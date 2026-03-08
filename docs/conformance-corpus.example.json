@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "name": "server-root",
+      "request": {
+        "method": "GET",
+        "path": "/"
+      },
+      "comparison": {
+        "body_mode": "text",
+        "check_headers": false
+      }
+    },
+    {
+      "name": "api-root",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2"
+      },
+      "comparison": {
+        "body_mode": "json",
+        "check_headers": false
+      }
+    },
+    {
+      "name": "healthz",
+      "request": {
+        "method": "GET",
+        "path": "/healthz"
+      },
+      "comparison": {
+        "body_mode": "text",
+        "check_headers": false
+      }
+    },
+    {
+      "name": "first-user-missing",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/users/first"
+      },
+      "comparison": {
+        "body_mode": "json",
+        "check_headers": false
+      }
+    }
+  ]
+}

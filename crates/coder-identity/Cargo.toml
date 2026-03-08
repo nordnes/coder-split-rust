@@ -1,0 +1,18 @@
+[package]
+name = "coder-identity"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+coder-core = { path = "../coder-core" }
+coder-rbac = { path = "../coder-rbac" }
+thiserror.workspace = true
+uuid.workspace = true

@@ -1,0 +1,6 @@
+ALTER TABLE users
+    ADD COLUMN IF NOT EXISTS theme_preference TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS terminal_font TEXT NOT NULL DEFAULT '',
+    ADD COLUMN IF NOT EXISTS task_notification_alert_dismissed BOOLEAN NOT NULL DEFAULT FALSE,
+    ADD COLUMN IF NOT EXISTS hashed_one_time_passcode BYTEA NOT NULL DEFAULT ''::BYTEA,
+    ADD COLUMN IF NOT EXISTS one_time_passcode_expires_at TIMESTAMPTZ;

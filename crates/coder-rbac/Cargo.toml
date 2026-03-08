@@ -1,0 +1,15 @@
+[package]
+name = "coder-rbac"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+uuid.workspace = true
