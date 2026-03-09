@@ -2529,7 +2529,19 @@ impl AppStore for PostgresStore {
         let escaped_search = filter.search.as_deref().map(escape_like);
         let rows = sqlx::query_as::<_, StoredTemplateRow>(
             r#"
-            SELECT t.*,
+            SELECT t.id, t.created_at, t.updated_at, t.organization_id, t.deleted,
+                   t.name, t.provisioner::text AS provisioner, t.active_version_id,
+                   t.description, t.default_ttl, t.created_by, t.icon, t.user_acl,
+                   t.group_acl, t.display_name, t.allow_user_cancel_workspace_jobs,
+                   t.allow_user_autostart, t.allow_user_autostop, t.failure_ttl,
+                   t.time_til_dormant, t.time_til_dormant_autodelete,
+                   t.autostop_requirement_days_of_week, t.autostop_requirement_weeks,
+                   t.autostart_block_days_of_week, t.require_active_version,
+                   t.deprecated, t.activity_bump,
+                   t.max_port_sharing_level::text AS max_port_sharing_level,
+                   t.use_classic_parameter_flow,
+                   t.cors_behavior::text AS cors_behavior,
+                   t.disable_module_cache,
                    COALESCE(o.name, '') AS organization_name,
                    COALESCE(o.display_name, '') AS organization_display_name,
                    COALESCE(o.icon, '') AS organization_icon,
@@ -2563,7 +2575,19 @@ impl AppStore for PostgresStore {
     ) -> Result<Option<TemplateRecord>, StorageError> {
         let row = sqlx::query_as::<_, StoredTemplateRow>(
             r#"
-            SELECT t.*,
+            SELECT t.id, t.created_at, t.updated_at, t.organization_id, t.deleted,
+                   t.name, t.provisioner::text AS provisioner, t.active_version_id,
+                   t.description, t.default_ttl, t.created_by, t.icon, t.user_acl,
+                   t.group_acl, t.display_name, t.allow_user_cancel_workspace_jobs,
+                   t.allow_user_autostart, t.allow_user_autostop, t.failure_ttl,
+                   t.time_til_dormant, t.time_til_dormant_autodelete,
+                   t.autostop_requirement_days_of_week, t.autostop_requirement_weeks,
+                   t.autostart_block_days_of_week, t.require_active_version,
+                   t.deprecated, t.activity_bump,
+                   t.max_port_sharing_level::text AS max_port_sharing_level,
+                   t.use_classic_parameter_flow,
+                   t.cors_behavior::text AS cors_behavior,
+                   t.disable_module_cache,
                    COALESCE(o.name, '') AS organization_name,
                    COALESCE(o.display_name, '') AS organization_display_name,
                    COALESCE(o.icon, '') AS organization_icon,
@@ -2591,7 +2615,19 @@ impl AppStore for PostgresStore {
     ) -> Result<Option<TemplateRecord>, StorageError> {
         let row = sqlx::query_as::<_, StoredTemplateRow>(
             r#"
-            SELECT t.*,
+            SELECT t.id, t.created_at, t.updated_at, t.organization_id, t.deleted,
+                   t.name, t.provisioner::text AS provisioner, t.active_version_id,
+                   t.description, t.default_ttl, t.created_by, t.icon, t.user_acl,
+                   t.group_acl, t.display_name, t.allow_user_cancel_workspace_jobs,
+                   t.allow_user_autostart, t.allow_user_autostop, t.failure_ttl,
+                   t.time_til_dormant, t.time_til_dormant_autodelete,
+                   t.autostop_requirement_days_of_week, t.autostop_requirement_weeks,
+                   t.autostart_block_days_of_week, t.require_active_version,
+                   t.deprecated, t.activity_bump,
+                   t.max_port_sharing_level::text AS max_port_sharing_level,
+                   t.use_classic_parameter_flow,
+                   t.cors_behavior::text AS cors_behavior,
+                   t.disable_module_cache,
                    COALESCE(o.name, '') AS organization_name,
                    COALESCE(o.display_name, '') AS organization_display_name,
                    COALESCE(o.icon, '') AS organization_icon,
@@ -2985,7 +3021,7 @@ impl AppStore for PostgresStore {
         version_id: Uuid,
     ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredTemplateVersionParameterRow>(
-            "SELECT * FROM template_version_parameters WHERE template_version_id = $1 ORDER BY display_order ASC",
+            "SELECT template_version_id, name, description, type, mutable, default_value, icon, options, validation_regex, validation_min, validation_max, validation_error, validation_monotonic, required, display_name, display_order, ephemeral, form_type::text AS form_type FROM template_version_parameters WHERE template_version_id = $1 ORDER BY display_order ASC",
         )
         .bind(version_id)
         .fetch_all(&self.pool)
@@ -3106,7 +3142,7 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredProvisionerJobRow>(
             r#"
             SELECT id, created_at, updated_at, started_at, canceled_at, completed_at,
-                   error, organization_id, initiator_id, provisioner,
+                   error, organization_id, initiator_id, provisioner::text AS provisioner,
                    CASE
                        WHEN completed_at IS NOT NULL AND canceled_at IS NOT NULL THEN 'canceled'
                        WHEN completed_at IS NOT NULL AND error != '' THEN 'failed'
