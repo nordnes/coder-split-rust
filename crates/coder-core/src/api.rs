@@ -1579,7 +1579,7 @@ pub struct WebpushSubscription {
 }
 
 /// Request body for DELETE web push subscription.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeleteWebpushSubscription {
     pub endpoint: String,
 }

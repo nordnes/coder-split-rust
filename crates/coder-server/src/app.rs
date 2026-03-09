@@ -2571,6 +2571,12 @@ async fn get_user_notification_preferences(
         }
     };
 
+    if target_user.id != context.user.id && !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You are not authorized to access this user's notification preferences.",
+        ));
+    }
+
     let preferences = state
         .store
         .get_user_notification_preferences(target_user.id)
@@ -2598,6 +2604,12 @@ async fn put_user_notification_preferences(
                 .into_response());
         }
     };
+
+    if target_user.id != context.user.id && !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You are not authorized to update this user's notification preferences.",
+        ));
+    }
 
     let Json(body) = match payload {
         Ok(request) => request,
@@ -2657,36 +2669,66 @@ async fn list_inbox_notifications(
             .into_response());
     }
 
-    let templates: Option<Vec<Uuid>> = params.templates.as_deref().and_then(|s| {
-        if s.is_empty() {
-            None
-        } else {
-            let parsed: Vec<Uuid> = s
-                .split(',')
-                .filter_map(|id| Uuid::from_str(id.trim()).ok())
-                .collect();
+    let templates: Option<Vec<Uuid>> = match params.templates.as_deref() {
+        None | Some("") => None,
+        Some(s) => {
+            let mut parsed = Vec::new();
+            for raw in s.split(',') {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match Uuid::from_str(trimmed) {
+                    Ok(id) => parsed.push(id),
+                    Err(_) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiResponse::error(
+                                format!("Invalid UUID in templates parameter: {trimmed}"),
+                                "",
+                            )),
+                        )
+                            .into_response());
+                    }
+                }
+            }
             if parsed.is_empty() {
                 None
             } else {
                 Some(parsed)
             }
         }
-    });
-    let targets: Option<Vec<Uuid>> = params.targets.as_deref().and_then(|s| {
-        if s.is_empty() {
-            None
-        } else {
-            let parsed: Vec<Uuid> = s
-                .split(',')
-                .filter_map(|id| Uuid::from_str(id.trim()).ok())
-                .collect();
+    };
+    let targets: Option<Vec<Uuid>> = match params.targets.as_deref() {
+        None | Some("") => None,
+        Some(s) => {
+            let mut parsed = Vec::new();
+            for raw in s.split(',') {
+                let trimmed = raw.trim();
+                if trimmed.is_empty() {
+                    continue;
+                }
+                match Uuid::from_str(trimmed) {
+                    Ok(id) => parsed.push(id),
+                    Err(_) => {
+                        return Ok((
+                            StatusCode::BAD_REQUEST,
+                            Json(ApiResponse::error(
+                                format!("Invalid UUID in targets parameter: {trimmed}"),
+                                "",
+                            )),
+                        )
+                            .into_response());
+                    }
+                }
+            }
             if parsed.is_empty() {
                 None
             } else {
                 Some(parsed)
             }
         }
-    });
+    };
 
     let notifications = state
         .store
@@ -2850,6 +2892,12 @@ async fn post_user_webpush_subscription(
         }
     };
 
+    if target_user.id != context.user.id && !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You are not authorized to manage this user's webpush subscriptions.",
+        ));
+    }
+
     let Json(body) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2888,6 +2936,12 @@ async fn delete_user_webpush_subscription(
                 .into_response());
         }
     };
+
+    if target_user.id != context.user.id && !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You are not authorized to manage this user's webpush subscriptions.",
+        ));
+    }
 
     let Json(body) = match payload {
         Ok(request) => request,
@@ -2929,6 +2983,12 @@ async fn post_user_webpush_test(
                 .into_response());
         }
     };
+
+    if target_user.id != context.user.id && !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You are not authorized to test this user's webpush subscriptions.",
+        ));
+    }
 
     // Verify user has webpush subscriptions
     let _subscriptions = state
@@ -3368,6 +3428,12 @@ mod tests {
         stats_agents: Mutex<Vec<WorkspaceAgentStatInput>>,
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
+        notifications_settings: Mutex<coder_core::NotificationsSettings>,
+        notification_templates: Mutex<Vec<coder_core::NotificationTemplate>>,
+        notification_preferences: Mutex<HashMap<(Uuid, Uuid), coder_core::NotificationPreference>>,
+        inbox_notifications: Mutex<HashMap<Uuid, coder_core::InboxNotification>>,
+        webpush_subscriptions:
+            Mutex<HashMap<(Uuid, String), coder_core::WebpushSubscriptionRecord>>,
     }
 
     impl FakeStore {
@@ -3393,6 +3459,11 @@ mod tests {
                 stats_agents: Mutex::new(Vec::new()),
                 workspace_proxies: Mutex::new(HashMap::new()),
                 provisioner_daemons: Mutex::new(HashMap::new()),
+                notifications_settings: Mutex::new(coder_core::NotificationsSettings::default()),
+                notification_templates: Mutex::new(Vec::new()),
+                notification_preferences: Mutex::new(HashMap::new()),
+                inbox_notifications: Mutex::new(HashMap::new()),
+                webpush_subscriptions: Mutex::new(HashMap::new()),
             }
         }
 
@@ -4996,6 +5067,248 @@ mod tests {
             };
             links.insert((user_id, link.provider_id.clone()), record.clone());
             Ok(record)
+        }
+
+        // -------------------------------------------------------------------
+        // Notifications domain
+        // -------------------------------------------------------------------
+
+        async fn get_notifications_settings(
+            &self,
+        ) -> Result<coder_core::NotificationsSettings, StorageError> {
+            self.notifications_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|s| s.clone())
+        }
+
+        async fn upsert_notifications_settings(
+            &self,
+            settings: &coder_core::NotificationsSettings,
+        ) -> Result<(), StorageError> {
+            let mut current = self
+                .notifications_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            *current = settings.clone();
+            Ok(())
+        }
+
+        async fn get_notification_templates_by_kind(
+            &self,
+            kind: &str,
+        ) -> Result<Vec<coder_core::NotificationTemplate>, StorageError> {
+            let templates = self
+                .notification_templates
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if kind.is_empty() {
+                Ok(templates.clone())
+            } else {
+                Ok(templates
+                    .iter()
+                    .filter(|t| t.kind == kind)
+                    .cloned()
+                    .collect())
+            }
+        }
+
+        async fn update_notification_template_method(
+            &self,
+            template_id: Uuid,
+            method: Option<&str>,
+        ) -> Result<Option<coder_core::NotificationTemplate>, StorageError> {
+            let mut templates = self
+                .notification_templates
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(t) = templates.iter_mut().find(|t| t.id == template_id) {
+                t.method = method.map(|m| m.to_owned());
+                Ok(Some(t.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn get_user_notification_preferences(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<coder_core::NotificationPreference>, StorageError> {
+            let prefs = self
+                .notification_preferences
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(prefs
+                .iter()
+                .filter(|((uid, _), _)| *uid == user_id)
+                .map(|(_, v)| v.clone())
+                .collect())
+        }
+
+        async fn update_user_notification_preferences(
+            &self,
+            user_id: Uuid,
+            template_ids: &[Uuid],
+            disableds: &[bool],
+        ) -> Result<(), StorageError> {
+            let mut prefs = self
+                .notification_preferences
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let now = OffsetDateTime::now_utc();
+            for (tid, disabled) in template_ids.iter().zip(disableds.iter()) {
+                prefs.insert(
+                    (user_id, *tid),
+                    coder_core::NotificationPreference {
+                        id: *tid,
+                        disabled: *disabled,
+                        updated_at: now,
+                    },
+                );
+            }
+            Ok(())
+        }
+
+        async fn get_filtered_inbox_notifications(
+            &self,
+            user_id: Uuid,
+            templates: Option<&[Uuid]>,
+            targets: Option<&[Uuid]>,
+            read_status: &str,
+            _created_before: Option<OffsetDateTime>,
+        ) -> Result<Vec<coder_core::InboxNotification>, StorageError> {
+            let notifs = self
+                .inbox_notifications
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let mut result: Vec<coder_core::InboxNotification> = notifs
+                .values()
+                .filter(|n| n.user_id == user_id)
+                .filter(|n| match templates {
+                    Some(t) => t.contains(&n.template_id),
+                    None => true,
+                })
+                .filter(|n| match targets {
+                    Some(t) => n.targets.iter().any(|tid| t.contains(tid)),
+                    None => true,
+                })
+                .filter(|n| match read_status {
+                    "unread" => n.read_at.is_none(),
+                    "read" => n.read_at.is_some(),
+                    _ => true,
+                })
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(result)
+        }
+
+        async fn count_unread_inbox_notifications(
+            &self,
+            user_id: Uuid,
+        ) -> Result<i64, StorageError> {
+            let notifs = self
+                .inbox_notifications
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let count = notifs
+                .values()
+                .filter(|n| n.user_id == user_id && n.read_at.is_none())
+                .count();
+            Ok(count as i64)
+        }
+
+        async fn get_inbox_notification_by_id(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<coder_core::InboxNotification>, StorageError> {
+            self.inbox_notifications
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|notifs| notifs.get(&id).cloned())
+        }
+
+        async fn update_inbox_notification_read_status(
+            &self,
+            id: Uuid,
+            read_at: Option<OffsetDateTime>,
+        ) -> Result<(), StorageError> {
+            let mut notifs = self
+                .inbox_notifications
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(n) = notifs.get_mut(&id) {
+                n.read_at = read_at;
+            }
+            Ok(())
+        }
+
+        async fn mark_all_inbox_notifications_as_read(
+            &self,
+            user_id: Uuid,
+            read_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut notifs = self
+                .inbox_notifications
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            for n in notifs.values_mut() {
+                if n.user_id == user_id && n.read_at.is_none() {
+                    n.read_at = Some(read_at);
+                }
+            }
+            Ok(())
+        }
+
+        async fn get_webpush_subscriptions_by_user_id(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<coder_core::WebpushSubscriptionRecord>, StorageError> {
+            let subs = self
+                .webpush_subscriptions
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(subs
+                .iter()
+                .filter(|((uid, _), _)| *uid == user_id)
+                .map(|(_, v)| v.clone())
+                .collect())
+        }
+
+        async fn insert_webpush_subscription(
+            &self,
+            user_id: Uuid,
+            endpoint: &str,
+            p256dh_key: &str,
+            auth_key: &str,
+        ) -> Result<(), StorageError> {
+            let mut subs = self
+                .webpush_subscriptions
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let record = coder_core::WebpushSubscriptionRecord {
+                id: Uuid::new_v4(),
+                user_id,
+                created_at: OffsetDateTime::now_utc(),
+                endpoint: endpoint.to_owned(),
+                endpoint_p256dh_key: p256dh_key.to_owned(),
+                endpoint_auth_key: auth_key.to_owned(),
+            };
+            subs.insert((user_id, endpoint.to_owned()), record);
+            Ok(())
+        }
+
+        async fn delete_webpush_subscription_by_user_and_endpoint(
+            &self,
+            user_id: Uuid,
+            endpoint: &str,
+        ) -> Result<bool, StorageError> {
+            Ok(self
+                .webpush_subscriptions
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .remove(&(user_id, endpoint.to_owned()))
+                .is_some())
         }
     }
 
@@ -7124,6 +7437,260 @@ mod tests {
         )
         .await?;
         assert_eq!(convert_login_response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Notifications domain tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn notifications_settings_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/notifications/settings")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notifications_settings_get_and_put() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET default settings
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/settings",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+
+        // PUT settings (owner can update)
+        let put_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/notifications/settings",
+                &session_token,
+                &coder_core::NotificationsSettings {
+                    notifier_paused: true,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(put_response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_templates_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_dispatch_methods() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/dispatch-methods",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_test_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/notifications/test", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_notification_preferences_get() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inbox_notifications_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/notifications/inbox", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inbox_notifications_invalid_uuid_returns_400() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/inbox?templates=not-a-uuid",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inbox_notifications_invalid_read_status_returns_400() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/inbox?read_status=invalid",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn inbox_mark_all_read() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/notifications/inbox/mark-all-as-read",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_subscription_lifecycle() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create subscription
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/subscription",
+                &session_token,
+                &coder_core::WebpushSubscription {
+                    endpoint: "https://push.example.com/sub1".to_owned(),
+                    p256dh_key: "test-p256dh-key".to_owned(),
+                    auth_key: "test-auth-key".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::NO_CONTENT);
+
+        // Delete subscription
+        let delete_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::DELETE,
+                "/api/v2/users/me/webpush/subscription",
+                &session_token,
+                &coder_core::DeleteWebpushSubscription {
+                    endpoint: "https://push.example.com/sub1".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        // Delete non-existent should return 404
+        let delete_again_response = call(
+            app,
+            authenticated_json_request(
+                Method::DELETE,
+                "/api/v2/users/me/webpush/subscription",
+                &session_token,
+                &coder_core::DeleteWebpushSubscription {
+                    endpoint: "https://push.example.com/sub1".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_again_response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_test_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/test",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
         Ok(())
     }
 }
