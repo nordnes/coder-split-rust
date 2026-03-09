@@ -2380,6 +2380,11 @@ where
             ));
         }
 
+        // Also delete the old API key so the previous access token can no
+        // longer authenticate.  The access token IS the API key secret, so
+        // leaving the key around means the old token remains valid.
+        let _ = self.store.delete_api_key(&token_record.api_key_id).await;
+
         // Generate a new token pair.
         let result = self
             .generate_token_pair(
@@ -2393,15 +2398,32 @@ where
     }
 
     /// Revokes all tokens for a given app + user combination.
+    ///
+    /// Also deletes the underlying API keys so that previously issued access
+    /// tokens can no longer authenticate.
     pub async fn revoke_tokens(
         &self,
         app_id: Uuid,
         user_id: Uuid,
     ) -> Result<u64, OAuth2ProviderError> {
+        // Collect API key IDs before deleting the token records, so we can
+        // clean up the associated API keys afterwards.
+        let tokens = self
+            .store
+            .list_oauth2_provider_app_tokens_by_app_and_user(app_id, user_id)
+            .await?;
+        let api_key_ids: Vec<String> = tokens.iter().map(|t| t.api_key_id.clone()).collect();
+
         let count = self
             .store
             .delete_oauth2_provider_app_tokens_by_app_and_user(app_id, user_id)
             .await?;
+
+        // Best-effort cleanup of associated API keys.
+        for key_id in &api_key_ids {
+            let _ = self.store.delete_api_key(key_id).await;
+        }
+
         Ok(count)
     }
 
@@ -2482,7 +2504,12 @@ where
             audience: audience.to_owned(),
             user_id,
         };
-        self.store.create_oauth2_provider_app_token(&input).await?;
+        // If token-record creation fails, clean up the API key we just
+        // created so it doesn't remain as an orphaned, valid credential.
+        if let Err(e) = self.store.create_oauth2_provider_app_token(&input).await {
+            let _ = self.store.delete_api_key(&api_key_id).await;
+            return Err(OAuth2ProviderError::Storage(e));
+        }
 
         Ok(OAuth2TokenResult {
             access_token: key_secret,

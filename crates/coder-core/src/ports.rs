@@ -1039,6 +1039,18 @@ pub trait IdentityStore: Send + Sync {
         ))
     }
 
+    /// Lists all OAuth2 tokens for a given user and app.
+    async fn list_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let _ = (app_id, user_id);
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
     /// Deletes all OAuth2 tokens for a given user and app.
     async fn delete_oauth2_provider_app_tokens_by_app_and_user(
         &self,
