@@ -1651,7 +1651,43 @@ pub struct WorkspaceHealth {
     pub failing_agents: Vec<Uuid>,
 }
 
-/// Provisioner job status.
+/// Provisioner job status values.
+///
+/// Matches the Go `ProvisionerJobStatus` enum.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvisionerJobStatus {
+    /// Job is pending.
+    #[default]
+    Pending,
+    /// Job is running.
+    Running,
+    /// Job succeeded.
+    Succeeded,
+    /// Job is being canceled.
+    Canceling,
+    /// Job was canceled.
+    Canceled,
+    /// Job failed.
+    Failed,
+}
+
+impl ProvisionerJobStatus {
+    /// Returns the canonical wire-format string.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Canceling => "canceling",
+            Self::Canceled => "canceled",
+            Self::Failed => "failed",
+        }
+    }
+}
+
+/// Provisioner job representation.
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ProvisionerJob {
     /// Job identifier.
@@ -1684,7 +1720,7 @@ pub struct ProvisionerJob {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub error: String,
     /// Current job status.
-    pub status: WorkspaceStatus,
+    pub status: ProvisionerJobStatus,
     /// Worker ID when assigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worker_id: Option<Uuid>,

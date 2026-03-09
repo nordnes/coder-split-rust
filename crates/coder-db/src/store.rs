@@ -2527,7 +2527,7 @@ impl AppStore for PostgresStore {
             .name
             .as_deref()
             .filter(|s| !s.trim().is_empty())
-            .map(|s| format!("%{}%", s.trim().replace('%', "\\%")));
+            .map(|s| format!("%{}%", s.trim().replace('%', "\\%").replace('_', "\\_")));
         let owner_username = filter.owner_username.clone();
         let template_name = filter.template_name.clone();
         let _status = filter.status.clone();
