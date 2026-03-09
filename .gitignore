@@ -2,3 +2,8 @@
 /.sqlx
 .env
 .DS_Store
+
+# Vendored Go reference (cloned separately, not committed)
+/coder/*
+!/coder/AGENTS.md
+
