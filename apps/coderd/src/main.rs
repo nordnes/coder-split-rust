@@ -321,5 +321,7 @@ fn resource_kind_name(resource: coder_rbac::ResourceKind) -> &'static str {
         coder_rbac::ResourceKind::GitSshKey => "git_ssh_key",
         coder_rbac::ResourceKind::HealthSettings => "health_settings",
         coder_rbac::ResourceKind::ExternalAuth => "user",
+        coder_rbac::ResourceKind::Template => "template",
+        coder_rbac::ResourceKind::TemplateVersion => "template_version",
     }
 }

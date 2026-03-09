@@ -8,6 +8,7 @@ pub mod config;
 pub mod identity;
 pub mod password;
 pub mod ports;
+pub mod template;
 
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,

@@ -150,4 +150,8 @@ pub enum ResourceKind {
     HealthSettings,
     /// An external-auth link.
     ExternalAuth,
+    /// A template.
+    Template,
+    /// A template version.
+    TemplateVersion,
 }

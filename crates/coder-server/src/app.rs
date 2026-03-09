@@ -22,6 +22,20 @@ use coder_auth::{
     supported_auth_methods,
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
+use coder_core::StorageError;
+use coder_core::api::{
+    CreateTemplateRequest, CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest,
+    DAUEntry, DAUsResponse, MinimalUser, PatchTemplateVersionRequest, ProvisionerJobLog,
+    ProvisionerJobResponse, ProvisionerJobStatus, TemplateExample, TemplateFilter,
+    TemplateResponse, TemplateVersionExternalAuth, TemplateVersionParameter, TemplateVersionPreset,
+    TemplateVersionPresetParameter, TemplateVersionResponse, TemplateVersionVariable,
+    UpdateTemplateMeta, WorkspaceResource,
+};
+use coder_core::template::{
+    CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
+    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateListFilter, TemplateRecord,
+    TemplateVersionListFilter, TemplateVersionRecord,
+};
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
     AvailableExperiments, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
@@ -222,6 +236,17 @@ struct CspViolationReport {
     report: HashMap<String, Value>,
 }
 
+/// Query parameters for listing template versions.
+#[derive(Clone, Debug, Default, Deserialize)]
+struct TemplateVersionsQuery {
+    #[serde(default)]
+    include_archived: Option<bool>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    offset: Option<u32>,
+}
+
 /// Builds the Axum router for the current Rust backend slice.
 pub fn build_router(state: AppState) -> Router {
     let request_id_header = HeaderName::from_static("x-request-id");
@@ -372,7 +397,113 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route("/users/{user}/password", put(put_user_password))
                 .route("/users/{user}/convert-login", post(post_convert_login))
-                .route("/users/{user}", get(get_user).delete(delete_user)),
+                .route("/users/{user}", get(get_user).delete(delete_user))
+                // ----- Template routes -----
+                .route(
+                    "/organizations/{organization}/templates",
+                    get(list_org_templates).post(post_org_template),
+                )
+                .route(
+                    "/organizations/{organization}/templates/{templatename}",
+                    get(get_org_template_by_name),
+                )
+                .route(
+                    "/organizations/{organization}/templates/{templatename}/versions/{templateversionname}",
+                    get(get_org_template_version_by_name),
+                )
+                .route(
+                    "/organizations/{organization}/templateversions",
+                    post(post_org_template_version),
+                )
+                .route(
+                    "/templates/{template}",
+                    get(get_template).delete(delete_template).patch(patch_template),
+                )
+                .route("/templates/{template}/daus", get(get_template_daus))
+                .route(
+                    "/templates/{template}/examples",
+                    get(get_template_examples),
+                )
+                .route(
+                    "/templates/{template}/versions",
+                    get(list_template_versions),
+                )
+                .route(
+                    "/templates/{template}/versions/{templateversionname}",
+                    get(get_template_version_by_name),
+                )
+                .route(
+                    "/templateversions/{templateversion}",
+                    get(get_template_version).patch(patch_template_version),
+                )
+                .route(
+                    "/templateversions/{templateversion}/archive",
+                    post(post_archive_template_version),
+                )
+                .route(
+                    "/templateversions/{templateversion}/cancel",
+                    post(post_cancel_template_version),
+                )
+                .route(
+                    "/templateversions/{templateversion}/dry-run",
+                    post(post_template_version_dry_run),
+                )
+                .route(
+                    "/templateversions/{templateversion}/dry-run/{jobid}",
+                    get(get_template_version_dry_run).patch(patch_template_version_dry_run),
+                )
+                .route(
+                    "/templateversions/{templateversion}/dry-run/{jobid}/cancel",
+                    get(get_cancel_template_version_dry_run),
+                )
+                .route(
+                    "/templateversions/{templateversion}/dry-run/{jobid}/logs",
+                    get(get_template_version_dry_run_logs),
+                )
+                .route(
+                    "/templateversions/{templateversion}/dry-run/{jobid}/resources",
+                    get(get_template_version_dry_run_resources),
+                )
+                .route(
+                    "/templateversions/{templateversion}/external-auth",
+                    get(get_template_version_external_auth),
+                )
+                .route(
+                    "/templateversions/{templateversion}/logs",
+                    get(get_template_version_logs),
+                )
+                .route(
+                    "/templateversions/{templateversion}/parameters",
+                    get(get_template_version_parameters),
+                )
+                .route(
+                    "/templateversions/{templateversion}/presets",
+                    get(get_template_version_presets),
+                )
+                .route(
+                    "/templateversions/{templateversion}/presets/{presetid}/parameters",
+                    get(get_template_version_preset_parameters),
+                )
+                .route(
+                    "/templateversions/{templateversion}/resources",
+                    get(get_template_version_resources),
+                )
+                .route(
+                    "/templateversions/{templateversion}/rich-parameters",
+                    get(get_template_version_rich_parameters),
+                )
+                .route(
+                    "/templateversions/{templateversion}/schema",
+                    get(get_template_version_schema),
+                )
+                .route(
+                    "/templateversions/{templateversion}/unarchive",
+                    post(post_unarchive_template_version),
+                )
+                .route(
+                    "/templateversions/{templateversion}/variables",
+                    get(get_template_version_variables),
+                ),
         )
         .layer(
             TraceLayer::new_for_http()
@@ -2381,6 +2512,1148 @@ async fn delete_user(
     )
         .into_response())
 }
+
+// ---------------------------------------------------------------------------
+// Template & Template Version Handlers (33 routes)
+// ---------------------------------------------------------------------------
+
+/// Converts a `TemplateRecord` into a `TemplateResponse`.
+fn template_response(rec: &TemplateRecord) -> TemplateResponse {
+    use coder_core::api::{TemplateAutostartRequirement, TemplateAutostopRequirement};
+    TemplateResponse {
+        id: rec.id,
+        created_at: rec.created_at,
+        updated_at: rec.updated_at,
+        organization_id: rec.organization_id,
+        organization_name: rec.organization_name.clone(),
+        organization_display_name: rec.organization_display_name.clone(),
+        organization_icon: rec.organization_icon.clone(),
+        name: rec.name.clone(),
+        display_name: rec.display_name.clone(),
+        provisioner: rec.provisioner.clone(),
+        active_version_id: rec.active_version_id,
+        active_user_count: -1,
+        build_time_stats: HashMap::new(),
+        description: rec.description.clone(),
+        deprecated: !rec.deprecated.is_empty(),
+        deprecation_message: rec.deprecated.clone(),
+        deleted: rec.deleted,
+        icon: rec.icon.clone(),
+        default_ttl_ms: rec.default_ttl / 1_000_000,
+        activity_bump_ms: rec.activity_bump / 1_000_000,
+        autostop_requirement: TemplateAutostopRequirement::default(),
+        autostart_requirement: TemplateAutostartRequirement::default(),
+        created_by_id: rec.created_by,
+        created_by_name: rec.created_by_name.clone(),
+        allow_user_autostart: rec.allow_user_autostart,
+        allow_user_autostop: rec.allow_user_autostop,
+        allow_user_cancel_workspace_jobs: rec.allow_user_cancel_workspace_jobs,
+        failure_ttl_ms: rec.failure_ttl / 1_000_000,
+        time_til_dormant_ms: rec.time_til_dormant / 1_000_000,
+        time_til_dormant_autodelete_ms: rec.time_til_dormant_autodelete / 1_000_000,
+        require_active_version: rec.require_active_version,
+        max_port_share_level: rec.max_port_sharing_level.clone(),
+        cors_behavior: rec.cors_behavior.clone(),
+        use_classic_parameter_flow: rec.use_classic_parameter_flow,
+        disable_module_cache: rec.disable_module_cache,
+    }
+}
+
+/// Converts a `ProvisionerJobRecord` into a `ProvisionerJobResponse`.
+fn provisioner_job_response(job: &ProvisionerJobRecord) -> ProvisionerJobResponse {
+    ProvisionerJobResponse {
+        id: job.id,
+        created_at: job.created_at,
+        started_at: job.started_at,
+        completed_at: job.completed_at,
+        canceled_at: job.canceled_at,
+        error: job.error.clone(),
+        status: ProvisionerJobStatus::from_str_opt(&job.job_status).unwrap_or_default(),
+        worker_id: job.worker_id,
+        file_id: job.file_id,
+        tags: job.tags.clone(),
+        queue_position: 0,
+        queue_size: 0,
+    }
+}
+
+/// Converts a `TemplateVersionRecord` + `ProvisionerJobRecord` into a `TemplateVersionResponse`.
+fn template_version_response(
+    ver: &TemplateVersionRecord,
+    job: &ProvisionerJobRecord,
+) -> TemplateVersionResponse {
+    TemplateVersionResponse {
+        id: ver.id,
+        template_id: ver.template_id,
+        organization_id: ver.organization_id,
+        created_at: ver.created_at,
+        updated_at: ver.updated_at,
+        name: ver.name.clone(),
+        message: ver.message.clone(),
+        job: provisioner_job_response(job),
+        readme: ver.readme.clone(),
+        created_by: MinimalUser {
+            id: ver.created_by,
+            username: ver.created_by_username.clone(),
+            name: String::new(),
+            avatar_url: ver.created_by_avatar_url.clone(),
+        },
+        archived: ver.archived,
+        warnings: Vec::new(),
+        has_external_agent: ver.has_external_agent.unwrap_or(false),
+    }
+}
+
+/// Helper to build a template version response, fetching the provisioner job.
+async fn build_tv_response(
+    state: &AppState,
+    ver: &TemplateVersionRecord,
+) -> Result<TemplateVersionResponse, AppError> {
+    let job = state.store.find_provisioner_job_by_id(ver.job_id).await?;
+    let job = job.ok_or_else(|| {
+        AppError::from(StorageError::invalid_data(format!(
+            "provisioner job {} not found for version {}",
+            ver.job_id, ver.id
+        )))
+    })?;
+    Ok(template_version_response(ver, &job))
+}
+
+/// GET /organizations/{organization}/templates
+async fn list_org_templates(
+    State(state): State<AppState>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+    Query(query): Query<TemplateFilter>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let org_record = state
+        .store
+        .find_organization_by_name(&org)
+        .await?
+        .ok_or_else(|| {
+            AppError::from(StorageError::invalid_data(format!(
+                "organization {org} not found"
+            )))
+        })?;
+
+    let templates = state
+        .store
+        .list_templates(TemplateListFilter {
+            organization_id: Some(org_record.id),
+            exact_name: query.exact_name,
+            search: query.search,
+            deleted: query.deleted.unwrap_or(false),
+        })
+        .await?;
+
+    let body: Vec<TemplateResponse> = templates.iter().map(template_response).collect();
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// POST /organizations/{organization}/templates
+async fn post_org_template(
+    State(state): State<AppState>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateTemplateRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) =
+        payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
+
+    let org_record = state
+        .store
+        .find_organization_by_name(&org)
+        .await?
+        .ok_or_else(|| {
+            AppError::from(StorageError::invalid_data(format!(
+                "organization {org} not found"
+            )))
+        })?;
+
+    let now = OffsetDateTime::now_utc();
+    let template_id = Uuid::new_v4();
+    let input = CreateTemplateInput {
+        id: template_id,
+        created_at: now,
+        updated_at: now,
+        organization_id: org_record.id,
+        name: body.name.clone(),
+        display_name: body.display_name.clone(),
+        provisioner: String::from("terraform"),
+        active_version_id: body.template_version_id,
+        description: body.description.clone(),
+        default_ttl: body.default_ttl_ms * 1_000_000,
+        created_by: context.user.id,
+        icon: body.icon.clone(),
+        allow_user_cancel_workspace_jobs: body.allow_user_cancel_workspace_jobs,
+        allow_user_autostart: body.allow_user_autostart,
+        allow_user_autostop: body.allow_user_autostop,
+        failure_ttl: body.failure_ttl_ms * 1_000_000,
+        time_til_dormant: body.time_til_dormant_ms * 1_000_000,
+        time_til_dormant_autodelete: body.time_til_dormant_autodelete_ms * 1_000_000,
+        require_active_version: body.require_active_version,
+        activity_bump: body.activity_bump_ms * 1_000_000,
+        max_port_share_level: body.max_port_share_level.clone(),
+    };
+
+    let template = match state.store.insert_template(input).await {
+        Ok(t) => t,
+        Err(CreateTemplateStoreError::AlreadyExists) => {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(ApiResponse::error(
+                    "A template with that name already exists.",
+                    "duplicate name",
+                )),
+            )
+                .into_response());
+        }
+        Err(CreateTemplateStoreError::Storage(e)) => return Err(AppError::from(e)),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::Template,
+        Some(&context.user),
+        Some(template.id.to_string()),
+        "created template",
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(template_response(&template))).into_response())
+}
+
+/// GET /organizations/{organization}/templates/{templatename}
+async fn get_org_template_by_name(
+    State(state): State<AppState>,
+    Path((org, name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let org_record = state
+        .store
+        .find_organization_by_name(&org)
+        .await?
+        .ok_or_else(|| {
+            AppError::from(StorageError::invalid_data(format!(
+                "organization {org} not found"
+            )))
+        })?;
+
+    let template = state
+        .store
+        .find_template_by_org_and_name(org_record.id, &name)
+        .await?;
+
+    match template {
+        Some(t) => Ok((StatusCode::OK, Json(template_response(&t))).into_response()),
+        None => Ok(not_found_response(format!("Template '{name}' not found."))),
+    }
+}
+
+/// GET /organizations/{organization}/templates/{templatename}/versions/{templateversionname}
+async fn get_org_template_version_by_name(
+    State(state): State<AppState>,
+    Path((org, tname, vname)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let org_record = state
+        .store
+        .find_organization_by_name(&org)
+        .await?
+        .ok_or_else(|| {
+            AppError::from(StorageError::invalid_data(format!(
+                "organization {org} not found"
+            )))
+        })?;
+
+    let ver = state
+        .store
+        .find_template_version_by_org_and_name(org_record.id, &tname, &vname)
+        .await?;
+
+    match ver {
+        Some(v) => {
+            let resp = build_tv_response(&state, &v).await?;
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        }
+        None => Ok(not_found_response(format!(
+            "Template version '{vname}' not found."
+        ))),
+    }
+}
+
+/// POST /organizations/{organization}/templateversions
+async fn post_org_template_version(
+    State(state): State<AppState>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateTemplateVersionRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) =
+        payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
+
+    let org_record = state
+        .store
+        .find_organization_by_name(&org)
+        .await?
+        .ok_or_else(|| {
+            AppError::from(StorageError::invalid_data(format!(
+                "organization {org} not found"
+            )))
+        })?;
+
+    let now = OffsetDateTime::now_utc();
+    let job_id = Uuid::new_v4();
+    let version_id = Uuid::new_v4();
+
+    // Create the provisioner job (stub — stays in pending state).
+    let provisioner = if body.provisioner.is_empty() {
+        "terraform".to_owned()
+    } else {
+        body.provisioner.clone()
+    };
+    let _job = state
+        .store
+        .insert_provisioner_job(CreateProvisionerJobInput {
+            id: job_id,
+            created_at: now,
+            updated_at: now,
+            organization_id: org_record.id,
+            initiator_id: context.user.id,
+            provisioner: provisioner.clone(),
+            file_id: body.file_id,
+            job_type: "template_version_import".to_owned(),
+            input: serde_json::json!({}),
+            tags: body.tags.clone(),
+        })
+        .await?;
+
+    let version_name = if body.name.is_empty() {
+        version_id.to_string()
+    } else {
+        body.name.clone()
+    };
+
+    let ver = state
+        .store
+        .insert_template_version(CreateTemplateVersionInput {
+            id: version_id,
+            template_id: body.template_id,
+            organization_id: org_record.id,
+            created_at: now,
+            updated_at: now,
+            name: version_name,
+            message: body.message.clone(),
+            readme: String::new(),
+            job_id,
+            created_by: context.user.id,
+            source_example_id: body.example_id.clone(),
+        })
+        .await?;
+
+    let resp = build_tv_response(&state, &ver).await?;
+    Ok((StatusCode::CREATED, Json(resp)).into_response())
+}
+
+/// GET /templates/{template}
+async fn get_template(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let template = state.store.find_template_by_id(template_id).await?;
+    match template {
+        Some(t) => Ok((StatusCode::OK, Json(template_response(&t))).into_response()),
+        None => Ok(not_found_response("Template not found.")),
+    }
+}
+
+/// DELETE /templates/{template}
+async fn delete_template(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let deleted = state.store.soft_delete_template(template_id).await?;
+    if !deleted {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Template,
+        Some(&context.user),
+        Some(template_id.to_string()),
+        "deleted template",
+    )
+    .await;
+
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Template has been deleted!")),
+    )
+        .into_response())
+}
+
+/// PATCH /templates/{template}
+async fn patch_template(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateTemplateMeta>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) =
+        payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
+
+    // Fetch existing template to use current values as defaults.
+    let existing = state
+        .store
+        .find_template_by_id(template_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template not found")))?;
+
+    let name = if body.name.is_empty() {
+        &existing.name
+    } else {
+        &body.name
+    };
+    let display_name = body
+        .display_name
+        .as_deref()
+        .unwrap_or(&existing.display_name);
+    let description = body.description.as_deref().unwrap_or(&existing.description);
+    let icon = body.icon.as_deref().unwrap_or(&existing.icon);
+    let deprecation_message = body
+        .deprecation_message
+        .as_deref()
+        .unwrap_or(&existing.deprecated);
+    let max_port_share_level = body
+        .max_port_share_level
+        .as_deref()
+        .unwrap_or(&existing.max_port_sharing_level);
+
+    let updated = state
+        .store
+        .update_template_meta(
+            template_id,
+            name,
+            display_name,
+            description,
+            icon,
+            body.default_ttl_ms * 1_000_000,
+            body.activity_bump_ms * 1_000_000,
+            body.allow_user_autostart,
+            body.allow_user_autostop,
+            body.allow_user_cancel_workspace_jobs,
+            body.failure_ttl_ms * 1_000_000,
+            body.time_til_dormant_ms * 1_000_000,
+            body.time_til_dormant_autodelete_ms * 1_000_000,
+            body.require_active_version,
+            deprecation_message,
+            max_port_share_level,
+        )
+        .await?;
+
+    match updated {
+        Some(t) => {
+            record_audit(
+                &state,
+                AuditAction::Write,
+                ResourceKind::Template,
+                Some(&context.user),
+                Some(template_id.to_string()),
+                "updated template metadata",
+            )
+            .await;
+            Ok((StatusCode::OK, Json(template_response(&t))).into_response())
+        }
+        None => Ok(not_found_response("Template not found.")),
+    }
+}
+
+/// GET /templates/{template}/daus
+async fn get_template_daus(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let rows = state.store.template_daus(template_id).await?;
+    let entries: Vec<DAUEntry> = rows
+        .iter()
+        .map(|r| DAUEntry {
+            date: r.date.clone(),
+            amount: r.amount,
+        })
+        .collect();
+    let resp = DAUsResponse {
+        entries,
+        tz_hour_offset: 0,
+    };
+    Ok((StatusCode::OK, Json(resp)).into_response())
+}
+
+/// GET /templates/{template}/examples
+async fn get_template_examples(
+    State(state): State<AppState>,
+    Path(_template_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    // Template examples are static / built-in. Return empty list for now.
+    let examples: Vec<TemplateExample> = Vec::new();
+    Ok((StatusCode::OK, Json(examples)).into_response())
+}
+
+/// GET /templates/{template}/versions
+async fn list_template_versions(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+    Query(query): Query<TemplateVersionsQuery>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let versions = state
+        .store
+        .list_template_versions(TemplateVersionListFilter {
+            template_id,
+            include_archived: query.include_archived.unwrap_or(false),
+            limit: query.limit.unwrap_or(50),
+            offset: query.offset.unwrap_or(0),
+        })
+        .await?;
+
+    let mut responses = Vec::with_capacity(versions.len());
+    for v in &versions {
+        responses.push(build_tv_response(&state, v).await?);
+    }
+    Ok((StatusCode::OK, Json(responses)).into_response())
+}
+
+/// GET /templates/{template}/versions/{templateversionname}
+async fn get_template_version_by_name(
+    State(state): State<AppState>,
+    Path((template_id, vname)): Path<(Uuid, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let ver = state
+        .store
+        .find_template_version_by_template_and_name(template_id, &vname)
+        .await?;
+
+    match ver {
+        Some(v) => {
+            let resp = build_tv_response(&state, &v).await?;
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        }
+        None => Ok(not_found_response(format!(
+            "Template version '{vname}' not found."
+        ))),
+    }
+}
+
+/// GET /templateversions/{templateversion}
+async fn get_template_version(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let ver = state.store.find_template_version_by_id(version_id).await?;
+    match ver {
+        Some(v) => {
+            let resp = build_tv_response(&state, &v).await?;
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        }
+        None => Ok(not_found_response("Template version not found.")),
+    }
+}
+
+/// PATCH /templateversions/{templateversion}
+async fn patch_template_version(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<PatchTemplateVersionRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) =
+        payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
+
+    let existing = state
+        .store
+        .find_template_version_by_id(version_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+
+    let name = if body.name.is_empty() {
+        &existing.name
+    } else {
+        &body.name
+    };
+    let message = body.message.as_deref().unwrap_or(&existing.message);
+
+    let updated = state
+        .store
+        .update_template_version(version_id, name, message)
+        .await?;
+
+    match updated {
+        Some(v) => {
+            record_audit(
+                &state,
+                AuditAction::Write,
+                ResourceKind::TemplateVersion,
+                Some(&context.user),
+                Some(version_id.to_string()),
+                "updated template version",
+            )
+            .await;
+            let resp = build_tv_response(&state, &v).await?;
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        }
+        None => Ok(not_found_response("Template version not found.")),
+    }
+}
+
+/// POST /templateversions/{templateversion}/archive
+async fn post_archive_template_version(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let archived = state.store.archive_template_version(version_id).await?;
+    if !archived {
+        return Ok(not_found_response("Template version not found."));
+    }
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Template version archived.")),
+    )
+        .into_response())
+}
+
+/// POST /templateversions/{templateversion}/cancel
+async fn post_cancel_template_version(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let ver = state
+        .store
+        .find_template_version_by_id(version_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+
+    let canceled = state.store.cancel_provisioner_job(ver.job_id).await?;
+    if !canceled {
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(ApiResponse::error(
+                "Job cannot be canceled.",
+                "job is already completed or canceled",
+            )),
+        )
+            .into_response());
+    }
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Template version job canceled.")),
+    )
+        .into_response())
+}
+
+/// POST /templateversions/{templateversion}/dry-run
+async fn post_template_version_dry_run(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateTemplateVersionDryRunRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) =
+        payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
+
+    // Ensure the template version exists.
+    let ver = state
+        .store
+        .find_template_version_by_id(version_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+
+    let now = OffsetDateTime::now_utc();
+    let job_id = Uuid::new_v4();
+
+    let input_json = serde_json::json!({
+        "template_version_id": version_id,
+        "workspace_name": body.workspace_name,
+        "rich_parameter_values": body.rich_parameter_values,
+        "user_variable_values": body.user_variable_values,
+    });
+
+    let job = state
+        .store
+        .insert_provisioner_job(CreateProvisionerJobInput {
+            id: job_id,
+            created_at: now,
+            updated_at: now,
+            organization_id: ver.organization_id,
+            initiator_id: context.user.id,
+            provisioner: String::from("terraform"),
+            file_id: None,
+            job_type: "template_version_dry_run".to_owned(),
+            input: input_json,
+            tags: HashMap::new(),
+        })
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(provisioner_job_response(&job))).into_response())
+}
+
+/// GET /templateversions/{templateversion}/dry-run/{jobid}
+async fn get_template_version_dry_run(
+    State(state): State<AppState>,
+    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let job = state.store.find_provisioner_job_by_id(job_id).await?;
+    match job {
+        Some(j) => Ok((StatusCode::OK, Json(provisioner_job_response(&j))).into_response()),
+        None => Ok(not_found_response("Dry-run job not found.")),
+    }
+}
+
+/// PATCH /templateversions/{templateversion}/dry-run/{jobid}
+async fn patch_template_version_dry_run(
+    State(state): State<AppState>,
+    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let canceled = state.store.cancel_provisioner_job(job_id).await?;
+    if !canceled {
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(ApiResponse::error(
+                "Job cannot be canceled.",
+                "job is already completed or canceled",
+            )),
+        )
+            .into_response());
+    }
+
+    let job = state.store.find_provisioner_job_by_id(job_id).await?;
+    match job {
+        Some(j) => Ok((StatusCode::OK, Json(provisioner_job_response(&j))).into_response()),
+        None => Ok(not_found_response("Dry-run job not found.")),
+    }
+}
+
+/// GET /templateversions/{templateversion}/dry-run/{jobid}/cancel
+async fn get_cancel_template_version_dry_run(
+    State(state): State<AppState>,
+    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let canceled = state.store.cancel_provisioner_job(job_id).await?;
+    if !canceled {
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(ApiResponse::error(
+                "Job cannot be canceled.",
+                "job is already completed or canceled",
+            )),
+        )
+            .into_response());
+    }
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Dry-run job canceled.")),
+    )
+        .into_response())
+}
+
+/// GET /templateversions/{templateversion}/dry-run/{jobid}/logs
+async fn get_template_version_dry_run_logs(
+    State(state): State<AppState>,
+    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Verify the job exists.
+    let _job = state
+        .store
+        .find_provisioner_job_by_id(job_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("dry-run job not found")))?;
+
+    // Provisioner logs are not stored in the stub implementation.
+    let logs: Vec<ProvisionerJobLog> = Vec::new();
+    Ok((StatusCode::OK, Json(logs)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/dry-run/{jobid}/resources
+async fn get_template_version_dry_run_resources(
+    State(state): State<AppState>,
+    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _job = state
+        .store
+        .find_provisioner_job_by_id(job_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("dry-run job not found")))?;
+
+    // Resources are populated by the provisioner daemon. Return empty for stub.
+    let resources: Vec<WorkspaceResource> = Vec::new();
+    Ok((StatusCode::OK, Json(resources)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/external-auth
+async fn get_template_version_external_auth(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Verify the version exists.
+    let _ver = state
+        .store
+        .find_template_version_by_id(version_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+
+    // External auth requirements come from provisioner output. Return empty for stub.
+    let auths: Vec<TemplateVersionExternalAuth> = Vec::new();
+    Ok((StatusCode::OK, Json(auths)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/logs
+async fn get_template_version_logs(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _ver = state
+        .store
+        .find_template_version_by_id(version_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+
+    let logs: Vec<ProvisionerJobLog> = Vec::new();
+    Ok((StatusCode::OK, Json(logs)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/parameters (deprecated alias for rich-parameters)
+async fn get_template_version_parameters(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    get_template_version_rich_parameters_impl(&state, &headers, version_id).await
+}
+
+/// GET /templateversions/{templateversion}/rich-parameters
+async fn get_template_version_rich_parameters(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    get_template_version_rich_parameters_impl(&state, &headers, version_id).await
+}
+
+/// Shared implementation for parameters / rich-parameters endpoints.
+async fn get_template_version_rich_parameters_impl(
+    state: &AppState,
+    headers: &HeaderMap,
+    version_id: Uuid,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(state, headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let params = state
+        .store
+        .list_template_version_parameters(version_id)
+        .await?;
+
+    let body: Vec<TemplateVersionParameter> = params
+        .iter()
+        .map(|p| {
+            let options: Vec<coder_core::api::TemplateVersionParameterOption> =
+                serde_json::from_value(p.options.clone()).unwrap_or_default();
+            TemplateVersionParameter {
+                name: p.name.clone(),
+                display_name: p.display_name.clone(),
+                description: p.description.clone(),
+                description_plaintext: p.description.clone(),
+                param_type: p.param_type.clone(),
+                form_type: p.form_type.clone(),
+                mutable: p.mutable,
+                default_value: p.default_value.clone(),
+                icon: p.icon.clone(),
+                options,
+                validation_error: p.validation_error.clone(),
+                validation_regex: p.validation_regex.clone(),
+                validation_min: p.validation_min,
+                validation_max: p.validation_max,
+                validation_monotonic: p.validation_monotonic.clone(),
+                required: p.required,
+                ephemeral: p.ephemeral,
+            }
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/presets
+async fn get_template_version_presets(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let presets = state
+        .store
+        .list_template_version_presets(version_id)
+        .await?;
+
+    let body: Vec<TemplateVersionPreset> = presets
+        .iter()
+        .map(|p| TemplateVersionPreset {
+            id: p.id,
+            template_version_id: p.template_version_id,
+            name: p.name.clone(),
+            created_at: p.created_at,
+            is_default: p.is_default,
+            description: p.description.clone(),
+            icon: p.icon.clone(),
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/presets/{presetid}/parameters
+async fn get_template_version_preset_parameters(
+    State(state): State<AppState>,
+    Path((_version_id, preset_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let params = state
+        .store
+        .list_template_version_preset_parameters(preset_id)
+        .await?;
+
+    let body: Vec<TemplateVersionPresetParameter> = params
+        .iter()
+        .map(|p| TemplateVersionPresetParameter {
+            id: p.id,
+            template_version_preset_id: p.template_version_preset_id,
+            name: p.name.clone(),
+            value: p.value.clone(),
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/resources
+async fn get_template_version_resources(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _ver = state
+        .store
+        .find_template_version_by_id(version_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+
+    // Resources are populated by the provisioner daemon. Return empty for stub.
+    let resources: Vec<WorkspaceResource> = Vec::new();
+    Ok((StatusCode::OK, Json(resources)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/schema (deprecated)
+async fn get_template_version_schema(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _ver = state
+        .store
+        .find_template_version_by_id(version_id)
+        .await?
+        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+
+    // Deprecated endpoint — return empty array.
+    let schema: Vec<Value> = Vec::new();
+    Ok((StatusCode::OK, Json(schema)).into_response())
+}
+
+/// POST /templateversions/{templateversion}/unarchive
+async fn post_unarchive_template_version(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let unarchived = state.store.unarchive_template_version(version_id).await?;
+    if !unarchived {
+        return Ok(not_found_response("Template version not found."));
+    }
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Template version unarchived.")),
+    )
+        .into_response())
+}
+
+/// GET /templateversions/{templateversion}/variables
+async fn get_template_version_variables(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let vars = state
+        .store
+        .list_template_version_variables(version_id)
+        .await?;
+
+    let body: Vec<TemplateVersionVariable> = vars
+        .iter()
+        .map(|v| TemplateVersionVariable {
+            name: v.name.clone(),
+            description: v.description.clone(),
+            var_type: v.var_type.clone(),
+            value: if v.sensitive {
+                String::new()
+            } else {
+                v.value.clone()
+            },
+            default_value: if v.sensitive {
+                String::new()
+            } else {
+                v.default_value.clone()
+            },
+            required: v.required,
+            sensitive: v.sensitive,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// End of Template & Template Version Handlers
+// ---------------------------------------------------------------------------
 
 async fn authenticate_request(
     state: &AppState,
