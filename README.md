@@ -1,13 +1,16 @@
 # coder-split-rust
 
-`coder-split-rust` is the Rust rewrite workspace for the backend portions of
-the original Coder monorepo, which remains checked in under
-[`coder/`](./coder/).
+**Complete Rust rewrite of the [Coder](https://github.com/coder/coder) backend.**
 
-This repository now contains an executable Rust foundation for the rewrite:
+Goal: reproduce all backend features, routes, and behavior from the original Go
+monorepo in Rust, achieving full API parity. The original Go source is available
+under [`coder/`](./coder/) as a read-only reference (see setup instructions below).
 
-- a stable Rust workspace with explicit edition, resolver, MSRV, and lint
-  policy
+**Status: 72 of 229 OSS API routes ported (31%).** See
+[`docs/parity-matrix.md`](./docs/parity-matrix.md) for the full route matrix.
+
+This repository contains an executable Rust foundation for the rewrite:
+
 - feature-crate seams for auth, identity, RBAC, audit, workspaces,
   provisioners, connectivity, and notifications
 - a Postgres-backed store for deployment metadata, organizations, users,
