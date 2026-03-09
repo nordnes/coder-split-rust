@@ -2227,6 +2227,14 @@ where
             ));
         }
 
+        // Verify app ownership BEFORE leaking any information about
+        // client secrets or PKCE verifiers (prevents oracle attacks).
+        if code_record.app_id != client_id {
+            return Err(OAuth2ProviderError::unauthorized(
+                "Authorization code does not belong to this client.",
+            ));
+        }
+
         // Verify PKCE if a code challenge was used.
         if !code_record.code_challenge.is_empty() {
             if code_verifier.is_empty() {
@@ -2257,13 +2265,6 @@ where
             .into_iter()
             .find(|s| s.hashed_secret == secret_hash)
             .ok_or_else(|| OAuth2ProviderError::unauthorized("Invalid client credentials."))?;
-
-        // Verify app ownership.
-        if code_record.app_id != client_id {
-            return Err(OAuth2ProviderError::unauthorized(
-                "Authorization code does not belong to this client.",
-            ));
-        }
 
         // Delete the code (single-use).
         let _ = self
@@ -2412,8 +2413,40 @@ where
             .checked_add(time::Duration::days(30))
             .ok_or_else(|| OAuth2ProviderError::bad_request("Failed to compute token expiry."))?;
 
-        // Create an API key for this token (ties it to the session system).
+        // Create a real API key for this token (ties it to the session system).
+        let key_secret = new_session_token();
         let api_key_id = Uuid::new_v4().to_string();
+        let hashed_secret = hash_session_token(&key_secret);
+        let now = OffsetDateTime::now_utc();
+        let api_key_result = self
+            .store
+            .create_api_key(CreateApiKeyInput {
+                id: api_key_id.clone(),
+                hashed_secret,
+                user_id,
+                last_used: now,
+                expires_at,
+                created_at: now,
+                updated_at: now,
+                login_type: LoginType::Password,
+                scopes: vec!["all".to_owned()],
+                token_name: format!("oauth2_{api_key_id}"),
+                lifetime_seconds: 30 * 24 * 60 * 60, // 30 days
+                allow_list: Vec::new(),
+            })
+            .await;
+        match api_key_result {
+            Ok(_) => {}
+            Err(CreateApiKeyStoreError::Storage(e)) => {
+                return Err(OAuth2ProviderError::Storage(e));
+            }
+            Err(CreateApiKeyStoreError::DuplicateTokenName) => {
+                // Extremely unlikely with UUID-based names; retry not needed.
+                return Err(OAuth2ProviderError::bad_request(
+                    "Failed to create API key for token.",
+                ));
+            }
+        }
 
         let input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
             expires_at,

@@ -154,17 +154,27 @@ impl AutostartSchedule {
     }
 
     /// Returns the next scheduled occurrence after the given UTC time.
+    ///
+    /// The cron expression is evaluated in the schedule's timezone so that
+    /// e.g. "CRON_TZ=America/Chicago 30 9 * * 1-5" fires at 09:30 Chicago
+    /// time. The result is converted back to UTC.
     #[must_use]
     pub fn next_after_utc(&self) -> Option<OffsetDateTime> {
-        self.schedule
-            .upcoming(chrono::Utc)
-            .take(1)
-            .next()
-            .map(|dt| {
-                let ts = dt.timestamp();
-                // Convert chrono timestamp to time::OffsetDateTime
-                OffsetDateTime::from_unix_timestamp(ts).unwrap_or(OffsetDateTime::UNIX_EPOCH)
-            })
+        // Try to resolve the IANA timezone; fall back to UTC on unknown names.
+        let ts = if let Ok(tz) = self.timezone.parse::<chrono_tz::Tz>() {
+            self.schedule
+                .upcoming(tz)
+                .take(1)
+                .next()
+                .map(|dt| dt.with_timezone(&chrono::Utc).timestamp())
+        } else {
+            self.schedule
+                .upcoming(chrono::Utc)
+                .take(1)
+                .next()
+                .map(|dt| dt.timestamp())
+        };
+        ts.and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok())
     }
 
     /// Returns whether the schedule should have fired within the last
@@ -173,10 +183,17 @@ impl AutostartSchedule {
     pub fn should_have_fired(&self, window_secs: i64) -> bool {
         let now = chrono::Utc::now();
         let window_start = now - chrono::Duration::seconds(window_secs);
-        self.schedule
-            .after(&window_start)
-            .take(1)
-            .any(|next| next <= now)
+        if let Ok(tz) = self.timezone.parse::<chrono_tz::Tz>() {
+            self.schedule
+                .after(&window_start.with_timezone(&tz))
+                .take(1)
+                .any(|next| next.with_timezone(&chrono::Utc) <= now)
+        } else {
+            self.schedule
+                .after(&window_start)
+                .take(1)
+                .any(|next| next <= now)
+        }
     }
 }
 

@@ -67,7 +67,7 @@ CREATE TABLE IF NOT EXISTS custom_roles (
     user_permissions JSONB NOT NULL DEFAULT '[]'::JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    UNIQUE (name, organization_id)
+    UNIQUE NULLS NOT DISTINCT (name, organization_id)
 );
 
 -- groups: user groups for template ACLs and RBAC

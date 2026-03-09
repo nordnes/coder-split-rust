@@ -1075,6 +1075,17 @@ pub trait IdentityStore: Send + Sync {
             "notification messages are not implemented",
         ))
     }
+
+    /// Increments the attempt count for a notification message.
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = message_id;
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
 }
 
 /// Narrow storage contract for operational and deployment-owned state.

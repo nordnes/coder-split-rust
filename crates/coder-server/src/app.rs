@@ -4,7 +4,7 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{OriginalUri, Path, Query, State, rejection::JsonRejection},
+    extract::{Form, OriginalUri, Path, Query, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
@@ -2752,6 +2752,11 @@ async fn post_oauth2_provider_app(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider apps.",
+        ));
+    }
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2813,6 +2818,11 @@ async fn put_oauth2_provider_app(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider apps.",
+        ));
+    }
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -2858,6 +2868,11 @@ async fn delete_oauth2_provider_app(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider apps.",
+        ));
+    }
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -2912,6 +2927,11 @@ async fn post_oauth2_provider_app_secret(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider app secrets.",
+        ));
+    }
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -2949,6 +2969,11 @@ async fn delete_oauth2_provider_app_secret(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider app secrets.",
+        ));
+    }
     let _app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -3153,13 +3178,8 @@ async fn post_oauth2_authorize(
 
 async fn post_oauth2_token(
     State(state): State<AppState>,
-    payload: Result<Json<OAuth2TokenRequest>, JsonRejection>,
+    Form(request): Form<OAuth2TokenRequest>,
 ) -> Result<Response, AppError> {
-    let Json(request) = match payload {
-        Ok(r) => r,
-        Err(error) => return Ok(invalid_json_response(error)),
-    };
-
     match request.grant_type.as_str() {
         "authorization_code" => {
             let client_id = match Uuid::parse_str(&request.client_id) {

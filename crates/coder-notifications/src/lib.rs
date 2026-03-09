@@ -110,6 +110,12 @@ where
                         "notification dispatch failed"
                     );
                 }
+                // Increment the attempt count so the MAX_DISPATCH_ATTEMPTS
+                // check above will eventually move the message to Failed.
+                let _ = self
+                    .store
+                    .increment_notification_message_attempt_count(message.id)
+                    .await;
                 NotificationMessageStatus::Pending
             };
 
@@ -132,15 +138,18 @@ where
             ));
         }
 
-        // Log the dispatch attempt. A full SMTP implementation using `lettre`
-        // will be wired in when SMTP credentials are provisioned.
-        info!(
+        // A full SMTP implementation using `lettre` will be wired in when
+        // SMTP credentials are provisioned. Until then, return an error so the
+        // message is not incorrectly marked as Sent.
+        warn!(
             message_id = %message.id,
             user_id = %message.user_id,
             smtp_host = %self.config.smtp_host,
-            "email notification dispatch queued"
+            "email dispatch not yet implemented"
         );
-        Ok(())
+        Err(NotificationDispatchError::Transport(
+            "SMTP email dispatch is not yet implemented".to_owned(),
+        ))
     }
 
     async fn dispatch_webhook(
