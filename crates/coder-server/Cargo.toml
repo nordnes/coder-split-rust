@@ -20,10 +20,10 @@ coder-identity = { path = "../coder-identity" }
 coder-provisioner = { path = "../coder-provisioner" }
 coder-rbac = { path = "../coder-rbac" }
 coder-workspaces = { path = "../coder-workspaces" }
-governor = { version = "0.8", features = ["std"] }
+governor.workspace = true
 http.workspace = true
-metrics = "0.24"
-metrics-exporter-prometheus = "0.16"
+metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 sha2.workspace = true

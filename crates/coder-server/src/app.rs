@@ -2939,7 +2939,11 @@ async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Respons
 /// crate.  Counters and histograms are registered lazily on first use.
 async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> Response {
     let method = request.method().to_string();
-    let path = request.uri().path().to_owned();
+    let path = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_owned())
+        .unwrap_or_else(|| request.uri().path().to_owned());
 
     let start = std::time::Instant::now();
     let response = next.run(request).await;
