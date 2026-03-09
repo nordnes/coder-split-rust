@@ -403,7 +403,7 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/workspaceagents/me/gitsshkey",
-                    get(deprecated_workspace_agent_git_ssh_key),
+                    get(workspace_agent_git_ssh_key),
                 )
                 .route(
                     "/workspaceagents/me/gitauth",
@@ -2573,14 +2573,23 @@ async fn applications_auth_redirect(
 }
 
 // ---------------------------------------------------------------------------
+// GET /workspaceagents/me/gitsshkey — workspace agent endpoint (stub).
+// In Go this is `agentGitSSHKey` in `gitsshkey.go` — returns the agent's
+// Git SSH key.  The workspace-agent domain is not yet implemented in this
+// Rust slice, so we return an empty stub response.
+// ---------------------------------------------------------------------------
+async fn workspace_agent_git_ssh_key() -> Response {
+    (
+        StatusCode::OK,
+        Json(json!({"public_key":"","private_key":""})),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
 // Deprecated endpoints — return empty arrays or stub responses matching the
 // original Go implementation in deprecated.go.
 // ---------------------------------------------------------------------------
-
-/// GET /workspaceagents/me/gitsshkey — deprecated, returns empty object.
-async fn deprecated_workspace_agent_git_ssh_key() -> Response {
-    (StatusCode::OK, Json(json!({}))).into_response()
-}
 
 /// GET /workspaceagents/me/gitauth — deprecated, returns empty array.
 async fn deprecated_workspace_agent_git_auth() -> Response {
@@ -6779,6 +6788,252 @@ mod tests {
         )
         .await?;
         assert_eq!(convert_login_response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn misc_routes_return_expected_stubs_and_status_codes() -> Result<(), Box<dyn Error>> {
+        use coder_core::PatchDeploymentConfigRequest;
+
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // --- PATCH /deployment/config (authenticated) returns 200 with config ---
+        let patch_config_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/deployment/config",
+                &session_token,
+                &PatchDeploymentConfigRequest {},
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_config_response.status(), StatusCode::OK);
+        let patch_config_body = response_json(patch_config_response).await?;
+        assert!(patch_config_body.get("config").is_some());
+        assert!(patch_config_body.get("options").is_some());
+
+        // --- PATCH /deployment/config without auth returns 401 ---
+        let patch_config_unauth = call(
+            app.clone(),
+            json_request(
+                Method::PATCH,
+                "/api/v2/deployment/config",
+                &PatchDeploymentConfigRequest {},
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_config_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{org}/provisionerdaemons returns 200 + empty array ---
+        let daemons_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerdaemons"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(daemons_response.status(), StatusCode::OK);
+        let daemons_body = response_json(daemons_response).await?;
+        assert_eq!(daemons_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET /organizations/{org}/provisionerdaemons without auth returns 401 ---
+        let daemons_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerdaemons"),
+            )?,
+        )
+        .await?;
+        assert_eq!(daemons_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{org}/provisionerjobs returns 200 + empty array ---
+        let jobs_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(jobs_response.status(), StatusCode::OK);
+        let jobs_body = response_json(jobs_response).await?;
+        assert_eq!(jobs_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET /organizations/{org}/provisionerjobs without auth returns 401 ---
+        let jobs_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs"),
+            )?,
+        )
+        .await?;
+        assert_eq!(jobs_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{org}/provisionerjobs/{job} returns 404 ---
+        let job_id = Uuid::new_v4();
+        let get_job_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs/{job_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_job_response.status(), StatusCode::NOT_FOUND);
+
+        // --- GET /organizations/{org}/provisionerjobs/{job} without auth returns 401 ---
+        let get_job_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs/{job_id}"),
+            )?,
+        )
+        .await?;
+        assert_eq!(get_job_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- PATCH /organizations/{org}/provisionerjobs/{job}/cancel returns 404 ---
+        let cancel_job_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs/{job_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(cancel_job_response.status(), StatusCode::NOT_FOUND);
+
+        // --- PATCH cancel without auth returns 401 ---
+        let cancel_job_unauth = call(
+            app.clone(),
+            request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs/{job_id}/cancel"),
+            )?,
+        )
+        .await?;
+        assert_eq!(cancel_job_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{org}/provisionerjobs/{job}/logs returns 200 + empty array ---
+        let logs_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs/{job_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(logs_response.status(), StatusCode::OK);
+        let logs_body = response_json(logs_response).await?;
+        assert_eq!(logs_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET logs without auth returns 401 ---
+        let logs_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/provisionerjobs/{job_id}/logs"),
+            )?,
+        )
+        .await?;
+        assert_eq!(logs_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /applications/host returns 200 with empty host ---
+        let host_response = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/applications/host")?,
+        )
+        .await?;
+        assert_eq!(host_response.status(), StatusCode::OK);
+        let host_body = response_json(host_response).await?;
+        assert_eq!(host_body.get("host").and_then(Value::as_str), Some(""));
+
+        // --- GET /applications/auth-redirect with auth returns 400 ---
+        let auth_redirect_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/applications/auth-redirect",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(auth_redirect_response.status(), StatusCode::BAD_REQUEST);
+
+        // --- GET /applications/auth-redirect without auth returns 401 ---
+        let auth_redirect_unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/applications/auth-redirect")?,
+        )
+        .await?;
+        assert_eq!(auth_redirect_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /workspaceagents/me/gitsshkey returns 200 with stub keys ---
+        let gitsshkey_response = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/workspaceagents/me/gitsshkey")?,
+        )
+        .await?;
+        assert_eq!(gitsshkey_response.status(), StatusCode::OK);
+        let gitsshkey_body = response_json(gitsshkey_response).await?;
+        assert_eq!(
+            gitsshkey_body.get("public_key").and_then(Value::as_str),
+            Some("")
+        );
+        assert_eq!(
+            gitsshkey_body.get("private_key").and_then(Value::as_str),
+            Some("")
+        );
+
+        // --- GET /workspaceagents/me/gitauth returns 200 with empty array ---
+        let gitauth_response = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/workspaceagents/me/gitauth")?,
+        )
+        .await?;
+        assert_eq!(gitauth_response.status(), StatusCode::OK);
+        let gitauth_body = response_json(gitauth_response).await?;
+        assert_eq!(gitauth_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET /workspaceagents/{agent}/startup-logs returns 200 with empty array ---
+        let agent_id = Uuid::new_v4();
+        let startup_logs_response = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/startup-logs"),
+            )?,
+        )
+        .await?;
+        assert_eq!(startup_logs_response.status(), StatusCode::OK);
+        let startup_logs_body = response_json(startup_logs_response).await?;
+        assert_eq!(startup_logs_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET /templateversions/{tv}/schema returns 200 with empty array ---
+        let tv_id = Uuid::new_v4();
+        let schema_response = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{tv_id}/schema"),
+            )?,
+        )
+        .await?;
+        assert_eq!(schema_response.status(), StatusCode::OK);
+        let schema_body = response_json(schema_response).await?;
+        assert_eq!(schema_body.as_array().map(Vec::len), Some(0));
+
         Ok(())
     }
 }
