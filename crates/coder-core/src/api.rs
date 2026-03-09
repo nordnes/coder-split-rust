@@ -1642,7 +1642,7 @@ pub struct TemplateResponse {
 }
 
 /// Request to create a new template.
-#[derive(Clone, Debug, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
 pub struct CreateTemplateRequest {
     /// Template name (slug).
     pub name: String,
@@ -1697,7 +1697,7 @@ fn default_true() -> bool {
 }
 
 /// Request to update template metadata.
-#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct UpdateTemplateMeta {
     /// New template name.
     #[serde(default)]

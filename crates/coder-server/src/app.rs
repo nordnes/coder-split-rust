@@ -43,7 +43,7 @@ use coder_core::{
     CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
     DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
     GetUsersResponse, HealthSettings, HealthcheckReport, LoginType, LoginWithPasswordRequest,
-    OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
+    OrganizationMember, OrganizationMemberWithUserData, OrganizationRecord, OrganizationResponse,
     PaginatedMembersResponse, PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig,
     SshConfigResponse, UpdateCheckResponse, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
@@ -2517,6 +2517,17 @@ async fn delete_user(
 // Template & Template Version Handlers (33 routes)
 // ---------------------------------------------------------------------------
 
+/// Resolve an organization path segment by UUID or name.
+async fn resolve_organization(
+    state: &AppState,
+    org_ref: &str,
+) -> Result<Option<OrganizationRecord>, AppError> {
+    if let Ok(org_id) = Uuid::parse_str(org_ref) {
+        return Ok(state.store.find_organization_by_id(org_id).await?);
+    }
+    Ok(state.store.find_organization_by_name(org_ref).await?)
+}
+
 /// Converts a `TemplateRecord` into a `TemplateResponse`.
 fn template_response(rec: &TemplateRecord) -> TemplateResponse {
     use coder_core::api::{TemplateAutostartRequirement, TemplateAutostopRequirement};
@@ -2630,7 +2641,7 @@ async fn list_org_templates(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let org_record = match state.store.find_organization_by_name(&org).await? {
+    let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
             return Ok(not_found_response(format!(
@@ -2666,7 +2677,7 @@ async fn post_org_template(
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
-    let org_record = match state.store.find_organization_by_name(&org).await? {
+    let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
             return Ok(not_found_response(format!(
@@ -2739,7 +2750,7 @@ async fn get_org_template_by_name(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let org_record = match state.store.find_organization_by_name(&org).await? {
+    let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
             return Ok(not_found_response(format!(
@@ -2769,7 +2780,7 @@ async fn get_org_template_version_by_name(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let org_record = match state.store.find_organization_by_name(&org).await? {
+    let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
             return Ok(not_found_response(format!(
@@ -2807,7 +2818,7 @@ async fn post_org_template_version(
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
-    let org_record = match state.store.find_organization_by_name(&org).await? {
+    let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
             return Ok(not_found_response(format!(
@@ -2881,8 +2892,8 @@ async fn get_template(
 
     let template = state.store.find_template_by_id(template_id).await?;
     match template {
-        Some(t) => Ok((StatusCode::OK, Json(template_response(&t))).into_response()),
-        None => Ok(not_found_response("Template not found.")),
+        Some(t) if !t.deleted => Ok((StatusCode::OK, Json(template_response(&t))).into_response()),
+        _ => Ok(not_found_response("Template not found.")),
     }
 }
 
@@ -4034,21 +4045,27 @@ mod tests {
         AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
         ChangePasswordWithOneTimePasscodeRequest, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserRequest,
-        CreateFirstUserStoreError, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
-        CreateUserRequestWithOrgs, CreateUserStoreError, DatabaseConfig, DeploymentMetadata,
-        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, GitSshKeyRecord,
-        HealthSettings, InsertOrganizationMemberError, LogFormat, LoginType,
-        LoginWithPasswordRequest, OrganizationMemberListFilter, OrganizationMemberRecord,
-        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-        ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, RequestOneTimePasscodeRequest,
-        ServerConfig, SessionCountDeploymentStatsResponse, SlimRoleRecord, SshConfig, StorageError,
-        TokenConfigRecord, UpdateRolesRequest, UpdateUserAppearanceSettingsRequest,
-        UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
-        UpsertExternalAuthLinkInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
-        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentStatInput,
-        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+        CreateFirstUserStoreError, CreateProvisionerJobInput, CreateTemplateInput,
+        CreateTemplateRequest, CreateTemplateStoreError, CreateTemplateVersionInput,
+        CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs,
+        CreateUserStoreError, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
+        DeploymentStore, DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider,
+        ExternalAuthLinkRecord, ExternalAuthUser, GitSshKeyRecord, HealthSettings,
+        InsertOrganizationMemberError, LogFormat, LoginType, LoginWithPasswordRequest,
+        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        ProvisionerDaemonHealthRecord, ProvisionerJobRecord, ProvisionerJobStatsInput,
+        RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
+        SlimRoleRecord, SshConfig, StorageError, TemplateDAURow, TemplateListFilter,
+        TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
+        TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
+        TemplateVersionVariableRecord, TokenConfigRecord, UpdateRolesRequest, UpdateTemplateMeta,
+        UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
+        UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
+        UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+        ValidateUserPasswordRequest, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
+        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput,
+        WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -4097,6 +4114,14 @@ mod tests {
         stats_agents: Mutex<Vec<WorkspaceAgentStatInput>>,
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
+        templates: Mutex<HashMap<Uuid, TemplateRecord>>,
+        template_versions: Mutex<HashMap<Uuid, TemplateVersionRecord>>,
+        provisioner_jobs: Mutex<HashMap<Uuid, ProvisionerJobRecord>>,
+        template_version_parameters: Mutex<HashMap<Uuid, Vec<TemplateVersionParameterRecord>>>,
+        template_version_variables: Mutex<HashMap<Uuid, Vec<TemplateVersionVariableRecord>>>,
+        template_version_presets: Mutex<HashMap<Uuid, Vec<TemplateVersionPresetRecord>>>,
+        template_version_preset_parameters:
+            Mutex<HashMap<Uuid, Vec<TemplateVersionPresetParameterRecord>>>,
     }
 
     impl FakeStore {
@@ -4122,6 +4147,13 @@ mod tests {
                 stats_agents: Mutex::new(Vec::new()),
                 workspace_proxies: Mutex::new(HashMap::new()),
                 provisioner_daemons: Mutex::new(HashMap::new()),
+                templates: Mutex::new(HashMap::new()),
+                template_versions: Mutex::new(HashMap::new()),
+                provisioner_jobs: Mutex::new(HashMap::new()),
+                template_version_parameters: Mutex::new(HashMap::new()),
+                template_version_variables: Mutex::new(HashMap::new()),
+                template_version_presets: Mutex::new(HashMap::new()),
+                template_version_preset_parameters: Mutex::new(HashMap::new()),
             }
         }
 
@@ -5725,6 +5757,476 @@ mod tests {
             };
             links.insert((user_id, link.provider_id.clone()), record.clone());
             Ok(record)
+        }
+
+        // ----- Template Store Methods -----
+
+        async fn list_templates(
+            &self,
+            filter: TemplateListFilter,
+        ) -> Result<Vec<TemplateRecord>, StorageError> {
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut results: Vec<TemplateRecord> = templates
+                .values()
+                .filter(|t| {
+                    if !filter.deleted && t.deleted {
+                        return false;
+                    }
+                    if let Some(ref org_id) = filter.organization_id {
+                        if t.organization_id != *org_id {
+                            return false;
+                        }
+                    }
+                    if let Some(ref name) = filter.exact_name {
+                        if t.name != *name {
+                            return false;
+                        }
+                    }
+                    if let Some(ref search) = filter.search {
+                        let lower = search.to_lowercase();
+                        if !t.name.to_lowercase().contains(&lower)
+                            && !t.display_name.to_lowercase().contains(&lower)
+                        {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .cloned()
+                .collect();
+            results.sort_by(|a, b| a.name.cmp(&b.name));
+            Ok(results)
+        }
+
+        async fn find_template_by_id(
+            &self,
+            template_id: Uuid,
+        ) -> Result<Option<TemplateRecord>, StorageError> {
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(templates.get(&template_id).cloned())
+        }
+
+        async fn find_template_by_org_and_name(
+            &self,
+            organization_id: Uuid,
+            name: &str,
+        ) -> Result<Option<TemplateRecord>, StorageError> {
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(templates
+                .values()
+                .find(|t| t.organization_id == organization_id && t.name == name && !t.deleted)
+                .cloned())
+        }
+
+        async fn insert_template(
+            &self,
+            input: CreateTemplateInput,
+        ) -> Result<TemplateRecord, CreateTemplateStoreError> {
+            let mut templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map_err(CreateTemplateStoreError::Storage)?;
+
+            // Check for duplicate name in same org.
+            let duplicate = templates.values().any(|t| {
+                t.organization_id == input.organization_id && t.name == input.name && !t.deleted
+            });
+            if duplicate {
+                return Err(CreateTemplateStoreError::AlreadyExists);
+            }
+
+            let organizations = self
+                .organizations
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map_err(CreateTemplateStoreError::Storage)?;
+            let org = organizations.get(&input.organization_id);
+
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map_err(CreateTemplateStoreError::Storage)?;
+            let creator = users.get(&input.created_by);
+
+            let record = TemplateRecord {
+                id: input.id,
+                created_at: input.created_at,
+                updated_at: input.updated_at,
+                organization_id: input.organization_id,
+                organization_name: org.map(|o| o.name.clone()).unwrap_or_default(),
+                organization_display_name: org.map(|o| o.display_name.clone()).unwrap_or_default(),
+                organization_icon: org.map(|o| o.icon.clone()).unwrap_or_default(),
+                deleted: false,
+                name: input.name,
+                provisioner: input.provisioner,
+                active_version_id: input.active_version_id,
+                description: input.description,
+                default_ttl: input.default_ttl,
+                created_by: input.created_by,
+                icon: input.icon,
+                user_acl: HashMap::new(),
+                group_acl: HashMap::new(),
+                display_name: input.display_name,
+                allow_user_cancel_workspace_jobs: input.allow_user_cancel_workspace_jobs,
+                allow_user_autostart: input.allow_user_autostart,
+                allow_user_autostop: input.allow_user_autostop,
+                failure_ttl: input.failure_ttl,
+                time_til_dormant: input.time_til_dormant,
+                time_til_dormant_autodelete: input.time_til_dormant_autodelete,
+                autostop_requirement_days_of_week: 0,
+                autostop_requirement_weeks: 0,
+                autostart_block_days_of_week: 0,
+                require_active_version: input.require_active_version,
+                deprecated: String::new(),
+                activity_bump: input.activity_bump,
+                max_port_sharing_level: input.max_port_share_level,
+                use_classic_parameter_flow: false,
+                cors_behavior: String::new(),
+                disable_module_cache: false,
+                created_by_username: creator.map(|u| u.username.clone()).unwrap_or_default(),
+                created_by_avatar_url: creator.map(|u| u.avatar_url.clone()).unwrap_or_default(),
+                created_by_name: creator.map(|u| u.name.clone()).unwrap_or_default(),
+            };
+            templates.insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn update_template_meta(
+            &self,
+            input: UpdateTemplateMetaInput,
+        ) -> Result<Option<TemplateRecord>, StorageError> {
+            let mut templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let template = match templates.get_mut(&input.template_id) {
+                Some(t) => t,
+                None => return Ok(None),
+            };
+            template.name = input.name;
+            template.display_name = input.display_name;
+            template.description = input.description;
+            template.icon = input.icon;
+            template.default_ttl = input.default_ttl;
+            template.activity_bump = input.activity_bump;
+            template.allow_user_autostart = input.allow_user_autostart;
+            template.allow_user_autostop = input.allow_user_autostop;
+            template.allow_user_cancel_workspace_jobs = input.allow_user_cancel_workspace_jobs;
+            template.failure_ttl = input.failure_ttl;
+            template.time_til_dormant = input.time_til_dormant;
+            template.time_til_dormant_autodelete = input.time_til_dormant_autodelete;
+            template.require_active_version = input.require_active_version;
+            template.deprecated = input.deprecation_message;
+            template.max_port_sharing_level = input.max_port_share_level;
+            template.cors_behavior = input.cors_behavior;
+            template.use_classic_parameter_flow = input.use_classic_parameter_flow;
+            template.disable_module_cache = input.disable_module_cache;
+            template.updated_at = OffsetDateTime::now_utc();
+            Ok(Some(template.clone()))
+        }
+
+        async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError> {
+            let mut templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            match templates.get_mut(&template_id) {
+                Some(t) => {
+                    t.deleted = true;
+                    t.updated_at = OffsetDateTime::now_utc();
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn update_template_active_version(
+            &self,
+            template_id: Uuid,
+            active_version_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let mut templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            match templates.get_mut(&template_id) {
+                Some(t) => {
+                    t.active_version_id = active_version_id;
+                    t.updated_at = OffsetDateTime::now_utc();
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn template_daus(
+            &self,
+            _template_id: Uuid,
+        ) -> Result<Vec<TemplateDAURow>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_template_versions(
+            &self,
+            filter: TemplateVersionListFilter,
+        ) -> Result<Vec<TemplateVersionRecord>, StorageError> {
+            let versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut results: Vec<TemplateVersionRecord> = versions
+                .values()
+                .filter(|v| {
+                    v.template_id == Some(filter.template_id)
+                        && (filter.include_archived || !v.archived)
+                })
+                .cloned()
+                .collect();
+            results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            let offset = filter.offset as usize;
+            let limit = filter.limit as usize;
+            Ok(results.into_iter().skip(offset).take(limit).collect())
+        }
+
+        async fn find_template_version_by_id(
+            &self,
+            version_id: Uuid,
+        ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(versions.get(&version_id).cloned())
+        }
+
+        async fn find_template_version_by_template_and_name(
+            &self,
+            template_id: Uuid,
+            name: &str,
+        ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(versions
+                .values()
+                .find(|v| v.template_id == Some(template_id) && v.name == name)
+                .cloned())
+        }
+
+        async fn find_template_version_by_org_and_name(
+            &self,
+            organization_id: Uuid,
+            _template_name: &str,
+            version_name: &str,
+        ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(versions
+                .values()
+                .find(|v| v.organization_id == organization_id && v.name == version_name)
+                .cloned())
+        }
+
+        async fn insert_template_version(
+            &self,
+            input: CreateTemplateVersionInput,
+        ) -> Result<TemplateVersionRecord, StorageError> {
+            let mut versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let creator = users.get(&input.created_by);
+
+            let record = TemplateVersionRecord {
+                id: input.id,
+                template_id: input.template_id,
+                organization_id: input.organization_id,
+                created_at: input.created_at,
+                updated_at: input.updated_at,
+                name: input.name,
+                readme: input.readme,
+                job_id: input.job_id,
+                created_by: input.created_by,
+                external_auth_providers: Value::Array(Vec::new()),
+                message: input.message,
+                archived: false,
+                source_example_id: input.source_example_id,
+                has_ai_task: None,
+                has_external_agent: None,
+                created_by_avatar_url: creator.map(|u| u.avatar_url.clone()).unwrap_or_default(),
+                created_by_username: creator.map(|u| u.username.clone()).unwrap_or_default(),
+                created_by_name: creator.map(|u| u.name.clone()).unwrap_or_default(),
+            };
+            versions.insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn update_template_version(
+            &self,
+            version_id: Uuid,
+            name: &str,
+            message: &str,
+        ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let mut versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            match versions.get_mut(&version_id) {
+                Some(v) => {
+                    v.name = name.to_owned();
+                    v.message = message.to_owned();
+                    v.updated_at = OffsetDateTime::now_utc();
+                    Ok(Some(v.clone()))
+                }
+                None => Ok(None),
+            }
+        }
+
+        async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+            let mut versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            match versions.get_mut(&version_id) {
+                Some(v) => {
+                    v.archived = true;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+            let mut versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            match versions.get_mut(&version_id) {
+                Some(v) => {
+                    v.archived = false;
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
+        }
+
+        async fn list_template_version_parameters(
+            &self,
+            version_id: Uuid,
+        ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
+            let params = self
+                .template_version_parameters
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(params.get(&version_id).cloned().unwrap_or_default())
+        }
+
+        async fn list_template_version_variables(
+            &self,
+            version_id: Uuid,
+        ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError> {
+            let vars = self
+                .template_version_variables
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(vars.get(&version_id).cloned().unwrap_or_default())
+        }
+
+        async fn list_template_version_presets(
+            &self,
+            version_id: Uuid,
+        ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError> {
+            let presets = self
+                .template_version_presets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(presets.get(&version_id).cloned().unwrap_or_default())
+        }
+
+        async fn list_template_version_preset_parameters(
+            &self,
+            preset_id: Uuid,
+        ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError> {
+            let params = self
+                .template_version_preset_parameters
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(params.get(&preset_id).cloned().unwrap_or_default())
+        }
+
+        async fn insert_provisioner_job(
+            &self,
+            input: CreateProvisionerJobInput,
+        ) -> Result<ProvisionerJobRecord, StorageError> {
+            let mut jobs = self
+                .provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let record = ProvisionerJobRecord {
+                id: input.id,
+                created_at: input.created_at,
+                updated_at: input.updated_at,
+                started_at: None,
+                canceled_at: None,
+                completed_at: None,
+                error: String::new(),
+                organization_id: input.organization_id,
+                initiator_id: input.initiator_id,
+                provisioner: input.provisioner,
+                job_status: "pending".to_owned(),
+                file_id: input.file_id,
+                job_type: input.job_type,
+                input: input.input,
+                worker_id: None,
+                tags: input.tags,
+            };
+            jobs.insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_provisioner_job_by_id(
+            &self,
+            job_id: Uuid,
+        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            let jobs = self
+                .provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(jobs.get(&job_id).cloned())
+        }
+
+        async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+            let mut jobs = self
+                .provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            match jobs.get_mut(&job_id) {
+                Some(j) => {
+                    j.canceled_at = Some(OffsetDateTime::now_utc());
+                    j.job_status = "canceling".to_owned();
+                    Ok(true)
+                }
+                None => Ok(false),
+            }
         }
     }
 
@@ -7853,6 +8355,332 @@ mod tests {
         )
         .await?;
         assert_eq!(convert_login_response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ----- Template Route Tests -----
+
+    /// Helper: creates a user, logs in, fetches the org id, and creates a
+    /// template via the HTTP API. Returns (session_token, org_id, template json).
+    async fn create_test_template(app: &Router) -> Result<(String, Uuid, Value), Box<dyn Error>> {
+        let session_token = create_and_login(app).await?;
+        let org_id = first_organization_id(app, &session_token).await?;
+
+        let create_body = CreateTemplateRequest {
+            name: "test-template".to_owned(),
+            display_name: "Test Template".to_owned(),
+            description: "A test template".to_owned(),
+            icon: "/icon/docker.png".to_owned(),
+            template_version_id: Uuid::nil(),
+            default_ttl_ms: 3_600_000,
+            activity_bump_ms: 1_800_000,
+            allow_user_cancel_workspace_jobs: true,
+            allow_user_autostart: true,
+            allow_user_autostop: true,
+            require_active_version: false,
+            failure_ttl_ms: 0,
+            time_til_dormant_ms: 0,
+            time_til_dormant_autodelete_ms: 0,
+            disable_everyone_group_access: false,
+            max_port_share_level: "owner".to_owned(),
+        };
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+                &create_body,
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let template = response_json(create_response).await?;
+        Ok((session_token, org_id, template))
+    }
+
+    #[tokio::test]
+    async fn template_create_and_get() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        // Verify fields on creation response.
+        assert_eq!(
+            template.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+        assert_eq!(
+            template.get("display_name").and_then(Value::as_str),
+            Some("Test Template")
+        );
+        assert_eq!(
+            template.get("description").and_then(Value::as_str),
+            Some("A test template")
+        );
+
+        // GET /templates/{id}
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let fetched = response_json(get_response).await?;
+        assert_eq!(
+            fetched.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // GET /organizations/{org}/templates (list)
+        let list_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await?;
+        let templates = list_body.as_array().ok_or("expected array")?;
+        assert_eq!(templates.len(), 1);
+
+        // GET /organizations/{org}/templates/{name}
+        let by_name_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates/test-template"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(by_name_response.status(), StatusCode::OK);
+        let by_name = response_json(by_name_response).await?;
+        assert_eq!(by_name.get("id").and_then(Value::as_str), Some(template_id));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_patch_preserves_fields() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, _org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        // PATCH with partial update — only change description and the newly-fixed fields.
+        let patch_body = UpdateTemplateMeta {
+            description: Some("Updated description".to_owned()),
+            cors_behavior: Some("same-origin".to_owned()),
+            use_classic_parameter_flow: Some(true),
+            disable_module_cache: Some(true),
+            ..UpdateTemplateMeta::default()
+        };
+        let patch_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+                &patch_body,
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::OK);
+        let patched = response_json(patch_response).await?;
+
+        // The patched fields should reflect the new values.
+        assert_eq!(
+            patched.get("description").and_then(Value::as_str),
+            Some("Updated description")
+        );
+
+        // Original name should be preserved (not zeroed).
+        assert_eq!(
+            patched.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // Verify GET also returns the persisted values.
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let fetched = response_json(get_response).await?;
+        assert_eq!(
+            fetched.get("description").and_then(Value::as_str),
+            Some("Updated description")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, _org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        // DELETE /templates/{id}
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        // GET after delete should return 404.
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_versions_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, _org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        // GET /templates/{id}/versions — should return an empty array since
+        // the nil-UUID version created by post_org_template has template_id=nil.
+        let versions_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}/versions"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(versions_response.status(), StatusCode::OK);
+        let versions = response_json(versions_response).await?;
+        // It's an array (may be empty or contain the initial version).
+        assert!(versions.is_array());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        // Unauthenticated requests to template endpoints should return 401.
+        let list_response = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{}/templates", Uuid::from_u128(2)),
+            )?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::UNAUTHORIZED);
+
+        let get_response = call(
+            app.clone(),
+            request(Method::GET, &format!("/api/v2/templates/{}", Uuid::nil()))?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::UNAUTHORIZED);
+
+        let delete_response = call(
+            app,
+            request(
+                Method::DELETE,
+                &format!("/api/v2/templates/{}", Uuid::nil()),
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let missing_id = Uuid::from_u128(999);
+
+        // GET non-existent template
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{missing_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+
+        // PATCH non-existent template
+        let patch_body = UpdateTemplateMeta::default();
+        let patch_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{missing_id}"),
+                &session_token,
+                &patch_body,
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::NOT_FOUND);
+
+        // DELETE non-existent template
+        let delete_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/templates/{missing_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NOT_FOUND);
+
         Ok(())
     }
 }

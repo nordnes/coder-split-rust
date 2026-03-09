@@ -2625,8 +2625,8 @@ impl AppStore for PostgresStore {
                 failure_ttl, time_til_dormant, time_til_dormant_autodelete,
                 require_active_version, activity_bump, max_port_sharing_level
             ) VALUES (
-                $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-                $16, $17, $18, $19, $20, $21
+                $1, $2, $3, $4, $5, $6, $7::provisioner_type, $8, $9, $10, $11, $12, $13, $14, $15,
+                $16, $17, $18, $19, $20, $21::app_sharing_level
             )
             "#,
         )
@@ -2694,8 +2694,8 @@ impl AppStore for PostgresStore {
                 time_til_dormant_autodelete = $13,
                 require_active_version = $14,
                 deprecated = $15,
-                max_port_sharing_level = $16,
-                cors_behavior = $17,
+                max_port_sharing_level = $16::app_sharing_level,
+                cors_behavior = $17::cors_behavior,
                 use_classic_parameter_flow = $18,
                 disable_module_cache = $19,
                 updated_at = NOW()
@@ -3070,7 +3070,7 @@ impl AppStore for PostgresStore {
             INSERT INTO provisioner_jobs (
                 id, created_at, updated_at, organization_id, initiator_id,
                 provisioner, file_id, type, input, tags
-            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ) VALUES ($1, $2, $3, $4, $5, $6::provisioner_type, $7, $8, $9, $10)
             "#,
         )
         .bind(input.id)
