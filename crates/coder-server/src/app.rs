@@ -3267,7 +3267,7 @@ fn oauth2_app_response(
         name: app.name,
         icon: app.icon,
         callback_url: app.callback_url,
-        redirect_uris: Vec::new(),
+        redirect_uris: app.redirect_uris,
         endpoints: OAuth2ProviderAppEndpoints {
             authorization: "/oauth2/authorize".to_owned(),
             token: "/oauth2/tokens".to_owned(),

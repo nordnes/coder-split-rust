@@ -2389,16 +2389,6 @@ where
         use rand::RngCore;
         use sha2::Digest;
 
-        // Access token: 32 bytes, URL-safe base64.
-        let mut access_raw = [0u8; 32];
-        rand::thread_rng().fill_bytes(&mut access_raw);
-        let access_token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(access_raw);
-        let access_prefix = if access_token.len() >= 8 {
-            access_token.as_bytes()[..8].to_vec()
-        } else {
-            access_token.as_bytes().to_vec()
-        };
-
         // Refresh token: 32 bytes, URL-safe base64.
         let mut refresh_raw = [0u8; 32];
         rand::thread_rng().fill_bytes(&mut refresh_raw);
@@ -2414,9 +2404,17 @@ where
             .ok_or_else(|| OAuth2ProviderError::bad_request("Failed to compute token expiry."))?;
 
         // Create a real API key for this token (ties it to the session system).
+        // The key_secret IS the access token returned to the OAuth2 client so
+        // that the token can be used to authenticate via the standard session
+        // token validation path (hash_session_token → lookup).
         let key_secret = new_session_token();
         let api_key_id = Uuid::new_v4().to_string();
         let hashed_secret = hash_session_token(&key_secret);
+        let access_prefix = if key_secret.len() >= 8 {
+            key_secret.as_bytes()[..8].to_vec()
+        } else {
+            key_secret.as_bytes().to_vec()
+        };
         let now = OffsetDateTime::now_utc();
         let api_key_result = self
             .store
@@ -2428,7 +2426,7 @@ where
                 expires_at,
                 created_at: now,
                 updated_at: now,
-                login_type: LoginType::Password,
+                login_type: LoginType::Oauth2ProviderApp,
                 scopes: vec!["all".to_owned()],
                 token_name: format!("oauth2_{api_key_id}"),
                 lifetime_seconds: 30 * 24 * 60 * 60, // 30 days
@@ -2460,7 +2458,7 @@ where
         self.store.create_oauth2_provider_app_token(&input).await?;
 
         Ok(OAuth2TokenResult {
-            access_token,
+            access_token: key_secret,
             token_type: "Bearer".to_owned(),
             expires_in: 3600,
             refresh_token: refresh_token_str,
