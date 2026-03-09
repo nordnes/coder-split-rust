@@ -1361,7 +1361,10 @@ impl Authorizer {
         }
 
         // Step 2: Apply scope restrictions.
-        let scope = Scope::scope_all();
+        let scope = match &actor.scope {
+            Some(s) if s == "application_connect" => Scope::scope_application_connect(),
+            _ => Scope::scope_all(),
+        };
         if !scope.allows_object(object) {
             return Err(Forbidden {
                 message: format!(
@@ -1980,5 +1983,29 @@ mod tests {
             Action::Read,
             &ws
         ));
+    }
+
+    #[test]
+    fn authorizer_respects_actor_scope() {
+        let authorizer = Authorizer::new();
+        // Owner with application_connect scope should only be able to
+        // ApplicationConnect on workspaces, not Read templates.
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.scope = Some("application_connect".to_owned());
+
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(
+            authorizer
+                .authorize(&actor, Action::ApplicationConnect, &ws)
+                .is_ok()
+        );
+
+        // Read on template should be denied by the scope restriction.
+        let tpl = Object::new(ResourceType::Template);
+        assert!(authorizer.authorize(&actor, Action::Read, &tpl).is_err());
+
+        // Without scope restriction (None), owner can read templates.
+        actor.scope = None;
+        assert!(authorizer.authorize(&actor, Action::Read, &tpl).is_ok());
     }
 }

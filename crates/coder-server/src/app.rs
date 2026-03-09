@@ -3172,10 +3172,25 @@ mod tests {
                 .get(&user_id)
                 .cloned()
                 .ok_or_else(|| StorageError::invalid_data("missing user for session"))?;
+            let mut auth_user = AuthenticatedUser::from(user);
+            // Populate org_roles from organization member records.
+            let members = self
+                .organization_members
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            for ((_, member_user_id), member) in members.iter() {
+                if *member_user_id == user_id {
+                    for role in &member.roles {
+                        auth_user
+                            .org_roles
+                            .push(format!("{}:{}", role.name, member.organization_id));
+                    }
+                }
+            }
             self.sessions
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?
-                .insert(token_hash.to_vec(), AuthenticatedUser::from(user));
+                .insert(token_hash.to_vec(), auth_user);
             Ok(())
         }
 

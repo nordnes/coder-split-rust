@@ -161,6 +161,8 @@ pub struct AuthenticatedUser {
     pub organization_ids: Vec<Uuid>,
     /// Site-wide RBAC roles.
     pub roles: Vec<SlimRoleRecord>,
+    /// Organization-scoped RBAC roles in `"role_name:org_id"` format.
+    pub org_roles: Vec<String>,
     /// Login type for the account.
     pub login_type: LoginType,
     /// Current user status.
@@ -180,6 +182,7 @@ impl From<UserRecord> for AuthenticatedUser {
             last_seen_at: value.last_seen_at,
             organization_ids: value.organization_ids,
             roles: value.roles,
+            org_roles: vec![],
             login_type: value.login_type,
             status: value.status,
         }

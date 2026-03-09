@@ -985,7 +985,7 @@ fn actor_from_user(user: &AuthenticatedUser) -> Actor {
         username: user.username.clone(),
         organization_ids: user.organization_ids.clone(),
         site_roles: user.roles.iter().map(|role| role.name.clone()).collect(),
-        org_roles: vec![],
+        org_roles: user.org_roles.clone(),
         groups: vec![],
         scope: None,
     }
