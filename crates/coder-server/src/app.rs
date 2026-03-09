@@ -380,7 +380,14 @@ pub fn build_router(state: AppState) -> Router {
                     "/notifications/settings",
                     get(get_notifications_settings).put(put_notifications_settings),
                 )
-                .route("/notifications/templates", get(get_notification_templates))
+                .route(
+                    "/notifications/templates/system",
+                    get(get_system_notification_templates),
+                )
+                .route(
+                    "/notifications/templates/custom",
+                    get(get_custom_notification_templates),
+                )
                 .route("/notifications/test", post(post_test_notification))
                 .route(
                     "/notifications/templates/{id}/method",
@@ -2470,7 +2477,7 @@ async fn put_notifications_settings(
     Ok((StatusCode::OK, Json(settings)).into_response())
 }
 
-async fn get_notification_templates(
+async fn get_system_notification_templates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
@@ -2478,7 +2485,25 @@ async fn get_notification_templates(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let templates = state.store.get_notification_templates_by_kind("").await?;
+    let templates = state
+        .store
+        .get_notification_templates_by_kind("system")
+        .await?;
+    Ok((StatusCode::OK, Json(templates)).into_response())
+}
+
+async fn get_custom_notification_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let templates = state
+        .store
+        .get_notification_templates_by_kind("custom")
+        .await?;
     Ok((StatusCode::OK, Json(templates)).into_response())
 }
 
@@ -2520,9 +2545,25 @@ async fn put_notification_template_method(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
+    let method_ref = body.method.as_deref();
+    if let Some(m) = method_ref {
+        if !matches!(m, "smtp" | "webhook" | "inbox") {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    format!(
+                        "Invalid notification method: {m}. Must be one of: smtp, webhook, inbox"
+                    ),
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    }
+
     let template = state
         .store
-        .update_notification_template_method(id, body.method.as_deref())
+        .update_notification_template_method(id, method_ref)
         .await?;
 
     match template {
@@ -7487,7 +7528,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn notification_templates_list() -> Result<(), Box<dyn Error>> {
+    async fn notification_system_templates_list() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
@@ -7495,7 +7536,25 @@ mod tests {
             app,
             authenticated_request(
                 Method::GET,
-                "/api/v2/notifications/templates",
+                "/api/v2/notifications/templates/system",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_custom_templates_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/custom",
                 &session_token,
             )?,
         )
