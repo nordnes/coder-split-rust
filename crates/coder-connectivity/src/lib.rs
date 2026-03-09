@@ -689,7 +689,8 @@ impl UpdateCheckService {
             .unwrap_or_default()
             .to_owned();
 
-        let update_available = !tag_name.is_empty() && tag_name != self.current_version;
+        let update_available =
+            !tag_name.is_empty() && tag_name != self.current_version.trim_start_matches('v');
 
         let result = UpdateCheckResult {
             current_version: self.current_version.clone(),

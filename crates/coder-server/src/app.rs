@@ -3181,11 +3181,10 @@ async fn post_oauth2_authorize(
         .append_pair("code", &raw_code)
         .append_pair("state", &params.state);
 
-    Ok((
-        StatusCode::TEMPORARY_REDIRECT,
-        [("location", redirect_url.as_str())],
-    )
-        .into_response())
+    // Use 303 See Other (not 307) so the browser follows the redirect with
+    // GET.  A 307 would re-issue the POST to the callback URL, which only
+    // handles GET per RFC 6749 §4.1.2.
+    Ok((StatusCode::SEE_OTHER, [("location", redirect_url.as_str())]).into_response())
 }
 
 async fn post_oauth2_token(
