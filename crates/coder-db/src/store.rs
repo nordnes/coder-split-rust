@@ -272,6 +272,11 @@ impl PostgresStore {
         Ok(Self { pool })
     }
 
+    /// Returns a clone of the underlying connection pool.
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     /// Applies the Rust rewrite migrations.
     pub async fn migrate(&self) -> Result<(), DatabaseInitError> {
         MIGRATOR
