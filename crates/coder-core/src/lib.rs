@@ -35,8 +35,7 @@ pub use api::{
     WorkspaceProxyHealthReport,
 };
 // Insights / Analytics & Debug types are accessed via `coder_core::api::*` in
-// downstream crates that need them (e.g. coder-server).  Re-exporting them here
-// keeps the top-level namespace clean while still making them discoverable.
+// downstream crates that need them (e.g. coder-server).
 pub use build_info::BuildMetadata;
 pub use config::{
     DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, PublicDatabaseConfig,
@@ -57,8 +56,9 @@ pub use password::{
 };
 pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
-    ExternalAuthLinkRecord, GitSshKeyRecord, IdentityStore, OperationalStore, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    StorageError, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    ExternalAuthLinkRecord, GitSshKeyRecord, IdentityStore, InsightsStore, OperationalStore,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerJobStatsInput, StorageError, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput,
+    WorkspaceBuildStatsInput, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
+    WorkspaceStatsWorkspaceInput,
 };

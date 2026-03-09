@@ -4877,6 +4877,93 @@ mod tests {
             links.insert((user_id, link.provider_id.clone()), record.clone());
             Ok(record)
         }
+
+        async fn get_deployment_daus(
+            &self,
+            tz_offset: i32,
+        ) -> Result<coder_core::api::DAUsResponse, StorageError> {
+            Ok(coder_core::api::DAUsResponse {
+                tz_hour_offset: tz_offset,
+                entries: Vec::new(),
+            })
+        }
+
+        async fn get_template_insights(
+            &self,
+            start_time: OffsetDateTime,
+            end_time: OffsetDateTime,
+            _interval: coder_core::api::InsightsReportInterval,
+            template_ids: Vec<Uuid>,
+        ) -> Result<coder_core::api::TemplateInsightsResponse, StorageError> {
+            Ok(coder_core::api::TemplateInsightsResponse {
+                report: Some(coder_core::api::TemplateInsightsReport {
+                    start_time,
+                    end_time,
+                    template_ids: template_ids.clone(),
+                    active_users: 0,
+                    apps_usage: Vec::new(),
+                    parameters_usage: Vec::new(),
+                }),
+                interval_reports: vec![coder_core::api::TemplateInsightsIntervalReport {
+                    start_time,
+                    end_time,
+                    template_ids,
+                    interval: coder_core::api::InsightsReportInterval::Day,
+                    active_users: 0,
+                }],
+            })
+        }
+
+        async fn get_template_insights_by_interval(
+            &self,
+            _start_time: OffsetDateTime,
+            _end_time: OffsetDateTime,
+            _interval: coder_core::api::InsightsReportInterval,
+            _template_ids: Vec<Uuid>,
+        ) -> Result<Vec<coder_core::api::TemplateInsightsIntervalReport>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_user_activity_insights(
+            &self,
+            start_time: OffsetDateTime,
+            end_time: OffsetDateTime,
+            template_ids: Vec<Uuid>,
+        ) -> Result<coder_core::api::UserActivityInsightsResponse, StorageError> {
+            Ok(coder_core::api::UserActivityInsightsResponse {
+                report: coder_core::api::UserActivityInsightsReport {
+                    start_time,
+                    end_time,
+                    template_ids,
+                    users: Vec::new(),
+                },
+            })
+        }
+
+        async fn get_user_latency_insights(
+            &self,
+            start_time: OffsetDateTime,
+            end_time: OffsetDateTime,
+            template_ids: Vec<Uuid>,
+        ) -> Result<coder_core::api::UserLatencyInsightsResponse, StorageError> {
+            Ok(coder_core::api::UserLatencyInsightsResponse {
+                report: coder_core::api::UserLatencyInsightsReport {
+                    start_time,
+                    end_time,
+                    template_ids,
+                    users: Vec::new(),
+                },
+            })
+        }
+
+        async fn get_user_status_counts(
+            &self,
+            _timezone: &str,
+        ) -> Result<coder_core::api::GetUserStatusCountsResponse, StorageError> {
+            Ok(coder_core::api::GetUserStatusCountsResponse {
+                status_counts: HashMap::new(),
+            })
+        }
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -7004,6 +7091,360 @@ mod tests {
         )
         .await?;
         assert_eq!(convert_login_response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ── Insights route tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn insights_daus_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        // 401 – unauthenticated
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/insights/daus")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // 200 – happy path (owner role has operational data access)
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/insights/daus", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert_eq!(body.get("tz_hour_offset").and_then(Value::as_i64), Some(0));
+        assert_eq!(
+            body.get("entries").and_then(Value::as_array).map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_templates_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            )?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("report").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_templates_sections_filter_strips_unrequested_fields()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Request only "report" section – interval_reports should be stripped
+        let report_only = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z&sections=report",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(report_only.status(), StatusCode::OK);
+        let body = response_json(report_only).await?;
+        assert!(body.get("report").is_some());
+        // interval_reports should be absent or empty (skip_serializing_if = "Vec::is_empty")
+        assert!(
+            body.get("interval_reports").is_none()
+                || body
+                    .get("interval_reports")
+                    .and_then(Value::as_array)
+                    .map(Vec::is_empty)
+                    .unwrap_or(false)
+        );
+
+        // Request only "interval_reports" section – report should be stripped
+        let interval_only = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z&sections=interval_reports",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(interval_only.status(), StatusCode::OK);
+        let body = response_json(interval_only).await?;
+        // report should be absent (skip_serializing_if = "Option::is_none")
+        assert!(body.get("report").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_activity_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                "/api/v2/insights/user-activity?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            )?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-activity?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("report").is_some());
+        assert_eq!(
+            body.get("report")
+                .and_then(|r| r.get("users"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_latency_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                "/api/v2/insights/user-latency?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            )?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-latency?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("report").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_status_counts_requires_auth_and_returns_stub()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/insights/user-status-counts")?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-status-counts",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("status_counts").is_some());
+
+        // Test timezone offset logic: tz_offset=5 → Etc/GMT-5
+        let tz_ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-status-counts?tz_offset=5",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(tz_ok.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // ── Debug route tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn debug_coordinator_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/debug/coordinator")?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/coordinator", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("message").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_tailnet_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/tailnet")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/tailnet", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("message").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_derp_traffic_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/debug/derp/traffic")?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/derp/traffic", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("message").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_expvar_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/expvar")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/expvar", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("vars").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_pprof_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/pprof")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+
+        // Test main pprof endpoint
+        let ok = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/debug/pprof", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("message").and_then(Value::as_str).is_some());
+
+        // Test pprof sub-routes (cmdline, profile, symbol, trace)
+        for sub in &["cmdline", "profile", "symbol", "trace"] {
+            let sub_ok = call(
+                app.clone(),
+                authenticated_request(
+                    Method::GET,
+                    &format!("/api/v2/debug/pprof/{sub}"),
+                    &session_token,
+                )?,
+            )
+            .await?;
+            assert_eq!(
+                sub_ok.status(),
+                StatusCode::OK,
+                "pprof/{sub} should return 200"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_websocket_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/ws")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("message").and_then(Value::as_str).is_some());
         Ok(())
     }
 }
