@@ -207,7 +207,7 @@ async fn run() -> Result<(), MainError> {
         deployment_metadata.deployment_id,
         store.clone(),
         Arc::new(PersistingAuditSink::new(store)),
-        pubsub,
+        pubsub.clone(),
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
@@ -225,10 +225,18 @@ async fn run() -> Result<(), MainError> {
         "starting Rust coderd"
     );
 
-    axum::serve(listener, application.into_make_service())
+    let serve_result = axum::serve(listener, application.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(MainError::Serve)
+        .map_err(MainError::Serve);
+
+    // Shut down the pub/sub background listener task and release its dedicated
+    // PgListener database connection.
+    if let Err(close_err) = pubsub.close().await {
+        warn!(error = %close_err, "failed to close pubsub during shutdown");
+    }
+
+    serve_result
 }
 
 fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {

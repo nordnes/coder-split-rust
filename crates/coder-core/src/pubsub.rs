@@ -163,7 +163,12 @@ impl PubSub for InMemoryPubSub {
 
     async fn close(&self) -> Result<(), PubSubError> {
         let mut closed = self.closed.lock().await;
+        if *closed {
+            return Ok(());
+        }
         *closed = true;
+        drop(closed);
+
         let mut channels = self.channels.lock().await;
         channels.clear();
         Ok(())
