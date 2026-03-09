@@ -2658,13 +2658,13 @@ impl AppStore for PostgresStore {
                 architecture, environment_variables::text AS environment_variables, operating_system,
                 directory, expanded_directory, version, api_version,
                 connection_timeout_seconds, troubleshooting_url, motd_file,
-                lifecycle_state, logs_length, logs_overflowed,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
                 started_at, ready_at,
                 subsystems::text[] AS subsystems,
                 display_apps::text[] AS display_apps,
                 display_order, api_key_scope::text AS api_key_scope
              FROM workspace_agents
-             WHERE id = $1",
+             WHERE id = $1 AND deleted = false",
         )
         .bind(agent_id)
         .fetch_optional(&self.pool)
@@ -2686,13 +2686,13 @@ impl AppStore for PostgresStore {
                 architecture, environment_variables::text AS environment_variables, operating_system,
                 directory, expanded_directory, version, api_version,
                 connection_timeout_seconds, troubleshooting_url, motd_file,
-                lifecycle_state, logs_length, logs_overflowed,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
                 started_at, ready_at,
                 subsystems::text[] AS subsystems,
                 display_apps::text[] AS display_apps,
                 display_order, api_key_scope::text AS api_key_scope
              FROM workspace_agents
-             WHERE auth_token = $1",
+             WHERE auth_token = $1 AND deleted = false",
         )
         .bind(auth_token)
         .fetch_optional(&self.pool)
@@ -2714,13 +2714,13 @@ impl AppStore for PostgresStore {
                 architecture, environment_variables::text AS environment_variables, operating_system,
                 directory, expanded_directory, version, api_version,
                 connection_timeout_seconds, troubleshooting_url, motd_file,
-                lifecycle_state, logs_length, logs_overflowed,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
                 started_at, ready_at,
                 subsystems::text[] AS subsystems,
                 display_apps::text[] AS display_apps,
                 display_order, api_key_scope::text AS api_key_scope
              FROM workspace_agents
-             WHERE auth_instance_id = $1
+             WHERE auth_instance_id = $1 AND deleted = false
              ORDER BY created_at DESC
              LIMIT 1",
         )
@@ -2744,13 +2744,13 @@ impl AppStore for PostgresStore {
                 architecture, environment_variables::text AS environment_variables, operating_system,
                 directory, expanded_directory, version, api_version,
                 connection_timeout_seconds, troubleshooting_url, motd_file,
-                lifecycle_state, logs_length, logs_overflowed,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
                 started_at, ready_at,
                 subsystems::text[] AS subsystems,
                 display_apps::text[] AS display_apps,
                 display_order, api_key_scope::text AS api_key_scope
              FROM workspace_agents
-             WHERE resource_id = ANY($1)
+             WHERE resource_id = ANY($1) AND deleted = false
              ORDER BY created_at ASC",
         )
         .bind(resource_ids)
