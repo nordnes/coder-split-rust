@@ -79,7 +79,6 @@ ALTER TABLE provisioner_jobs
     ADD COLUMN IF NOT EXISTS job_status provisioner_job_status
         GENERATED ALWAYS AS (
             CASE
-                WHEN completed_at IS NOT NULL AND canceled_at IS NOT NULL AND error <> '' THEN 'canceled'::provisioner_job_status
                 WHEN completed_at IS NOT NULL AND canceled_at IS NOT NULL THEN 'canceled'::provisioner_job_status
                 WHEN completed_at IS NOT NULL AND error <> '' THEN 'failed'::provisioner_job_status
                 WHEN completed_at IS NOT NULL THEN 'succeeded'::provisioner_job_status

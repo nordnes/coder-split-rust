@@ -2833,6 +2833,15 @@ impl ProvisionerStore for PostgresStore {
         input: InsertProvisionerJobLogsInput,
     ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
         let n = input.created_at.len();
+        if input.source.len() != n
+            || input.level.len() != n
+            || input.stage.len() != n
+            || input.output.len() != n
+        {
+            return Err(StorageError::invalid_data(
+                "all log input vectors must have the same length".to_string(),
+            ));
+        }
         let job_ids: Vec<Uuid> = vec![input.job_id; n];
         let sources: Vec<String> = input.source.iter().map(|s| s.to_string()).collect();
         let levels: Vec<String> = input.level.iter().map(|l| l.to_string()).collect();
@@ -2854,14 +2863,15 @@ impl ProvisionerStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        // Update logs_length on the parent job.
-        let log_count = i32::try_from(n).unwrap_or(i32::MAX);
+        // Update logs_length on the parent job (tracks total bytes, not entry count).
+        let total_bytes: usize = input.output.iter().map(|o| o.len()).sum();
+        let log_bytes = i32::try_from(total_bytes).unwrap_or(i32::MAX);
         sqlx::query(
             "UPDATE provisioner_jobs
              SET logs_length = logs_length + $1
              WHERE id = $2",
         )
-        .bind(log_count)
+        .bind(log_bytes)
         .bind(input.job_id)
         .execute(&mut *transaction)
         .await
@@ -2905,6 +2915,16 @@ impl ProvisionerStore for PostgresStore {
         input: InsertProvisionerJobTimingsInput,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
         let n = input.started_at.len();
+        if input.ended_at.len() != n
+            || input.stage.len() != n
+            || input.source.len() != n
+            || input.action.len() != n
+            || input.resource.len() != n
+        {
+            return Err(StorageError::invalid_data(
+                "all timing input vectors must have the same length".to_string(),
+            ));
+        }
         let job_ids: Vec<Uuid> = vec![input.job_id; n];
         let stages: Vec<String> = input.stage.iter().map(|s| s.to_string()).collect();
 
