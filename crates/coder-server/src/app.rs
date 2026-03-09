@@ -2974,7 +2974,7 @@ async fn delete_oauth2_provider_app_secret(
             "You must be an owner to manage OAuth2 provider app secrets.",
         ));
     }
-    let _app_uuid = match Uuid::parse_str(&app_id) {
+    let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
             return Ok(not_found_response("OAuth2 provider app not found."));
@@ -2986,7 +2986,11 @@ async fn delete_oauth2_provider_app_secret(
             return Ok(not_found_response("OAuth2 provider app secret not found."));
         }
     };
-    if let Err(error) = state.oauth2_provider.delete_app_secret(secret_uuid).await {
+    if let Err(error) = state
+        .oauth2_provider
+        .delete_app_secret(app_uuid, secret_uuid)
+        .await
+    {
         return handle_oauth2_provider_error(error);
     }
 

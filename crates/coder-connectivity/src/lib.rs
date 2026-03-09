@@ -505,8 +505,8 @@ fn max_severity(left: HealthSeverity, right: HealthSeverity) -> HealthSeverity {
 pub struct TelemetrySnapshot {
     /// Unique deployment identifier.
     pub deployment_id: String,
-    /// Number of active users.
-    pub active_users: u64,
+    /// Number of active sessions (sum of VS Code, SSH, and JetBrains sessions).
+    pub active_sessions: u64,
     /// Number of workspaces.
     pub workspaces: u64,
     /// Number of templates.
@@ -543,26 +543,29 @@ where
     /// Collects a telemetry snapshot.
     pub async fn collect_snapshot(&self) -> Result<TelemetrySnapshot, coder_core::StorageError> {
         let stats = self.store.deployment_stats().await.ok();
-        let (active_users, workspaces) = match stats {
+        let (active_sessions, workspaces) = match stats {
             Some(ref s) => {
-                let users = u64::try_from(s.session_count.vscode)
+                let sessions = u64::try_from(s.session_count.vscode)
                     .unwrap_or_default()
                     .saturating_add(u64::try_from(s.session_count.ssh).unwrap_or_default())
-                    .saturating_add(u64::try_from(s.session_count.jetbrains).unwrap_or_default());
+                    .saturating_add(u64::try_from(s.session_count.jetbrains).unwrap_or_default())
+                    .saturating_add(
+                        u64::try_from(s.session_count.reconnecting_pty).unwrap_or_default(),
+                    );
                 let ws = u64::try_from(s.workspaces.pending)
                     .unwrap_or_default()
                     .saturating_add(u64::try_from(s.workspaces.building).unwrap_or_default())
                     .saturating_add(u64::try_from(s.workspaces.running).unwrap_or_default())
                     .saturating_add(u64::try_from(s.workspaces.stopped).unwrap_or_default())
                     .saturating_add(u64::try_from(s.workspaces.failed).unwrap_or_default());
-                (users, ws)
+                (sessions, ws)
             }
             None => (0, 0),
         };
 
         Ok(TelemetrySnapshot {
             deployment_id: self.deployment_id.clone(),
-            active_users,
+            active_sessions,
             workspaces,
             templates: 0,
             version: self.version.clone(),
@@ -598,7 +601,7 @@ where
             Ok(snapshot) => {
                 tracing::info!(
                     deployment_id = %snapshot.deployment_id,
-                    active_users = snapshot.active_users,
+                    active_sessions = snapshot.active_sessions,
                     workspaces = snapshot.workspaces,
                     "telemetry snapshot collected"
                 );

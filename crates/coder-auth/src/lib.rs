@@ -2113,7 +2113,21 @@ where
     }
 
     /// Deletes an OAuth2 provider app secret.
-    pub async fn delete_app_secret(&self, secret_id: Uuid) -> Result<(), OAuth2ProviderError> {
+    ///
+    /// Verifies that the secret belongs to the specified `app_id` before
+    /// deleting, preventing cross-app secret deletion.
+    pub async fn delete_app_secret(
+        &self,
+        app_id: Uuid,
+        secret_id: Uuid,
+    ) -> Result<(), OAuth2ProviderError> {
+        // Verify the secret belongs to the specified app.
+        let secrets = self.store.list_oauth2_provider_app_secrets(app_id).await?;
+        if !secrets.iter().any(|s| s.id == secret_id) {
+            return Err(OAuth2ProviderError::not_found(
+                "OAuth2 app secret not found for this app.",
+            ));
+        }
         if !self
             .store
             .delete_oauth2_provider_app_secret(secret_id)
@@ -2266,11 +2280,17 @@ where
             .find(|s| s.hashed_secret == secret_hash)
             .ok_or_else(|| OAuth2ProviderError::unauthorized("Invalid client credentials."))?;
 
-        // Delete the code (single-use).
-        let _ = self
+        // Delete the code (single-use).  Propagate errors so that tokens
+        // are never issued if the code cannot be invalidated (RFC 6749 §10.5).
+        if !self
             .store
             .delete_oauth2_provider_app_code(code_record.id)
-            .await;
+            .await?
+        {
+            return Err(OAuth2ProviderError::unauthorized(
+                "Authorization code already consumed.",
+            ));
+        }
 
         // Generate tokens.
         let result = self
@@ -2347,11 +2367,11 @@ where
             ));
         }
 
-        // Delete the old token.
-        let _ = self
-            .store
+        // Delete the old token.  Propagate errors so that token replay
+        // is prevented if deletion fails (RFC 6749 §10.4).
+        self.store
             .delete_oauth2_provider_app_token(token_record.id)
-            .await;
+            .await?;
 
         // Generate a new token pair.
         let result = self
