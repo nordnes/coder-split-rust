@@ -2297,10 +2297,16 @@ where
             .store
             .list_oauth2_provider_app_secrets(code_record.app_id)
             .await?;
-        let matched_secret = match secrets
-            .into_iter()
-            .find(|s| bool::from(s.hashed_secret.as_slice().ct_eq(secret_hash.as_slice())))
-        {
+        // Iterate ALL secrets without short-circuiting so the total elapsed
+        // time does not reveal which position matched (prevents timing
+        // side-channel that `find()` would introduce).
+        let mut matched_secret = None;
+        for s in secrets {
+            if bool::from(s.hashed_secret.as_slice().ct_eq(secret_hash.as_slice())) {
+                matched_secret = Some(s);
+            }
+        }
+        let matched_secret = match matched_secret {
             Some(s) => s,
             None => {
                 // Delete the code on client_secret failure to enforce single-use
@@ -2393,13 +2399,16 @@ where
             .store
             .list_oauth2_provider_app_secrets(secret.app_id)
             .await?;
-        if !app_secrets.iter().any(|s| {
-            bool::from(
+        // Iterate ALL secrets without short-circuiting so total elapsed time
+        // does not reveal which position matched (prevents timing side-channel).
+        let secret_valid = app_secrets.iter().fold(false, |acc, s| {
+            acc | bool::from(
                 s.hashed_secret
                     .as_slice()
                     .ct_eq(client_secret_hash.as_slice()),
             )
-        }) {
+        });
+        if !secret_valid {
             return Err(OAuth2ProviderError::unauthorized(
                 "Invalid client credentials.",
             ));
@@ -2587,9 +2596,9 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
         "S256" => {
             let hash = sha2::Sha256::digest(code_verifier.as_bytes());
             let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
-            encoded == code_challenge
+            bool::from(encoded.as_bytes().ct_eq(code_challenge.as_bytes()))
         }
-        "plain" | "" => code_verifier == code_challenge,
+        "plain" | "" => bool::from(code_verifier.as_bytes().ct_eq(code_challenge.as_bytes())),
         _ => false,
     }
 }
