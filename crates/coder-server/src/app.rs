@@ -2413,8 +2413,6 @@ async fn delete_user(
 #[derive(Deserialize)]
 struct TasksQuery {
     #[serde(default)]
-    owner_id: Option<Uuid>,
-    #[serde(default)]
     organization_id: Option<Uuid>,
 }
 
@@ -2427,9 +2425,9 @@ async fn list_tasks(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Default owner_id to the authenticated user so results are scoped.
+    // Always scope to the authenticated user — no cross-user enumeration.
     let filter = TaskListFilter {
-        owner_id: Some(query.owner_id.unwrap_or(context.user.id)),
+        owner_id: Some(context.user.id),
         organization_id: query.organization_id,
     };
     let tasks = state.store.list_tasks(filter).await?;
@@ -5366,9 +5364,11 @@ mod tests {
                 })
                 .map(|c| c.id)
                 .collect();
+            let now = OffsetDateTime::now_utc();
             for cid in ids_to_archive {
                 if let Some(chat) = chats.get_mut(&cid) {
                     chat.archived = true;
+                    chat.updated_at = now;
                 }
             }
             Ok(())
