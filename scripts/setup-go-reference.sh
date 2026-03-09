@@ -19,4 +19,10 @@ if [ ! -f "$GUARD_FILE" ]; then
   cd "$(dirname "$0")/.." && git checkout -- coder/AGENTS.md 2>/dev/null || true
 fi
 
-echo "Done. Go reference available at $CODER_REF_DIR"
+echo "Go reference available at $CODER_REF_DIR"
+
+# Pre-warm the Rust build cache (speeds up first compile in new sessions)
+echo "Pre-warming cargo build cache..."
+cd "$(dirname "$0")/.."
+cargo check --workspace 2>&1 | tail -3
+echo "Setup complete."
