@@ -1,0 +1,17 @@
+[package]
+name = "coder-audit"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+coder-rbac = { path = "../coder-rbac" }
+tracing.workspace = true
+uuid.workspace = true

@@ -1,0 +1,4 @@
+CREATE TABLE IF NOT EXISTS site_configs (
+    key VARCHAR(256) NOT NULL UNIQUE,
+    value TEXT NOT NULL
+);

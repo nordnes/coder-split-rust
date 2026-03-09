@@ -1,0 +1,26 @@
+{
+  "cases": [
+    {
+      "name": "auth-methods",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/users/authmethods"
+      },
+      "comparison": {
+        "body_mode": "json",
+        "check_headers": false
+      }
+    },
+    {
+      "name": "scope-catalog",
+      "request": {
+        "method": "GET",
+        "path": "/api/v2/auth/scopes"
+      },
+      "comparison": {
+        "body_mode": "json",
+        "check_headers": false
+      }
+    }
+  ]
+}

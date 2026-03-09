@@ -1,0 +1,61 @@
+//! Build metadata helpers.
+
+use url::Url;
+use uuid::Uuid;
+
+use crate::api::BuildInfoResponse;
+
+/// Static metadata describing the running build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BuildMetadata {
+    /// Semantic version for the running build.
+    pub version: String,
+    /// Canonical link for this build or repository.
+    pub external_url: String,
+    /// Current agent API version.
+    pub agent_api_version: String,
+    /// Current provisioner API version.
+    pub provisioner_api_version: String,
+    /// Upgrade guidance surfaced to clients.
+    pub upgrade_message: String,
+    /// Whether this process is acting as a workspace proxy.
+    pub workspace_proxy: bool,
+}
+
+impl BuildMetadata {
+    /// Converts static build metadata into the public API response shape.
+    #[must_use]
+    pub fn to_response(
+        &self,
+        deployment_id: Uuid,
+        access_url: &Url,
+        telemetry_enabled: bool,
+    ) -> BuildInfoResponse {
+        BuildInfoResponse {
+            external_url: self.external_url.clone(),
+            version: self.version.clone(),
+            dashboard_url: access_url.to_string(),
+            telemetry: telemetry_enabled,
+            workspace_proxy: self.workspace_proxy,
+            agent_api_version: self.agent_api_version.clone(),
+            provisioner_api_version: self.provisioner_api_version.clone(),
+            upgrade_message: self.upgrade_message.clone(),
+            deployment_id: deployment_id.to_string(),
+        }
+    }
+}
+
+impl Default for BuildMetadata {
+    fn default() -> Self {
+        Self {
+            version: env!("CARGO_PKG_VERSION").to_owned(),
+            external_url: option_env!("CARGO_PKG_REPOSITORY")
+                .unwrap_or("https://github.com/coder/coder")
+                .to_owned(),
+            agent_api_version: "0.1".to_owned(),
+            provisioner_api_version: "0.1".to_owned(),
+            upgrade_message: String::new(),
+            workspace_proxy: false,
+        }
+    }
+}

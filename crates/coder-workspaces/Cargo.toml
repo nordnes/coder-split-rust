@@ -1,0 +1,16 @@
+[package]
+name = "coder-workspaces"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+coder-core = { path = "../coder-core" }
+tokio.workspace = true
+tracing.workspace = true
