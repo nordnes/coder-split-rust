@@ -30,9 +30,9 @@ use coder_core::{
     DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
     GetUsersResponse, HealthSettings, HealthcheckReport, LoginType, LoginWithPasswordRequest,
     OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
-    PaginatedMembersResponse, PatchDeploymentConfigRequest, PersistAuditLogInput,
-    RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse, UpdateCheckResponse,
-    UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
+    PaginatedMembersResponse, PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig,
+    SshConfigResponse, UpdateCheckResponse, UpdateRolesRequest,
+    UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
     UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
     UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
     UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
@@ -247,10 +247,7 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/auth/scopes", get(list_api_key_scopes))
                 .route("/buildinfo", get(build_info))
                 .route("/csp/reports", post(post_csp_report))
-                .route(
-                    "/deployment/config",
-                    get(deployment_config).patch(patch_deployment_config),
-                )
+                .route("/deployment/config", get(deployment_config))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
                 .route("/debug/health", get(debug_health))
@@ -2427,29 +2424,6 @@ async fn delete_user(
 }
 
 // ---------------------------------------------------------------------------
-// PATCH /deployment/config — returns the current config (runtime mutation is
-// not yet supported).
-// ---------------------------------------------------------------------------
-async fn patch_deployment_config(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(_body): Json<PatchDeploymentConfigRequest>,
-) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    // Runtime config mutation is not supported yet — return the current config.
-    Ok((
-        StatusCode::OK,
-        Json(DeploymentConfigResponse {
-            config: state.config.public(),
-            options: ServerConfig::supported_options(),
-        }),
-    )
-        .into_response())
-}
-
-// ---------------------------------------------------------------------------
 // GET /organizations/{org}/provisionerdaemons — list provisioner daemons.
 // The provisioner domain is a stub; we return an empty array.
 // ---------------------------------------------------------------------------
@@ -2545,10 +2519,20 @@ async fn get_provisioner_job_logs(
 // GET /applications/host — returns the wildcard hostname for workspace
 // applications (currently empty).
 // ---------------------------------------------------------------------------
-async fn applications_host(State(_state): State<AppState>) -> Json<AppHostResponse> {
-    Json(AppHostResponse {
-        host: String::new(),
-    })
+async fn applications_host(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    Ok((
+        StatusCode::OK,
+        Json(AppHostResponse {
+            host: String::new(),
+        }),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -6799,39 +6783,9 @@ mod tests {
 
     #[tokio::test]
     async fn misc_routes_return_expected_stubs_and_status_codes() -> Result<(), Box<dyn Error>> {
-        use coder_core::PatchDeploymentConfigRequest;
-
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
-
-        // --- PATCH /deployment/config (authenticated) returns 200 with config ---
-        let patch_config_response = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::PATCH,
-                "/api/v2/deployment/config",
-                &session_token,
-                &PatchDeploymentConfigRequest {},
-            )?,
-        )
-        .await?;
-        assert_eq!(patch_config_response.status(), StatusCode::OK);
-        let patch_config_body = response_json(patch_config_response).await?;
-        assert!(patch_config_body.get("config").is_some());
-        assert!(patch_config_body.get("options").is_some());
-
-        // --- PATCH /deployment/config without auth returns 401 ---
-        let patch_config_unauth = call(
-            app.clone(),
-            json_request(
-                Method::PATCH,
-                "/api/v2/deployment/config",
-                &PatchDeploymentConfigRequest {},
-            )?,
-        )
-        .await?;
-        assert_eq!(patch_config_unauth.status(), StatusCode::UNAUTHORIZED);
 
         // --- GET /organizations/{org}/provisionerdaemons returns 200 + empty array ---
         let daemons_response = call(
@@ -6955,15 +6909,23 @@ mod tests {
         .await?;
         assert_eq!(logs_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /applications/host returns 200 with empty host ---
+        // --- GET /applications/host with auth returns 200 with empty host ---
         let host_response = call(
             app.clone(),
-            request(Method::GET, "/api/v2/applications/host")?,
+            authenticated_request(Method::GET, "/api/v2/applications/host", &session_token)?,
         )
         .await?;
         assert_eq!(host_response.status(), StatusCode::OK);
         let host_body = response_json(host_response).await?;
         assert_eq!(host_body.get("host").and_then(Value::as_str), Some(""));
+
+        // --- GET /applications/host without auth returns 401 ---
+        let host_unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/applications/host")?,
+        )
+        .await?;
+        assert_eq!(host_unauth.status(), StatusCode::UNAUTHORIZED);
 
         // --- GET /applications/auth-redirect with auth returns 400 ---
         let auth_redirect_response = call(

@@ -1621,13 +1621,6 @@ pub struct ProvisionerJobLogResponse {
     pub output: String,
 }
 
-/// PATCH /deployment/config request body.
-#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
-pub struct PatchDeploymentConfigRequest {
-    // Currently a placeholder — the Rust backend does not support runtime
-    // config mutations, so this will always return the current config.
-}
-
 fn value_is_null_or_empty_object(value: &Value) -> bool {
     match value {
         Value::Null => true,
