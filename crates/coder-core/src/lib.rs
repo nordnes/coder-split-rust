@@ -12,7 +12,8 @@ pub mod ports;
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,
     ApiResponse, AssignableRoleResponse, AuditDiff, AuditDiffField, AuditLog, AuditLogAction,
-    AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods, AvailableExperiments,
+    AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods, AuthorizationCheck,
+    AuthorizationObject, AuthorizationRequest, AuthorizationResponse, AvailableExperiments,
     BaseHealthReport, BuildInfoResponse, ChangePasswordWithOneTimePasscodeRequest, ConfigOption,
     ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
     CreateOrganizationRequest, CreateTestAuditLogRequest, CreateTokenRequest,
