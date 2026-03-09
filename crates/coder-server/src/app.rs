@@ -2582,21 +2582,41 @@ async fn workspace_agent_git_ssh_key(
 // ---------------------------------------------------------------------------
 
 /// GET /workspaceagents/me/gitauth — deprecated, returns empty array.
-async fn deprecated_workspace_agent_git_auth() -> Response {
+async fn deprecated_workspace_agent_git_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
     let empty: Vec<Value> = Vec::new();
-    (StatusCode::OK, Json(empty)).into_response()
+    Ok((StatusCode::OK, Json(empty)).into_response())
 }
 
 /// GET /workspaceagents/{agent}/startup-logs — deprecated, returns empty array.
-async fn deprecated_workspace_agent_startup_logs(Path(_agent): Path<String>) -> Response {
+async fn deprecated_workspace_agent_startup_logs(
+    State(state): State<AppState>,
+    Path(_agent): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
     let empty: Vec<Value> = Vec::new();
-    (StatusCode::OK, Json(empty)).into_response()
+    Ok((StatusCode::OK, Json(empty)).into_response())
 }
 
 /// GET /templateversions/{tv}/schema — deprecated, returns empty array.
-async fn deprecated_template_version_schema(Path(_templateversion): Path<String>) -> Response {
+async fn deprecated_template_version_schema(
+    State(state): State<AppState>,
+    Path(_templateversion): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
     let empty: Vec<Value> = Vec::new();
-    (StatusCode::OK, Json(empty)).into_response()
+    Ok((StatusCode::OK, Json(empty)).into_response())
 }
 
 async fn authenticate_request(
@@ -6976,23 +6996,36 @@ mod tests {
         .await?;
         assert_eq!(gitsshkey_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /workspaceagents/me/gitauth returns 200 with empty array ---
+        // --- GET /workspaceagents/me/gitauth with auth returns 200 with empty array ---
         let gitauth_response = call(
             app.clone(),
-            request(Method::GET, "/api/v2/workspaceagents/me/gitauth")?,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/workspaceagents/me/gitauth",
+                &session_token,
+            )?,
         )
         .await?;
         assert_eq!(gitauth_response.status(), StatusCode::OK);
         let gitauth_body = response_json(gitauth_response).await?;
         assert_eq!(gitauth_body.as_array().map(Vec::len), Some(0));
 
-        // --- GET /workspaceagents/{agent}/startup-logs returns 200 with empty array ---
+        // --- GET /workspaceagents/me/gitauth without auth returns 401 ---
+        let gitauth_unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/workspaceagents/me/gitauth")?,
+        )
+        .await?;
+        assert_eq!(gitauth_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /workspaceagents/{agent}/startup-logs with auth returns 200 ---
         let agent_id = Uuid::new_v4();
         let startup_logs_response = call(
             app.clone(),
-            request(
+            authenticated_request(
                 Method::GET,
                 &format!("/api/v2/workspaceagents/{agent_id}/startup-logs"),
+                &session_token,
             )?,
         )
         .await?;
@@ -7000,9 +7033,34 @@ mod tests {
         let startup_logs_body = response_json(startup_logs_response).await?;
         assert_eq!(startup_logs_body.as_array().map(Vec::len), Some(0));
 
-        // --- GET /templateversions/{tv}/schema returns 200 with empty array ---
+        // --- GET /workspaceagents/{agent}/startup-logs without auth returns 401 ---
+        let startup_logs_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/startup-logs"),
+            )?,
+        )
+        .await?;
+        assert_eq!(startup_logs_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /templateversions/{tv}/schema with auth returns 200 ---
         let tv_id = Uuid::new_v4();
         let schema_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{tv_id}/schema"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(schema_response.status(), StatusCode::OK);
+        let schema_body = response_json(schema_response).await?;
+        assert_eq!(schema_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET /templateversions/{tv}/schema without auth returns 401 ---
+        let schema_unauth = call(
             app.clone(),
             request(
                 Method::GET,
@@ -7010,9 +7068,7 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(schema_response.status(), StatusCode::OK);
-        let schema_body = response_json(schema_response).await?;
-        assert_eq!(schema_body.as_array().map(Vec::len), Some(0));
+        assert_eq!(schema_unauth.status(), StatusCode::UNAUTHORIZED);
 
         Ok(())
     }
