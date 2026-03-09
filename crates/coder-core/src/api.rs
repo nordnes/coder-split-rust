@@ -1513,6 +1513,121 @@ where
     Ok(Duration::from_nanos(nanos))
 }
 
+/// Response for `GET /api/v2/applications/host`.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct AppHostResponse {
+    /// Wildcard hostname for workspace applications.
+    pub host: String,
+}
+
+/// Provisioner job response matching `codersdk.ProvisionerJob`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisionerJobResponse {
+    /// Stable job identifier.
+    pub id: Uuid,
+    /// Organization that owns the job.
+    pub organization_id: Uuid,
+    /// User who initiated the job.
+    pub initiator_id: Uuid,
+    /// When the job was created.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// When the job started executing.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub started_at: Option<OffsetDateTime>,
+    /// When the job completed.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub completed_at: Option<OffsetDateTime>,
+    /// When the job was canceled.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub canceled_at: Option<OffsetDateTime>,
+    /// Current job status.
+    pub status: String,
+    /// Job type.
+    #[serde(rename = "type")]
+    pub job_type: String,
+    /// Error message on failure.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error: String,
+    /// Position in the provisioner queue.
+    #[serde(default)]
+    pub queue_position: i32,
+    /// Total queue size.
+    #[serde(default)]
+    pub queue_size: i32,
+    /// Tags associated with the job.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tags: HashMap<String, String>,
+}
+
+/// Provisioner daemon response matching `codersdk.ProvisionerDaemon`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisionerDaemonResponse {
+    /// Stable daemon identifier.
+    pub id: Uuid,
+    /// Organization that owns the daemon.
+    pub organization_id: Uuid,
+    /// When the daemon was created.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// When the daemon was last seen.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub last_seen_at: Option<OffsetDateTime>,
+    /// Daemon name.
+    pub name: String,
+    /// Daemon version.
+    pub version: String,
+    /// API version supported.
+    pub api_version: String,
+    /// Provisioner types supported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provisioners: Vec<String>,
+    /// Tags associated with the daemon.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tags: HashMap<String, String>,
+}
+
+/// Provisioner job log entry matching `codersdk.ProvisionerJobLog`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisionerJobLogResponse {
+    /// Stable log entry identifier.
+    pub id: i64,
+    /// When the log entry was created.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Log source.
+    pub source: String,
+    /// Log level.
+    pub level: String,
+    /// Pipeline stage.
+    pub stage: String,
+    /// Log output text.
+    pub output: String,
+}
+
+/// PATCH /deployment/config request body.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PatchDeploymentConfigRequest {
+    // Currently a placeholder — the Rust backend does not support runtime
+    // config mutations, so this will always return the current config.
+}
+
 fn value_is_null_or_empty_object(value: &Value) -> bool {
     match value {
         Value::Null => true,

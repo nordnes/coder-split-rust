@@ -13,7 +13,7 @@ use axum::{
         },
     },
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use coder_audit::{AuditAction, AuditEvent, AuditSink};
 use coder_auth::{
@@ -23,16 +23,16 @@ use coder_auth::{
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
 use coder_core::{
-    ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
+    ApiResponse, AppHostResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
     AvailableExperiments, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
     ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
     CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
     DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
     GetUsersResponse, HealthSettings, HealthcheckReport, LoginType, LoginWithPasswordRequest,
     OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
-    PaginatedMembersResponse, PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig,
-    SshConfigResponse, UpdateCheckResponse, UpdateRolesRequest,
-    UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
+    PaginatedMembersResponse, PatchDeploymentConfigRequest, PersistAuditLogInput,
+    RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse, UpdateCheckResponse,
+    UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
     UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
     UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
     UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
@@ -247,7 +247,10 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/auth/scopes", get(list_api_key_scopes))
                 .route("/buildinfo", get(build_info))
                 .route("/csp/reports", post(post_csp_report))
-                .route("/deployment/config", get(deployment_config))
+                .route(
+                    "/deployment/config",
+                    get(deployment_config).patch(patch_deployment_config),
+                )
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
                 .route("/debug/health", get(debug_health))
@@ -270,6 +273,26 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/organizations", get(list_organizations))
                 .route("/init-script/{os}/{arch}", get(get_init_script))
                 .route("/organizations/{organization}", get(get_organization))
+                .route(
+                    "/organizations/{organization}/provisionerdaemons",
+                    get(list_provisioner_daemons),
+                )
+                .route(
+                    "/organizations/{organization}/provisionerjobs",
+                    get(list_provisioner_jobs),
+                )
+                .route(
+                    "/organizations/{organization}/provisionerjobs/{job}",
+                    get(get_provisioner_job),
+                )
+                .route(
+                    "/organizations/{organization}/provisionerjobs/{job}/cancel",
+                    patch(cancel_provisioner_job),
+                )
+                .route(
+                    "/organizations/{organization}/provisionerjobs/{job}/logs",
+                    get(get_provisioner_job_logs),
+                )
                 .route(
                     "/organizations/{organization}/members/roles",
                     get(list_organization_roles),
@@ -372,7 +395,28 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route("/users/{user}/password", put(put_user_password))
                 .route("/users/{user}/convert-login", post(post_convert_login))
-                .route("/users/{user}", get(get_user).delete(delete_user)),
+                .route("/users/{user}", get(get_user).delete(delete_user))
+                .route("/applications/host", get(applications_host))
+                .route(
+                    "/applications/auth-redirect",
+                    get(applications_auth_redirect),
+                )
+                .route(
+                    "/workspaceagents/me/gitsshkey",
+                    get(deprecated_workspace_agent_git_ssh_key),
+                )
+                .route(
+                    "/workspaceagents/me/gitauth",
+                    get(deprecated_workspace_agent_git_auth),
+                )
+                .route(
+                    "/workspaceagents/{agent}/startup-logs",
+                    get(deprecated_workspace_agent_startup_logs),
+                )
+                .route(
+                    "/templateversions/{templateversion}/schema",
+                    get(deprecated_template_version_schema),
+                ),
         )
         .layer(
             TraceLayer::new_for_http()
@@ -2380,6 +2424,180 @@ async fn delete_user(
         Json(ApiResponse::ok("User has been deleted!")),
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /deployment/config — returns the current config (runtime mutation is
+// not yet supported).
+// ---------------------------------------------------------------------------
+async fn patch_deployment_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(_body): Json<PatchDeploymentConfigRequest>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    // Runtime config mutation is not supported yet — return the current config.
+    Ok((
+        StatusCode::OK,
+        Json(DeploymentConfigResponse {
+            config: state.config.public(),
+            options: ServerConfig::supported_options(),
+        }),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /organizations/{org}/provisionerdaemons — list provisioner daemons.
+// The provisioner domain is a stub; we return an empty array.
+// ---------------------------------------------------------------------------
+async fn list_provisioner_daemons(
+    State(state): State<AppState>,
+    Path(_organization): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let empty: Vec<coder_core::ProvisionerDaemonResponse> = Vec::new();
+    Ok((StatusCode::OK, Json(empty)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /organizations/{org}/provisionerjobs — list provisioner jobs.
+// The provisioner domain is a stub; we return an empty array.
+// ---------------------------------------------------------------------------
+async fn list_provisioner_jobs(
+    State(state): State<AppState>,
+    Path(_organization): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let empty: Vec<coder_core::ProvisionerJobResponse> = Vec::new();
+    Ok((StatusCode::OK, Json(empty)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /organizations/{org}/provisionerjobs/{job} — get a single provisioner
+// job. Stub: always returns 404.
+// ---------------------------------------------------------------------------
+async fn get_provisioner_job(
+    State(state): State<AppState>,
+    Path((_organization, _job)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    Ok((
+        StatusCode::NOT_FOUND,
+        Json(ApiResponse::error(
+            "Resource not found or you do not have access to this resource",
+            "The provisioner domain is not yet implemented in this backend slice.",
+        )),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /organizations/{org}/provisionerjobs/{job}/cancel — cancel a
+// provisioner job. Stub: always returns 404.
+// ---------------------------------------------------------------------------
+async fn cancel_provisioner_job(
+    State(state): State<AppState>,
+    Path((_organization, _job)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    Ok((
+        StatusCode::NOT_FOUND,
+        Json(ApiResponse::error(
+            "Resource not found or you do not have access to this resource",
+            "The provisioner domain is not yet implemented in this backend slice.",
+        )),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /organizations/{org}/provisionerjobs/{job}/logs — stream provisioner
+// job logs. Stub: returns an empty JSON array (no streaming support yet).
+// ---------------------------------------------------------------------------
+async fn get_provisioner_job_logs(
+    State(state): State<AppState>,
+    Path((_organization, _job)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let empty: Vec<coder_core::ProvisionerJobLogResponse> = Vec::new();
+    Ok((StatusCode::OK, Json(empty)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /applications/host — returns the wildcard hostname for workspace
+// applications (currently empty).
+// ---------------------------------------------------------------------------
+async fn applications_host(State(_state): State<AppState>) -> Json<AppHostResponse> {
+    Json(AppHostResponse {
+        host: String::new(),
+    })
+}
+
+// ---------------------------------------------------------------------------
+// GET /applications/auth-redirect — redirects with an encrypted API key.
+// Stub: returns 400 because subdomain apps are not supported yet.
+// ---------------------------------------------------------------------------
+async fn applications_auth_redirect(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    Ok((
+        StatusCode::BAD_REQUEST,
+        Json(ApiResponse::error(
+            "Subdomain-based application routing is not supported in this deployment.",
+            "Subdomain-based workspace application routing requires additional proxy configuration.",
+        )),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Deprecated endpoints — return empty arrays or stub responses matching the
+// original Go implementation in deprecated.go.
+// ---------------------------------------------------------------------------
+
+/// GET /workspaceagents/me/gitsshkey — deprecated, returns empty object.
+async fn deprecated_workspace_agent_git_ssh_key() -> Response {
+    (StatusCode::OK, Json(json!({}))).into_response()
+}
+
+/// GET /workspaceagents/me/gitauth — deprecated, returns empty array.
+async fn deprecated_workspace_agent_git_auth() -> Response {
+    let empty: Vec<Value> = Vec::new();
+    (StatusCode::OK, Json(empty)).into_response()
+}
+
+/// GET /workspaceagents/{agent}/startup-logs — deprecated, returns empty array.
+async fn deprecated_workspace_agent_startup_logs(Path(_agent): Path<String>) -> Response {
+    let empty: Vec<Value> = Vec::new();
+    (StatusCode::OK, Json(empty)).into_response()
+}
+
+/// GET /templateversions/{tv}/schema — deprecated, returns empty array.
+async fn deprecated_template_version_schema(Path(_templateversion): Path<String>) -> Response {
+    let empty: Vec<Value> = Vec::new();
+    (StatusCode::OK, Json(empty)).into_response()
 }
 
 async fn authenticate_request(
