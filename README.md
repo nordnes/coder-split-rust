@@ -4,7 +4,7 @@
 
 Goal: reproduce all backend features, routes, and behavior from the original Go
 monorepo in Rust, achieving full API parity. The original Go source is available
-under [`coder/`](./coder/) as a read-only reference (see setup instructions below).
+under [`coder/`](./coder/) as a read-only git submodule (fork of [`coder/coder`](https://github.com/coder/coder)).
 
 **Status: 72 of 229 OSS API routes ported (31%).** See
 [`docs/parity-matrix.md`](./docs/parity-matrix.md) for the full route matrix.

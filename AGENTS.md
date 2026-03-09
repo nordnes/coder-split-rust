@@ -10,7 +10,7 @@ See [`docs/parity-matrix.md`](docs/parity-matrix.md) for full route-by-route sta
 
 # The Go Reference (`coder/`)
 
-`coder/` contains a checkout of the original Go monorepo. It is the primary reference for understanding what each route does.
+`coder/` is a **git submodule** pointing to a fork of the original Go monorepo ([`nordnes/coder`](https://github.com/nordnes/coder)). It is the primary reference for understanding what each route does. After cloning, run `git submodule update --init coder` if the directory is empty.
 
 ## ⚠️ CRITICAL RULES for `coder/`
 
