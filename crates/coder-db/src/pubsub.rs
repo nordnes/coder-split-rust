@@ -23,6 +23,13 @@ enum ListenerCommand {
     Close,
 }
 
+/// Shared state for [`PostgresPubSub`], protected by a single mutex to
+/// prevent TOCTOU races between the `closed` flag and `channels` map.
+struct PostgresPubSubState {
+    closed: bool,
+    channels: HashMap<String, broadcast::Sender<Vec<u8>>>,
+}
+
 /// PostgreSQL-backed [`PubSub`] implementation.
 ///
 /// Uses a dedicated [`PgListener`] connection (separate from the pool) for
@@ -32,14 +39,12 @@ enum ListenerCommand {
 pub struct PostgresPubSub {
     /// Connection pool used for `SELECT pg_notify(...)` on publish.
     pool: PgPool,
-    /// Per-channel broadcast senders shared with the background listener task.
-    channels: Arc<Mutex<HashMap<String, broadcast::Sender<Vec<u8>>>>>,
+    /// Shared state: closed flag + per-channel broadcast senders.
+    state: Arc<Mutex<PostgresPubSubState>>,
     /// Sender half of the command channel to the background listener task.
     command_tx: mpsc::UnboundedSender<ListenerCommand>,
     /// Handle to the background listener task.
     listener_handle: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    /// Whether the pubsub has been closed.
-    closed: Arc<Mutex<bool>>,
 }
 
 impl PostgresPubSub {
@@ -59,22 +64,22 @@ impl PostgresPubSub {
             .map_err(|err| PubSubError::unavailable(format!("create PgListener: {err}")))?;
 
         let (command_tx, command_rx) = mpsc::unbounded_channel();
-        let channels: Arc<Mutex<HashMap<String, broadcast::Sender<Vec<u8>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
-        let closed = Arc::new(Mutex::new(false));
+        let state = Arc::new(Mutex::new(PostgresPubSubState {
+            closed: false,
+            channels: HashMap::new(),
+        }));
 
-        let listener_channels = channels.clone();
+        let listener_state = state.clone();
 
         let handle = tokio::spawn(async move {
-            Self::listener_loop(listener, listener_channels, command_rx).await;
+            Self::listener_loop(listener, listener_state, command_rx).await;
         });
 
         Ok(Self {
             pool,
-            channels,
+            state,
             command_tx,
             listener_handle: Mutex::new(Some(handle)),
-            closed,
         })
     }
 
@@ -82,7 +87,7 @@ impl PostgresPubSub {
     /// notifications.
     async fn listener_loop(
         mut listener: PgListener,
-        channels: Arc<Mutex<HashMap<String, broadcast::Sender<Vec<u8>>>>>,
+        state: Arc<Mutex<PostgresPubSubState>>,
         mut command_rx: mpsc::UnboundedReceiver<ListenerCommand>,
     ) {
         debug!("pubsub listener loop started");
@@ -102,8 +107,8 @@ impl PostgresPubSub {
                                 // Remove the stale channel entry so future
                                 // subscribe() calls will retry LISTEN instead
                                 // of assuming it already succeeded.
-                                let mut channel_map = channels.lock().await;
-                                channel_map.remove(&channel);
+                                let mut inner = state.lock().await;
+                                inner.channels.remove(&channel);
                             } else {
                                 debug!(channel = %channel, "started listening on channel");
                             }
@@ -129,8 +134,8 @@ impl PostgresPubSub {
                 notification = listener.recv() => {
                     match notification {
                         Ok(notif) => {
-                            let channel_map = channels.lock().await;
-                            if let Some(sender) = channel_map.get(notif.channel()) {
+                            let inner = state.lock().await;
+                            if let Some(sender) = inner.channels.get(notif.channel()) {
                                 // It is fine if there are currently no receivers.
                                 let _ = sender.send(notif.payload().as_bytes().to_vec());
                             }
@@ -149,14 +154,15 @@ impl PostgresPubSub {
     /// Removes the channel from the map and issues an UNLISTEN command if the
     /// broadcast sender has no remaining receivers.
     async fn maybe_cleanup_channel(&self, channel: &str) {
-        let mut channels = self.channels.lock().await;
-        let should_remove = channels
+        let mut inner = self.state.lock().await;
+        let should_remove = inner
+            .channels
             .get(channel)
             .is_some_and(|sender| sender.receiver_count() == 0);
 
         if should_remove {
-            channels.remove(channel);
-            drop(channels);
+            inner.channels.remove(channel);
+            drop(inner);
             // Best-effort: if the background task is gone the send will fail
             // silently, which is fine.
             let _ = self
@@ -169,20 +175,19 @@ impl PostgresPubSub {
 #[async_trait]
 impl PubSub for PostgresPubSub {
     async fn subscribe(&self, channel: &str) -> Result<Subscription, PubSubError> {
-        let closed = self.closed.lock().await;
-        if *closed {
+        let mut inner = self.state.lock().await;
+        if inner.closed {
             return Err(PubSubError::Closed);
         }
-        drop(closed);
 
-        let mut channels = self.channels.lock().await;
-        let need_listen = !channels.contains_key(channel);
-        let sender = channels
+        let need_listen = !inner.channels.contains_key(channel);
+        let sender = inner
+            .channels
             .entry(channel.to_owned())
             .or_insert_with(|| broadcast::channel(BROADCAST_CAPACITY).0)
             .clone();
         let receiver = sender.subscribe();
-        drop(channels);
+        drop(inner);
 
         // Tell the background task to LISTEN on this channel if it is new.
         if need_listen {
@@ -192,8 +197,8 @@ impl PubSub for PostgresPubSub {
             {
                 // Clean up the channel entry we just inserted so future
                 // subscribe calls don't skip the LISTEN command.
-                let mut channels = self.channels.lock().await;
-                channels.remove(channel);
+                let mut inner = self.state.lock().await;
+                inner.channels.remove(channel);
                 return Err(PubSubError::unavailable(err.to_string()));
             }
         }
@@ -202,11 +207,12 @@ impl PubSub for PostgresPubSub {
     }
 
     async fn publish(&self, channel: &str, message: &[u8]) -> Result<(), PubSubError> {
-        let closed = self.closed.lock().await;
-        if *closed {
-            return Err(PubSubError::Closed);
+        {
+            let inner = self.state.lock().await;
+            if inner.closed {
+                return Err(PubSubError::Closed);
+            }
         }
-        drop(closed);
 
         // pg_notify() requires a text payload. Validate that the message is
         // valid UTF-8 rather than silently replacing invalid bytes (which would
@@ -231,12 +237,14 @@ impl PubSub for PostgresPubSub {
     }
 
     async fn close(&self) -> Result<(), PubSubError> {
-        let mut closed = self.closed.lock().await;
-        if *closed {
-            return Ok(());
+        {
+            let mut inner = self.state.lock().await;
+            if inner.closed {
+                return Ok(());
+            }
+            inner.closed = true;
+            inner.channels.clear();
         }
-        *closed = true;
-        drop(closed);
 
         // Signal the background listener task to shut down.
         let _ = self.command_tx.send(ListenerCommand::Close);
@@ -246,10 +254,6 @@ impl PubSub for PostgresPubSub {
         if let Some(h) = handle.take() {
             let _ = h.await;
         }
-
-        // Clear all channels so receivers get a Closed error.
-        let mut channels = self.channels.lock().await;
-        channels.clear();
 
         debug!("pubsub closed");
         Ok(())
