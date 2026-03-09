@@ -1624,8 +1624,9 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         &self,
         workspace_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (workspace_id, name);
+        let _ = (workspace_id, name, viewer_id);
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
@@ -1654,8 +1655,9 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         &self,
         workspace_id: Uuid,
         dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (workspace_id, dormant_at);
+        let _ = (workspace_id, dormant_at, viewer_id);
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
@@ -1972,6 +1974,7 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         workspace_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Updates a workspace autostart schedule.
@@ -1993,6 +1996,7 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         workspace_id: Uuid,
         dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Updates workspace automatic updates.
@@ -3061,8 +3065,9 @@ where
         &self,
         workspace_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        AppStore::update_workspace_name(self, workspace_id, name).await
+        AppStore::update_workspace_name(self, workspace_id, name, viewer_id).await
     }
 
     async fn update_workspace_autostart(
@@ -3085,8 +3090,9 @@ where
         &self,
         workspace_id: Uuid,
         dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        AppStore::update_workspace_dormant_at(self, workspace_id, dormant_at).await
+        AppStore::update_workspace_dormant_at(self, workspace_id, dormant_at, viewer_id).await
     }
 
     async fn update_workspace_automatic_updates(
@@ -3325,8 +3331,11 @@ where
         &self,
         workspace_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        (**self).update_workspace_name(workspace_id, name).await
+        (**self)
+            .update_workspace_name(workspace_id, name, viewer_id)
+            .await
     }
 
     async fn update_workspace_autostart(
@@ -3351,9 +3360,10 @@ where
         &self,
         workspace_id: Uuid,
         dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
         (**self)
-            .update_workspace_dormant_at(workspace_id, dormant_at)
+            .update_workspace_dormant_at(workspace_id, dormant_at, viewer_id)
             .await
     }
 

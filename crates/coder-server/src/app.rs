@@ -2951,7 +2951,7 @@ async fn patch_workspace(
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
         let Some(updated) = state
             .store
-            .update_workspace_name(workspace_id, name)
+            .update_workspace_name(workspace_id, name, Some(context.user.id))
             .await?
         else {
             return Ok(resource_not_found_response());
@@ -3138,7 +3138,7 @@ async fn put_workspace_dormant(
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     let Json(body) = match payload {
@@ -3158,7 +3158,7 @@ async fn put_workspace_dormant(
 
     let Some(updated) = state
         .store
-        .update_workspace_dormant_at(workspace_id, dormant_at)
+        .update_workspace_dormant_at(workspace_id, dormant_at, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());

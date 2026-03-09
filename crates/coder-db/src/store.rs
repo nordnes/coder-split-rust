@@ -2699,18 +2699,28 @@ impl AppStore for PostgresStore {
         &self,
         workspace_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
         sqlx::query_as::<_, StoredWorkspaceRow>(
-            "UPDATE workspaces
-             SET name = $2, updated_at = NOW()
-             WHERE id = $1 AND deleted = false
-             RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
-                       template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates,
-                       false AS favorite, next_start_at",
+            "WITH updated AS (
+                UPDATE workspaces
+                SET name = $2, updated_at = NOW()
+                WHERE id = $1 AND deleted = false
+                RETURNING *
+             )
+             SELECT u.id, u.created_at, u.updated_at, u.deleted, u.owner_id,
+                    u.organization_id, u.template_id, u.name, u.autostart_schedule,
+                    u.ttl, u.last_used_at, u.dormant_at, u.deleting_at,
+                    u.automatic_updates,
+                    COALESCE((wf.user_id IS NOT NULL), false) AS favorite,
+                    u.next_start_at
+             FROM updated u
+             LEFT JOIN workspace_favorites wf
+               ON wf.workspace_id = u.id AND wf.user_id = $3",
         )
         .bind(workspace_id)
         .bind(name)
+        .bind(viewer_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
@@ -2758,18 +2768,28 @@ impl AppStore for PostgresStore {
         &self,
         workspace_id: Uuid,
         dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
         sqlx::query_as::<_, StoredWorkspaceRow>(
-            "UPDATE workspaces
-             SET dormant_at = $2, updated_at = NOW()
-             WHERE id = $1 AND deleted = false
-             RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
-                       template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates,
-                       false AS favorite, next_start_at",
+            "WITH updated AS (
+                UPDATE workspaces
+                SET dormant_at = $2, updated_at = NOW()
+                WHERE id = $1 AND deleted = false
+                RETURNING *
+             )
+             SELECT u.id, u.created_at, u.updated_at, u.deleted, u.owner_id,
+                    u.organization_id, u.template_id, u.name, u.autostart_schedule,
+                    u.ttl, u.last_used_at, u.dormant_at, u.deleting_at,
+                    u.automatic_updates,
+                    COALESCE((wf.user_id IS NOT NULL), false) AS favorite,
+                    u.next_start_at
+             FROM updated u
+             LEFT JOIN workspace_favorites wf
+               ON wf.workspace_id = u.id AND wf.user_id = $3",
         )
         .bind(workspace_id)
         .bind(dormant_at)
+        .bind(viewer_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
@@ -3100,6 +3120,7 @@ impl AppStore for PostgresStore {
         build_id: Uuid,
         params: &[(String, String)],
     ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
         for (name, value) in params {
             sqlx::query(
                 "INSERT INTO workspace_build_parameters (workspace_build_id, name, value)
@@ -3108,10 +3129,11 @@ impl AppStore for PostgresStore {
             .bind(build_id)
             .bind(name)
             .bind(value)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
         }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
