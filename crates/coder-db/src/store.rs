@@ -15,9 +15,14 @@ use coder_core::{
     PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
     ProvisionerJobStatsInput, SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError,
     TokenConfigRecord, UpsertExternalAuthLinkInput, UserAppearanceRecord, UserListFilter,
-    UserPreferenceRecord, UserRecord, UserStatus, WorkspaceAgentStatInput,
-    WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    UserPreferenceRecord, UserRecord, UserStatus, WebpushSubscriptionRecord,
+    WorkspaceAgentStatInput, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
+    WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
+    WorkspaceStatsWorkspaceInput,
+};
+use coder_core::{
+    InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
+    NotificationsSettings,
 };
 use serde_json::{Value, from_str};
 use sqlx::{FromRow, PgPool, Postgres, Transaction, postgres::PgPoolOptions};
@@ -256,6 +261,60 @@ struct StoredProvisionerDaemonRow {
     provisioners: Vec<String>,
     tags_json: String,
     status: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Notification domain row types
+// ---------------------------------------------------------------------------
+
+#[derive(FromRow)]
+struct StoredNotificationTemplateRow {
+    id: Uuid,
+    name: String,
+    title_template: String,
+    body_template: String,
+    actions: Option<String>,
+    #[sqlx(rename = "\"group\"")]
+    group: Option<String>,
+    method: Option<String>,
+    kind: String,
+    enabled_by_default: bool,
+}
+
+#[derive(FromRow)]
+struct StoredNotificationPreferenceRow {
+    id: Uuid,
+    disabled: bool,
+    updated_at: OffsetDateTime,
+}
+
+#[derive(FromRow)]
+struct StoredInboxNotificationRow {
+    id: Uuid,
+    user_id: Uuid,
+    template_id: Uuid,
+    targets: Vec<Uuid>,
+    title: String,
+    content: String,
+    icon: String,
+    actions: String,
+    read_at: Option<OffsetDateTime>,
+    created_at: OffsetDateTime,
+}
+
+#[derive(FromRow)]
+struct StoredWebpushSubscriptionRow {
+    id: Uuid,
+    user_id: Uuid,
+    created_at: OffsetDateTime,
+    endpoint: String,
+    endpoint_p256dh_key: String,
+    endpoint_auth_key: String,
+}
+
+#[derive(FromRow)]
+struct StoredNotificationsSettingsRow {
+    notifier_paused: bool,
 }
 
 impl PostgresStore {
@@ -2508,6 +2567,333 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)
         .and_then(external_auth_link_record_from_row)
     }
+
+    // -----------------------------------------------------------------------
+    // Notifications domain
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_notifications_settings(&self) -> Result<NotificationsSettings, StorageError> {
+        let row = sqlx::query_as::<_, StoredNotificationsSettingsRow>(
+            "SELECT notifier_paused FROM site_configs WHERE key = 'notifications_settings' LIMIT 1",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        match row {
+            Some(r) => Ok(NotificationsSettings {
+                notifier_paused: r.notifier_paused,
+            }),
+            None => Ok(NotificationsSettings::default()),
+        }
+    }
+
+    #[instrument(skip(self, settings), err(level = tracing::Level::WARN))]
+    async fn upsert_notifications_settings(
+        &self,
+        settings: &NotificationsSettings,
+    ) -> Result<(), StorageError> {
+        let json = serde_json::to_string(settings)
+            .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ('notifications_settings', $1)
+             ON CONFLICT (key) DO UPDATE SET value = $1",
+        )
+        .bind(&json)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_notification_templates_by_kind(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<NotificationTemplate>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredNotificationTemplateRow>(
+            r#"SELECT id, name, title_template, body_template, actions, "group", method,
+                      kind::text, enabled_by_default
+               FROM notification_templates
+               WHERE ($1 = '' OR kind::text = $1)
+               ORDER BY name ASC"#,
+        )
+        .bind(kind)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| NotificationTemplate {
+                id: r.id,
+                name: r.name,
+                title_template: r.title_template,
+                body_template: r.body_template,
+                actions: r.actions,
+                group: r.group,
+                method: r.method,
+                kind: r.kind,
+                enabled_by_default: r.enabled_by_default,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_notification_template_method(
+        &self,
+        template_id: Uuid,
+        method: Option<&str>,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        let row = sqlx::query_as::<_, StoredNotificationTemplateRow>(
+            r#"UPDATE notification_templates
+               SET method = $2
+               WHERE id = $1
+               RETURNING id, name, title_template, body_template, actions, "group", method,
+                         kind::text, enabled_by_default"#,
+        )
+        .bind(template_id)
+        .bind(method)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| NotificationTemplate {
+            id: r.id,
+            name: r.name,
+            title_template: r.title_template,
+            body_template: r.body_template,
+            actions: r.actions,
+            group: r.group,
+            method: r.method,
+            kind: r.kind,
+            enabled_by_default: r.enabled_by_default,
+        }))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_user_notification_preferences(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<NotificationPreference>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredNotificationPreferenceRow>(
+            "SELECT notification_template_id AS id, disabled, updated_at
+             FROM notification_preferences
+             WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| NotificationPreference {
+                id: r.id,
+                disabled: r.disabled,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, template_ids, disableds), err(level = tracing::Level::WARN))]
+    async fn update_user_notification_preferences(
+        &self,
+        user_id: Uuid,
+        template_ids: &[Uuid],
+        disableds: &[bool],
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO notification_preferences (user_id, notification_template_id, disabled)
+             SELECT $1, UNNEST($2::uuid[]), UNNEST($3::bool[])
+             ON CONFLICT (user_id, notification_template_id) DO UPDATE SET
+                disabled = EXCLUDED.disabled,
+                updated_at = NOW()",
+        )
+        .bind(user_id)
+        .bind(template_ids)
+        .bind(disableds)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_filtered_inbox_notifications(
+        &self,
+        user_id: Uuid,
+        templates: Option<&[Uuid]>,
+        targets: Option<&[Uuid]>,
+        read_status: &str,
+        created_before: Option<OffsetDateTime>,
+    ) -> Result<Vec<InboxNotification>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredInboxNotificationRow>(
+            r#"SELECT id, user_id, template_id, targets, title, content, icon, actions,
+                      read_at, created_at
+               FROM inbox_notifications
+               WHERE user_id = $1
+                 AND ($2::uuid[] IS NULL OR template_id = ANY($2))
+                 AND ($3::uuid[] IS NULL OR targets && $3::uuid[])
+                 AND (
+                    $4 = 'all'
+                    OR ($4 = 'unread' AND read_at IS NULL)
+                    OR ($4 = 'read' AND read_at IS NOT NULL)
+                 )
+                 AND ($5::timestamptz IS NULL OR created_at < $5)
+               ORDER BY created_at DESC
+               LIMIT 25"#,
+        )
+        .bind(user_id)
+        .bind(templates)
+        .bind(targets)
+        .bind(read_status)
+        .bind(created_before)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(inbox_notification_from_row).collect()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn count_unread_inbox_notifications(&self, user_id: Uuid) -> Result<i64, StorageError> {
+        let row: (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM inbox_notifications WHERE user_id = $1 AND read_at IS NULL",
+        )
+        .bind(user_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_inbox_notification_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<InboxNotification>, StorageError> {
+        let row = sqlx::query_as::<_, StoredInboxNotificationRow>(
+            "SELECT id, user_id, template_id, targets, title, content, icon, actions,
+                    read_at, created_at
+             FROM inbox_notifications WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        row.map(inbox_notification_from_row).transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_inbox_notification_read_status(
+        &self,
+        id: Uuid,
+        read_at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE inbox_notifications SET read_at = $2 WHERE id = $1")
+            .bind(id)
+            .bind(read_at)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn mark_all_inbox_notifications_as_read(
+        &self,
+        user_id: Uuid,
+        read_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE inbox_notifications SET read_at = $2 WHERE user_id = $1 AND read_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(read_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_webpush_subscriptions_by_user_id(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<WebpushSubscriptionRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWebpushSubscriptionRow>(
+            "SELECT id, user_id, created_at, endpoint, endpoint_p256dh_key, endpoint_auth_key
+             FROM webpush_subscriptions WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| WebpushSubscriptionRecord {
+                id: r.id,
+                user_id: r.user_id,
+                created_at: r.created_at,
+                endpoint: r.endpoint,
+                endpoint_p256dh_key: r.endpoint_p256dh_key,
+                endpoint_auth_key: r.endpoint_auth_key,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, endpoint, p256dh_key, auth_key), err(level = tracing::Level::WARN))]
+    async fn insert_webpush_subscription(
+        &self,
+        user_id: Uuid,
+        endpoint: &str,
+        p256dh_key: &str,
+        auth_key: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO webpush_subscriptions (id, user_id, created_at, endpoint, endpoint_p256dh_key, endpoint_auth_key)
+             VALUES (gen_random_uuid(), $1, NOW(), $2, $3, $4)
+             ON CONFLICT (user_id, endpoint) DO UPDATE
+             SET endpoint_p256dh_key = $3, endpoint_auth_key = $4",
+        )
+        .bind(user_id)
+        .bind(endpoint)
+        .bind(p256dh_key)
+        .bind(auth_key)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self, endpoint), err(level = tracing::Level::WARN))]
+    async fn delete_webpush_subscription_by_user_and_endpoint(
+        &self,
+        user_id: Uuid,
+        endpoint: &str,
+    ) -> Result<bool, StorageError> {
+        let result =
+            sqlx::query("DELETE FROM webpush_subscriptions WHERE user_id = $1 AND endpoint = $2")
+                .bind(user_id)
+                .bind(endpoint)
+                .execute(&self.pool)
+                .await
+                .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 async fn ensure_default_organization(
@@ -2879,6 +3265,26 @@ fn title_case(value: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+fn inbox_notification_from_row(
+    row: StoredInboxNotificationRow,
+) -> Result<InboxNotification, StorageError> {
+    let actions: Vec<InboxNotificationAction> =
+        from_str(&row.actions).map_err(|error| StorageError::invalid_data(error.to_string()))?;
+
+    Ok(InboxNotification {
+        id: row.id,
+        user_id: row.user_id,
+        template_id: row.template_id,
+        targets: row.targets,
+        title: row.title,
+        content: row.content,
+        icon: row.icon,
+        actions,
+        read_at: row.read_at,
+        created_at: row.created_at,
+    })
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {

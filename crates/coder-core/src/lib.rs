@@ -34,6 +34,13 @@ pub use api::{
     WebsocketHealthReport, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceProxyHealthReport,
 };
+pub use api::{
+    DeleteWebpushSubscription, GetInboxNotificationResponse, InboxNotification,
+    InboxNotificationAction, ListInboxNotificationsResponse, NotificationMethodsResponse,
+    NotificationPreference, NotificationTemplate, NotificationsSettings,
+    UpdateInboxNotificationReadStatusRequest, UpdateInboxNotificationReadStatusResponse,
+    UpdateNotificationTemplateMethod, UpdateUserNotificationPreferences, WebpushSubscription,
+};
 pub use build_info::BuildMetadata;
 pub use config::{
     DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, PublicDatabaseConfig,
@@ -56,6 +63,7 @@ pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
     ExternalAuthLinkRecord, GitSshKeyRecord, IdentityStore, OperationalStore, PersistAuditLogInput,
     ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    StorageError, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    StorageError, UpsertExternalAuthLinkInput, WebpushSubscriptionRecord, WorkspaceAgentStatInput,
+    WorkspaceBuildStatsInput, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
+    WorkspaceStatsWorkspaceInput,
 };

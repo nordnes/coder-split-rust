@@ -2,4 +2,4 @@
 #![forbid(unsafe_code)]
 
 /// Current milestone for the notifications crate.
-pub const STATUS: &str = "planned";
+pub const STATUS: &str = "active";

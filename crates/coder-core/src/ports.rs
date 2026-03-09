@@ -8,7 +8,10 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::api::{AuditLogResponse, ExternalAuthAppInstallation, ExternalAuthUser, HealthSettings};
+use crate::api::{
+    AuditLogResponse, ExternalAuthAppInstallation, ExternalAuthUser, HealthSettings,
+    InboxNotification, NotificationPreference, NotificationTemplate, NotificationsSettings,
+};
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
     CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError, CreateUserInput,
@@ -1224,6 +1227,181 @@ pub trait AppStore: DeploymentStore + Send + Sync {
             "external auth links are not implemented",
         ))
     }
+
+    // -----------------------------------------------------------------------
+    // Notifications domain
+    // -----------------------------------------------------------------------
+
+    /// Returns the current global notification settings JSON.
+    async fn get_notifications_settings(&self) -> Result<NotificationsSettings, StorageError> {
+        Err(StorageError::unavailable(
+            "notifications settings are not implemented",
+        ))
+    }
+
+    /// Replaces the global notification settings.
+    async fn upsert_notifications_settings(
+        &self,
+        settings: &NotificationsSettings,
+    ) -> Result<(), StorageError> {
+        let _ = settings;
+        Err(StorageError::unavailable(
+            "notifications settings are not implemented",
+        ))
+    }
+
+    /// Returns notification templates filtered by kind.
+    async fn get_notification_templates_by_kind(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<NotificationTemplate>, StorageError> {
+        let _ = kind;
+        Err(StorageError::unavailable(
+            "notification templates are not implemented",
+        ))
+    }
+
+    /// Updates the delivery method for a notification template.
+    async fn update_notification_template_method(
+        &self,
+        template_id: Uuid,
+        method: Option<&str>,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        let _ = (template_id, method);
+        Err(StorageError::unavailable(
+            "notification templates are not implemented",
+        ))
+    }
+
+    /// Returns notification preferences for a user.
+    async fn get_user_notification_preferences(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<NotificationPreference>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "notification preferences are not implemented",
+        ))
+    }
+
+    /// Updates notification preferences for a user.
+    async fn update_user_notification_preferences(
+        &self,
+        user_id: Uuid,
+        template_ids: &[Uuid],
+        disableds: &[bool],
+    ) -> Result<(), StorageError> {
+        let _ = (user_id, template_ids, disableds);
+        Err(StorageError::unavailable(
+            "notification preferences are not implemented",
+        ))
+    }
+
+    /// Lists inbox notifications for a user with optional filtering.
+    async fn get_filtered_inbox_notifications(
+        &self,
+        user_id: Uuid,
+        templates: Option<&[Uuid]>,
+        targets: Option<&[Uuid]>,
+        read_status: &str,
+        created_before: Option<OffsetDateTime>,
+    ) -> Result<Vec<InboxNotification>, StorageError> {
+        let _ = (user_id, templates, targets, read_status, created_before);
+        Err(StorageError::unavailable(
+            "inbox notifications are not implemented",
+        ))
+    }
+
+    /// Counts unread inbox notifications for a user.
+    async fn count_unread_inbox_notifications(&self, user_id: Uuid) -> Result<i64, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "inbox notifications are not implemented",
+        ))
+    }
+
+    /// Finds an inbox notification by ID.
+    async fn get_inbox_notification_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<InboxNotification>, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable(
+            "inbox notifications are not implemented",
+        ))
+    }
+
+    /// Updates the read status of an inbox notification.
+    async fn update_inbox_notification_read_status(
+        &self,
+        id: Uuid,
+        read_at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        let _ = (id, read_at);
+        Err(StorageError::unavailable(
+            "inbox notifications are not implemented",
+        ))
+    }
+
+    /// Marks all unread inbox notifications as read for a user.
+    async fn mark_all_inbox_notifications_as_read(
+        &self,
+        user_id: Uuid,
+        read_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let _ = (user_id, read_at);
+        Err(StorageError::unavailable(
+            "inbox notifications are not implemented",
+        ))
+    }
+
+    /// Lists webpush subscriptions for a user.
+    async fn get_webpush_subscriptions_by_user_id(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<WebpushSubscriptionRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "webpush subscriptions are not implemented",
+        ))
+    }
+
+    /// Inserts a webpush subscription.
+    async fn insert_webpush_subscription(
+        &self,
+        user_id: Uuid,
+        endpoint: &str,
+        p256dh_key: &str,
+        auth_key: &str,
+    ) -> Result<(), StorageError> {
+        let _ = (user_id, endpoint, p256dh_key, auth_key);
+        Err(StorageError::unavailable(
+            "webpush subscriptions are not implemented",
+        ))
+    }
+
+    /// Deletes a webpush subscription by user ID and endpoint.
+    async fn delete_webpush_subscription_by_user_and_endpoint(
+        &self,
+        user_id: Uuid,
+        endpoint: &str,
+    ) -> Result<bool, StorageError> {
+        let _ = (user_id, endpoint);
+        Err(StorageError::unavailable(
+            "webpush subscriptions are not implemented",
+        ))
+    }
+}
+
+/// Stored webpush subscription record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebpushSubscriptionRecord {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub created_at: OffsetDateTime,
+    pub endpoint: String,
+    pub endpoint_p256dh_key: String,
+    pub endpoint_auth_key: String,
 }
 
 #[async_trait]
