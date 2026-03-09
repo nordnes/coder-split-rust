@@ -2957,19 +2957,19 @@ impl ProvisionerStore for PostgresStore {
 
         let row = sqlx::query_as::<_, StoredFullProvisionerDaemonRow>(
             "INSERT INTO provisioner_daemons (
-                 name, provisioners, tags, last_seen_at, version,
+                 name, provisioners, tags_json, last_seen_at, version,
                  organization_id, api_version, key_id
-             ) VALUES ($1, $2, $3::JSONB, $4, $5, $6, $7, $8)
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
              ON CONFLICT (organization_id, name) DO UPDATE SET
                  provisioners = EXCLUDED.provisioners,
-                 tags = EXCLUDED.tags,
+                 tags_json = EXCLUDED.tags_json,
                  last_seen_at = EXCLUDED.last_seen_at,
                  version = EXCLUDED.version,
                  api_version = EXCLUDED.api_version,
                  key_id = EXCLUDED.key_id
              RETURNING id, organization_id, created_at, last_seen_at,
                        name, version, api_version, provisioners,
-                       tags::TEXT AS tags_json, key_id",
+                       tags_json, key_id",
         )
         .bind(&input.name)
         .bind(&input.provisioners)
@@ -3010,7 +3010,7 @@ impl ProvisionerStore for PostgresStore {
         let rows = sqlx::query_as::<_, StoredFullProvisionerDaemonRow>(
             "SELECT id, organization_id, created_at, last_seen_at,
                     name, version, api_version, provisioners,
-                    tags::TEXT AS tags_json, key_id
+                    tags_json, key_id
              FROM provisioner_daemons
              WHERE organization_id = $1
              ORDER BY created_at ASC",

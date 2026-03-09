@@ -152,3 +152,10 @@ CREATE INDEX IF NOT EXISTS idx_provisioner_keys_organization_id
 -- ============================================================
 ALTER TABLE provisioner_daemons
     ADD COLUMN IF NOT EXISTS key_id UUID REFERENCES provisioner_keys(id) ON DELETE SET NULL;
+
+-- Add default for id so INSERT without explicit id works (upsert_provisioner_daemon).
+ALTER TABLE provisioner_daemons ALTER COLUMN id SET DEFAULT gen_random_uuid();
+
+-- Required for ON CONFLICT (organization_id, name) in upsert_provisioner_daemon.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_provisioner_daemons_org_name
+    ON provisioner_daemons (organization_id, name);
