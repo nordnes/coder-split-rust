@@ -2911,8 +2911,9 @@ fn convert_workspace_agent_row(
 
 fn derive_agent_status(row: &coder_core::WorkspaceAgentRow) -> coder_core::WorkspaceAgentStatus {
     if row.first_connected_at.is_none() {
-        if let Some(timeout) = row.connection_timeout_seconds.checked_mul(1_000_000_000) {
-            let deadline = row.created_at + time::Duration::nanoseconds(i64::from(timeout));
+        if let Some(timeout) = i64::from(row.connection_timeout_seconds).checked_mul(1_000_000_000)
+        {
+            let deadline = row.created_at + time::Duration::nanoseconds(timeout);
             if OffsetDateTime::now_utc() > deadline {
                 return coder_core::WorkspaceAgentStatus::Timeout;
             }

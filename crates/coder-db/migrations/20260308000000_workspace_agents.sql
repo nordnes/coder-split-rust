@@ -94,6 +94,15 @@ CREATE TYPE port_share_protocol AS ENUM (
     'https'
 );
 
+-- Enum: log level
+CREATE TYPE log_level AS ENUM (
+    'trace',
+    'debug',
+    'info',
+    'warn',
+    'error'
+);
+
 -- Table: workspace_agents
 CREATE TABLE workspace_agents (
     id uuid NOT NULL PRIMARY KEY,
