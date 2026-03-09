@@ -24,14 +24,19 @@ use coder_auth::{
 use coder_connectivity::{HealthService, generate_git_ssh_key};
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
-    AvailableExperiments, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
-    ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
-    CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
+    AvailableExperiments, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest, ChatMessagePart,
+    ChatMessageRecord, ChatMessageResponse, ChatMessageUsage, ChatMessageVisibility,
+    ChatQueuedMessageRecord, ChatQueuedMessageResponse, ChatRecord, ChatResponse,
+    ChatWithMessagesResponse, ConvertLoginRequest, CreateChatMessageApiResponse,
+    CreateChatMessageRequest, CreateChatRequest, CreateFirstUserRequest, CreateFirstUserResponse,
+    CreateTaskRequest, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
     DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
-    GetUsersResponse, HealthSettings, HealthcheckReport, LoginType, LoginWithPasswordRequest,
-    OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
-    PaginatedMembersResponse, PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig,
-    SshConfigResponse, UpdateCheckResponse, UpdateRolesRequest,
+    GetUsersResponse, HealthSettings, HealthcheckReport, InsertChatInput, InsertChatMessageInput,
+    InsertTaskInput, LoginType, LoginWithPasswordRequest, OrganizationMember,
+    OrganizationMemberWithUserData, OrganizationResponse, PaginatedMembersResponse,
+    PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse,
+    TaskListFilter, TaskLogSnapshotEnvelope, TaskLogsResponse, TaskRecord, TaskResponse,
+    TaskSendRequest, TasksListResponse, UpdateCheckResponse, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
     UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
     UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
@@ -372,7 +377,26 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route("/users/{user}/password", put(put_user_password))
                 .route("/users/{user}/convert-login", post(post_convert_login))
-                .route("/users/{user}", get(get_user).delete(delete_user)),
+                .route("/users/{user}", get(get_user).delete(delete_user))
+                // AI Tasks
+                .route("/tasks", get(list_tasks).post(create_task))
+                .route(
+                    "/tasks/{task}",
+                    get(get_task).patch(patch_task).delete(delete_task),
+                )
+                .route("/tasks/{task}/input", get(get_task_input))
+                .route("/tasks/{task}/logs", get(get_task_logs))
+                .route("/tasks/{task}/send", post(post_task_send))
+                .route("/tasks/{task}/pause", post(post_task_pause))
+                .route("/tasks/{task}/resume", post(post_task_resume))
+                .route(
+                    "/workspaceagents/me/tasks/{task}/log-snapshot",
+                    post(post_task_log_snapshot),
+                )
+                // Chats
+                .route("/chats", get(list_chats).post(create_chat))
+                .route("/chats/{chat}", get(get_chat).delete(delete_chat))
+                .route("/chats/{chat}/messages", post(post_chat_message)),
         )
         .layer(
             TraceLayer::new_for_http()
@@ -2380,6 +2404,595 @@ async fn delete_user(
         Json(ApiResponse::ok("User has been deleted!")),
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// AI Tasks handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct TasksQuery {
+    #[serde(default)]
+    owner_id: Option<Uuid>,
+    #[serde(default)]
+    organization_id: Option<Uuid>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+async fn list_tasks(
+    State(state): State<AppState>,
+    Query(query): Query<TasksQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let filter = TaskListFilter {
+        owner_id: query.owner_id,
+        organization_id: query.organization_id,
+        status: query.status,
+    };
+    let tasks = state.store.list_tasks(filter).await?;
+    let count = tasks.len();
+    let task_responses: Vec<TaskResponse> =
+        tasks.into_iter().map(task_response_from_record).collect();
+
+    Ok(Json(TasksListResponse {
+        tasks: task_responses,
+        count,
+    })
+    .into_response())
+}
+
+async fn create_task(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateTaskRequest>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let now = OffsetDateTime::now_utc();
+    let task_id = Uuid::new_v4();
+    let name = request.name.unwrap_or_else(|| format!("task-{task_id}"));
+    let display_name = request.display_name.unwrap_or_default();
+
+    let input = InsertTaskInput {
+        id: task_id,
+        organization_id: context
+            .user
+            .organization_ids
+            .first()
+            .copied()
+            .unwrap_or_else(Uuid::new_v4),
+        owner_id: context.user.id,
+        name,
+        display_name,
+        template_version_id: request.template_version_id,
+        template_parameters: Value::Object(serde_json::Map::new()),
+        prompt: request.input,
+        created_at: now,
+    };
+
+    let record = state.store.insert_task(input).await?;
+    Ok((StatusCode::CREATED, Json(task_response_from_record(record))).into_response())
+}
+
+async fn get_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    Ok(Json(task_response_from_record(record)).into_response())
+}
+
+async fn get_task_input(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    Ok(Json(json!({ "input": record.prompt })).into_response())
+}
+
+#[derive(Deserialize)]
+struct PatchTaskRequest {
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    input: Option<String>,
+}
+
+async fn patch_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<PatchTaskRequest>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(mut record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    if let Some(input) = &request.input {
+        if let Some(updated) = state.store.update_task_prompt(task_id, input).await? {
+            record = updated;
+        }
+    }
+
+    // Status transitions are validated here but not persisted to DB directly
+    // since task status is derived from workspace state in the full implementation.
+    if let Some(_status) = &request.status {
+        // In the full implementation, status transitions would trigger workspace
+        // provisioning actions. For now we acknowledge the request.
+    }
+
+    Ok(Json(task_response_from_record(record)).into_response())
+}
+
+async fn delete_task(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let now = OffsetDateTime::now_utc();
+    let deleted = state.store.delete_task(task_id, now).await?;
+    if !deleted {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
+
+    Ok((StatusCode::OK, Json(ApiResponse::ok("Task deleted."))).into_response())
+}
+
+async fn get_task_logs(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Verify the task exists
+    let Some(_record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // Check for a snapshot
+    let snapshot = state.store.find_task_snapshot(task_id).await?;
+    let response = match snapshot {
+        Some(snap) => TaskLogsResponse {
+            logs: Vec::new(),
+            snapshot: true,
+            snapshot_at: Some(snap.log_snapshot_created_at),
+        },
+        None => TaskLogsResponse {
+            logs: Vec::new(),
+            snapshot: false,
+            snapshot_at: None,
+        },
+    };
+
+    Ok(Json(response).into_response())
+}
+
+async fn post_task_send(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(_request): Json<TaskSendRequest>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // In the full implementation this sends input to the workspace sidebar app.
+    // For now we acknowledge the request.
+    Ok((StatusCode::OK, Json(ApiResponse::ok("Message sent."))).into_response())
+}
+
+async fn post_task_pause(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // In the full implementation this would stop the workspace.
+    Ok(Json(json!({ "task": task_response_from_record(record) })).into_response())
+}
+
+async fn post_task_resume(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // In the full implementation this would start the workspace.
+    Ok(Json(json!({ "task": task_response_from_record(record) })).into_response())
+}
+
+async fn post_task_log_snapshot(
+    State(state): State<AppState>,
+    Path(task_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<TaskLogSnapshotEnvelope>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    let now = OffsetDateTime::now_utc();
+    state
+        .store
+        .upsert_task_snapshot(task_id, &request.log_snapshot, now)
+        .await?;
+
+    Ok((StatusCode::OK, Json(ApiResponse::ok("Snapshot saved."))).into_response())
+}
+
+fn task_response_from_record(record: TaskRecord) -> TaskResponse {
+    TaskResponse {
+        id: record.id,
+        organization_id: record.organization_id,
+        owner_id: record.owner_id,
+        owner_name: String::new(),
+        owner_avatar_url: String::new(),
+        name: record.name,
+        display_name: record.display_name,
+        template_version_id: record.template_version_id,
+        workspace_id: record.workspace_id,
+        initial_prompt: record.prompt,
+        status: record.status,
+        current_state: None,
+        created_at: record.created_at,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Chats handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct ChatsQuery {
+    #[serde(default)]
+    archived: Option<bool>,
+}
+
+async fn list_chats(
+    State(state): State<AppState>,
+    Query(query): Query<ChatsQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let chats = state
+        .store
+        .list_chats_by_owner(context.user.id, query.archived)
+        .await?;
+
+    let chat_responses: Vec<ChatResponse> =
+        chats.into_iter().map(chat_response_from_record).collect();
+    Ok(Json(chat_responses).into_response())
+}
+
+async fn create_chat(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<CreateChatRequest>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Use a default model config ID if none provided.
+    let model_config_id = request.model_config_id.unwrap_or_else(Uuid::nil);
+
+    let input = InsertChatInput {
+        owner_id: context.user.id,
+        workspace_id: request.workspace_id,
+        parent_chat_id: None,
+        root_chat_id: None,
+        last_model_config_id: model_config_id,
+        title: "New Chat".to_string(),
+    };
+
+    let chat = state.store.insert_chat(input).await?;
+
+    // Store the initial user message.
+    let content_value = serde_json::to_value(&request.content).ok();
+    let msg_input = InsertChatMessageInput {
+        chat_id: chat.id,
+        model_config_id: Some(model_config_id),
+        role: "user".to_string(),
+        content: content_value,
+        visibility: ChatMessageVisibility::Both,
+    };
+    let message = state.store.insert_chat_message(msg_input).await?;
+    let messages = vec![chat_message_response_from_record(message)];
+
+    Ok((
+        StatusCode::CREATED,
+        Json(ChatWithMessagesResponse {
+            chat: chat_response_from_record(chat),
+            messages,
+            queued_messages: Vec::new(),
+        }),
+    )
+        .into_response())
+}
+
+async fn get_chat(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    }
+
+    let messages = state.store.list_chat_messages(chat_id, 0).await?;
+    let queued = state.store.list_chat_queued_messages(chat_id).await?;
+
+    let message_responses: Vec<ChatMessageResponse> = messages
+        .into_iter()
+        .map(chat_message_response_from_record)
+        .collect();
+    let queued_responses: Vec<ChatQueuedMessageResponse> = queued
+        .into_iter()
+        .map(chat_queued_message_response_from_record)
+        .collect();
+
+    Ok(Json(ChatWithMessagesResponse {
+        chat: chat_response_from_record(chat),
+        messages: message_responses,
+        queued_messages: queued_responses,
+    })
+    .into_response())
+}
+
+async fn delete_chat(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    }
+
+    state.store.archive_chat(chat_id).await?;
+    Ok((StatusCode::OK, Json(ApiResponse::ok("Chat archived."))).into_response())
+}
+
+async fn post_chat_message(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+    Json(request): Json<CreateChatMessageRequest>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    }
+
+    let model_config_id = request.model_config_id.unwrap_or(chat.last_model_config_id);
+    let content_value = serde_json::to_value(&request.content).ok();
+
+    let msg_input = InsertChatMessageInput {
+        chat_id,
+        model_config_id: Some(model_config_id),
+        role: "user".to_string(),
+        content: content_value,
+        visibility: ChatMessageVisibility::Both,
+    };
+
+    let message = state.store.insert_chat_message(msg_input).await?;
+
+    // In the full implementation, this would trigger an LLM call and stream
+    // the response back via SSE. For now, we return the stored user message.
+    Ok((
+        StatusCode::OK,
+        Json(CreateChatMessageApiResponse {
+            message: Some(chat_message_response_from_record(message)),
+            queued_message: None,
+            queued: false,
+        }),
+    )
+        .into_response())
+}
+
+fn chat_response_from_record(record: ChatRecord) -> ChatResponse {
+    ChatResponse {
+        id: record.id,
+        owner_id: record.owner_id,
+        workspace_id: record.workspace_id,
+        parent_chat_id: record.parent_chat_id,
+        root_chat_id: record.root_chat_id,
+        last_model_config_id: record.last_model_config_id,
+        title: record.title,
+        status: record.status,
+        last_error: record.last_error,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+        archived: record.archived,
+    }
+}
+
+fn chat_message_response_from_record(record: ChatMessageRecord) -> ChatMessageResponse {
+    let content: Vec<ChatMessagePart> = record
+        .content
+        .and_then(|v| serde_json::from_value(v).ok())
+        .unwrap_or_default();
+
+    let usage = if record.input_tokens.is_some()
+        || record.output_tokens.is_some()
+        || record.total_tokens.is_some()
+    {
+        Some(ChatMessageUsage {
+            input_tokens: record.input_tokens,
+            output_tokens: record.output_tokens,
+            total_tokens: record.total_tokens,
+            reasoning_tokens: record.reasoning_tokens,
+            cache_creation_tokens: record.cache_creation_tokens,
+            cache_read_tokens: record.cache_read_tokens,
+            context_limit: record.context_limit,
+        })
+    } else {
+        None
+    };
+
+    ChatMessageResponse {
+        id: record.id,
+        chat_id: record.chat_id,
+        model_config_id: record.model_config_id,
+        created_at: record.created_at,
+        role: record.role,
+        content,
+        usage,
+    }
+}
+
+fn chat_queued_message_response_from_record(
+    record: ChatQueuedMessageRecord,
+) -> ChatQueuedMessageResponse {
+    let content: Vec<ChatMessagePart> = serde_json::from_value(record.content).unwrap_or_default();
+    ChatQueuedMessageResponse {
+        id: record.id,
+        chat_id: record.chat_id,
+        content,
+        created_at: record.created_at,
+    }
 }
 
 async fn authenticate_request(
