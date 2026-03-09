@@ -2783,7 +2783,10 @@ impl AppStore for PostgresStore {
     async fn archive_chat(&self, id: Uuid) -> Result<(), StorageError> {
         sqlx::query(
             "UPDATE chats SET archived = true, updated_at = now()
-             WHERE id = $1 OR root_chat_id = $1",
+             WHERE id = $1
+                OR root_chat_id = $1
+                OR id = (SELECT COALESCE(root_chat_id, id) FROM chats WHERE id = $1)
+                OR root_chat_id = (SELECT COALESCE(root_chat_id, id) FROM chats WHERE id = $1)",
         )
         .bind(id)
         .execute(&self.pool)

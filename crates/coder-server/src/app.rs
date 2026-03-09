@@ -2880,7 +2880,7 @@ async fn create_chat(
         visibility: ChatMessageVisibility::Both,
     };
     let message = state.store.insert_chat_message(msg_input).await?;
-    let messages = vec![chat_message_response_from_record(message)];
+    let messages = vec![chat_message_response_from_record(message)?];
 
     Ok((
         StatusCode::CREATED,
@@ -2924,11 +2924,11 @@ async fn get_chat(
     let message_responses: Vec<ChatMessageResponse> = messages
         .into_iter()
         .map(chat_message_response_from_record)
-        .collect();
+        .collect::<Result<_, _>>()?;
     let queued_responses: Vec<ChatQueuedMessageResponse> = queued
         .into_iter()
         .map(chat_queued_message_response_from_record)
-        .collect();
+        .collect::<Result<_, _>>()?;
 
     Ok(Json(ChatWithMessagesResponse {
         chat: chat_response_from_record(chat),
@@ -3013,7 +3013,7 @@ async fn post_chat_message(
     Ok((
         StatusCode::OK,
         Json(CreateChatMessageApiResponse {
-            message: Some(chat_message_response_from_record(message)),
+            message: Some(chat_message_response_from_record(message)?),
             queued_message: None,
             queued: false,
         }),
@@ -3038,11 +3038,14 @@ fn chat_response_from_record(record: ChatRecord) -> ChatResponse {
     }
 }
 
-fn chat_message_response_from_record(record: ChatMessageRecord) -> ChatMessageResponse {
-    let content: Vec<ChatMessagePart> = record
-        .content
-        .and_then(|v| serde_json::from_value(v).ok())
-        .unwrap_or_default();
+fn chat_message_response_from_record(
+    record: ChatMessageRecord,
+) -> Result<ChatMessageResponse, AppError> {
+    let content: Vec<ChatMessagePart> = match record.content {
+        Some(v) => serde_json::from_value(v)
+            .map_err(|e| StorageError::invalid_data(format!("chat message content: {e}")))?,
+        None => Vec::new(),
+    };
 
     let usage = if record.input_tokens.is_some()
         || record.output_tokens.is_some()
@@ -3061,7 +3064,7 @@ fn chat_message_response_from_record(record: ChatMessageRecord) -> ChatMessageRe
         None
     };
 
-    ChatMessageResponse {
+    Ok(ChatMessageResponse {
         id: record.id,
         chat_id: record.chat_id,
         model_config_id: record.model_config_id,
@@ -3069,19 +3072,20 @@ fn chat_message_response_from_record(record: ChatMessageRecord) -> ChatMessageRe
         role: record.role,
         content,
         usage,
-    }
+    })
 }
 
 fn chat_queued_message_response_from_record(
     record: ChatQueuedMessageRecord,
-) -> ChatQueuedMessageResponse {
-    let content: Vec<ChatMessagePart> = serde_json::from_value(record.content).unwrap_or_default();
-    ChatQueuedMessageResponse {
+) -> Result<ChatQueuedMessageResponse, AppError> {
+    let content: Vec<ChatMessagePart> = serde_json::from_value(record.content)
+        .map_err(|e| StorageError::invalid_data(format!("queued message content: {e}")))?;
+    Ok(ChatQueuedMessageResponse {
         id: record.id,
         chat_id: record.chat_id,
         content,
         created_at: record.created_at,
-    }
+    })
 }
 
 async fn authenticate_request(
@@ -5343,11 +5347,18 @@ mod tests {
                 .chats
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            // Cascade: archive the target chat and all chats sharing root_chat_id,
-            // matching the PostgresStore behavior (WHERE id = $1 OR root_chat_id = $1).
+            // Cascade: archive the entire chat tree. Resolve the root first,
+            // matching PostgresStore: WHERE id=$1 OR root_chat_id=$1
+            //   OR id=COALESCE(root_chat_id,$1) OR root_chat_id=COALESCE(root_chat_id,$1)
+            let resolved_root = chats.get(&id).and_then(|c| c.root_chat_id).unwrap_or(id);
             let ids_to_archive: Vec<Uuid> = chats
                 .values()
-                .filter(|c| c.id == id || c.root_chat_id == Some(id))
+                .filter(|c| {
+                    c.id == id
+                        || c.root_chat_id == Some(id)
+                        || c.id == resolved_root
+                        || c.root_chat_id == Some(resolved_root)
+                })
                 .map(|c| c.id)
                 .collect();
             for cid in ids_to_archive {
