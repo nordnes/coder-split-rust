@@ -5245,9 +5245,14 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Match PostgresStore: WHERE id = $1 AND deleted_at IS NULL
             if let Some(task) = tasks.get_mut(&id) {
-                task.prompt = prompt.to_string();
-                Ok(Some(task.clone()))
+                if task.deleted_at.is_none() {
+                    task.prompt = prompt.to_string();
+                    Ok(Some(task.clone()))
+                } else {
+                    Ok(None)
+                }
             } else {
                 Ok(None)
             }
