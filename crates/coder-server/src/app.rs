@@ -18,8 +18,8 @@ use axum::{
 use coder_audit::{AuditAction, AuditEvent, AuditSink};
 use coder_auth::{
     AuthService, AuthServiceError, AuthenticatedRequest, ExternalAuthService,
-    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, cookie_from_headers,
-    supported_auth_methods,
+    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
+    OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
 use coder_core::{
@@ -29,13 +29,15 @@ use coder_core::{
     CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
     DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
     GetUsersResponse, HealthSettings, HealthcheckReport, LoginType, LoginWithPasswordRequest,
-    OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
-    PaginatedMembersResponse, PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig,
-    SshConfigResponse, UpdateCheckResponse, UpdateRolesRequest,
-    UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
-    UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
-    UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
+    OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints, OAuth2ProviderAppResponse,
+    OAuth2ProviderAppSecretFullResponse, OAuth2ProviderAppSecretResponse, OAuth2TokenRequest,
+    OAuth2TokenResponse, OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
+    PaginatedMembersResponse, PersistAuditLogInput, PostOAuth2ProviderAppRequest,
+    PutOAuth2ProviderAppRequest, RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse,
+    UpdateCheckResponse, UpdateRolesRequest, UpdateUserAppearanceSettingsRequest,
+    UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
+    UserAppearanceSettings, UserListFilter, UserParameter, UserPreferenceSettings, UserRecord,
+    UserResponse, UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
@@ -138,6 +140,7 @@ pub struct AppState {
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
     health: HealthService<Arc<dyn AppStore>>,
     external_auth: ExternalAuthService<Arc<dyn AppStore>>,
+    oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
 }
 
 impl AppState {
@@ -154,6 +157,7 @@ impl AppState {
         let deployment_stats = DeploymentStatsService::new(store.clone());
         let health = HealthService::new(store.clone())?;
         let external_auth = ExternalAuthService::new(store.clone())?;
+        let oauth2_provider = OAuth2ProviderService::new(store.clone());
 
         Ok(Self {
             config,
@@ -166,6 +170,7 @@ impl AppState {
             deployment_stats,
             health,
             external_auth,
+            oauth2_provider,
         })
     }
 }
@@ -372,8 +377,35 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route("/users/{user}/password", put(put_user_password))
                 .route("/users/{user}/convert-login", post(post_convert_login))
-                .route("/users/{user}", get(get_user).delete(delete_user)),
+                .route("/users/{user}", get(get_user).delete(delete_user))
+                .route(
+                    "/oauth2-provider/apps",
+                    get(list_oauth2_provider_apps).post(post_oauth2_provider_app),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}",
+                    get(get_oauth2_provider_app)
+                        .put(put_oauth2_provider_app)
+                        .delete(delete_oauth2_provider_app),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}/secrets",
+                    get(list_oauth2_provider_app_secrets).post(post_oauth2_provider_app_secret),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}/secrets/{secret_id}",
+                    axum::routing::delete(delete_oauth2_provider_app_secret),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}/tokens",
+                    axum::routing::delete(delete_oauth2_provider_app_tokens),
+                ),
         )
+        .route(
+            "/oauth2/authorize",
+            get(get_oauth2_authorize).post(post_oauth2_authorize),
+        )
+        .route("/oauth2/tokens", post(post_oauth2_token))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new())
@@ -2690,6 +2722,548 @@ fn unauthorized_response(message: impl Into<String>) -> Response {
 
 fn forbidden_response(message: impl Into<String>) -> Response {
     (StatusCode::FORBIDDEN, Json(ApiResponse::ok(message.into()))).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// OAuth2 Provider Handlers
+// ---------------------------------------------------------------------------
+
+async fn list_oauth2_provider_apps(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let apps = match state.oauth2_provider.list_apps().await {
+        Ok(apps) => apps,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let response: Vec<OAuth2ProviderAppResponse> =
+        apps.into_iter().map(oauth2_app_response).collect();
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn post_oauth2_provider_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<PostOAuth2ProviderAppRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let app = match state
+        .oauth2_provider
+        .create_app(
+            &request.name,
+            &request.icon,
+            &request.callback_url,
+            context.user.id,
+        )
+        .await
+    {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::OAuth2ProviderApp,
+        Some(&context.user),
+        Some(app.id.to_string()),
+        "created oauth2 provider app",
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(oauth2_app_response(app))).into_response())
+}
+
+async fn get_oauth2_provider_app(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let app = match state.oauth2_provider.get_app(app_uuid).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    Ok((StatusCode::OK, Json(oauth2_app_response(app))).into_response())
+}
+
+async fn put_oauth2_provider_app(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<PutOAuth2ProviderAppRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let app = match state
+        .oauth2_provider
+        .update_app(
+            app_uuid,
+            &request.name,
+            &request.icon,
+            &request.callback_url,
+        )
+        .await
+    {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::OAuth2ProviderApp,
+        Some(&context.user),
+        Some(app.id.to_string()),
+        "updated oauth2 provider app",
+    )
+    .await;
+
+    Ok((StatusCode::OK, Json(oauth2_app_response(app))).into_response())
+}
+
+async fn delete_oauth2_provider_app(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    if let Err(error) = state.oauth2_provider.delete_app(app_uuid).await {
+        return handle_oauth2_provider_error(error);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::OAuth2ProviderApp,
+        Some(&context.user),
+        Some(app_id),
+        "deleted oauth2 provider app",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn list_oauth2_provider_app_secrets(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let secrets = match state.oauth2_provider.list_app_secrets(app_uuid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let response: Vec<OAuth2ProviderAppSecretResponse> =
+        secrets.into_iter().map(oauth2_secret_response).collect();
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn post_oauth2_provider_app_secret(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let (raw_secret, record) = match state.oauth2_provider.create_app_secret(app_uuid).await {
+        Ok(result) => result,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::OAuth2ProviderAppSecret,
+        Some(&context.user),
+        Some(record.id.to_string()),
+        "created oauth2 provider app secret",
+    )
+    .await;
+
+    let response = OAuth2ProviderAppSecretFullResponse {
+        id: record.id.to_string(),
+        client_secret_full: raw_secret,
+        client_secret_truncated: record.display_secret,
+    };
+    Ok((StatusCode::CREATED, Json(response)).into_response())
+}
+
+async fn delete_oauth2_provider_app_secret(
+    State(state): State<AppState>,
+    Path((app_id, secret_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let _app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let secret_uuid = match Uuid::parse_str(&secret_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app secret not found."));
+        }
+    };
+    if let Err(error) = state.oauth2_provider.delete_app_secret(secret_uuid).await {
+        return handle_oauth2_provider_error(error);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::OAuth2ProviderAppSecret,
+        Some(&context.user),
+        Some(secret_id),
+        "deleted oauth2 provider app secret",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn delete_oauth2_provider_app_tokens(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    if let Err(error) = state
+        .oauth2_provider
+        .revoke_tokens(app_uuid, context.user.id)
+        .await
+    {
+        return handle_oauth2_provider_error(error);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::OAuth2ProviderApp,
+        Some(&context.user),
+        Some(app_id),
+        "revoked oauth2 provider app tokens",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn get_oauth2_authorize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<OAuth2AuthorizeRequest>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if params.response_type != "code" {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok("response_type must be \"code\".")),
+        )
+            .into_response());
+    }
+    let client_id = match Uuid::parse_str(&params.client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("Invalid client_id.")),
+            )
+                .into_response());
+        }
+    };
+    let raw_code = match state
+        .oauth2_provider
+        .create_authorization_code(
+            client_id,
+            context.user.id,
+            &params.resource,
+            &params.code_challenge,
+            &params.code_challenge_method,
+        )
+        .await
+    {
+        Ok(code) => code,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    // Build the redirect URL with the code and state.
+    let app = match state.oauth2_provider.get_app(client_id).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let mut redirect_url = match url::Url::parse(&app.callback_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("App has invalid callback URL.")),
+            )
+                .into_response());
+        }
+    };
+    redirect_url
+        .query_pairs_mut()
+        .append_pair("code", &raw_code)
+        .append_pair("state", &params.state);
+
+    Ok((
+        StatusCode::TEMPORARY_REDIRECT,
+        [("location", redirect_url.as_str())],
+    )
+        .into_response())
+}
+
+async fn post_oauth2_authorize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<OAuth2AuthorizeRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(params) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    if params.response_type != "code" {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok("response_type must be \"code\".")),
+        )
+            .into_response());
+    }
+    let client_id = match Uuid::parse_str(&params.client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("Invalid client_id.")),
+            )
+                .into_response());
+        }
+    };
+    let raw_code = match state
+        .oauth2_provider
+        .create_authorization_code(
+            client_id,
+            context.user.id,
+            &params.resource,
+            &params.code_challenge,
+            &params.code_challenge_method,
+        )
+        .await
+    {
+        Ok(code) => code,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    // Build the redirect URL with the code and state.
+    let app = match state.oauth2_provider.get_app(client_id).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let mut redirect_url = match url::Url::parse(&app.callback_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("App has invalid callback URL.")),
+            )
+                .into_response());
+        }
+    };
+    redirect_url
+        .query_pairs_mut()
+        .append_pair("code", &raw_code)
+        .append_pair("state", &params.state);
+
+    Ok((
+        StatusCode::TEMPORARY_REDIRECT,
+        [("location", redirect_url.as_str())],
+    )
+        .into_response())
+}
+
+async fn post_oauth2_token(
+    State(state): State<AppState>,
+    payload: Result<Json<OAuth2TokenRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    match request.grant_type.as_str() {
+        "authorization_code" => {
+            let client_id = match Uuid::parse_str(&request.client_id) {
+                Ok(id) => id,
+                Err(_) => {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::ok("Invalid client_id.")),
+                    )
+                        .into_response());
+                }
+            };
+            let result = match state
+                .oauth2_provider
+                .exchange_code(
+                    &request.code,
+                    client_id,
+                    &request.client_secret,
+                    &request.code_verifier,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => return handle_oauth2_provider_error(error),
+            };
+            let response = OAuth2TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                refresh_token: result.refresh_token,
+            };
+            Ok((StatusCode::OK, Json(response)).into_response())
+        }
+        "refresh_token" => {
+            let client_id = match Uuid::parse_str(&request.client_id) {
+                Ok(id) => id,
+                Err(_) => {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::ok("Invalid client_id.")),
+                    )
+                        .into_response());
+                }
+            };
+            let result = match state
+                .oauth2_provider
+                .refresh_token(&request.refresh_token, client_id, &request.client_secret)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => return handle_oauth2_provider_error(error),
+            };
+            let response = OAuth2TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                refresh_token: result.refresh_token,
+            };
+            Ok((StatusCode::OK, Json(response)).into_response())
+        }
+        _ => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok("Unsupported grant_type.")),
+        )
+            .into_response()),
+    }
+}
+
+fn handle_oauth2_provider_error(error: OAuth2ProviderError) -> Result<Response, AppError> {
+    match error {
+        OAuth2ProviderError::Storage(error) => Err(AppError::from(error)),
+        OAuth2ProviderError::BadRequest { message } => {
+            Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
+        }
+        OAuth2ProviderError::NotFound { message } => Ok(not_found_response(message)),
+        OAuth2ProviderError::Unauthorized { message } => Ok(unauthorized_response(message)),
+    }
+}
+
+fn oauth2_app_response(
+    app: coder_core::identity::OAuth2ProviderAppRecord,
+) -> OAuth2ProviderAppResponse {
+    OAuth2ProviderAppResponse {
+        id: app.id.to_string(),
+        name: app.name,
+        icon: app.icon,
+        callback_url: app.callback_url,
+        redirect_uris: Vec::new(),
+        endpoints: OAuth2ProviderAppEndpoints {
+            authorization: "/oauth2/authorize".to_owned(),
+            token: "/oauth2/tokens".to_owned(),
+            device_authorization: String::new(),
+        },
+    }
+}
+
+fn oauth2_secret_response(
+    secret: coder_core::identity::OAuth2ProviderAppSecretRecord,
+) -> OAuth2ProviderAppSecretResponse {
+    OAuth2ProviderAppSecretResponse {
+        id: secret.id.to_string(),
+        last_used_at: None,
+        client_secret_truncated: secret.display_secret,
+    }
 }
 
 fn not_implemented_response(message: impl Into<String>) -> Response {

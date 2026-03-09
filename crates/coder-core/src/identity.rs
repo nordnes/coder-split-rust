@@ -521,3 +521,353 @@ pub enum CreateApiKeyStoreError {
     #[error("{0}")]
     Storage(#[from] StorageError),
 }
+
+// ---------------------------------------------------------------------------
+// User Identity Supplements
+// ---------------------------------------------------------------------------
+
+/// An OAuth/OIDC identity provider link for a user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserLinkRecord {
+    /// Owning user identifier.
+    pub user_id: Uuid,
+    /// Login type of the linked provider.
+    pub login_type: LoginType,
+    /// Provider-side identifier for the user.
+    pub linked_id: String,
+    /// OAuth access token (encrypted at rest).
+    pub oauth_access_token: String,
+    /// OAuth refresh token (encrypted at rest).
+    pub oauth_refresh_token: String,
+    /// OAuth token expiry time.
+    pub oauth_expiry: OffsetDateTime,
+}
+
+/// Input for upserting a user link.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpsertUserLinkInput {
+    /// Login type of the linked provider.
+    pub login_type: LoginType,
+    /// Provider-side identifier for the user.
+    pub linked_id: String,
+    /// OAuth access token.
+    pub oauth_access_token: String,
+    /// OAuth refresh token.
+    pub oauth_refresh_token: String,
+    /// OAuth token expiry time.
+    pub oauth_expiry: OffsetDateTime,
+}
+
+/// Per-user key-value configuration entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserConfigRecord {
+    /// Owning user identifier.
+    pub user_id: Uuid,
+    /// Configuration key.
+    pub key: String,
+    /// Configuration value.
+    pub value: String,
+}
+
+/// Soft-delete tracking record for a deleted user.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserDeletedRecord {
+    /// Record identifier.
+    pub id: Uuid,
+    /// Deleted user identifier.
+    pub user_id: Uuid,
+    /// When the user was deleted.
+    pub deleted_at: OffsetDateTime,
+    /// Who deleted the user (if known).
+    pub deleted_by: Option<Uuid>,
+    /// Reason for deletion.
+    pub reason: String,
+}
+
+/// A user status change audit entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UserStatusChangeRecord {
+    /// Record identifier.
+    pub id: Uuid,
+    /// User whose status changed.
+    pub user_id: Uuid,
+    /// The new status.
+    pub new_status: UserStatus,
+    /// The previous status.
+    pub old_status: UserStatus,
+    /// When the change occurred.
+    pub changed_at: OffsetDateTime,
+    /// Who initiated the change (if known).
+    pub changed_by: Option<Uuid>,
+    /// Reason for the change.
+    pub reason: String,
+}
+
+/// A custom RBAC role defined by an administrator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CustomRoleRecord {
+    /// Stable role name.
+    pub name: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Organization scope (if org-scoped).
+    pub organization_id: Option<Uuid>,
+    /// Site-level permissions (JSON).
+    pub site_permissions: String,
+    /// Organization-level permissions (JSON).
+    pub org_permissions: String,
+    /// User-level permissions (JSON).
+    pub user_permissions: String,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+}
+
+/// Input for upserting a custom role.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpsertCustomRoleInput {
+    /// Stable role name.
+    pub name: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Organization scope (if org-scoped).
+    pub organization_id: Option<Uuid>,
+    /// Site-level permissions (JSON).
+    pub site_permissions: String,
+    /// Organization-level permissions (JSON).
+    pub org_permissions: String,
+    /// User-level permissions (JSON).
+    pub user_permissions: String,
+}
+
+/// A user group for template ACLs and RBAC.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupRecord {
+    /// Stable group identifier.
+    pub id: Uuid,
+    /// Canonical group name.
+    pub name: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Owning organization.
+    pub organization_id: Uuid,
+    /// Avatar URL.
+    pub avatar_url: String,
+    /// Resource quota allowance.
+    pub quota_allowance: i32,
+    /// Source of group creation (e.g. "user", "oidc").
+    pub source: String,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+}
+
+/// Input for creating a group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateGroupInput {
+    /// Canonical group name.
+    pub name: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Owning organization.
+    pub organization_id: Uuid,
+    /// Avatar URL.
+    pub avatar_url: String,
+    /// Resource quota allowance.
+    pub quota_allowance: i32,
+}
+
+/// A group membership entry.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GroupMemberRecord {
+    /// Group identifier.
+    pub group_id: Uuid,
+    /// Member user identifier.
+    pub user_id: Uuid,
+}
+
+// ---------------------------------------------------------------------------
+// OAuth2 Provider
+// ---------------------------------------------------------------------------
+
+/// A registered OAuth2 provider application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OAuth2ProviderAppRecord {
+    /// Stable application identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+    /// Application name.
+    pub name: String,
+    /// Application icon URL.
+    pub icon: String,
+    /// Primary callback URL.
+    pub callback_url: String,
+    /// Additional redirect URIs.
+    pub redirect_uris: Vec<String>,
+    /// User who created the application.
+    pub created_by: Uuid,
+}
+
+/// Input for creating an OAuth2 provider app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateOAuth2ProviderAppInput {
+    /// Application name.
+    pub name: String,
+    /// Application icon URL.
+    pub icon: String,
+    /// Primary callback URL.
+    pub callback_url: String,
+    /// User who created the application.
+    pub created_by: Uuid,
+}
+
+/// Input for updating an OAuth2 provider app.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateOAuth2ProviderAppInput {
+    /// Application identifier.
+    pub id: Uuid,
+    /// Updated name.
+    pub name: String,
+    /// Updated icon URL.
+    pub icon: String,
+    /// Updated callback URL.
+    pub callback_url: String,
+}
+
+/// A secret for an OAuth2 provider application.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OAuth2ProviderAppSecretRecord {
+    /// Secret identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Hashed secret.
+    pub hashed_secret: Vec<u8>,
+    /// Truncated display string for the UI.
+    pub display_secret: String,
+    /// Owning application identifier.
+    pub app_id: Uuid,
+}
+
+/// An authorization code issued during the OAuth2 flow.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OAuth2ProviderAppCodeRecord {
+    /// Code identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Expiry time.
+    pub expires_at: OffsetDateTime,
+    /// Prefix for fast lookup.
+    pub secret_prefix: Vec<u8>,
+    /// Hashed authorization code secret.
+    pub hashed_secret: Vec<u8>,
+    /// Owning application identifier.
+    pub app_id: Uuid,
+    /// Authorizing user identifier.
+    pub user_id: Uuid,
+    /// Optional resource URI.
+    pub resource_uri: String,
+    /// PKCE code challenge.
+    pub code_challenge: String,
+    /// PKCE code challenge method.
+    pub code_challenge_method: String,
+}
+
+/// An access token issued by the OAuth2 provider.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OAuth2ProviderAppTokenRecord {
+    /// Token identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Expiry time.
+    pub expires_at: OffsetDateTime,
+    /// Hash prefix for fast lookup.
+    pub hash_prefix: Vec<u8>,
+    /// Hashed refresh token.
+    pub refresh_hash: Vec<u8>,
+    /// Owning secret identifier.
+    pub app_secret_id: Uuid,
+    /// Associated API key identifier.
+    pub api_key_id: String,
+    /// Token audience.
+    pub audience: String,
+    /// Owning user identifier.
+    pub user_id: Uuid,
+}
+
+/// Input for creating an OAuth2 provider app token.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateOAuth2ProviderAppTokenInput {
+    /// Expiry time.
+    pub expires_at: OffsetDateTime,
+    /// Hash prefix for fast lookup.
+    pub hash_prefix: Vec<u8>,
+    /// Hashed refresh token.
+    pub refresh_hash: Vec<u8>,
+    /// Owning secret identifier.
+    pub app_secret_id: Uuid,
+    /// Associated API key identifier.
+    pub api_key_id: String,
+    /// Token audience.
+    pub audience: String,
+    /// Owning user identifier.
+    pub user_id: Uuid,
+}
+
+// ---------------------------------------------------------------------------
+// Notification dispatch
+// ---------------------------------------------------------------------------
+
+/// Notification dispatch method.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationMethod {
+    /// SMTP email dispatch.
+    Email,
+    /// HTTP webhook dispatch.
+    Webhook,
+    /// In-app inbox delivery.
+    Inbox,
+}
+
+/// Status of a queued notification message.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NotificationMessageStatus {
+    /// Waiting to be dispatched.
+    Pending,
+    /// Successfully dispatched.
+    Sent,
+    /// Dispatch permanently failed.
+    Failed,
+}
+
+/// A queued notification message.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NotificationMessageRecord {
+    /// Unique message identifier.
+    pub id: Uuid,
+    /// Recipient user identifier.
+    pub user_id: Uuid,
+    /// Notification template identifier.
+    pub notification_template_id: Uuid,
+    /// Dispatch method.
+    pub method: NotificationMethod,
+    /// Current dispatch status.
+    pub status: NotificationMessageStatus,
+    /// Number of delivery attempts so far.
+    pub attempt_count: i32,
+    /// Serialized template input values (JSON).
+    pub input_json: String,
+    /// Targets for the notification (JSON).
+    pub targets_json: String,
+    /// When the message was enqueued.
+    pub created_at: OffsetDateTime,
+    /// When the message was last updated.
+    pub updated_at: OffsetDateTime,
+}

@@ -4,13 +4,15 @@
 use std::collections::{HashMap, HashSet};
 
 use coder_core::{
-    AssignableRoleResponse, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
-    IdentityStore, InsertOrganizationMemberError, LoginType, OrganizationMemberListFilter,
+    AssignableRoleResponse, CreateGroupInput, CreateUserInput, CreateUserRequestWithOrgs,
+    CreateUserStoreError, CustomRoleRecord, GroupMemberRecord, GroupRecord, IdentityStore,
+    InsertOrganizationMemberError, LoginType, OrganizationMemberListFilter,
     OrganizationMemberRecord, PasswordError, RoleResponse, StorageError, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPreferenceSettingsRequest,
-    UpdateUserProfileRequest, UserAppearanceRecord, UserPreferenceRecord, UserRecord, UserStatus,
-    ValidationError, hash_password, normalize_real_name, validate_email, validate_password,
-    validate_real_name, validate_username,
+    UpdateUserProfileRequest, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
+    UserConfigRecord, UserLinkRecord, UserPreferenceRecord, UserRecord, UserStatus,
+    UserStatusChangeRecord, ValidationError, hash_password, normalize_real_name, validate_email,
+    validate_password, validate_real_name, validate_username,
 };
 use coder_rbac::{Actor, BuiltinRole, organization_builtin_roles, site_builtin_roles};
 use thiserror::Error;
@@ -897,6 +899,389 @@ where
 
         self.store
             .find_organization_by_name(requested_organization)
+            .await
+            .map_err(Into::into)
+    }
+
+    // -----------------------------------------------------------------
+    // User Links
+    // -----------------------------------------------------------------
+
+    /// Lists user links for a given user.
+    pub async fn list_user_links(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+    ) -> Result<Vec<UserLinkRecord>, IdentityServiceError> {
+        if !actor.can_access_user(user_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view user links.",
+            ));
+        }
+        self.store
+            .list_user_links(user_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Links a user with an external identity provider.
+    pub async fn upsert_user_link(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, IdentityServiceError> {
+        if !actor.can_access_user(user_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to modify user links.",
+            ));
+        }
+        self.store
+            .upsert_user_link(user_id, input)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Removes a user's link with an external identity provider.
+    pub async fn delete_user_link(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+        login_type: LoginType,
+    ) -> Result<bool, IdentityServiceError> {
+        if !actor.can_access_user(user_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to modify user links.",
+            ));
+        }
+        self.store
+            .delete_user_link(user_id, login_type)
+            .await
+            .map_err(Into::into)
+    }
+
+    // -----------------------------------------------------------------
+    // User Configs
+    // -----------------------------------------------------------------
+
+    /// Gets a user configuration value.
+    pub async fn get_user_config(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, IdentityServiceError> {
+        if !actor.can_access_user(user_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view user config.",
+            ));
+        }
+        self.store
+            .get_user_config(user_id, key)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Sets a user configuration value.
+    pub async fn upsert_user_config(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, IdentityServiceError> {
+        if !actor.can_access_user(user_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to modify user config.",
+            ));
+        }
+        if key.trim().is_empty() {
+            return Err(IdentityServiceError::bad_request(
+                "Config key must not be empty.",
+            ));
+        }
+        self.store
+            .upsert_user_config(user_id, key, value)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Deletes a user configuration value.
+    pub async fn delete_user_config(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<bool, IdentityServiceError> {
+        if !actor.can_access_user(user_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to modify user config.",
+            ));
+        }
+        self.store
+            .delete_user_config(user_id, key)
+            .await
+            .map_err(Into::into)
+    }
+
+    // -----------------------------------------------------------------
+    // Status Changes
+    // -----------------------------------------------------------------
+
+    /// Records a user status change for audit.
+    pub async fn record_user_status_change(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, IdentityServiceError> {
+        if !actor.is_owner() {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to record status changes.",
+            ));
+        }
+        self.store
+            .insert_user_status_change(user_id, old_status, new_status, Some(actor.user_id), reason)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Lists status changes for a given user.
+    pub async fn list_user_status_changes(
+        &self,
+        actor: &Actor,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, IdentityServiceError> {
+        if !actor.can_access_user(user_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view status changes.",
+            ));
+        }
+        self.store
+            .list_user_status_changes(user_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    // -----------------------------------------------------------------
+    // Custom Roles
+    // -----------------------------------------------------------------
+
+    /// Lists custom roles, optionally filtered by organization.
+    pub async fn list_custom_roles(
+        &self,
+        actor: &Actor,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, IdentityServiceError> {
+        if !actor.is_owner() {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to list custom roles.",
+            ));
+        }
+        self.store
+            .list_custom_roles(organization_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Creates or updates a custom role.
+    pub async fn upsert_custom_role(
+        &self,
+        actor: &Actor,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, IdentityServiceError> {
+        if !actor.is_owner() {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to manage custom roles.",
+            ));
+        }
+        if input.name.trim().is_empty() {
+            return Err(IdentityServiceError::bad_request(
+                "Role name must not be empty.",
+            ));
+        }
+        self.store
+            .upsert_custom_role(input)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Deletes a custom role.
+    pub async fn delete_custom_role(
+        &self,
+        actor: &Actor,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, IdentityServiceError> {
+        if !actor.is_owner() {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to manage custom roles.",
+            ));
+        }
+        self.store
+            .delete_custom_role(name, organization_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    // -----------------------------------------------------------------
+    // Groups
+    // -----------------------------------------------------------------
+
+    /// Lists groups for an organization.
+    pub async fn list_groups(
+        &self,
+        actor: &Actor,
+        organization_id: Uuid,
+    ) -> Result<Vec<GroupRecord>, IdentityServiceError> {
+        if !actor.can_access_organization(organization_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view groups in this organization.",
+            ));
+        }
+        self.store
+            .list_groups(organization_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Creates a new group.
+    pub async fn create_group(
+        &self,
+        actor: &Actor,
+        organization_id: Uuid,
+        name: &str,
+        display_name: &str,
+        avatar_url: &str,
+        quota_allowance: i32,
+    ) -> Result<GroupRecord, IdentityServiceError> {
+        if !actor.can_manage_organization(organization_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to create groups in this organization.",
+            ));
+        }
+        if name.trim().is_empty() {
+            return Err(IdentityServiceError::bad_request(
+                "Group name must not be empty.",
+            ));
+        }
+        let input = CreateGroupInput {
+            organization_id,
+            name: name.trim().to_owned(),
+            display_name: display_name.to_owned(),
+            avatar_url: avatar_url.to_owned(),
+            quota_allowance,
+        };
+        self.store.create_group(&input).await.map_err(Into::into)
+    }
+
+    /// Gets a group by identifier.
+    pub async fn get_group(
+        &self,
+        actor: &Actor,
+        group_id: Uuid,
+    ) -> Result<GroupRecord, IdentityServiceError> {
+        let group = self
+            .store
+            .find_group_by_id(group_id)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Group not found."))?;
+        if !actor.can_access_organization(group.organization_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view this group.",
+            ));
+        }
+        Ok(group)
+    }
+
+    /// Deletes a group.
+    pub async fn delete_group(
+        &self,
+        actor: &Actor,
+        group_id: Uuid,
+    ) -> Result<(), IdentityServiceError> {
+        let group = self
+            .store
+            .find_group_by_id(group_id)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Group not found."))?;
+        if !actor.can_manage_organization(group.organization_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to delete this group.",
+            ));
+        }
+        if !self.store.delete_group(group_id).await? {
+            return Err(IdentityServiceError::not_found("Group not found."));
+        }
+        Ok(())
+    }
+
+    /// Lists members of a group.
+    pub async fn list_group_members(
+        &self,
+        actor: &Actor,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, IdentityServiceError> {
+        let group = self
+            .store
+            .find_group_by_id(group_id)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Group not found."))?;
+        if !actor.can_access_organization(group.organization_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view group members.",
+            ));
+        }
+        self.store
+            .list_group_members(group_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Adds a user to a group.
+    pub async fn add_group_member(
+        &self,
+        actor: &Actor,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<(), IdentityServiceError> {
+        let group = self
+            .store
+            .find_group_by_id(group_id)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Group not found."))?;
+        if !actor.can_manage_organization(group.organization_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to modify group membership.",
+            ));
+        }
+        self.store
+            .insert_group_member(group_id, user_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Removes a user from a group.
+    pub async fn remove_group_member(
+        &self,
+        actor: &Actor,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, IdentityServiceError> {
+        let group = self
+            .store
+            .find_group_by_id(group_id)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Group not found."))?;
+        if !actor.can_manage_organization(group.organization_id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to modify group membership.",
+            ));
+        }
+        self.store
+            .delete_group_member(group_id, user_id)
             .await
             .map_err(Into::into)
     }

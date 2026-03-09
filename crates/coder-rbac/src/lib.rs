@@ -150,4 +150,12 @@ pub enum ResourceKind {
     HealthSettings,
     /// An external-auth link.
     ExternalAuth,
+    /// An OAuth2 provider application.
+    OAuth2ProviderApp,
+    /// An OAuth2 provider application secret.
+    OAuth2ProviderAppSecret,
+    /// A user group.
+    Group,
+    /// A custom role.
+    CustomRole,
 }

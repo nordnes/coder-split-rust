@@ -12,11 +12,15 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+base64.workspace = true
 coder-core = { path = "../coder-core" }
 coder-rbac = { path = "../coder-rbac" }
 http.workspace = true
+rand.workspace = true
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
+sha2.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tracing.workspace = true
