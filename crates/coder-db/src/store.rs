@@ -2528,15 +2528,15 @@ impl AppStore for PostgresStore {
         let rows = sqlx::query_as::<_, StoredTemplateRow>(
             r#"
             SELECT t.*,
-                   o.name AS organization_name,
-                   o.display_name AS organization_display_name,
-                   o.icon AS organization_icon,
-                   u.username AS created_by_username,
-                   u.avatar_url AS created_by_avatar_url,
-                   u.name AS created_by_name
+                   COALESCE(o.name, '') AS organization_name,
+                   COALESCE(o.display_name, '') AS organization_display_name,
+                   COALESCE(o.icon, '') AS organization_icon,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.name, '') AS created_by_name
             FROM templates t
-            JOIN organizations o ON o.id = t.organization_id
-            JOIN users u ON u.id = t.created_by
+            LEFT JOIN organizations o ON o.id = t.organization_id
+            LEFT JOIN users u ON u.id = t.created_by
             WHERE ($1::uuid IS NULL OR t.organization_id = $1)
               AND ($2::text IS NULL OR t.name = $2)
               AND ($3::bool OR t.deleted = false)
@@ -2562,15 +2562,15 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredTemplateRow>(
             r#"
             SELECT t.*,
-                   o.name AS organization_name,
-                   o.display_name AS organization_display_name,
-                   o.icon AS organization_icon,
-                   u.username AS created_by_username,
-                   u.avatar_url AS created_by_avatar_url,
-                   u.name AS created_by_name
+                   COALESCE(o.name, '') AS organization_name,
+                   COALESCE(o.display_name, '') AS organization_display_name,
+                   COALESCE(o.icon, '') AS organization_icon,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.name, '') AS created_by_name
             FROM templates t
-            JOIN organizations o ON o.id = t.organization_id
-            JOIN users u ON u.id = t.created_by
+            LEFT JOIN organizations o ON o.id = t.organization_id
+            LEFT JOIN users u ON u.id = t.created_by
             WHERE t.id = $1
             "#,
         )
@@ -2590,15 +2590,15 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredTemplateRow>(
             r#"
             SELECT t.*,
-                   o.name AS organization_name,
-                   o.display_name AS organization_display_name,
-                   o.icon AS organization_icon,
-                   u.username AS created_by_username,
-                   u.avatar_url AS created_by_avatar_url,
-                   u.name AS created_by_name
+                   COALESCE(o.name, '') AS organization_name,
+                   COALESCE(o.display_name, '') AS organization_display_name,
+                   COALESCE(o.icon, '') AS organization_icon,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.name, '') AS created_by_name
             FROM templates t
-            JOIN organizations o ON o.id = t.organization_id
-            JOIN users u ON u.id = t.created_by
+            LEFT JOIN organizations o ON o.id = t.organization_id
+            LEFT JOIN users u ON u.id = t.created_by
             WHERE t.organization_id = $1 AND t.name = $2 AND t.deleted = false
             "#,
         )
@@ -2793,11 +2793,11 @@ impl AppStore for PostgresStore {
         let rows = sqlx::query_as::<_, StoredTemplateVersionRow>(
             r#"
             SELECT tv.*,
-                   u.avatar_url AS created_by_avatar_url,
-                   u.username AS created_by_username,
-                   u.name AS created_by_name
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
             FROM template_versions tv
-            JOIN users u ON u.id = tv.created_by
+            LEFT JOIN users u ON u.id = tv.created_by
             WHERE tv.template_id = $1
               AND ($2::bool OR tv.archived = false)
             ORDER BY tv.created_at DESC
@@ -2825,11 +2825,11 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredTemplateVersionRow>(
             r#"
             SELECT tv.*,
-                   u.avatar_url AS created_by_avatar_url,
-                   u.username AS created_by_username,
-                   u.name AS created_by_name
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
             FROM template_versions tv
-            JOIN users u ON u.id = tv.created_by
+            LEFT JOIN users u ON u.id = tv.created_by
             WHERE tv.id = $1
             "#,
         )
@@ -2849,11 +2849,11 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredTemplateVersionRow>(
             r#"
             SELECT tv.*,
-                   u.avatar_url AS created_by_avatar_url,
-                   u.username AS created_by_username,
-                   u.name AS created_by_name
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
             FROM template_versions tv
-            JOIN users u ON u.id = tv.created_by
+            LEFT JOIN users u ON u.id = tv.created_by
             WHERE tv.template_id = $1 AND tv.name = $2
             "#,
         )
@@ -2875,11 +2875,11 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredTemplateVersionRow>(
             r#"
             SELECT tv.*,
-                   u.avatar_url AS created_by_avatar_url,
-                   u.username AS created_by_username,
-                   u.name AS created_by_name
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
             FROM template_versions tv
-            JOIN users u ON u.id = tv.created_by
+            LEFT JOIN users u ON u.id = tv.created_by
             JOIN templates t ON t.id = tv.template_id
             WHERE t.organization_id = $1 AND t.name = $2 AND tv.name = $3
             "#,
