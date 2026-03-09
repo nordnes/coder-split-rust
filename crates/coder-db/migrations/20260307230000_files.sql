@@ -9,5 +9,5 @@ CREATE TABLE IF NOT EXISTS files (
     data        BYTEA         NOT NULL,
     UNIQUE (hash, created_by)
 );
-
-CREATE INDEX IF NOT EXISTS idx_files_hash_created_by ON files (hash, created_by);
+-- The UNIQUE (hash, created_by) constraint already creates a B-tree index;
+-- no additional explicit index is needed.

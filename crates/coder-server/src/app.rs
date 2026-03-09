@@ -2774,16 +2774,6 @@ async fn post_file(
         format!("{:x}", hasher.finalize())
     };
 
-    // Check for an existing duplicate.
-    let existing = state
-        .store
-        .get_file_by_hash_and_creator(&hash, context.user.id)
-        .await?;
-
-    if let Some(file) = existing {
-        return Ok((StatusCode::OK, Json(UploadFileResponse { id: file.id })).into_response());
-    }
-
     let file_id = Uuid::new_v4();
     let input = InsertFileInput {
         id: file_id,
@@ -2793,12 +2783,19 @@ async fn post_file(
         data,
     };
 
+    // INSERT … ON CONFLICT handles the race atomically – if a duplicate
+    // exists the DB returns the existing row instead of raising an error.
     let file = state.store.insert_file(input).await?;
-    Ok((
-        StatusCode::CREATED,
-        Json(UploadFileResponse { id: file.id }),
-    )
-        .into_response())
+
+    // If the returned id differs from the one we generated, a duplicate
+    // already existed and the DB returned the existing row.
+    let status = if file.id == file_id {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(UploadFileResponse { id: file.id })).into_response())
 }
 
 /// GET /api/v2/files/{fileid} – retrieve a file by UUID.
@@ -4694,6 +4691,20 @@ mod tests {
         }
 
         async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+            let mut files = self
+                .files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+
+            // Mimic ON CONFLICT (hash, created_by) DO UPDATE SET id = files.id
+            // – return the existing record when a duplicate exists.
+            if let Some(existing) = files
+                .values()
+                .find(|f| f.hash == input.hash && f.created_by == input.created_by)
+            {
+                return Ok(existing.clone());
+            }
+
             let record = FileRecord {
                 id: input.id,
                 hash: input.hash,
@@ -4702,10 +4713,7 @@ mod tests {
                 mimetype: input.mimetype,
                 data: input.data,
             };
-            self.files
-                .lock()
-                .map_err(|error| StorageError::unavailable(error.to_string()))?
-                .insert(record.id, record.clone());
+            files.insert(record.id, record.clone());
             Ok(record)
         }
 

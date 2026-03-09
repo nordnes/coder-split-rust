@@ -2342,6 +2342,7 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredFileRow>(
             "INSERT INTO files (id, hash, created_by, created_at, mimetype, data)
              VALUES ($1, $2, $3, NOW(), $4, $5)
+             ON CONFLICT (hash, created_by) DO UPDATE SET id = files.id
              RETURNING id, hash, created_by, created_at, mimetype, data",
         )
         .bind(input.id)
