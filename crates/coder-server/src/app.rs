@@ -35,8 +35,8 @@ use coder_core::{
     InsertTaskInput, LoginType, LoginWithPasswordRequest, OrganizationMember,
     OrganizationMemberWithUserData, OrganizationResponse, PaginatedMembersResponse,
     PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse,
-    TaskListFilter, TaskLogSnapshotEnvelope, TaskLogsResponse, TaskRecord, TaskResponse,
-    TaskSendRequest, TasksListResponse, UpdateCheckResponse, UpdateRolesRequest,
+    StorageError, TaskListFilter, TaskLogSnapshotEnvelope, TaskLogsResponse, TaskRecord,
+    TaskResponse, TaskSendRequest, TasksListResponse, UpdateCheckResponse, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
     UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
     UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
@@ -2416,8 +2416,6 @@ struct TasksQuery {
     owner_id: Option<Uuid>,
     #[serde(default)]
     organization_id: Option<Uuid>,
-    #[serde(default)]
-    status: Option<String>,
 }
 
 async fn list_tasks(
@@ -2432,7 +2430,6 @@ async fn list_tasks(
     let filter = TaskListFilter {
         owner_id: query.owner_id,
         organization_id: query.organization_id,
-        status: query.status,
     };
     let tasks = state.store.list_tasks(filter).await?;
     let count = tasks.len();
@@ -2784,7 +2781,9 @@ async fn create_chat(
     let chat = state.store.insert_chat(input).await?;
 
     // Store the initial user message.
-    let content_value = serde_json::to_value(&request.content).ok();
+    let content_value = serde_json::to_value(&request.content)
+        .map(Some)
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
     let msg_input = InsertChatMessageInput {
         chat_id: chat.id,
         model_config_id: Some(model_config_id),
@@ -2907,7 +2906,9 @@ async fn post_chat_message(
     }
 
     let model_config_id = request.model_config_id.unwrap_or(chat.last_model_config_id);
-    let content_value = serde_json::to_value(&request.content).ok();
+    let content_value = serde_json::to_value(&request.content)
+        .map(Some)
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
 
     let msg_input = InsertChatMessageInput {
         chat_id,
@@ -3353,17 +3354,20 @@ mod tests {
     use coder_core::{
         ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AppStore, AuditLog,
         AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
-        ChangePasswordWithOneTimePasscodeRequest, ConvertLoginRequest, CreateApiKeyInput,
-        CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserRequest,
-        CreateFirstUserStoreError, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
-        CreateUserRequestWithOrgs, CreateUserStoreError, DatabaseConfig, DeploymentMetadata,
-        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, GitSshKeyRecord,
-        HealthSettings, InsertOrganizationMemberError, LogFormat, LoginType,
+        ChangePasswordWithOneTimePasscodeRequest, ChatMessageRecord, ChatQueuedMessageRecord,
+        ChatRecord, ChatStatus, ConvertLoginRequest, CreateApiKeyInput, CreateApiKeyStoreError,
+        CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput, CreateFirstUserRequest,
+        CreateFirstUserStoreError, CreateTaskRequest, CreateTestAuditLogRequest,
+        CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
+        DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse, DeploymentStore,
+        DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord,
+        ExternalAuthUser, GitSshKeyRecord, HealthSettings, InsertChatInput, InsertChatMessageInput,
+        InsertOrganizationMemberError, InsertTaskInput, LogFormat, LoginType,
         LoginWithPasswordRequest, OrganizationMemberListFilter, OrganizationMemberRecord,
         OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
         ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, RequestOneTimePasscodeRequest,
         ServerConfig, SessionCountDeploymentStatsResponse, SlimRoleRecord, SshConfig, StorageError,
+        TaskListFilter, TaskRecord, TaskSendRequest, TaskSnapshotRecord, TaskStatus,
         TokenConfigRecord, UpdateRolesRequest, UpdateUserAppearanceSettingsRequest,
         UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
         UpsertExternalAuthLinkInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
@@ -3418,6 +3422,11 @@ mod tests {
         stats_agents: Mutex<Vec<WorkspaceAgentStatInput>>,
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
+        tasks: Mutex<HashMap<Uuid, TaskRecord>>,
+        task_snapshots: Mutex<HashMap<Uuid, TaskSnapshotRecord>>,
+        chats: Mutex<HashMap<Uuid, ChatRecord>>,
+        chat_messages: Mutex<Vec<ChatMessageRecord>>,
+        chat_message_next_id: Mutex<i64>,
     }
 
     impl FakeStore {
@@ -3443,6 +3452,11 @@ mod tests {
                 stats_agents: Mutex::new(Vec::new()),
                 workspace_proxies: Mutex::new(HashMap::new()),
                 provisioner_daemons: Mutex::new(HashMap::new()),
+                tasks: Mutex::new(HashMap::new()),
+                task_snapshots: Mutex::new(HashMap::new()),
+                chats: Mutex::new(HashMap::new()),
+                chat_messages: Mutex::new(Vec::new()),
+                chat_message_next_id: Mutex::new(1),
             }
         }
 
@@ -5046,6 +5060,254 @@ mod tests {
             };
             links.insert((user_id, link.provider_id.clone()), record.clone());
             Ok(record)
+        }
+
+        // -----------------------------------------------------------------
+        // Tasks
+        // -----------------------------------------------------------------
+
+        async fn insert_task(&self, input: InsertTaskInput) -> Result<TaskRecord, StorageError> {
+            let record = TaskRecord {
+                id: input.id,
+                organization_id: input.organization_id,
+                owner_id: input.owner_id,
+                name: input.name,
+                display_name: input.display_name,
+                workspace_id: None,
+                template_version_id: input.template_version_id,
+                template_parameters: input.template_parameters,
+                prompt: input.prompt,
+                status: TaskStatus::Pending,
+                created_at: input.created_at,
+                deleted_at: None,
+            };
+            self.tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_task_by_id(&self, id: Uuid) -> Result<Option<TaskRecord>, StorageError> {
+            Ok(self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&id)
+                .cloned())
+        }
+
+        async fn list_tasks(
+            &self,
+            filter: TaskListFilter,
+        ) -> Result<Vec<TaskRecord>, StorageError> {
+            let tasks = self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<TaskRecord> = tasks
+                .values()
+                .filter(|t| t.deleted_at.is_none())
+                .filter(|t| filter.owner_id.is_none() || filter.owner_id == Some(t.owner_id))
+                .filter(|t| {
+                    filter.organization_id.is_none()
+                        || filter.organization_id == Some(t.organization_id)
+                })
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(result)
+        }
+
+        async fn delete_task(
+            &self,
+            id: Uuid,
+            deleted_at: OffsetDateTime,
+        ) -> Result<bool, StorageError> {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(task) = tasks.get_mut(&id) {
+                task.deleted_at = Some(deleted_at);
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        async fn update_task_prompt(
+            &self,
+            id: Uuid,
+            prompt: &str,
+        ) -> Result<Option<TaskRecord>, StorageError> {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(task) = tasks.get_mut(&id) {
+                task.prompt = prompt.to_string();
+                Ok(Some(task.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn upsert_task_snapshot(
+            &self,
+            task_id: Uuid,
+            log_snapshot: &Value,
+            log_snapshot_created_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            self.task_snapshots
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(
+                    task_id,
+                    TaskSnapshotRecord {
+                        task_id,
+                        log_snapshot: log_snapshot.clone(),
+                        log_snapshot_created_at,
+                    },
+                );
+            Ok(())
+        }
+
+        async fn find_task_snapshot(
+            &self,
+            task_id: Uuid,
+        ) -> Result<Option<TaskSnapshotRecord>, StorageError> {
+            Ok(self
+                .task_snapshots
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&task_id)
+                .cloned())
+        }
+
+        // -----------------------------------------------------------------
+        // Chats
+        // -----------------------------------------------------------------
+
+        async fn insert_chat(&self, input: InsertChatInput) -> Result<ChatRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let id = Uuid::new_v4();
+            let record = ChatRecord {
+                id,
+                owner_id: input.owner_id,
+                workspace_id: input.workspace_id,
+                title: input.title,
+                status: ChatStatus::Waiting,
+                last_error: None,
+                parent_chat_id: input.parent_chat_id,
+                root_chat_id: input.root_chat_id,
+                last_model_config_id: input.last_model_config_id,
+                archived: false,
+                created_at: now,
+                updated_at: now,
+            };
+            self.chats
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_chat_by_id(&self, id: Uuid) -> Result<Option<ChatRecord>, StorageError> {
+            Ok(self
+                .chats
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&id)
+                .cloned())
+        }
+
+        async fn list_chats_by_owner(
+            &self,
+            owner_id: Uuid,
+            archived: Option<bool>,
+        ) -> Result<Vec<ChatRecord>, StorageError> {
+            let chats = self
+                .chats
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<ChatRecord> = chats
+                .values()
+                .filter(|c| c.owner_id == owner_id)
+                .filter(|c| archived.is_none() || archived == Some(c.archived))
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(result)
+        }
+
+        async fn archive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+            let mut chats = self
+                .chats
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(chat) = chats.get_mut(&id) {
+                chat.archived = true;
+            }
+            Ok(())
+        }
+
+        async fn list_chat_messages(
+            &self,
+            chat_id: Uuid,
+            after_id: i64,
+        ) -> Result<Vec<ChatMessageRecord>, StorageError> {
+            let msgs = self
+                .chat_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let result: Vec<ChatMessageRecord> = msgs
+                .iter()
+                .filter(|m| m.chat_id == chat_id && m.id > after_id)
+                .cloned()
+                .collect();
+            Ok(result)
+        }
+
+        async fn insert_chat_message(
+            &self,
+            input: InsertChatMessageInput,
+        ) -> Result<ChatMessageRecord, StorageError> {
+            let mut next_id = self
+                .chat_message_next_id
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let id = *next_id;
+            *next_id += 1;
+            let record = ChatMessageRecord {
+                id,
+                chat_id: input.chat_id,
+                model_config_id: input.model_config_id,
+                created_at: OffsetDateTime::now_utc(),
+                role: input.role,
+                content: input.content,
+                visibility: input.visibility,
+                input_tokens: None,
+                output_tokens: None,
+                total_tokens: None,
+                reasoning_tokens: None,
+                cache_creation_tokens: None,
+                cache_read_tokens: None,
+                context_limit: None,
+                compressed: false,
+            };
+            self.chat_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(record.clone());
+            Ok(record)
+        }
+
+        async fn list_chat_queued_messages(
+            &self,
+            _chat_id: Uuid,
+        ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
+            Ok(Vec::new())
         }
     }
 
@@ -7174,6 +7436,586 @@ mod tests {
         )
         .await?;
         assert_eq!(convert_login_response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // AI Tasks handler tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn task_lifecycle_create_list_get_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Build me a website".to_string(),
+                    name: Some("my-task".to_string()),
+                    display_name: Some("My Task".to_string()),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id = task["id"].as_str().ok_or("missing task id")?;
+        assert_eq!(task["name"], "my-task");
+        assert_eq!(task["display_name"], "My Task");
+        assert_eq!(task["initial_prompt"], "Build me a website");
+
+        // List tasks
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/tasks", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let body = to_bytes(list_response.into_body(), 1_000_000).await?;
+        let list: Value = serde_json::from_slice(&body)?;
+        assert_eq!(list["count"], 1);
+        assert_eq!(list["tasks"][0]["id"], task_id);
+
+        // Get task
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(fetched["id"], task_id);
+
+        // Delete task
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/tasks/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        // Verify deleted task no longer appears in list
+        let list_response2 = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/tasks", &session_token)?,
+        )
+        .await?;
+        let body = to_bytes(list_response2.into_body(), 1_000_000).await?;
+        let list2: Value = serde_json::from_slice(&body)?;
+        assert_eq!(list2["count"], 0);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_get_input_returns_prompt() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Write a test".to_string(),
+                    name: None,
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id = task["id"].as_str().ok_or("missing task id")?;
+
+        let input_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/{task_id}/input"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(input_response.status(), StatusCode::OK);
+        let body = to_bytes(input_response.into_body(), 1_000_000).await?;
+        let input: Value = serde_json::from_slice(&body)?;
+        assert_eq!(input["input"], "Write a test");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_patch_updates_prompt() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Original prompt".to_string(),
+                    name: None,
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id = task["id"].as_str().ok_or("missing task id")?;
+
+        let patch_response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/tasks/{task_id}"),
+                &session_token,
+                &json!({ "input": "Updated prompt" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::OK);
+        let body = to_bytes(patch_response.into_body(), 1_000_000).await?;
+        let patched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(patched["initial_prompt"], "Updated prompt");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_get_logs_empty() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "log test".to_string(),
+                    name: None,
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id = task["id"].as_str().ok_or("missing task id")?;
+
+        let logs_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/{task_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(logs_response.status(), StatusCode::OK);
+        let body = to_bytes(logs_response.into_body(), 1_000_000).await?;
+        let logs: Value = serde_json::from_slice(&body)?;
+        assert_eq!(logs["logs"], json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_send_returns_ok() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "send test".to_string(),
+                    name: None,
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id = task["id"].as_str().ok_or("missing task id")?;
+
+        let send_response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/tasks/{task_id}/send"),
+                &session_token,
+                &TaskSendRequest {
+                    input: "follow-up".to_string(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(send_response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_pause_resume() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "pause test".to_string(),
+                    name: None,
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id = task["id"].as_str().ok_or("missing task id")?;
+
+        let pause_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/{task_id}/pause"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(pause_response.status(), StatusCode::OK);
+
+        let resume_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/{task_id}/resume"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resume_response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_log_snapshot_roundtrip() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "snapshot test".to_string(),
+                    name: None,
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id = task["id"].as_str().ok_or("missing task id")?;
+
+        // Post a log snapshot
+        let snapshot_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaceagents/me/tasks/{task_id}/log-snapshot"),
+                &session_token,
+                &json!({ "log_snapshot": { "lines": ["hello", "world"] } }),
+            )?,
+        )
+        .await?;
+        assert_eq!(snapshot_response.status(), StatusCode::OK);
+
+        // Verify snapshot appears in logs
+        let logs_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/{task_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(logs_response.status(), StatusCode::OK);
+        let body = to_bytes(logs_response.into_body(), 1_000_000).await?;
+        let logs: Value = serde_json::from_slice(&body)?;
+        assert_eq!(logs["snapshot"], true);
+        assert!(logs["snapshot_at"].is_string());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_not_found_returns_404() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/{fake_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+
+        let delete_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/tasks/{fake_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let list_response = call(app.clone(), request(Method::GET, "/api/v2/tasks")?).await?;
+        assert_eq!(list_response.status(), StatusCode::UNAUTHORIZED);
+
+        let create_response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/tasks",
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "test".to_string(),
+                    name: None,
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Chats handler tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn chat_lifecycle_create_list_get_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a chat
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        // List chats
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/chats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let body = to_bytes(list_response.into_body(), 1_000_000).await?;
+        let chats: Value = serde_json::from_slice(&body)?;
+        let chats_arr = chats.as_array().ok_or("expected array")?;
+        assert_eq!(chats_arr.len(), 1);
+        assert_eq!(chats_arr[0]["id"], chat_id);
+
+        // Get chat with messages
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(fetched["chat"]["id"], chat_id);
+
+        // Delete (archive) chat
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_post_message() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create chat first
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        // Post a message
+        let msg_response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/messages"),
+                &session_token,
+                &CreateChatMessageRequest {
+                    content: vec![],
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(msg_response.status(), StatusCode::OK);
+        let body = to_bytes(msg_response.into_body(), 1_000_000).await?;
+        let msg: Value = serde_json::from_slice(&body)?;
+        assert!(!msg["queued"].as_bool().unwrap_or(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_not_found_returns_404() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{fake_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+
+        let delete_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/chats/{fake_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let list_response = call(app.clone(), request(Method::GET, "/api/v2/chats")?).await?;
+        assert_eq!(list_response.status(), StatusCode::UNAUTHORIZED);
+
+        let create_response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &CreateChatRequest {
+                    content: vec![],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }
 }

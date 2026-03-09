@@ -61,7 +61,6 @@ pub struct InsertTaskInput {
 pub struct TaskListFilter {
     pub owner_id: Option<Uuid>,
     pub organization_id: Option<Uuid>,
-    pub status: Option<String>,
 }
 
 /// A task log snapshot record.

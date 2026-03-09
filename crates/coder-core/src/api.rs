@@ -1613,7 +1613,7 @@ pub struct TasksListResponse {
 }
 
 /// CreateTaskRequest is the request to create a new task.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateTaskRequest {
     pub template_version_id: Uuid,
     pub input: String,
@@ -1630,7 +1630,7 @@ pub struct UpdateTaskInputRequest {
 }
 
 /// TaskSendRequest is used to send task input to the tasks sidebar app.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSendRequest {
     pub input: String,
 }
@@ -1887,7 +1887,7 @@ pub struct ChatInputPart {
 }
 
 /// CreateChatRequest is the request to create a new chat.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateChatRequest {
     pub content: Vec<ChatInputPart>,
     #[serde(default)]
@@ -1897,7 +1897,7 @@ pub struct CreateChatRequest {
 }
 
 /// CreateChatMessageRequest is the request to add a message to a chat.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateChatMessageRequest {
     pub content: Vec<ChatInputPart>,
     #[serde(default)]
