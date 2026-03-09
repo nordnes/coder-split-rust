@@ -2405,9 +2405,11 @@ where
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(refresh_raw);
         let refresh_hash = sha2::Sha256::digest(refresh_token_str.as_bytes()).to_vec();
 
-        // Token expires in 1 hour, refresh token expires in 30 days.
+        // The token record expiry controls how long the *refresh token* is
+        // valid (30 days).  The shorter access-token lifetime (1 hour) is
+        // communicated to the client via `expires_in` in the JSON response.
         let expires_at = OffsetDateTime::now_utc()
-            .checked_add(time::Duration::hours(1))
+            .checked_add(time::Duration::days(30))
             .ok_or_else(|| OAuth2ProviderError::bad_request("Failed to compute token expiry."))?;
 
         // Create an API key for this token (ties it to the session system).
