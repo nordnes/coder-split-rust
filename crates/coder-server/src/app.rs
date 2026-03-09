@@ -2944,8 +2944,8 @@ async fn patch_template(
 
     // Fetch existing template to use current values as defaults.
     let existing = match state.store.find_template_by_id(template_id).await? {
-        Some(t) => t,
-        None => return Ok(not_found_response("Template not found.")),
+        Some(t) if !t.deleted => t,
+        _ => return Ok(not_found_response("Template not found.")),
     };
 
     let name = if body.name.is_empty() {
@@ -5942,12 +5942,12 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             match templates.get_mut(&template_id) {
-                Some(t) => {
+                Some(t) if !t.deleted => {
                     t.deleted = true;
                     t.updated_at = OffsetDateTime::now_utc();
                     Ok(true)
                 }
-                None => Ok(false),
+                _ => Ok(false),
             }
         }
 
