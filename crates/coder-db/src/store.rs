@@ -3225,7 +3225,7 @@ impl AppStore for PostgresStore {
     ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredPortShareRow>(
             "SELECT workspace_id, agent_name, port, share_level, protocol
-             FROM workspace_agent_port_share
+             FROM workspace_agent_port_shares
              WHERE workspace_id = $1
              ORDER BY agent_name, port",
         )
@@ -3242,7 +3242,7 @@ impl AppStore for PostgresStore {
         input: UpsertPortShareInput,
     ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
         sqlx::query_as::<_, StoredPortShareRow>(
-            "INSERT INTO workspace_agent_port_share (
+            "INSERT INTO workspace_agent_port_shares (
                 workspace_id, agent_name, port, share_level, protocol
              )
              VALUES ($1, $2, $3, $4, $5)
@@ -3271,7 +3271,7 @@ impl AppStore for PostgresStore {
     ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
         sqlx::query_as::<_, StoredPortShareRow>(
             "SELECT workspace_id, agent_name, port, share_level, protocol
-             FROM workspace_agent_port_share
+             FROM workspace_agent_port_shares
              WHERE workspace_id = $1 AND agent_name = $2 AND port = $3",
         )
         .bind(workspace_id)
@@ -3291,7 +3291,7 @@ impl AppStore for PostgresStore {
         port: i32,
     ) -> Result<bool, StorageError> {
         let result = sqlx::query(
-            "DELETE FROM workspace_agent_port_share
+            "DELETE FROM workspace_agent_port_shares
              WHERE workspace_id = $1 AND agent_name = $2 AND port = $3",
         )
         .bind(workspace_id)
