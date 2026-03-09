@@ -43,7 +43,6 @@ ALTER TABLE workspaces
     ADD COLUMN IF NOT EXISTS dormant_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS deleting_at TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS automatic_updates TEXT NOT NULL DEFAULT 'never',
-    ADD COLUMN IF NOT EXISTS favorite BOOLEAN NOT NULL DEFAULT FALSE,
     ADD COLUMN IF NOT EXISTS next_start_at TIMESTAMPTZ;
 
 CREATE INDEX IF NOT EXISTS idx_workspaces_owner_id ON workspaces (owner_id) WHERE deleted = false;
@@ -63,6 +62,9 @@ ALTER TABLE workspace_builds
     ADD COLUMN IF NOT EXISTS max_deadline TIMESTAMPTZ,
     ADD COLUMN IF NOT EXISTS reason TEXT NOT NULL DEFAULT 'initiator',
     ADD COLUMN IF NOT EXISTS daily_cost INTEGER NOT NULL DEFAULT 0;
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_workspace_builds_workspace_id_build_number
+    ON workspace_builds (workspace_id, build_number);
 
 CREATE INDEX IF NOT EXISTS idx_workspace_builds_job_id ON workspace_builds (job_id);
 
@@ -135,3 +137,10 @@ CREATE TABLE IF NOT EXISTS provisioner_job_timings (
 );
 
 CREATE INDEX IF NOT EXISTS idx_provisioner_job_timings_job_id ON provisioner_job_timings (job_id);
+
+-- Per-user workspace favorites junction table.
+CREATE TABLE IF NOT EXISTS workspace_favorites (
+    workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    user_id UUID NOT NULL,
+    PRIMARY KEY (workspace_id, user_id)
+);

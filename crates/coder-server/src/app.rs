@@ -3024,11 +3024,6 @@ async fn post_workspace_build(
         template.active_version_id
     };
 
-    let build_number = state
-        .store
-        .next_workspace_build_number(workspace_id)
-        .await?;
-
     let job_id = Uuid::new_v4();
     let build_id = Uuid::new_v4();
 
@@ -3045,13 +3040,14 @@ async fn post_workspace_build(
         })
         .await?;
 
+    // build_number is computed atomically inside insert_workspace_build.
     let build = state
         .store
         .insert_workspace_build(CreateWorkspaceBuildInput {
             id: build_id,
             workspace_id,
             template_version_id: tv_id,
-            build_number,
+            build_number: 0,
             transition,
             initiator_id: context.user.id,
             job_id,
@@ -3169,7 +3165,25 @@ async fn put_workspace_extend(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let _deadline = body.get("deadline").and_then(|v| v.as_str());
+    let deadline_str = body.get("deadline").and_then(|v| v.as_str());
+
+    let new_deadline = match deadline_str {
+        Some(s) => match OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339) {
+            Ok(dt) => Some(dt),
+            Err(_) => {
+                return Ok(validation_response(vec![ValidationError {
+                    field: "deadline".to_owned(),
+                    detail: "Invalid RFC3339 timestamp.".to_owned(),
+                }]));
+            }
+        },
+        None => {
+            return Ok(validation_response(vec![ValidationError {
+                field: "deadline".to_owned(),
+                detail: "Deadline is required.".to_owned(),
+            }]));
+        }
+    };
 
     let Some(latest_build) = state
         .store
@@ -3179,12 +3193,17 @@ async fn put_workspace_extend(
         return Ok(not_found_response("No build found for workspace."));
     };
 
-    // Extend the build deadline (stub — just acknowledges the request).
+    // Enforce max_deadline: the new deadline cannot exceed the build's max_deadline.
+    let clamped_deadline = match (new_deadline, latest_build.max_deadline) {
+        (Some(nd), Some(md)) if nd > md => Some(md),
+        (d, _) => d,
+    };
+
     let _updated = state
         .store
         .update_workspace_build_deadline(
             latest_build.id,
-            latest_build.deadline,
+            clamped_deadline,
             latest_build.max_deadline,
         )
         .await?;
@@ -3905,13 +3924,14 @@ async fn post_user_workspace(
         })
         .await?;
 
+    // build_number is computed atomically inside insert_workspace_build.
     let _build = state
         .store
         .insert_workspace_build(CreateWorkspaceBuildInput {
             id: build_id,
             workspace_id,
             template_version_id,
-            build_number: 1,
+            build_number: 0,
             transition: "start".to_owned(),
             initiator_id: context.user.id,
             job_id,

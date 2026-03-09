@@ -2576,7 +2576,6 @@ impl AppStore for PostgresStore {
                 w.dormant_at,
                 w.deleting_at,
                 w.automatic_updates,
-                w.favorite,
                 w.next_start_at
              FROM workspaces w
              LEFT JOIN users u ON u.id = w.owner_id
@@ -2618,7 +2617,7 @@ impl AppStore for PostgresStore {
         sqlx::query_as::<_, StoredWorkspaceRow>(
             "SELECT id, created_at, updated_at, deleted, owner_id, organization_id,
                     template_id, name, autostart_schedule, ttl, last_used_at,
-                    dormant_at, deleting_at, automatic_updates, favorite, next_start_at
+                    dormant_at, deleting_at, automatic_updates, next_start_at
              FROM workspaces
              WHERE id = $1 AND deleted = false",
         )
@@ -2638,7 +2637,7 @@ impl AppStore for PostgresStore {
         sqlx::query_as::<_, StoredWorkspaceRow>(
             "SELECT id, created_at, updated_at, deleted, owner_id, organization_id,
                     template_id, name, autostart_schedule, ttl, last_used_at,
-                    dormant_at, deleting_at, automatic_updates, favorite, next_start_at
+                    dormant_at, deleting_at, automatic_updates, next_start_at
              FROM workspaces
              WHERE owner_id = $1 AND LOWER(name) = LOWER($2) AND deleted = false",
         )
@@ -2664,7 +2663,7 @@ impl AppStore for PostgresStore {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NOW())
              RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
                        template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates, favorite, next_start_at",
+                       dormant_at, deleting_at, automatic_updates, next_start_at",
         )
         .bind(input.id)
         .bind(input.owner_id)
@@ -2692,7 +2691,7 @@ impl AppStore for PostgresStore {
              WHERE id = $1 AND deleted = false
              RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
                        template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates, favorite, next_start_at",
+                       dormant_at, deleting_at, automatic_updates, next_start_at",
         )
         .bind(workspace_id)
         .bind(name)
@@ -2750,7 +2749,7 @@ impl AppStore for PostgresStore {
              WHERE id = $1 AND deleted = false
              RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
                        template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates, favorite, next_start_at",
+                       dormant_at, deleting_at, automatic_updates, next_start_at",
         )
         .bind(workspace_id)
         .bind(dormant_at)
@@ -2800,19 +2799,34 @@ impl AppStore for PostgresStore {
     async fn favorite_workspace(
         &self,
         workspace_id: Uuid,
-        _user_id: Uuid,
+        user_id: Uuid,
         favorite: bool,
     ) -> Result<bool, StorageError> {
-        let result = sqlx::query(
-            "UPDATE workspaces SET favorite = $2, updated_at = NOW()
-             WHERE id = $1 AND deleted = false",
-        )
-        .bind(workspace_id)
-        .bind(favorite)
-        .execute(&self.pool)
-        .await
-        .map_err(storage_error)?;
-        Ok(result.rows_affected() > 0)
+        if favorite {
+            // Insert into junction table (ignore conflict if already favorited).
+            sqlx::query(
+                "INSERT INTO workspace_favorites (workspace_id, user_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT (workspace_id, user_id) DO NOTHING",
+            )
+            .bind(workspace_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        } else {
+            // Remove from junction table.
+            sqlx::query(
+                "DELETE FROM workspace_favorites
+                 WHERE workspace_id = $1 AND user_id = $2",
+            )
+            .bind(workspace_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        }
+        Ok(true)
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2964,7 +2978,9 @@ impl AppStore for PostgresStore {
                 initiator_id, job_id, reason, deadline, max_deadline,
                 created_at, updated_at
              )
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+             VALUES ($1, $2, $3,
+                     (SELECT COALESCE(MAX(build_number), 0) + 1 FROM workspace_builds WHERE workspace_id = $2),
+                     $4, $5, $6, $7, $8, $9, NOW(), NOW())
              RETURNING id, created_at, updated_at, workspace_id, build_number, transition,
                        job_id, template_version_id, initiator_id, provisioner_state,
                        deadline, max_deadline, reason, daily_cost",
@@ -2972,7 +2988,6 @@ impl AppStore for PostgresStore {
         .bind(input.id)
         .bind(input.workspace_id)
         .bind(input.template_version_id)
-        .bind(input.build_number)
         .bind(&input.transition)
         .bind(input.initiator_id)
         .bind(input.job_id)
@@ -3695,7 +3710,6 @@ struct StoredWorkspaceRow {
     dormant_at: Option<OffsetDateTime>,
     deleting_at: Option<OffsetDateTime>,
     automatic_updates: String,
-    favorite: bool,
     next_start_at: Option<OffsetDateTime>,
 }
 
@@ -3831,7 +3845,7 @@ fn workspace_record_from_row(row: StoredWorkspaceRow) -> WorkspaceRecord {
         dormant_at: row.dormant_at,
         deleting_at: row.deleting_at,
         automatic_updates: row.automatic_updates,
-        favorite: row.favorite,
+        favorite: false,
         next_start_at: row.next_start_at,
     }
 }

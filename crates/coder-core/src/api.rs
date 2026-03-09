@@ -1907,9 +1907,9 @@ pub struct CreateWorkspaceRequest {
     /// Autostart schedule.
     #[serde(default)]
     pub autostart_schedule: Option<String>,
-    /// TTL in nanoseconds.
+    /// TTL in milliseconds.
     #[serde(default)]
-    pub ttl_ns: Option<i64>,
+    pub ttl_ms: Option<i64>,
     /// Automatic updates setting.
     #[serde(default)]
     pub automatic_updates: Option<AutomaticUpdates>,
