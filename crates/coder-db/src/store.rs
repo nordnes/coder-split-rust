@@ -2525,6 +2525,8 @@ impl AppStore for PostgresStore {
         &self,
         filter: TemplateListFilter,
     ) -> Result<Vec<TemplateRecord>, StorageError> {
+        // Escape LIKE metacharacters so user input is treated literally.
+        let escaped_search = filter.search.as_deref().map(escape_like);
         let rows = sqlx::query_as::<_, StoredTemplateRow>(
             r#"
             SELECT t.*,
@@ -2547,7 +2549,7 @@ impl AppStore for PostgresStore {
         .bind(filter.organization_id)
         .bind(filter.exact_name.as_deref())
         .bind(filter.deleted)
-        .bind(filter.search.as_deref())
+        .bind(escaped_search.as_deref())
         .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -2806,7 +2808,11 @@ impl AppStore for PostgresStore {
         )
         .bind(filter.template_id)
         .bind(filter.include_archived)
-        .bind(i64::from(filter.limit.max(1)))
+        .bind(if filter.limit == 0 {
+            i64::MAX
+        } else {
+            i64::from(filter.limit)
+        })
         .bind(i64::from(filter.offset))
         .fetch_all(&self.pool)
         .await
@@ -3789,6 +3795,22 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         error,
         sqlx::Error::Database(database_error) if database_error.is_unique_violation()
     )
+}
+
+/// Escapes SQL LIKE metacharacters (`%`, `_`, `\`) so that user-supplied
+/// search strings are matched literally.
+fn escape_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn storage_error(error: sqlx::Error) -> StorageError {
