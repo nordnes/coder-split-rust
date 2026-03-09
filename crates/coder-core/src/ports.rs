@@ -17,6 +17,13 @@ use crate::identity::{
     TokenConfigRecord, UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord,
     UserStatus,
 };
+use crate::provisioner::{
+    AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
+    GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+    InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, ProvisionerDaemonRecord,
+    ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobTimingRecord,
+    ProvisionerKeyRecord, UpsertProvisionerDaemonInput,
+};
 
 /// Deployment metadata required by the HTTP layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -811,9 +818,154 @@ pub trait OperationalStore: Send + Sync {
     }
 }
 
+/// Storage contract for provisioner job lifecycle, daemons, keys, logs, and timings.
+#[async_trait]
+pub trait ProvisionerStore: Send + Sync {
+    // ── Jobs ──────────────────────────────────────────────────
+
+    /// Atomically acquires a pending job matching the daemon's capabilities.
+    /// Uses `FOR UPDATE SKIP LOCKED` to prevent double-assignment.
+    async fn acquire_provisioner_job(
+        &self,
+        input: AcquireProvisionerJobInput,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError>;
+
+    /// Looks up a single provisioner job by identifier.
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError>;
+
+    /// Looks up multiple provisioner jobs by identifiers.
+    async fn get_provisioner_jobs_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError>;
+
+    /// Inserts a new provisioner job.
+    async fn insert_provisioner_job(
+        &self,
+        input: InsertProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError>;
+
+    /// Updates the heartbeat timestamp for a running job.
+    async fn update_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Marks a job as completed (successfully or with error).
+    async fn update_provisioner_job_with_complete_by_id(
+        &self,
+        input: CompleteProvisionerJobInput,
+    ) -> Result<(), StorageError>;
+
+    /// Marks a job as canceled.
+    async fn update_provisioner_job_with_cancel_by_id(
+        &self,
+        input: CancelProvisionerJobInput,
+    ) -> Result<(), StorageError>;
+
+    /// Returns stale jobs that should be reaped (pending too long or hung).
+    async fn get_provisioner_jobs_to_be_reaped(
+        &self,
+        input: GetJobsToBeReapedInput,
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError>;
+
+    // ── Logs ─────────────────────────────────────────────────
+
+    /// Inserts a batch of log entries for a job.
+    async fn insert_provisioner_job_logs(
+        &self,
+        input: InsertProvisionerJobLogsInput,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError>;
+
+    /// Returns log entries for a job after the given log-line identifier.
+    async fn get_provisioner_logs_after_id(
+        &self,
+        job_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError>;
+
+    // ── Timings ──────────────────────────────────────────────
+
+    /// Inserts a batch of timing entries for a job.
+    async fn insert_provisioner_job_timings(
+        &self,
+        input: InsertProvisionerJobTimingsInput,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
+
+    /// Returns all timing entries for a job.
+    async fn get_provisioner_job_timings_by_job_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
+
+    // ── Daemons ──────────────────────────────────────────────
+
+    /// Registers or updates a provisioner daemon.
+    async fn upsert_provisioner_daemon(
+        &self,
+        input: UpsertProvisionerDaemonInput,
+    ) -> Result<ProvisionerDaemonRecord, StorageError>;
+
+    /// Updates the last-seen heartbeat time for a daemon.
+    async fn update_provisioner_daemon_last_seen_at(
+        &self,
+        id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Lists daemons for an organization.
+    async fn get_provisioner_daemons_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError>;
+
+    /// Deletes provisioner daemons that have not been seen in over 7 days.
+    async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError>;
+
+    // ── Keys ─────────────────────────────────────────────────
+
+    /// Inserts a new provisioner key.
+    async fn insert_provisioner_key(
+        &self,
+        input: InsertProvisionerKeyInput,
+    ) -> Result<ProvisionerKeyRecord, StorageError>;
+
+    /// Looks up a provisioner key by identifier.
+    async fn get_provisioner_key_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError>;
+
+    /// Looks up a provisioner key by hashed secret.
+    async fn get_provisioner_key_by_hashed_secret(
+        &self,
+        hashed_secret: &[u8],
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError>;
+
+    /// Looks up a provisioner key by organization and name.
+    async fn get_provisioner_key_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError>;
+
+    /// Lists provisioner keys for an organization.
+    async fn list_provisioner_keys_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError>;
+
+    /// Deletes a provisioner key by identifier.
+    async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError>;
+}
+
 /// Aggregate store contract used by the current Rust backend slice.
 #[async_trait]
-pub trait AppStore: DeploymentStore + Send + Sync {
+pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Returns whether a non-system first user exists.
     async fn first_user_exists(&self) -> Result<bool, StorageError>;
 
@@ -2077,5 +2229,179 @@ where
         (**self)
             .upsert_git_ssh_key(user_id, public_key, private_key)
             .await
+    }
+}
+
+#[async_trait]
+impl<T> ProvisionerStore for Arc<T>
+where
+    T: ProvisionerStore + ?Sized,
+{
+    async fn acquire_provisioner_job(
+        &self,
+        input: AcquireProvisionerJobInput,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        (**self).acquire_provisioner_job(input).await
+    }
+
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        (**self).get_provisioner_job_by_id(id).await
+    }
+
+    async fn get_provisioner_jobs_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+        (**self).get_provisioner_jobs_by_ids(ids).await
+    }
+
+    async fn insert_provisioner_job(
+        &self,
+        input: InsertProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError> {
+        (**self).insert_provisioner_job(input).await
+    }
+
+    async fn update_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self).update_provisioner_job_by_id(id, updated_at).await
+    }
+
+    async fn update_provisioner_job_with_complete_by_id(
+        &self,
+        input: CompleteProvisionerJobInput,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_provisioner_job_with_complete_by_id(input)
+            .await
+    }
+
+    async fn update_provisioner_job_with_cancel_by_id(
+        &self,
+        input: CancelProvisionerJobInput,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_provisioner_job_with_cancel_by_id(input)
+            .await
+    }
+
+    async fn get_provisioner_jobs_to_be_reaped(
+        &self,
+        input: GetJobsToBeReapedInput,
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+        (**self).get_provisioner_jobs_to_be_reaped(input).await
+    }
+
+    async fn insert_provisioner_job_logs(
+        &self,
+        input: InsertProvisionerJobLogsInput,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+        (**self).insert_provisioner_job_logs(input).await
+    }
+
+    async fn get_provisioner_logs_after_id(
+        &self,
+        job_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+        (**self)
+            .get_provisioner_logs_after_id(job_id, after_id)
+            .await
+    }
+
+    async fn insert_provisioner_job_timings(
+        &self,
+        input: InsertProvisionerJobTimingsInput,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+        (**self).insert_provisioner_job_timings(input).await
+    }
+
+    async fn get_provisioner_job_timings_by_job_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+        (**self).get_provisioner_job_timings_by_job_id(job_id).await
+    }
+
+    async fn upsert_provisioner_daemon(
+        &self,
+        input: UpsertProvisionerDaemonInput,
+    ) -> Result<ProvisionerDaemonRecord, StorageError> {
+        (**self).upsert_provisioner_daemon(input).await
+    }
+
+    async fn update_provisioner_daemon_last_seen_at(
+        &self,
+        id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_provisioner_daemon_last_seen_at(id, last_seen_at)
+            .await
+    }
+
+    async fn get_provisioner_daemons_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
+        (**self)
+            .get_provisioner_daemons_by_organization(organization_id)
+            .await
+    }
+
+    async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
+        (**self).delete_old_provisioner_daemons().await
+    }
+
+    async fn insert_provisioner_key(
+        &self,
+        input: InsertProvisionerKeyInput,
+    ) -> Result<ProvisionerKeyRecord, StorageError> {
+        (**self).insert_provisioner_key(input).await
+    }
+
+    async fn get_provisioner_key_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        (**self).get_provisioner_key_by_id(id).await
+    }
+
+    async fn get_provisioner_key_by_hashed_secret(
+        &self,
+        hashed_secret: &[u8],
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        (**self)
+            .get_provisioner_key_by_hashed_secret(hashed_secret)
+            .await
+    }
+
+    async fn get_provisioner_key_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        (**self)
+            .get_provisioner_key_by_name(organization_id, name)
+            .await
+    }
+
+    async fn list_provisioner_keys_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+        (**self)
+            .list_provisioner_keys_by_organization(organization_id)
+            .await
+    }
+
+    async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_provisioner_key(id).await
     }
 }

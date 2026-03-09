@@ -2738,22 +2738,27 @@ mod tests {
         hash_password,
     };
     use coder_core::{
-        ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AppStore, AuditLog,
-        AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
-        ChangePasswordWithOneTimePasscodeRequest, ConvertLoginRequest, CreateApiKeyInput,
+        AcquireProvisionerJobInput, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord,
+        AppStore, AuditLog, AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
+        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest,
+        CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserRequest,
         CreateFirstUserStoreError, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
         CreateUserRequestWithOrgs, CreateUserStoreError, DatabaseConfig, DeploymentMetadata,
         DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, GitSshKeyRecord,
-        HealthSettings, InsertOrganizationMemberError, LogFormat, LoginType,
-        LoginWithPasswordRequest, OrganizationMemberListFilter, OrganizationMemberRecord,
-        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-        ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, RequestOneTimePasscodeRequest,
-        ServerConfig, SessionCountDeploymentStatsResponse, SlimRoleRecord, SshConfig, StorageError,
-        TokenConfigRecord, UpdateRolesRequest, UpdateUserAppearanceSettingsRequest,
-        UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
-        UpsertExternalAuthLinkInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
+        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, GetJobsToBeReapedInput,
+        GitSshKeyRecord, HealthSettings, InsertOrganizationMemberError, InsertProvisionerJobInput,
+        InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
+        LogFormat, LoginType, LoginWithPasswordRequest, OrganizationMemberListFilter,
+        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
+        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
+        ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatsInput,
+        ProvisionerJobTimingRecord, ProvisionerKeyRecord, ProvisionerStore,
+        RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
+        SlimRoleRecord, SshConfig, StorageError, TokenConfigRecord, UpdateRolesRequest,
+        UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
+        UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
+        UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
         UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentStatInput,
         WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
         WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
@@ -2863,6 +2868,161 @@ mod tests {
             Ok(DeploymentMetadata {
                 deployment_id: Uuid::nil(),
             })
+        }
+    }
+
+    #[async_trait]
+    impl ProvisionerStore for FakeStore {
+        async fn acquire_provisioner_job(
+            &self,
+            _input: AcquireProvisionerJobInput,
+        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_job_by_id(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_jobs_by_ids(
+            &self,
+            _ids: &[Uuid],
+        ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job(
+            &self,
+            _input: InsertProvisionerJobInput,
+        ) -> Result<ProvisionerJobRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn update_provisioner_job_by_id(
+            &self,
+            _id: Uuid,
+            _updated_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn update_provisioner_job_with_complete_by_id(
+            &self,
+            _input: CompleteProvisionerJobInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn update_provisioner_job_with_cancel_by_id(
+            &self,
+            _input: CancelProvisionerJobInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn get_provisioner_jobs_to_be_reaped(
+            &self,
+            _input: GetJobsToBeReapedInput,
+        ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job_logs(
+            &self,
+            _input: InsertProvisionerJobLogsInput,
+        ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_provisioner_logs_after_id(
+            &self,
+            _job_id: Uuid,
+            _after_id: i64,
+        ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job_timings(
+            &self,
+            _input: InsertProvisionerJobTimingsInput,
+        ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_provisioner_job_timings_by_job_id(
+            &self,
+            _job_id: Uuid,
+        ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn upsert_provisioner_daemon(
+            &self,
+            _input: UpsertProvisionerDaemonInput,
+        ) -> Result<ProvisionerDaemonRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn update_provisioner_daemon_last_seen_at(
+            &self,
+            _id: Uuid,
+            _last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn get_provisioner_daemons_by_organization(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn insert_provisioner_key(
+            &self,
+            _input: InsertProvisionerKeyInput,
+        ) -> Result<ProvisionerKeyRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn get_provisioner_key_by_id(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_key_by_hashed_secret(
+            &self,
+            _hashed_secret: &[u8],
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_key_by_name(
+            &self,
+            _organization_id: Uuid,
+            _name: &str,
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn list_provisioner_keys_by_organization(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_provisioner_key(&self, _id: Uuid) -> Result<bool, StorageError> {
+            Ok(false)
         }
     }
 

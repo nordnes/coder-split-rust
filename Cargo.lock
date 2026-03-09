@@ -388,9 +388,14 @@ dependencies = [
 name = "coder-provisioner"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "base64",
+ "coder-core",
  "sha2",
  "thiserror",
+ "time",
+ "tracing",
+ "uuid",
 ]
 
 [[package]]

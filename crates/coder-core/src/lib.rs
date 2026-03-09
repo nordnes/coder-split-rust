@@ -8,6 +8,7 @@ pub mod config;
 pub mod identity;
 pub mod password;
 pub mod ports;
+pub mod provisioner;
 
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,
@@ -56,6 +57,15 @@ pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
     ExternalAuthLinkRecord, GitSshKeyRecord, IdentityStore, OperationalStore, PersistAuditLogInput,
     ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    StorageError, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    ProvisionerStore, StorageError, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput,
+    WorkspaceBuildStatsInput, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
+    WorkspaceStatsWorkspaceInput,
+};
+pub use provisioner::{
+    AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
+    GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+    InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, LogLevel, LogSource,
+    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatus,
+    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
+    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType, UpsertProvisionerDaemonInput,
 };
