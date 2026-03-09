@@ -10,14 +10,17 @@ use coder_core::{
     CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, DatabaseConfig,
     DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
     ExternalAuthLinkRecord, ExternalAuthUser, FirstUserRecord, GitSshKeyRecord, HealthSettings,
-    InsertOrganizationMemberError, LoginType, MinimalOrganization, MinimalUser,
-    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerJobStatsInput, SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError,
-    TokenConfigRecord, UpsertExternalAuthLinkInput, UserAppearanceRecord, UserListFilter,
-    UserPreferenceRecord, UserRecord, UserStatus, WorkspaceAgentStatInput,
-    WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    InsertAgentLogInput, InsertOrganizationMemberError, InsertWorkspaceAppStatusInput, LoginType,
+    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
+    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, SessionCountDeploymentStatsResponse,
+    SlimRoleRecord, StorageError, TokenConfigRecord, UpsertExternalAuthLinkInput,
+    UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
+    WorkspaceAgentMetadataRow, WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentStatInput,
+    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
+    WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
+    WorkspaceStatsWorkspaceInput,
 };
 use serde_json::{Value, from_str};
 use sqlx::{FromRow, PgPool, Postgres, Transaction, postgres::PgPoolOptions};
@@ -256,6 +259,135 @@ struct StoredProvisionerDaemonRow {
     provisioners: Vec<String>,
     tags_json: String,
     status: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentRow {
+    id: Uuid,
+    parent_id: Option<Uuid>,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    name: String,
+    first_connected_at: Option<OffsetDateTime>,
+    last_connected_at: Option<OffsetDateTime>,
+    disconnected_at: Option<OffsetDateTime>,
+    resource_id: Uuid,
+    auth_token: Uuid,
+    auth_instance_id: Option<String>,
+    architecture: String,
+    environment_variables: Option<String>,
+    operating_system: String,
+    directory: String,
+    expanded_directory: String,
+    version: String,
+    api_version: String,
+    connection_timeout_seconds: i32,
+    troubleshooting_url: String,
+    motd_file: String,
+    lifecycle_state: String,
+    logs_length: i32,
+    logs_overflowed: bool,
+    started_at: Option<OffsetDateTime>,
+    ready_at: Option<OffsetDateTime>,
+    subsystems: Vec<String>,
+    display_apps: Vec<String>,
+    display_order: i32,
+    api_key_scope: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAppRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    agent_id: Uuid,
+    display_name: String,
+    icon: String,
+    command: Option<String>,
+    url: Option<String>,
+    healthcheck_url: String,
+    healthcheck_interval: i32,
+    healthcheck_threshold: i32,
+    health: String,
+    subdomain: bool,
+    sharing_level: String,
+    slug: String,
+    external: bool,
+    display_order: i32,
+    hidden: bool,
+    open_in: String,
+    display_group: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentScriptRow {
+    id: Uuid,
+    workspace_agent_id: Uuid,
+    log_source_id: Uuid,
+    log_path: String,
+    created_at: OffsetDateTime,
+    script: String,
+    cron: String,
+    start_blocks_login: bool,
+    run_on_start: bool,
+    run_on_stop: bool,
+    timeout_seconds: i32,
+    display_name: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentLogSourceRow {
+    id: Uuid,
+    workspace_agent_id: Uuid,
+    created_at: OffsetDateTime,
+    display_name: String,
+    icon: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentLogRow {
+    id: i64,
+    agent_id: Uuid,
+    created_at: OffsetDateTime,
+    output: String,
+    level: String,
+    log_source_id: Uuid,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentMetadataRow {
+    workspace_agent_id: Uuid,
+    display_name: String,
+    key: String,
+    script: String,
+    value: String,
+    error: String,
+    timeout: i64,
+    interval: i64,
+    collected_at: OffsetDateTime,
+    display_order: i32,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentDevcontainerRow {
+    id: Uuid,
+    workspace_agent_id: Uuid,
+    created_at: OffsetDateTime,
+    workspace_folder: String,
+    config_path: String,
+    name: String,
+    subagent_id: Option<Uuid>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAppStatusRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    agent_id: Uuid,
+    app_id: Uuid,
+    workspace_id: Uuid,
+    state: String,
+    message: String,
+    uri: Option<String>,
 }
 
 impl PostgresStore {
@@ -2508,6 +2640,410 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)
         .and_then(external_auth_link_record_from_row)
     }
+
+    // -----------------------------------------------------------------------
+    // Workspace Agent storage methods
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_agent_by_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_agent_row_from_stored))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_agent_by_auth_token(
+        &self,
+        auth_token: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE auth_token = $1",
+        )
+        .bind(auth_token)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_agent_row_from_stored))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_agent_by_instance_id(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE auth_instance_id = $1
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_agent_row_from_stored))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agents_by_resource_ids(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE resource_id = ANY($1)
+             ORDER BY created_at ASC",
+        )
+        .bind(resource_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_apps_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAppRow>(
+            "SELECT
+                id, created_at, agent_id, display_name, icon,
+                command, url, healthcheck_url, healthcheck_interval,
+                healthcheck_threshold, health::text AS health, subdomain,
+                sharing_level::text AS sharing_level, slug, external,
+                display_order, hidden, open_in::text AS open_in,
+                display_group
+             FROM workspace_apps
+             WHERE agent_id = $1
+             ORDER BY display_order ASC, slug ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_app_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_scripts(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentScriptRow>(
+            "SELECT
+                id, workspace_agent_id, log_source_id, log_path,
+                created_at, script, cron, start_blocks_login,
+                run_on_start, run_on_stop, timeout_seconds, display_name
+             FROM workspace_agent_scripts
+             WHERE workspace_agent_id = $1
+             ORDER BY display_name ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_script_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_log_sources(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentLogSourceRow>(
+            "SELECT id, workspace_agent_id, created_at, display_name, icon
+             FROM workspace_agent_log_sources
+             WHERE workspace_agent_id = $1
+             ORDER BY created_at ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_log_source_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentLogRow>(
+            "SELECT id, agent_id, created_at, output, level::text AS level, log_source_id
+             FROM workspace_agent_logs
+             WHERE agent_id = $1 AND id > $2
+             ORDER BY id ASC
+             LIMIT $3",
+        )
+        .bind(agent_id)
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_log_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self, logs), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        log_source_id: Uuid,
+        logs: &[InsertAgentLogInput],
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let mut created_ats = Vec::with_capacity(logs.len());
+        let mut outputs = Vec::with_capacity(logs.len());
+        let mut levels = Vec::with_capacity(logs.len());
+
+        for log in logs {
+            created_ats.push(log.created_at);
+            outputs.push(log.output.as_str());
+            levels.push(log.level.as_str());
+        }
+
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentLogRow>(
+            "INSERT INTO workspace_agent_logs (agent_id, created_at, output, level, log_source_id)
+             SELECT $1, unnest($2::timestamptz[]), unnest($3::text[]),
+                    unnest($4::log_level[]), $5
+             RETURNING id, agent_id, created_at, output, level::text AS level, log_source_id",
+        )
+        .bind(agent_id)
+        .bind(&created_ats)
+        .bind(&outputs)
+        .bind(&levels)
+        .bind(log_source_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_log_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_metadata(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentMetadataRow>(
+            "SELECT workspace_agent_id, display_name, key, script,
+                    value, error, timeout, interval, collected_at, display_order
+             FROM workspace_agent_metadata
+             WHERE workspace_agent_id = $1
+             ORDER BY display_order ASC, key ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_metadata_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_devcontainers(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentDevcontainerRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentDevcontainerRow>(
+            "SELECT id, workspace_agent_id, created_at, workspace_folder,
+                    config_path, name, subagent_id
+             FROM workspace_agent_devcontainers
+             WHERE workspace_agent_id = $1
+             ORDER BY name ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_devcontainer_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent_log_source(
+        &self,
+        agent_id: Uuid,
+        display_name: &str,
+        icon: &str,
+    ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
+        let row = sqlx::query_as::<_, StoredWorkspaceAgentLogSourceRow>(
+            "INSERT INTO workspace_agent_log_sources (id, workspace_agent_id, created_at, display_name, icon)
+             VALUES ($1, $2, NOW(), $3, $4)
+             RETURNING id, workspace_agent_id, created_at, display_name, icon",
+        )
+        .bind(Uuid::new_v4())
+        .bind(agent_id)
+        .bind(display_name)
+        .bind(icon)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(workspace_agent_log_source_row_from_stored(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_app_statuses_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppStatusRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAppStatusRow>(
+            "SELECT id, created_at, agent_id, app_id, workspace_id,
+                    state::text AS state, message, uri
+             FROM workspace_app_statuses
+             WHERE agent_id = $1
+             ORDER BY created_at DESC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_app_status_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_app_status(
+        &self,
+        input: &InsertWorkspaceAppStatusInput,
+    ) -> Result<WorkspaceAppStatusRow, StorageError> {
+        let row = sqlx::query_as::<_, StoredWorkspaceAppStatusRow>(
+            "INSERT INTO workspace_app_statuses (id, created_at, agent_id, app_id, workspace_id, state, message, uri)
+             VALUES ($1, NOW(), $2, $3, $4, $5::workspace_app_status_state, $6, $7)
+             RETURNING id, created_at, agent_id, app_id, workspace_id, state::text AS state, message, uri",
+        )
+        .bind(Uuid::new_v4())
+        .bind(input.agent_id)
+        .bind(input.app_id)
+        .bind(input.workspace_id)
+        .bind(&input.state)
+        .bind(&input.message)
+        .bind(&input.uri)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(workspace_app_status_row_from_stored(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_app_by_agent_and_slug(
+        &self,
+        agent_id: Uuid,
+        slug: &str,
+    ) -> Result<Option<WorkspaceAppRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAppRow>(
+            "SELECT
+                id, created_at, agent_id, display_name, icon,
+                command, url, healthcheck_url, healthcheck_interval,
+                healthcheck_threshold, health::text AS health, subdomain,
+                sharing_level::text AS sharing_level, slug, external,
+                display_order, hidden, open_in::text AS open_in,
+                display_group
+             FROM workspace_apps
+             WHERE agent_id = $1 AND slug = $2",
+        )
+        .bind(agent_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_app_row_from_stored))
+    }
 }
 
 async fn ensure_default_organization(
@@ -2890,4 +3426,149 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
 
 fn storage_error(error: sqlx::Error) -> StorageError {
     StorageError::unavailable(error.to_string())
+}
+
+fn workspace_agent_row_from_stored(row: StoredWorkspaceAgentRow) -> WorkspaceAgentRow {
+    WorkspaceAgentRow {
+        id: row.id,
+        parent_id: row.parent_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        name: row.name,
+        first_connected_at: row.first_connected_at,
+        last_connected_at: row.last_connected_at,
+        disconnected_at: row.disconnected_at,
+        resource_id: row.resource_id,
+        auth_token: row.auth_token,
+        auth_instance_id: row.auth_instance_id,
+        architecture: row.architecture,
+        environment_variables: row.environment_variables,
+        operating_system: row.operating_system,
+        directory: row.directory,
+        expanded_directory: row.expanded_directory,
+        version: row.version,
+        api_version: row.api_version,
+        connection_timeout_seconds: row.connection_timeout_seconds,
+        troubleshooting_url: row.troubleshooting_url,
+        motd_file: row.motd_file,
+        lifecycle_state: row.lifecycle_state,
+        logs_length: row.logs_length,
+        logs_overflowed: row.logs_overflowed,
+        started_at: row.started_at,
+        ready_at: row.ready_at,
+        subsystems: row.subsystems,
+        display_apps: row.display_apps,
+        display_order: row.display_order,
+        api_key_scope: row.api_key_scope,
+    }
+}
+
+fn workspace_app_row_from_stored(row: StoredWorkspaceAppRow) -> WorkspaceAppRow {
+    WorkspaceAppRow {
+        id: row.id,
+        created_at: row.created_at,
+        agent_id: row.agent_id,
+        display_name: row.display_name,
+        icon: row.icon,
+        command: row.command,
+        url: row.url,
+        healthcheck_url: row.healthcheck_url,
+        healthcheck_interval: row.healthcheck_interval,
+        healthcheck_threshold: row.healthcheck_threshold,
+        health: row.health,
+        subdomain: row.subdomain,
+        sharing_level: row.sharing_level,
+        slug: row.slug,
+        external: row.external,
+        display_order: row.display_order,
+        hidden: row.hidden,
+        open_in: row.open_in,
+        display_group: row.display_group,
+    }
+}
+
+fn workspace_agent_script_row_from_stored(
+    row: StoredWorkspaceAgentScriptRow,
+) -> WorkspaceAgentScriptRow {
+    WorkspaceAgentScriptRow {
+        id: row.id,
+        workspace_agent_id: row.workspace_agent_id,
+        log_source_id: row.log_source_id,
+        log_path: row.log_path,
+        created_at: row.created_at,
+        script: row.script,
+        cron: row.cron,
+        start_blocks_login: row.start_blocks_login,
+        run_on_start: row.run_on_start,
+        run_on_stop: row.run_on_stop,
+        timeout_seconds: row.timeout_seconds,
+        display_name: row.display_name,
+    }
+}
+
+fn workspace_agent_log_source_row_from_stored(
+    row: StoredWorkspaceAgentLogSourceRow,
+) -> WorkspaceAgentLogSourceRow {
+    WorkspaceAgentLogSourceRow {
+        id: row.id,
+        workspace_agent_id: row.workspace_agent_id,
+        created_at: row.created_at,
+        display_name: row.display_name,
+        icon: row.icon,
+    }
+}
+
+fn workspace_agent_log_row_from_stored(row: StoredWorkspaceAgentLogRow) -> WorkspaceAgentLogRow {
+    WorkspaceAgentLogRow {
+        id: row.id,
+        agent_id: row.agent_id,
+        created_at: row.created_at,
+        output: row.output,
+        level: row.level,
+        log_source_id: row.log_source_id,
+    }
+}
+
+fn workspace_agent_metadata_row_from_stored(
+    row: StoredWorkspaceAgentMetadataRow,
+) -> WorkspaceAgentMetadataRow {
+    WorkspaceAgentMetadataRow {
+        workspace_agent_id: row.workspace_agent_id,
+        display_name: row.display_name,
+        key: row.key,
+        script: row.script,
+        value: row.value,
+        error: row.error,
+        timeout: row.timeout,
+        interval: row.interval,
+        collected_at: row.collected_at,
+        display_order: row.display_order,
+    }
+}
+
+fn workspace_agent_devcontainer_row_from_stored(
+    row: StoredWorkspaceAgentDevcontainerRow,
+) -> WorkspaceAgentDevcontainerRow {
+    WorkspaceAgentDevcontainerRow {
+        id: row.id,
+        workspace_agent_id: row.workspace_agent_id,
+        created_at: row.created_at,
+        workspace_folder: row.workspace_folder,
+        config_path: row.config_path,
+        name: row.name,
+        subagent_id: row.subagent_id,
+    }
+}
+
+fn workspace_app_status_row_from_stored(row: StoredWorkspaceAppStatusRow) -> WorkspaceAppStatusRow {
+    WorkspaceAppStatusRow {
+        id: row.id,
+        created_at: row.created_at,
+        agent_id: row.agent_id,
+        app_id: row.app_id,
+        workspace_id: row.workspace_id,
+        state: row.state,
+        message: row.message,
+        uri: row.uri,
+    }
 }

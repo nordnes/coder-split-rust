@@ -25,17 +25,19 @@ use coder_connectivity::{HealthService, generate_git_ssh_key};
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
     AvailableExperiments, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
-    ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
-    CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
+    ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse, CreateLogSourceRequest,
+    CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs, DERPMap,
     DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
     GetUsersResponse, HealthSettings, HealthcheckReport, LoginType, LoginWithPasswordRequest,
     OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
-    PaginatedMembersResponse, PersistAuditLogInput, RequestOneTimePasscodeRequest, ServerConfig,
-    SshConfigResponse, UpdateCheckResponse, UpdateRolesRequest,
-    UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
+    PaginatedMembersResponse, PatchAgentLogsRequest, PatchAppStatusRequest, PersistAuditLogInput,
+    RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse, UpdateCheckResponse,
+    UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
     UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
     UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
     UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
+    WorkspaceAgentConnectionInfo, WorkspaceAgentListContainersResponse,
+    WorkspaceAgentListeningPortsResponse,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
@@ -372,7 +374,84 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route("/users/{user}/password", put(put_user_password))
                 .route("/users/{user}/convert-login", post(post_convert_login))
-                .route("/users/{user}", get(get_user).delete(delete_user)),
+                .route("/users/{user}", get(get_user).delete(delete_user))
+                // Workspace agent routes
+                .route(
+                    "/workspaceagents/connection",
+                    get(get_workspace_agents_connection_info),
+                )
+                .route(
+                    "/workspaceagents/me/app-status",
+                    axum::routing::patch(patch_workspace_agent_app_status),
+                )
+                .route(
+                    "/workspaceagents/me/external-auth",
+                    get(get_workspace_agent_external_auth),
+                )
+                .route(
+                    "/workspaceagents/me/log-source",
+                    post(post_workspace_agent_log_source),
+                )
+                .route(
+                    "/workspaceagents/me/logs",
+                    axum::routing::patch(patch_workspace_agent_logs),
+                )
+                .route(
+                    "/workspaceagents/me/reinit",
+                    get(get_workspace_agent_reinit),
+                )
+                .route("/workspaceagents/me/rpc", get(get_workspace_agent_rpc))
+                .route("/workspaceagents/{agent}", get(get_workspace_agent))
+                .route(
+                    "/workspaceagents/{agent}/connection",
+                    get(get_workspace_agent_connection),
+                )
+                .route(
+                    "/workspaceagents/{agent}/containers",
+                    get(get_workspace_agent_containers),
+                )
+                .route(
+                    "/workspaceagents/{agent}/containers/devcontainers/{devcontainer}",
+                    post(post_workspace_agent_recreate_devcontainer)
+                        .delete(axum::routing::delete(delete_workspace_agent_devcontainer)),
+                )
+                .route(
+                    "/workspaceagents/{agent}/containers/watch",
+                    get(get_workspace_agent_containers_watch),
+                )
+                .route(
+                    "/workspaceagents/{agent}/coordinate",
+                    get(get_workspace_agent_coordinate),
+                )
+                .route(
+                    "/workspaceagents/{agent}/listening-ports",
+                    get(get_workspace_agent_listening_ports),
+                )
+                .route(
+                    "/workspaceagents/{agent}/logs",
+                    get(get_workspace_agent_logs),
+                )
+                .route("/workspaceagents/{agent}/pty", get(get_workspace_agent_pty))
+                .route(
+                    "/workspaceagents/{agent}/watch-metadata",
+                    get(get_workspace_agent_watch_metadata),
+                )
+                .route(
+                    "/workspaceagents/{agent}/watch-metadata-ws",
+                    get(get_workspace_agent_watch_metadata_ws),
+                )
+                .route(
+                    "/workspaceagents/aws-instance-identity",
+                    post(post_workspace_agent_instance_identity_aws),
+                )
+                .route(
+                    "/workspaceagents/azure-instance-identity",
+                    post(post_workspace_agent_instance_identity_azure),
+                )
+                .route(
+                    "/workspaceagents/google-instance-identity",
+                    post(post_workspace_agent_instance_identity_google),
+                ),
         )
         .layer(
             TraceLayer::new_for_http()
@@ -2712,6 +2791,707 @@ fn resource_not_found_response() -> Response {
         )),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Agent query parameters
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+struct AgentLogsQuery {
+    #[serde(default)]
+    after: i64,
+    #[serde(default)]
+    follow: bool,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[allow(dead_code)]
+struct AgentExternalAuthQuery {
+    #[serde(default)]
+    id: String,
+    #[serde(default)]
+    listen: bool,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Agent conversion helpers
+// ---------------------------------------------------------------------------
+
+fn convert_workspace_agent_row(
+    row: &coder_core::WorkspaceAgentRow,
+    apps: Vec<coder_core::WorkspaceApp>,
+    log_sources: Vec<coder_core::WorkspaceAgentLogSource>,
+    scripts: Vec<coder_core::WorkspaceAgentScript>,
+) -> coder_core::WorkspaceAgent {
+    let lifecycle_state = match row.lifecycle_state.as_str() {
+        "starting" => coder_core::WorkspaceAgentLifecycle::Starting,
+        "start_timeout" => coder_core::WorkspaceAgentLifecycle::StartTimeout,
+        "start_error" => coder_core::WorkspaceAgentLifecycle::StartError,
+        "ready" => coder_core::WorkspaceAgentLifecycle::Ready,
+        "shutting_down" => coder_core::WorkspaceAgentLifecycle::ShuttingDown,
+        "shutdown_timeout" => coder_core::WorkspaceAgentLifecycle::ShutdownTimeout,
+        "shutdown_error" => coder_core::WorkspaceAgentLifecycle::ShutdownError,
+        "off" => coder_core::WorkspaceAgentLifecycle::Off,
+        _ => coder_core::WorkspaceAgentLifecycle::Created,
+    };
+
+    let status = derive_agent_status(row);
+
+    let subsystems: Vec<coder_core::AgentSubsystem> = row
+        .subsystems
+        .iter()
+        .filter_map(|s| match s.as_str() {
+            "envbuilder" => Some(coder_core::AgentSubsystem::Envbuilder),
+            "envbox" => Some(coder_core::AgentSubsystem::Envbox),
+            "exectrace" => Some(coder_core::AgentSubsystem::Exectrace),
+            _ => None,
+        })
+        .collect();
+
+    let display_apps: Vec<coder_core::DisplayApp> = row
+        .display_apps
+        .iter()
+        .filter_map(|d| match d.as_str() {
+            "vscode" => Some(coder_core::DisplayApp::Vscode),
+            "vscode_insiders" => Some(coder_core::DisplayApp::VscodeInsiders),
+            "web_terminal" => Some(coder_core::DisplayApp::WebTerminal),
+            "ssh_helper" => Some(coder_core::DisplayApp::SshHelper),
+            "port_forwarding_helper" => Some(coder_core::DisplayApp::PortForwardingHelper),
+            _ => None,
+        })
+        .collect();
+
+    let environment_variables: HashMap<String, String> = row
+        .environment_variables
+        .as_deref()
+        .and_then(|json_str| serde_json::from_str(json_str).ok())
+        .unwrap_or_default();
+
+    coder_core::WorkspaceAgent {
+        id: row.id,
+        parent_id: row.parent_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        first_connected_at: row.first_connected_at,
+        last_connected_at: row.last_connected_at,
+        disconnected_at: row.disconnected_at,
+        started_at: row.started_at,
+        ready_at: row.ready_at,
+        status,
+        lifecycle_state,
+        name: row.name.clone(),
+        resource_id: row.resource_id,
+        instance_id: row.auth_instance_id.clone().unwrap_or_default(),
+        architecture: row.architecture.clone(),
+        environment_variables,
+        operating_system: row.operating_system.clone(),
+        logs_length: row.logs_length,
+        logs_overflowed: row.logs_overflowed,
+        directory: row.directory.clone(),
+        expanded_directory: row.expanded_directory.clone(),
+        version: row.version.clone(),
+        api_version: row.api_version.clone(),
+        apps,
+        latency: HashMap::new(),
+        connection_timeout_seconds: row.connection_timeout_seconds,
+        troubleshooting_url: row.troubleshooting_url.clone(),
+        subsystems,
+        health: coder_core::WorkspaceAgentHealth {
+            healthy: true,
+            reason: None,
+        },
+        display_apps,
+        log_sources,
+        scripts,
+    }
+}
+
+fn derive_agent_status(row: &coder_core::WorkspaceAgentRow) -> coder_core::WorkspaceAgentStatus {
+    if row.first_connected_at.is_none() {
+        if let Some(timeout) = row.connection_timeout_seconds.checked_mul(1_000_000_000) {
+            let deadline = row.created_at + time::Duration::nanoseconds(i64::from(timeout));
+            if OffsetDateTime::now_utc() > deadline {
+                return coder_core::WorkspaceAgentStatus::Timeout;
+            }
+        }
+        return coder_core::WorkspaceAgentStatus::Connecting;
+    }
+    if row.disconnected_at.is_some() {
+        return coder_core::WorkspaceAgentStatus::Disconnected;
+    }
+    coder_core::WorkspaceAgentStatus::Connected
+}
+
+fn convert_workspace_app_row(row: &coder_core::WorkspaceAppRow) -> coder_core::WorkspaceApp {
+    let sharing_level = match row.sharing_level.as_str() {
+        "authenticated" => coder_core::AppSharingLevel::Authenticated,
+        "organization" => coder_core::AppSharingLevel::Organization,
+        "public" => coder_core::AppSharingLevel::Public,
+        _ => coder_core::AppSharingLevel::Owner,
+    };
+    let health = match row.health.as_str() {
+        "initializing" => coder_core::WorkspaceAppHealth::Initializing,
+        "healthy" => coder_core::WorkspaceAppHealth::Healthy,
+        "unhealthy" => coder_core::WorkspaceAppHealth::Unhealthy,
+        _ => coder_core::WorkspaceAppHealth::Disabled,
+    };
+    let open_in = match row.open_in.as_str() {
+        "tab" => coder_core::WorkspaceAppOpenIn::Tab,
+        "window" => coder_core::WorkspaceAppOpenIn::Window,
+        _ => coder_core::WorkspaceAppOpenIn::SlimWindow,
+    };
+    coder_core::WorkspaceApp {
+        id: row.id,
+        slug: row.slug.clone(),
+        display_name: row.display_name.clone(),
+        command: row.command.clone(),
+        url: row.url.clone(),
+        icon: row.icon.clone(),
+        subdomain: row.subdomain,
+        sharing_level,
+        healthcheck_url: row.healthcheck_url.clone(),
+        healthcheck_interval: row.healthcheck_interval,
+        healthcheck_threshold: row.healthcheck_threshold,
+        health,
+        external: row.external,
+        display_order: row.display_order,
+        hidden: row.hidden,
+        open_in,
+        display_group: row.display_group.clone(),
+    }
+}
+
+fn convert_log_source_row(
+    row: &coder_core::WorkspaceAgentLogSourceRow,
+) -> coder_core::WorkspaceAgentLogSource {
+    coder_core::WorkspaceAgentLogSource {
+        id: row.id,
+        workspace_agent_id: row.workspace_agent_id,
+        created_at: row.created_at,
+        display_name: row.display_name.clone(),
+        icon: row.icon.clone(),
+    }
+}
+
+fn convert_script_row(
+    row: &coder_core::WorkspaceAgentScriptRow,
+) -> coder_core::WorkspaceAgentScript {
+    coder_core::WorkspaceAgentScript {
+        id: row.id,
+        log_source_id: row.log_source_id,
+        log_path: row.log_path.clone(),
+        script: row.script.clone(),
+        cron: row.cron.clone(),
+        start_blocks_login: row.start_blocks_login,
+        run_on_start: row.run_on_start,
+        run_on_stop: row.run_on_stop,
+        timeout_seconds: row.timeout_seconds,
+        display_name: row.display_name.clone(),
+    }
+}
+
+fn convert_log_level(level: &str) -> coder_core::LogLevel {
+    match level {
+        "trace" => coder_core::LogLevel::Trace,
+        "debug" => coder_core::LogLevel::Debug,
+        "warn" => coder_core::LogLevel::Warn,
+        "error" => coder_core::LogLevel::Error,
+        _ => coder_core::LogLevel::Info,
+    }
+}
+
+#[allow(dead_code)]
+fn convert_app_status_state(state: &str) -> coder_core::WorkspaceAppStatusState {
+    match state {
+        "working" => coder_core::WorkspaceAppStatusState::Working,
+        "complete" => coder_core::WorkspaceAppStatusState::Complete,
+        "failure" => coder_core::WorkspaceAppStatusState::Failure,
+        _ => coder_core::WorkspaceAppStatusState::Idle,
+    }
+}
+
+/// Build a full agent response including apps, log sources, scripts.
+async fn build_agent_response(
+    state: &AppState,
+    row: &coder_core::WorkspaceAgentRow,
+) -> Result<coder_core::WorkspaceAgent, AppError> {
+    let app_rows = state.store.list_workspace_apps_by_agent_id(row.id).await?;
+    let apps: Vec<coder_core::WorkspaceApp> =
+        app_rows.iter().map(convert_workspace_app_row).collect();
+
+    let source_rows = state.store.list_workspace_agent_log_sources(row.id).await?;
+    let log_sources: Vec<coder_core::WorkspaceAgentLogSource> =
+        source_rows.iter().map(convert_log_source_row).collect();
+
+    let script_rows = state.store.list_workspace_agent_scripts(row.id).await?;
+    let scripts: Vec<coder_core::WorkspaceAgentScript> =
+        script_rows.iter().map(convert_script_row).collect();
+
+    Ok(convert_workspace_agent_row(row, apps, log_sources, scripts))
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Agent handlers (20 routes)
+// ---------------------------------------------------------------------------
+
+/// GET /api/v2/workspaceagents/{agent} — get agent info.
+async fn get_workspace_agent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let agent = build_agent_response(&state, &row).await?;
+    Ok((StatusCode::OK, Json(agent)).into_response())
+}
+
+/// GET /api/v2/workspaceagents/{agent}/connection — per-agent connection info.
+async fn get_workspace_agent_connection(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(_agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let info = WorkspaceAgentConnectionInfo {
+        derp_map: DERPMap {
+            regions: HashMap::new(),
+        },
+        derp_force_websockets: false,
+        disable_direct_connections: false,
+    };
+    Ok((StatusCode::OK, Json(info)).into_response())
+}
+
+/// GET /api/v2/workspaceagents/{agent}/containers — list containers.
+async fn get_workspace_agent_containers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let devcontainer_rows = state
+        .store
+        .list_workspace_agent_devcontainers(agent_id)
+        .await?;
+    let devcontainers: Vec<coder_core::WorkspaceAgentDevcontainer> = devcontainer_rows
+        .iter()
+        .map(|dc| coder_core::WorkspaceAgentDevcontainer {
+            id: dc.id,
+            workspace_agent_id: dc.workspace_agent_id,
+            workspace_folder: dc.workspace_folder.clone(),
+            config_path: dc.config_path.clone(),
+            name: dc.name.clone(),
+            container: None,
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(WorkspaceAgentListContainersResponse {
+            containers: Vec::new(),
+            devcontainers,
+        }),
+    )
+        .into_response())
+}
+
+/// POST /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc} — recreate devcontainer.
+async fn post_workspace_agent_recreate_devcontainer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((_agent_id, _dc_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Devcontainer recreation is not yet implemented.",
+    ))
+}
+
+/// DELETE /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc} — delete devcontainer.
+async fn delete_workspace_agent_devcontainer(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((_agent_id, _dc_id)): Path<(Uuid, Uuid)>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Devcontainer deletion is not yet implemented.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/{agent}/containers/watch — SSE container watch.
+async fn get_workspace_agent_containers_watch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(_agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Container watch SSE is not yet implemented.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/{agent}/coordinate — WebSocket coordination.
+async fn get_workspace_agent_coordinate(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(_agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Agent coordination WebSocket is not yet implemented.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/{agent}/listening-ports — list listening ports.
+async fn get_workspace_agent_listening_ports(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Listening ports are reported by the agent in real-time; return empty for now.
+    Ok((
+        StatusCode::OK,
+        Json(WorkspaceAgentListeningPortsResponse { ports: Vec::new() }),
+    )
+        .into_response())
+}
+
+/// GET /api/v2/workspaceagents/{agent}/logs — streaming agent logs.
+async fn get_workspace_agent_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<Uuid>,
+    Query(query): Query<AgentLogsQuery>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    if query.follow {
+        // Streaming follow is not yet implemented; return current logs.
+        return Ok(not_implemented_response(
+            "Log streaming follow is not yet implemented.",
+        ));
+    }
+
+    let limit = query.limit.unwrap_or(256).min(10000);
+    let log_rows = state
+        .store
+        .list_workspace_agent_logs(agent_id, query.after, limit)
+        .await?;
+    let logs: Vec<coder_core::WorkspaceAgentLog> = log_rows
+        .iter()
+        .map(|r| coder_core::WorkspaceAgentLog {
+            id: r.id,
+            created_at: r.created_at,
+            output: r.output.clone(),
+            level: convert_log_level(&r.level),
+            source_id: r.log_source_id,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(logs)).into_response())
+}
+
+/// GET /api/v2/workspaceagents/{agent}/pty — WebSocket terminal.
+async fn get_workspace_agent_pty(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(_agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Agent PTY WebSocket is not yet implemented.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/{agent}/watch-metadata — SSE metadata watch.
+async fn get_workspace_agent_watch_metadata(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // SSE streaming not yet implemented; return current snapshot as JSON.
+    let metadata_rows = state.store.list_workspace_agent_metadata(agent_id).await?;
+    let metadata: Vec<coder_core::WorkspaceAgentMetadata> = metadata_rows
+        .iter()
+        .map(|m| coder_core::WorkspaceAgentMetadata {
+            display_name: m.display_name.clone(),
+            key: m.key.clone(),
+            script: m.script.clone(),
+            value: m.value.clone(),
+            error: m.error.clone(),
+            timeout: m.timeout,
+            interval: m.interval,
+            collected_at: m.collected_at,
+            display_order: m.display_order,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(metadata)).into_response())
+}
+
+/// GET /api/v2/workspaceagents/{agent}/watch-metadata-ws — WebSocket metadata watch.
+async fn get_workspace_agent_watch_metadata_ws(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(_agent_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Agent metadata WebSocket watch is not yet implemented.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/connection — global agent connection info.
+async fn get_workspace_agents_connection_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let info = WorkspaceAgentConnectionInfo {
+        derp_map: DERPMap {
+            regions: HashMap::new(),
+        },
+        derp_force_websockets: false,
+        disable_direct_connections: false,
+    };
+    Ok((StatusCode::OK, Json(info)).into_response())
+}
+
+/// PATCH /api/v2/workspaceagents/me/app-status — update app status (agent-authenticated).
+async fn patch_workspace_agent_app_status(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<PatchAppStatusRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Json(request) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    if request.app_slug.is_empty() {
+        return Ok(validation_response(vec![ValidationError {
+            field: "app_slug".to_owned(),
+            detail: "App slug is required.".to_owned(),
+        }]));
+    }
+
+    // Agent app-status updates require resolving the agent from the auth token.
+    // For now, return accepted to acknowledge the structure.
+    let _ = request;
+    Ok(not_implemented_response(
+        "Agent app-status updates require agent token resolution.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/me/external-auth — agent external auth.
+async fn get_workspace_agent_external_auth(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(_query): Query<AgentExternalAuthQuery>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Agent external auth lookup is not yet implemented.",
+    ))
+}
+
+/// POST /api/v2/workspaceagents/me/log-source — create agent log source.
+async fn post_workspace_agent_log_source(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<CreateLogSourceRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Json(request) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    if request.display_name.is_empty() {
+        return Ok(validation_response(vec![ValidationError {
+            field: "display_name".to_owned(),
+            detail: "Display name is required.".to_owned(),
+        }]));
+    }
+
+    // Requires agent token resolution to determine the calling agent.
+    let _ = request;
+    Ok(not_implemented_response(
+        "Agent log source creation requires agent token resolution.",
+    ))
+}
+
+/// PATCH /api/v2/workspaceagents/me/logs — append agent logs.
+async fn patch_workspace_agent_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Result<Json<PatchAgentLogsRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Json(request) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    if request.logs.is_empty() {
+        return Ok(validation_response(vec![ValidationError {
+            field: "logs".to_owned(),
+            detail: "At least one log entry is required.".to_owned(),
+        }]));
+    }
+
+    // Requires agent token resolution to determine the calling agent.
+    let _ = request;
+    Ok(not_implemented_response(
+        "Agent log appending requires agent token resolution.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/me/reinit — long-poll for agent reinit.
+async fn get_workspace_agent_reinit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Agent reinit long-poll is not yet implemented.",
+    ))
+}
+
+/// GET /api/v2/workspaceagents/me/rpc — dRPC over WebSocket.
+async fn get_workspace_agent_rpc(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Agent dRPC/WebSocket endpoint is not yet implemented.",
+    ))
+}
+
+/// POST /api/v2/workspaceagents/aws-instance-identity — AWS instance identity auth.
+async fn post_workspace_agent_instance_identity_aws(
+    State(state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    post_workspace_agent_instance_identity(state, "aws", body).await
+}
+
+/// POST /api/v2/workspaceagents/azure-instance-identity — Azure instance identity auth.
+async fn post_workspace_agent_instance_identity_azure(
+    State(state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    post_workspace_agent_instance_identity(state, "azure", body).await
+}
+
+/// POST /api/v2/workspaceagents/google-instance-identity — Google instance identity auth.
+async fn post_workspace_agent_instance_identity_google(
+    State(state): State<AppState>,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    post_workspace_agent_instance_identity(state, "google", body).await
+}
+
+async fn post_workspace_agent_instance_identity(
+    state: AppState,
+    cloud: &str,
+    body: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(token) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // Instance identity validation requires cloud provider
+    // credential verification, which is not yet implemented.
+    let _ = (state, token);
+    Ok(not_implemented_response(format!(
+        "Instance identity auth for '{cloud}' is not yet implemented.",
+    )))
 }
 
 #[cfg(test)]
