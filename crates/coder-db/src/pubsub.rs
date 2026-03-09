@@ -181,9 +181,16 @@ impl PubSub for PostgresPubSub {
 
         // Tell the background task to LISTEN on this channel if it is new.
         if need_listen {
-            self.command_tx
+            if let Err(err) = self
+                .command_tx
                 .send(ListenerCommand::Listen(channel.to_owned()))
-                .map_err(|err| PubSubError::unavailable(err.to_string()))?;
+            {
+                // Clean up the channel entry we just inserted so future
+                // subscribe calls don't skip the LISTEN command.
+                let mut channels = self.channels.lock().await;
+                channels.remove(channel);
+                return Err(PubSubError::unavailable(err.to_string()));
+            }
         }
 
         Ok(Subscription::new(receiver))
