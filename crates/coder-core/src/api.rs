@@ -1713,31 +1713,31 @@ pub struct UpdateTemplateMeta {
     pub icon: Option<String>,
     /// New default TTL in milliseconds.
     #[serde(default)]
-    pub default_ttl_ms: i64,
+    pub default_ttl_ms: Option<i64>,
     /// New activity bump in milliseconds.
     #[serde(default)]
-    pub activity_bump_ms: i64,
+    pub activity_bump_ms: Option<i64>,
     /// Allow user autostart.
     #[serde(default)]
-    pub allow_user_autostart: bool,
+    pub allow_user_autostart: Option<bool>,
     /// Allow user autostop.
     #[serde(default)]
-    pub allow_user_autostop: bool,
+    pub allow_user_autostop: Option<bool>,
     /// Allow user cancel workspace jobs.
     #[serde(default)]
-    pub allow_user_cancel_workspace_jobs: bool,
+    pub allow_user_cancel_workspace_jobs: Option<bool>,
     /// Failure TTL in milliseconds.
     #[serde(default)]
-    pub failure_ttl_ms: i64,
+    pub failure_ttl_ms: Option<i64>,
     /// Time til dormant in milliseconds.
     #[serde(default)]
-    pub time_til_dormant_ms: i64,
+    pub time_til_dormant_ms: Option<i64>,
     /// Time til dormant auto-delete in milliseconds.
     #[serde(default)]
-    pub time_til_dormant_autodelete_ms: i64,
+    pub time_til_dormant_autodelete_ms: Option<i64>,
     /// Require active version.
     #[serde(default)]
-    pub require_active_version: bool,
+    pub require_active_version: Option<bool>,
     /// Deprecation message.
     #[serde(default)]
     pub deprecation_message: Option<String>,

@@ -2771,12 +2771,12 @@ impl AppStore for PostgresStore {
     async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError> {
         let rows = sqlx::query_as::<_, StoredDAURow>(
             r#"
-            SELECT TO_CHAR(usage_date, 'YYYY-MM-DD') AS date,
+            SELECT TO_CHAR(start_time::date, 'YYYY-MM-DD') AS date,
                    CAST(COUNT(DISTINCT user_id) AS INT) AS amount
             FROM template_usage_stats
             WHERE template_id = $1
-            GROUP BY usage_date
-            ORDER BY usage_date ASC
+            GROUP BY start_time::date
+            ORDER BY start_time::date ASC
             "#,
         )
         .bind(template_id)

@@ -2595,7 +2595,7 @@ fn template_version_response(
         created_by: MinimalUser {
             id: ver.created_by,
             username: ver.created_by_username.clone(),
-            name: String::new(),
+            name: ver.created_by_name.clone(),
             avatar_url: ver.created_by_avatar_url.clone(),
         },
         archived: ver.archived,
@@ -2971,15 +2971,29 @@ async fn patch_template(
             display_name,
             description,
             icon,
-            body.default_ttl_ms * 1_000_000,
-            body.activity_bump_ms * 1_000_000,
-            body.allow_user_autostart,
-            body.allow_user_autostop,
-            body.allow_user_cancel_workspace_jobs,
-            body.failure_ttl_ms * 1_000_000,
-            body.time_til_dormant_ms * 1_000_000,
-            body.time_til_dormant_autodelete_ms * 1_000_000,
-            body.require_active_version,
+            body.default_ttl_ms
+                .unwrap_or(existing.default_ttl / 1_000_000)
+                * 1_000_000,
+            body.activity_bump_ms
+                .unwrap_or(existing.activity_bump / 1_000_000)
+                * 1_000_000,
+            body.allow_user_autostart
+                .unwrap_or(existing.allow_user_autostart),
+            body.allow_user_autostop
+                .unwrap_or(existing.allow_user_autostop),
+            body.allow_user_cancel_workspace_jobs
+                .unwrap_or(existing.allow_user_cancel_workspace_jobs),
+            body.failure_ttl_ms
+                .unwrap_or(existing.failure_ttl / 1_000_000)
+                * 1_000_000,
+            body.time_til_dormant_ms
+                .unwrap_or(existing.time_til_dormant / 1_000_000)
+                * 1_000_000,
+            body.time_til_dormant_autodelete_ms
+                .unwrap_or(existing.time_til_dormant_autodelete / 1_000_000)
+                * 1_000_000,
+            body.require_active_version
+                .unwrap_or(existing.require_active_version),
             deprecation_message,
             max_port_share_level,
         )
