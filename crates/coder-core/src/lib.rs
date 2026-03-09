@@ -5,6 +5,7 @@
 pub mod api;
 pub mod build_info;
 pub mod config;
+pub mod enums;
 pub mod identity;
 pub mod password;
 pub mod ports;

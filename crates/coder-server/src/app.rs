@@ -2778,7 +2778,7 @@ async fn post_oauth2_provider_app(
     record_audit(
         &state,
         AuditAction::Create,
-        ResourceKind::OAuth2ProviderApp,
+        ResourceKind::Oauth2ProviderApp,
         Some(&context.user),
         Some(app.id.to_string()),
         "created oauth2 provider app",
@@ -2850,7 +2850,7 @@ async fn put_oauth2_provider_app(
     record_audit(
         &state,
         AuditAction::Write,
-        ResourceKind::OAuth2ProviderApp,
+        ResourceKind::Oauth2ProviderApp,
         Some(&context.user),
         Some(app.id.to_string()),
         "updated oauth2 provider app",
@@ -2886,7 +2886,7 @@ async fn delete_oauth2_provider_app(
     record_audit(
         &state,
         AuditAction::Delete,
-        ResourceKind::OAuth2ProviderApp,
+        ResourceKind::Oauth2ProviderApp,
         Some(&context.user),
         Some(app_id),
         "deleted oauth2 provider app",
@@ -2946,7 +2946,7 @@ async fn post_oauth2_provider_app_secret(
     record_audit(
         &state,
         AuditAction::Create,
-        ResourceKind::OAuth2ProviderAppSecret,
+        ResourceKind::Oauth2ProviderAppSecret,
         Some(&context.user),
         Some(record.id.to_string()),
         "created oauth2 provider app secret",
@@ -2997,7 +2997,7 @@ async fn delete_oauth2_provider_app_secret(
     record_audit(
         &state,
         AuditAction::Delete,
-        ResourceKind::OAuth2ProviderAppSecret,
+        ResourceKind::Oauth2ProviderAppSecret,
         Some(&context.user),
         Some(secret_id),
         "deleted oauth2 provider app secret",
@@ -3032,7 +3032,7 @@ async fn delete_oauth2_provider_app_tokens(
     record_audit(
         &state,
         AuditAction::Delete,
-        ResourceKind::OAuth2ProviderApp,
+        ResourceKind::Oauth2ProviderApp,
         Some(&context.user),
         Some(app_id),
         "revoked oauth2 provider app tokens",

@@ -130,32 +130,68 @@ pub fn organization_builtin_roles() -> &'static [BuiltinRole] {
     ]
 }
 
-/// Normalized resource kinds used by the first Rust authorization layer.
+/// Normalized resource kinds used by the Rust authorization and audit layers.
+///
+/// Covers all variants from the PostgreSQL `resource_type` enum plus
+/// Rust-only variants (`Authentication`, `ExternalAuth`) that are used in
+/// the authorization layer but do not appear in the database enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ResourceKind {
-    /// A deployment-scoped authentication surface.
+    /// A deployment-scoped authentication surface (Rust-only).
     Authentication,
-    /// A site user.
-    User,
+    /// An external-auth link (Rust-only).
+    ExternalAuth,
     /// A site organization.
     Organization,
-    /// An organization member.
-    OrganizationMember,
-    /// A session or token API key.
-    ApiKey,
+    /// A template.
+    Template,
+    /// A template version.
+    TemplateVersion,
+    /// A site user.
+    User,
+    /// A workspace.
+    Workspace,
     /// A Git SSH keypair.
     GitSshKey,
+    /// A session or token API key.
+    ApiKey,
+    /// A group.
+    Group,
+    /// A workspace build.
+    WorkspaceBuild,
+    /// A license.
+    License,
+    /// A workspace proxy.
+    WorkspaceProxy,
+    /// A login conversion event.
+    ConvertLogin,
     /// Deployment health settings.
     HealthSettings,
-    /// An external-auth link.
-    ExternalAuth,
     /// An OAuth2 provider application.
-    OAuth2ProviderApp,
+    Oauth2ProviderApp,
     /// An OAuth2 provider application secret.
-    OAuth2ProviderAppSecret,
-    /// A user group.
-    Group,
+    Oauth2ProviderAppSecret,
     /// A custom role.
     CustomRole,
+    /// An organization member.
+    OrganizationMember,
+    /// Notifications settings.
+    NotificationsSettings,
+    /// A notification template.
+    NotificationTemplate,
+    /// IDP sync settings for an organization.
+    IdpSyncSettingsOrganization,
+    /// IDP sync settings for a group.
+    IdpSyncSettingsGroup,
+    /// IDP sync settings for a role.
+    IdpSyncSettingsRole,
+    /// A workspace agent.
+    WorkspaceAgent,
+    /// A workspace application.
+    WorkspaceApp,
+    /// Prebuilds settings.
+    PrebuildsSettings,
+    /// A task.
+    Task,
 }
