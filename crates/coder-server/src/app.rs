@@ -2423,12 +2423,13 @@ async fn list_tasks(
     Query(query): Query<TasksQuery>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Default owner_id to the authenticated user so results are scoped.
     let filter = TaskListFilter {
-        owner_id: query.owner_id,
+        owner_id: Some(query.owner_id.unwrap_or(context.user.id)),
         organization_id: query.organization_id,
     };
     let tasks = state.store.list_tasks(filter).await?;
@@ -2457,14 +2458,20 @@ async fn create_task(
     let name = request.name.unwrap_or_else(|| format!("task-{task_id}"));
     let display_name = request.display_name.unwrap_or_default();
 
+    let Some(&organization_id) = context.user.organization_ids.first() else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "User has no organization memberships.",
+                "A task cannot be created without an organization.",
+            )),
+        )
+            .into_response());
+    };
+
     let input = InsertTaskInput {
         id: task_id,
-        organization_id: context
-            .user
-            .organization_ids
-            .first()
-            .copied()
-            .unwrap_or_else(Uuid::new_v4),
+        organization_id,
         owner_id: context.user.id,
         name,
         display_name,
@@ -2483,7 +2490,7 @@ async fn get_task(
     Path(task_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -2494,6 +2501,14 @@ async fn get_task(
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     Ok(Json(task_response_from_record(record)).into_response())
 }
@@ -2503,7 +2518,7 @@ async fn get_task_input(
     Path(task_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -2514,6 +2529,14 @@ async fn get_task_input(
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     Ok(Json(json!({ "input": record.prompt })).into_response())
 }
@@ -2532,7 +2555,7 @@ async fn patch_task(
     headers: HeaderMap,
     Json(request): Json<PatchTaskRequest>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -2543,6 +2566,14 @@ async fn patch_task(
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     if let Some(input) = &request.input {
         if let Some(updated) = state.store.update_task_prompt(task_id, input).await? {
@@ -2565,9 +2596,26 @@ async fn delete_task(
     Path(task_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // Verify ownership before deleting.
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     let now = OffsetDateTime::now_utc();
     let deleted = state.store.delete_task(task_id, now).await?;
@@ -2587,18 +2635,26 @@ async fn get_task_logs(
     Path(task_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Verify the task exists
-    let Some(_record) = state.store.find_task_by_id(task_id).await? else {
+    // Verify the task exists and user owns it
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     // Check for a snapshot
     let snapshot = state.store.find_task_snapshot(task_id).await?;
@@ -2624,17 +2680,25 @@ async fn post_task_send(
     headers: HeaderMap,
     Json(_request): Json<TaskSendRequest>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     // In the full implementation this sends input to the workspace sidebar app.
     // For now we acknowledge the request.
@@ -2646,7 +2710,7 @@ async fn post_task_pause(
     Path(task_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -2657,6 +2721,14 @@ async fn post_task_pause(
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     // In the full implementation this would stop the workspace.
     Ok(Json(json!({ "task": task_response_from_record(record) })).into_response())
@@ -2667,7 +2739,7 @@ async fn post_task_resume(
     Path(task_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -2678,6 +2750,14 @@ async fn post_task_resume(
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     // In the full implementation this would start the workspace.
     Ok(Json(json!({ "task": task_response_from_record(record) })).into_response())
@@ -2689,17 +2769,25 @@ async fn post_task_log_snapshot(
     headers: HeaderMap,
     Json(request): Json<TaskLogSnapshotEnvelope>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(record) = state.store.find_task_by_id(task_id).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
     };
+
+    if record.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    }
 
     let now = OffsetDateTime::now_utc();
     state
@@ -5246,8 +5334,17 @@ mod tests {
                 .chats
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            if let Some(chat) = chats.get_mut(&id) {
-                chat.archived = true;
+            // Cascade: archive the target chat and all chats sharing root_chat_id,
+            // matching the PostgresStore behavior (WHERE id = $1 OR root_chat_id = $1).
+            let ids_to_archive: Vec<Uuid> = chats
+                .values()
+                .filter(|c| c.id == id || c.root_chat_id == Some(id))
+                .map(|c| c.id)
+                .collect();
+            for cid in ids_to_archive {
+                if let Some(chat) = chats.get_mut(&cid) {
+                    chat.archived = true;
+                }
             }
             Ok(())
         }
