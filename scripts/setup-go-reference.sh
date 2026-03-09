@@ -1,28 +1,20 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-CODER_REF_DIR="$(cd "$(dirname "$0")/.." && pwd)/coder"
+REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+cd "$REPO_ROOT"
 
-if [ -d "$CODER_REF_DIR/.git" ]; then
-  echo "Go reference already cloned at $CODER_REF_DIR"
-  cd "$CODER_REF_DIR" && git pull --ff-only
-  exit 0
+# Initialize the Go reference submodule
+if [ ! -f "coder/go.mod" ]; then
+  echo "Initializing Go reference submodule..."
+  git submodule update --init --depth 1 coder
+else
+  echo "Go reference submodule already initialized."
 fi
 
-echo "Cloning Coder Go reference into $CODER_REF_DIR ..."
-rm -rf "$CODER_REF_DIR"
-git clone --depth 1 https://github.com/coder/coder.git "$CODER_REF_DIR"
-
-# Restore the guard file that gitignore keeps tracked
-GUARD_FILE="$CODER_REF_DIR/AGENTS.md"
-if [ ! -f "$GUARD_FILE" ]; then
-  cd "$(dirname "$0")/.." && git checkout -- coder/AGENTS.md 2>/dev/null || true
-fi
-
-echo "Go reference available at $CODER_REF_DIR"
+echo "Go reference available at $REPO_ROOT/coder"
 
 # Pre-warm the Rust build cache (speeds up first compile in new sessions)
 echo "Pre-warming cargo build cache..."
-cd "$(dirname "$0")/.."
 cargo check --workspace 2>&1 | tail -3
 echo "Setup complete."

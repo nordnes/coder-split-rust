@@ -1,0 +1,3 @@
+[submodule "coder"]
+	path = coder
+	url = https://github.com/nordnes/coder.git
