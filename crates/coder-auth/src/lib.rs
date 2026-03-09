@@ -19,6 +19,7 @@ use coder_core::{
 use coder_rbac::Actor;
 use http::HeaderMap;
 use serde_json::{Value, json};
+use subtle::ConstantTimeEq;
 use time::OffsetDateTime;
 use tracing::warn;
 use url::form_urlencoded;
@@ -2233,9 +2234,14 @@ where
             ));
         }
 
-        // Verify the code hash.
+        // Verify the code hash (constant-time comparison to prevent
+        // timing side-channel attacks).
         let code_hash = sha2::Sha256::digest(raw_code.as_bytes()).to_vec();
-        if code_hash != code_record.hashed_secret {
+        if !bool::from(
+            code_hash
+                .as_slice()
+                .ct_eq(code_record.hashed_secret.as_slice()),
+        ) {
             return Err(OAuth2ProviderError::unauthorized(
                 "Invalid authorization code.",
             ));
@@ -2277,7 +2283,7 @@ where
             .await?;
         let matched_secret = secrets
             .into_iter()
-            .find(|s| s.hashed_secret == secret_hash)
+            .find(|s| bool::from(s.hashed_secret.as_slice().ct_eq(secret_hash.as_slice())))
             .ok_or_else(|| OAuth2ProviderError::unauthorized("Invalid client credentials."))?;
 
         // Delete the code (single-use).  Propagate errors so that tokens
@@ -2358,10 +2364,13 @@ where
             .store
             .list_oauth2_provider_app_secrets(secret.app_id)
             .await?;
-        if !app_secrets
-            .iter()
-            .any(|s| s.hashed_secret == client_secret_hash)
-        {
+        if !app_secrets.iter().any(|s| {
+            bool::from(
+                s.hashed_secret
+                    .as_slice()
+                    .ct_eq(client_secret_hash.as_slice()),
+            )
+        }) {
             return Err(OAuth2ProviderError::unauthorized(
                 "Invalid client credentials.",
             ));
