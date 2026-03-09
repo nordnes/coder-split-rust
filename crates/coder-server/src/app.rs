@@ -2578,12 +2578,18 @@ async fn applications_auth_redirect(
 // Git SSH key.  The workspace-agent domain is not yet implemented in this
 // Rust slice, so we return an empty stub response.
 // ---------------------------------------------------------------------------
-async fn workspace_agent_git_ssh_key() -> Response {
-    (
+async fn workspace_agent_git_ssh_key(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    Ok((
         StatusCode::OK,
         Json(json!({"public_key":"","private_key":""})),
     )
-        .into_response()
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -6979,10 +6985,14 @@ mod tests {
         .await?;
         assert_eq!(auth_redirect_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /workspaceagents/me/gitsshkey returns 200 with stub keys ---
+        // --- GET /workspaceagents/me/gitsshkey with auth returns 200 with stub keys ---
         let gitsshkey_response = call(
             app.clone(),
-            request(Method::GET, "/api/v2/workspaceagents/me/gitsshkey")?,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/workspaceagents/me/gitsshkey",
+                &session_token,
+            )?,
         )
         .await?;
         assert_eq!(gitsshkey_response.status(), StatusCode::OK);
@@ -6995,6 +7005,14 @@ mod tests {
             gitsshkey_body.get("private_key").and_then(Value::as_str),
             Some("")
         );
+
+        // --- GET /workspaceagents/me/gitsshkey without auth returns 401 ---
+        let gitsshkey_unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/workspaceagents/me/gitsshkey")?,
+        )
+        .await?;
+        assert_eq!(gitsshkey_unauth.status(), StatusCode::UNAUTHORIZED);
 
         // --- GET /workspaceagents/me/gitauth returns 200 with empty array ---
         let gitauth_response = call(
