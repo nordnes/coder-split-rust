@@ -563,36 +563,24 @@ pub enum PrebuildStatus {
 }
 
 // ---------------------------------------------------------------------------
-// Audit (database-mapped)
+// Audit
 // ---------------------------------------------------------------------------
 
-/// Audit action matching the PostgreSQL `audit_action` enum.
-///
-/// This is the database-mapped version. See also `coder_audit::AuditAction`
-/// which is used by the Rust audit layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
-#[serde(rename_all = "snake_case")]
-#[sqlx(type_name = "audit_action", rename_all = "snake_case")]
-pub enum AuditAction {
-    Create,
-    Write,
-    Delete,
-    Start,
-    Stop,
-    Login,
-    Logout,
-    Register,
-    RequestPasswordReset,
-    Connect,
-    Disconnect,
-    Open,
-    Close,
-}
+// The canonical `AuditAction` enum with `sqlx::Type` lives in
+// `coder_audit::AuditAction`.  It is the single source of truth for the
+// PostgreSQL `audit_action` type and is used by `AuditEvent` and
+// `PersistingAuditSink`.  Do **not** duplicate it here.
 
 /// Resource type matching the PostgreSQL `resource_type` enum.
 ///
-/// This is the database-mapped version. See also `coder_rbac::ResourceKind`
-/// which includes additional Rust-only variants.
+/// This is the **database-mapped** version that corresponds 1-to-1 with the
+/// `resource_type` PostgreSQL enum.  Use this type when reading/writing
+/// `resource_type` columns via `sqlx`.
+///
+/// See also [`coder_rbac::ResourceKind`], which extends this set with
+/// Rust-only variants (`Authentication`, `ExternalAuth`) used in the
+/// authorization layer.  `ResourceKind` intentionally does **not** derive
+/// `sqlx::Type` because those extra variants have no database counterpart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "resource_type", rename_all = "snake_case")]
