@@ -2137,7 +2137,7 @@ pub struct WorkspaceACLResponse {
     #[serde(default)]
     pub users: Vec<WorkspaceACLUser>,
     /// Groups with access.
-    #[serde(default, rename = "group")]
+    #[serde(default)]
     pub groups: Vec<WorkspaceACLGroup>,
 }
 
