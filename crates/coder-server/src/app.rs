@@ -385,9 +385,9 @@ pub fn build_router(state: AppState) -> Router {
         )
         // route_layer runs *after* routing so MatchedPath is populated.
         .route_layer(middleware::from_fn(prometheus_middleware))
-        .layer(middleware::from_fn(hsts_middleware))
-        .layer(middleware::from_fn(csp_middleware))
         .layer(middleware::from_fn(csrf_middleware))
+        .layer(middleware::from_fn(csp_middleware))
+        .layer(middleware::from_fn(hsts_middleware))
         .layer(middleware::from_fn(real_ip_middleware))
         .layer(
             TraceLayer::new_for_http()
