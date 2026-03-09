@@ -2262,8 +2262,14 @@ where
         }
 
         // Verify PKCE if a code challenge was used.
+        // On any PKCE failure, delete the code to enforce single-use
+        // (RFC 6749 §10.5: revoke on failed exchange attempt).
         if !code_record.code_challenge.is_empty() {
             if code_verifier.is_empty() {
+                let _ = self
+                    .store
+                    .delete_oauth2_provider_app_code(code_record.id)
+                    .await;
                 return Err(OAuth2ProviderError::bad_request(
                     "Code verifier is required for PKCE.",
                 ));
@@ -2274,6 +2280,10 @@ where
                 &code_record.code_challenge_method,
             );
             if !valid {
+                let _ = self
+                    .store
+                    .delete_oauth2_provider_app_code(code_record.id)
+                    .await;
                 return Err(OAuth2ProviderError::unauthorized(
                     "PKCE code verifier is invalid.",
                 ));
@@ -2287,10 +2297,23 @@ where
             .store
             .list_oauth2_provider_app_secrets(code_record.app_id)
             .await?;
-        let matched_secret = secrets
+        let matched_secret = match secrets
             .into_iter()
             .find(|s| bool::from(s.hashed_secret.as_slice().ct_eq(secret_hash.as_slice())))
-            .ok_or_else(|| OAuth2ProviderError::unauthorized("Invalid client credentials."))?;
+        {
+            Some(s) => s,
+            None => {
+                // Delete the code on client_secret failure to enforce single-use
+                // (RFC 6749 §10.5: revoke on failed exchange attempt).
+                let _ = self
+                    .store
+                    .delete_oauth2_provider_app_code(code_record.id)
+                    .await;
+                return Err(OAuth2ProviderError::unauthorized(
+                    "Invalid client credentials.",
+                ));
+            }
+        };
 
         // Delete the code (single-use).  Propagate errors so that tokens
         // are never issued if the code cannot be invalidated (RFC 6749 §10.5).
