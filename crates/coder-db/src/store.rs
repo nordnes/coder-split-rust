@@ -2837,6 +2837,8 @@ impl ProvisionerStore for PostgresStore {
         let sources: Vec<String> = input.source.iter().map(|s| s.to_string()).collect();
         let levels: Vec<String> = input.level.iter().map(|l| l.to_string()).collect();
 
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+
         let rows = sqlx::query_as::<_, StoredProvisionerJobLogRow>(
             "INSERT INTO provisioner_job_logs (job_id, created_at, source, level, stage, output)
              SELECT * FROM UNNEST($1::UUID[], $2::TIMESTAMPTZ[], $3::log_source[], $4::log_level[], $5::VARCHAR[], $6::VARCHAR[])
@@ -2848,21 +2850,24 @@ impl ProvisionerStore for PostgresStore {
         .bind(&levels)
         .bind(&input.stage)
         .bind(&input.output)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *transaction)
         .await
         .map_err(storage_error)?;
 
         // Update logs_length on the parent job.
+        let log_count = i32::try_from(n).unwrap_or(i32::MAX);
         sqlx::query(
             "UPDATE provisioner_jobs
              SET logs_length = logs_length + $1
              WHERE id = $2",
         )
-        .bind(i32::try_from(n).unwrap_or(i32::MAX))
+        .bind(log_count)
         .bind(input.job_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await
         .map_err(storage_error)?;
+
+        transaction.commit().await.map_err(storage_error)?;
 
         rows.into_iter()
             .map(provisioner_job_log_from_row)
@@ -3029,7 +3034,7 @@ impl ProvisionerStore for PostgresStore {
     async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
         sqlx::query(
             "DELETE FROM provisioner_daemons
-             WHERE last_seen_at < NOW() - INTERVAL '7 days'",
+             WHERE last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL '7 days'",
         )
         .execute(&self.pool)
         .await
