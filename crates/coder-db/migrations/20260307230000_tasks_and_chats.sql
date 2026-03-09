@@ -29,7 +29,7 @@ COMMENT ON COLUMN tasks.display_name IS 'Display name is a custom, human-friendl
 
 -- Task snapshots table
 CREATE TABLE task_snapshots (
-    task_id                 UUID        NOT NULL PRIMARY KEY,
+    task_id                 UUID        NOT NULL PRIMARY KEY REFERENCES tasks(id),
     log_snapshot            JSONB       NOT NULL,
     log_snapshot_created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -41,7 +41,7 @@ COMMENT ON COLUMN task_snapshots.log_snapshot_created_at IS 'When this log snaps
 
 -- Task workspace apps table
 CREATE TABLE task_workspace_apps (
-    task_id                 UUID    NOT NULL,
+    task_id                 UUID    NOT NULL REFERENCES tasks(id),
     workspace_agent_id      UUID,
     workspace_app_id        UUID,
     workspace_build_number  INTEGER NOT NULL,
