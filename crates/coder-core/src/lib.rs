@@ -58,8 +58,9 @@ pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
     ExternalAuthLinkRecord, GitSshKeyRecord, IdentityStore, OperationalStore, PersistAuditLogInput,
     ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    StorageError, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    StorageError, TemplateStore, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput,
+    WorkspaceBuildStatsInput, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
+    WorkspaceStatsWorkspaceInput,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
