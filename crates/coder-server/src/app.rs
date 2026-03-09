@@ -2646,27 +2646,45 @@ async fn list_inbox_notifications(
     };
 
     let read_status = params.read_status.unwrap_or_else(|| "all".to_owned());
+    if !matches!(read_status.as_str(), "all" | "unread" | "read") {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!("Invalid read_status: {read_status}. Must be one of: all, unread, read"),
+                "",
+            )),
+        )
+            .into_response());
+    }
 
     let templates: Option<Vec<Uuid>> = params.templates.as_deref().and_then(|s| {
         if s.is_empty() {
             None
         } else {
-            Some(
-                s.split(',')
-                    .filter_map(|id| Uuid::from_str(id.trim()).ok())
-                    .collect(),
-            )
+            let parsed: Vec<Uuid> = s
+                .split(',')
+                .filter_map(|id| Uuid::from_str(id.trim()).ok())
+                .collect();
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
         }
     });
     let targets: Option<Vec<Uuid>> = params.targets.as_deref().and_then(|s| {
         if s.is_empty() {
             None
         } else {
-            Some(
-                s.split(',')
-                    .filter_map(|id| Uuid::from_str(id.trim()).ok())
-                    .collect(),
-            )
+            let parsed: Vec<Uuid> = s
+                .split(',')
+                .filter_map(|id| Uuid::from_str(id.trim()).ok())
+                .collect();
+            if parsed.is_empty() {
+                None
+            } else {
+                Some(parsed)
+            }
         }
     });
 

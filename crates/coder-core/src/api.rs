@@ -1603,6 +1603,7 @@ pub struct InboxNotification {
     pub icon: String,
     pub actions: Vec<InboxNotificationAction>,
     #[serde(
+        default,
         skip_serializing_if = "Option::is_none",
         with = "time::serde::rfc3339::option"
     )]
