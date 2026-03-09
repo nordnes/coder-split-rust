@@ -2445,12 +2445,20 @@ where
             base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(refresh_raw);
         let refresh_hash = sha2::Sha256::digest(refresh_token_str.as_bytes()).to_vec();
 
-        // The token record expiry controls how long the *refresh token* is
-        // valid (30 days).  The shorter access-token lifetime (1 hour) is
-        // communicated to the client via `expires_in` in the JSON response.
-        let expires_at = OffsetDateTime::now_utc()
-            .checked_add(time::Duration::days(30))
-            .ok_or_else(|| OAuth2ProviderError::bad_request("Failed to compute token expiry."))?;
+        // Access token (API key) expires in 1 hour — matching `expires_in`
+        // returned to the client.  Refresh token record expires in 30 days.
+        let now_utc = OffsetDateTime::now_utc();
+        let access_expires_at = now_utc
+            .checked_add(time::Duration::hours(1))
+            .ok_or_else(|| {
+                OAuth2ProviderError::bad_request("Failed to compute access token expiry.")
+            })?;
+        let refresh_expires_at =
+            now_utc
+                .checked_add(time::Duration::days(30))
+                .ok_or_else(|| {
+                    OAuth2ProviderError::bad_request("Failed to compute refresh token expiry.")
+                })?;
 
         // Create a real API key for this token (ties it to the session system).
         // The key_secret IS the access token returned to the OAuth2 client so
@@ -2464,21 +2472,20 @@ where
         } else {
             key_secret.as_bytes().to_vec()
         };
-        let now = OffsetDateTime::now_utc();
         let api_key_result = self
             .store
             .create_api_key(CreateApiKeyInput {
                 id: api_key_id.clone(),
                 hashed_secret,
                 user_id,
-                last_used: now,
-                expires_at,
-                created_at: now,
-                updated_at: now,
+                last_used: now_utc,
+                expires_at: access_expires_at,
+                created_at: now_utc,
+                updated_at: now_utc,
                 login_type: LoginType::Oauth2ProviderApp,
                 scopes: vec!["all".to_owned()],
                 token_name: format!("oauth2_{api_key_id}"),
-                lifetime_seconds: 30 * 24 * 60 * 60, // 30 days
+                lifetime_seconds: 3600, // 1 hour — matches expires_in
                 allow_list: Vec::new(),
             })
             .await;
@@ -2496,7 +2503,7 @@ where
         }
 
         let input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
-            expires_at,
+            expires_at: refresh_expires_at,
             hash_prefix: access_prefix,
             refresh_hash,
             app_secret_id,
