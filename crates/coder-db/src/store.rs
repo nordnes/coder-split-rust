@@ -2777,7 +2777,8 @@ impl ProvisionerStore for PostgresStore {
         sqlx::query(
             "UPDATE provisioner_jobs
              SET canceled_at = $1,
-                 completed_at = COALESCE($2, completed_at)
+                 completed_at = COALESCE($2, completed_at),
+                 updated_at = $1
              WHERE id = $3",
         )
         .bind(input.canceled_at)
@@ -3133,7 +3134,7 @@ impl ProvisionerStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredProvisionerKeyRow>(
             "SELECT id, created_at, organization_id, name, hashed_secret, tags
              FROM provisioner_keys
-             WHERE organization_id = $1 AND LOWER(name) = LOWER($2)",
+             WHERE organization_id = $1 AND name = $2",
         )
         .bind(organization_id)
         .bind(name)
