@@ -5177,11 +5177,13 @@ mod tests {
         }
 
         async fn find_task_by_id(&self, id: Uuid) -> Result<Option<TaskRecord>, StorageError> {
+            // Match PostgresStore: exclude soft-deleted tasks (WHERE deleted_at IS NULL).
             Ok(self
                 .tasks
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .get(&id)
+                .filter(|t| t.deleted_at.is_none())
                 .cloned())
         }
 
@@ -5216,9 +5218,15 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Match PostgresStore: only soft-delete if not already deleted
+            // (WHERE id = $1 AND deleted_at IS NULL).
             if let Some(task) = tasks.get_mut(&id) {
-                task.deleted_at = Some(deleted_at);
-                Ok(true)
+                if task.deleted_at.is_none() {
+                    task.deleted_at = Some(deleted_at);
+                    Ok(true)
+                } else {
+                    Ok(false)
+                }
             } else {
                 Ok(false)
             }
@@ -5325,7 +5333,8 @@ mod tests {
                 .filter(|c| archived.is_none() || archived == Some(c.archived))
                 .cloned()
                 .collect();
-            result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            // Match PostgresStore: ORDER BY updated_at DESC.
+            result.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
             Ok(result)
         }
 
