@@ -360,6 +360,38 @@ pub struct ProvisionerDaemonHealthRecord {
     pub status: Option<String>,
 }
 
+/// Stored file record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FileRecord {
+    /// Stable file identifier.
+    pub id: Uuid,
+    /// SHA-256 hex-encoded hash of the file data.
+    pub hash: String,
+    /// User who uploaded the file.
+    pub created_by: Uuid,
+    /// Upload time.
+    pub created_at: OffsetDateTime,
+    /// MIME type of the file.
+    pub mimetype: String,
+    /// Raw file bytes.
+    pub data: Vec<u8>,
+}
+
+/// Input for inserting a new file.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertFileInput {
+    /// Stable file identifier.
+    pub id: Uuid,
+    /// SHA-256 hex-encoded hash of the file data.
+    pub hash: String,
+    /// User who uploaded the file.
+    pub created_by: Uuid,
+    /// MIME type of the file.
+    pub mimetype: String,
+    /// Raw file bytes.
+    pub data: Vec<u8>,
+}
+
 /// Errors surfaced by storage backends.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum StorageError {
@@ -809,6 +841,28 @@ pub trait OperationalStore: Send + Sync {
             "git ssh keys are not implemented",
         ))
     }
+
+    /// Inserts a new file record.
+    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("file storage is not implemented"))
+    }
+
+    /// Looks up a file by stable identifier.
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
+        let _ = file_id;
+        Err(StorageError::unavailable("file storage is not implemented"))
+    }
+
+    /// Looks up a file by hash and creator.
+    async fn get_file_by_hash_and_creator(
+        &self,
+        hash: &str,
+        creator_id: Uuid,
+    ) -> Result<Option<FileRecord>, StorageError> {
+        let _ = (hash, creator_id);
+        Err(StorageError::unavailable("file storage is not implemented"))
+    }
 }
 
 /// Aggregate store contract used by the current Rust backend slice.
@@ -1176,6 +1230,28 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         Err(StorageError::unavailable(
             "git ssh keys are not implemented",
         ))
+    }
+
+    /// Inserts a new file record.
+    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("file storage is not implemented"))
+    }
+
+    /// Looks up a file by stable identifier.
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
+        let _ = file_id;
+        Err(StorageError::unavailable("file storage is not implemented"))
+    }
+
+    /// Looks up a file by hash and creator.
+    async fn get_file_by_hash_and_creator(
+        &self,
+        hash: &str,
+        creator_id: Uuid,
+    ) -> Result<Option<FileRecord>, StorageError> {
+        let _ = (hash, creator_id);
+        Err(StorageError::unavailable("file storage is not implemented"))
     }
 
     /// Lists configured external-auth links for one user.
@@ -1974,6 +2050,22 @@ where
     ) -> Result<GitSshKeyRecord, StorageError> {
         AppStore::upsert_git_ssh_key(self, user_id, public_key, private_key).await
     }
+
+    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+        AppStore::insert_file(self, input).await
+    }
+
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
+        AppStore::get_file_by_id(self, file_id).await
+    }
+
+    async fn get_file_by_hash_and_creator(
+        &self,
+        hash: &str,
+        creator_id: Uuid,
+    ) -> Result<Option<FileRecord>, StorageError> {
+        AppStore::get_file_by_hash_and_creator(self, hash, creator_id).await
+    }
 }
 
 #[async_trait]
@@ -2076,6 +2168,24 @@ where
     ) -> Result<GitSshKeyRecord, StorageError> {
         (**self)
             .upsert_git_ssh_key(user_id, public_key, private_key)
+            .await
+    }
+
+    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+        (**self).insert_file(input).await
+    }
+
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
+        (**self).get_file_by_id(file_id).await
+    }
+
+    async fn get_file_by_hash_and_creator(
+        &self,
+        hash: &str,
+        creator_id: Uuid,
+    ) -> Result<Option<FileRecord>, StorageError> {
+        (**self)
+            .get_file_by_hash_and_creator(hash, creator_id)
             .await
     }
 }
