@@ -99,6 +99,11 @@ impl PostgresPubSub {
                                     error = %err,
                                     "failed to LISTEN on channel"
                                 );
+                                // Remove the stale channel entry so future
+                                // subscribe() calls will retry LISTEN instead
+                                // of assuming it already succeeded.
+                                let mut channel_map = channels.lock().await;
+                                channel_map.remove(&channel);
                             } else {
                                 debug!(channel = %channel, "started listening on channel");
                             }
