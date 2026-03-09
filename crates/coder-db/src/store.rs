@@ -2560,6 +2560,7 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
+        let viewer_id = filter.viewer_id;
         let rows = sqlx::query_as::<_, StoredWorkspaceRow>(
             "SELECT
                 w.id,
@@ -2576,10 +2577,12 @@ impl AppStore for PostgresStore {
                 w.dormant_at,
                 w.deleting_at,
                 w.automatic_updates,
+                COALESCE((wf.workspace_id IS NOT NULL), false) AS favorite,
                 w.next_start_at
              FROM workspaces w
              LEFT JOIN users u ON u.id = w.owner_id
              LEFT JOIN templates t ON t.id = w.template_id
+             LEFT JOIN workspace_favorites wf ON wf.workspace_id = w.id AND wf.user_id = $10
              WHERE w.deleted = false
                AND ($1::uuid IS NULL OR w.owner_id = $1)
                AND ($2::text IS NULL OR u.username = $2)
@@ -2600,6 +2603,7 @@ impl AppStore for PostgresStore {
         .bind(&template_ids)
         .bind(i64::from(filter.limit.min(1000)))
         .bind(i64::from(filter.offset))
+        .bind(viewer_id)
         .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -2613,15 +2617,20 @@ impl AppStore for PostgresStore {
     async fn find_workspace_by_id(
         &self,
         workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
         sqlx::query_as::<_, StoredWorkspaceRow>(
-            "SELECT id, created_at, updated_at, deleted, owner_id, organization_id,
-                    template_id, name, autostart_schedule, ttl, last_used_at,
-                    dormant_at, deleting_at, automatic_updates, next_start_at
-             FROM workspaces
-             WHERE id = $1 AND deleted = false",
+            "SELECT w.id, w.created_at, w.updated_at, w.deleted, w.owner_id, w.organization_id,
+                    w.template_id, w.name, w.autostart_schedule, w.ttl, w.last_used_at,
+                    w.dormant_at, w.deleting_at, w.automatic_updates,
+                    COALESCE((wf.workspace_id IS NOT NULL), false) AS favorite,
+                    w.next_start_at
+             FROM workspaces w
+             LEFT JOIN workspace_favorites wf ON wf.workspace_id = w.id AND wf.user_id = $2
+             WHERE w.id = $1 AND w.deleted = false",
         )
         .bind(workspace_id)
+        .bind(viewer_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
@@ -2633,16 +2642,21 @@ impl AppStore for PostgresStore {
         &self,
         owner_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
         sqlx::query_as::<_, StoredWorkspaceRow>(
-            "SELECT id, created_at, updated_at, deleted, owner_id, organization_id,
-                    template_id, name, autostart_schedule, ttl, last_used_at,
-                    dormant_at, deleting_at, automatic_updates, next_start_at
-             FROM workspaces
-             WHERE owner_id = $1 AND LOWER(name) = LOWER($2) AND deleted = false",
+            "SELECT w.id, w.created_at, w.updated_at, w.deleted, w.owner_id, w.organization_id,
+                    w.template_id, w.name, w.autostart_schedule, w.ttl, w.last_used_at,
+                    w.dormant_at, w.deleting_at, w.automatic_updates,
+                    COALESCE((wf.workspace_id IS NOT NULL), false) AS favorite,
+                    w.next_start_at
+             FROM workspaces w
+             LEFT JOIN workspace_favorites wf ON wf.workspace_id = w.id AND wf.user_id = $3
+             WHERE w.owner_id = $1 AND LOWER(w.name) = LOWER($2) AND w.deleted = false",
         )
         .bind(owner_id)
         .bind(name)
+        .bind(viewer_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
@@ -2663,7 +2677,8 @@ impl AppStore for PostgresStore {
              VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NOW())
              RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
                        template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates, next_start_at",
+                       dormant_at, deleting_at, automatic_updates,
+                       false AS favorite, next_start_at",
         )
         .bind(input.id)
         .bind(input.owner_id)
@@ -2691,7 +2706,8 @@ impl AppStore for PostgresStore {
              WHERE id = $1 AND deleted = false
              RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
                        template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates, next_start_at",
+                       dormant_at, deleting_at, automatic_updates,
+                       false AS favorite, next_start_at",
         )
         .bind(workspace_id)
         .bind(name)
@@ -2749,7 +2765,8 @@ impl AppStore for PostgresStore {
              WHERE id = $1 AND deleted = false
              RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
                        template_id, name, autostart_schedule, ttl, last_used_at,
-                       dormant_at, deleting_at, automatic_updates, next_start_at",
+                       dormant_at, deleting_at, automatic_updates,
+                       false AS favorite, next_start_at",
         )
         .bind(workspace_id)
         .bind(dormant_at)
@@ -3710,6 +3727,7 @@ struct StoredWorkspaceRow {
     dormant_at: Option<OffsetDateTime>,
     deleting_at: Option<OffsetDateTime>,
     automatic_updates: String,
+    favorite: bool,
     next_start_at: Option<OffsetDateTime>,
 }
 
@@ -3845,7 +3863,7 @@ fn workspace_record_from_row(row: StoredWorkspaceRow) -> WorkspaceRecord {
         dormant_at: row.dormant_at,
         deleting_at: row.deleting_at,
         automatic_updates: row.automatic_updates,
-        favorite: false,
+        favorite: row.favorite,
         next_start_at: row.next_start_at,
     }
 }

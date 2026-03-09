@@ -2871,6 +2871,7 @@ async fn list_workspaces(
         organization_id: None,
         limit: query.limit.unwrap_or(25),
         offset: query.offset.unwrap_or(0),
+        viewer_id: Some(context.user.id),
     };
 
     let (workspaces, count) = state.store.list_workspaces(filter).await?;
@@ -2909,11 +2910,15 @@ async fn get_workspace(
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(workspace) = state.store.find_workspace_by_id(workspace_id).await? else {
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
         return Ok(resource_not_found_response());
     };
 
@@ -2927,7 +2932,7 @@ async fn patch_workspace(
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     let Json(body) = match payload {
@@ -2935,7 +2940,11 @@ async fn patch_workspace(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state.store.find_workspace_by_id(workspace_id).await? else {
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
         return Ok(resource_not_found_response());
     };
 
@@ -2960,11 +2969,15 @@ async fn list_workspace_builds_handler(
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<WorkspaceBuildsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state.store.find_workspace_by_id(workspace_id).await? else {
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
         return Ok(resource_not_found_response());
     };
 
@@ -2996,7 +3009,11 @@ async fn post_workspace_build(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(workspace) = state.store.find_workspace_by_id(workspace_id).await? else {
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
         return Ok(resource_not_found_response());
     };
 
@@ -3393,11 +3410,15 @@ async fn get_workspace_resolve_autostart(
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(workspace) = state.store.find_workspace_by_id(workspace_id).await? else {
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
         return Ok(resource_not_found_response());
     };
 
@@ -3481,11 +3502,15 @@ async fn get_workspace_watch(
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(workspace) = state.store.find_workspace_by_id(workspace_id).await? else {
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
         return Ok(resource_not_found_response());
     };
 
@@ -3508,11 +3533,15 @@ async fn get_workspace_watch_ws(
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state.store.find_workspace_by_id(workspace_id).await? else {
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
         return Ok(resource_not_found_response());
     };
 
@@ -3779,7 +3808,7 @@ async fn get_user_workspace_by_name(
 
     let Some(workspace) = state
         .store
-        .find_workspace_by_owner_and_name(target_user.id, &name)
+        .find_workspace_by_owner_and_name(target_user.id, &name, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
@@ -3804,7 +3833,7 @@ async fn get_user_workspace_build_by_number(
 
     let Some(workspace) = state
         .store
-        .find_workspace_by_owner_and_name(target_user.id, &name)
+        .find_workspace_by_owner_and_name(target_user.id, &name, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());

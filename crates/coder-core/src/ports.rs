@@ -627,6 +627,8 @@ pub struct WorkspaceListFilter {
     pub limit: u32,
     /// Page offset.
     pub offset: u32,
+    /// Viewer user ID for computing per-user fields (e.g. favorite).
+    pub viewer_id: Option<Uuid>,
 }
 
 /// Input for creating a workspace.
@@ -1591,8 +1593,9 @@ pub trait AppStore: DeploymentStore + Send + Sync {
     async fn find_workspace_by_id(
         &self,
         workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = workspace_id;
+        let _ = (workspace_id, viewer_id);
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
@@ -1601,8 +1604,9 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         &self,
         owner_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (owner_id, name);
+        let _ = (owner_id, name, viewer_id);
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
@@ -1946,6 +1950,7 @@ pub trait WorkspaceStore: Send + Sync {
     async fn find_workspace_by_id(
         &self,
         workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Looks up a workspace by owner and name.
@@ -1953,6 +1958,7 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         owner_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Creates a new workspace.
@@ -3030,16 +3036,18 @@ where
     async fn find_workspace_by_id(
         &self,
         workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        AppStore::find_workspace_by_id(self, workspace_id).await
+        AppStore::find_workspace_by_id(self, workspace_id, viewer_id).await
     }
 
     async fn find_workspace_by_owner_and_name(
         &self,
         owner_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        AppStore::find_workspace_by_owner_and_name(self, owner_id, name).await
+        AppStore::find_workspace_by_owner_and_name(self, owner_id, name, viewer_id).await
     }
 
     async fn insert_workspace(
@@ -3290,17 +3298,19 @@ where
     async fn find_workspace_by_id(
         &self,
         workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        (**self).find_workspace_by_id(workspace_id).await
+        (**self).find_workspace_by_id(workspace_id, viewer_id).await
     }
 
     async fn find_workspace_by_owner_and_name(
         &self,
         owner_id: Uuid,
         name: &str,
+        viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
         (**self)
-            .find_workspace_by_owner_and_name(owner_id, name)
+            .find_workspace_by_owner_and_name(owner_id, name, viewer_id)
             .await
     }
 
