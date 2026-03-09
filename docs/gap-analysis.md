@@ -653,6 +653,845 @@ These routes could be ported with minimal infrastructure investment:
 
 ---
 
+## 8. Porting Prompts
+
+The following self-contained prompts can be used to implement each area of the gap. They are ordered by dependency (earlier prompts are prerequisites for later ones). Each prompt references specific Go source files, Rust files to modify, and the vertical slice pattern from `docs/porting-guide.md`.
+
+> **Convention**: Every prompt follows the vertical slice method — migration → domain types → API types → port trait → DB impl → handler → route → tests. See `docs/porting-guide.md` for worked examples.
+
+---
+
+### Prompt 1A: RBAC Policy Engine
+
+**Goal**: Replace the basic role-string checks in `coder-rbac` with a full policy evaluation engine that supports per-resource permissions, scopes, and organization-scoped roles.
+
+**Why first**: Nearly every route beyond the already-ported auth/identity set requires RBAC authorization. Without a policy engine, handlers can't enforce "can this user read this template?" or "can this user start this workspace?".
+
+**Go reference files**:
+- `coder/coderd/rbac/policy/policy.go` — policy definitions, action constants
+- `coder/coderd/rbac/roles.go` — built-in roles (owner, member, auditor, template-admin, user-admin), permission sets
+- `coder/coderd/rbac/authz.go` — `Authorize(ctx, subject, action, object)` main entrypoint
+- `coder/coderd/rbac/object.go` and `coder/coderd/rbac/object_gen.go` — 44 typed resource objects with owner/org scoping
+- `coder/coderd/rbac/scopes.go` — API key scopes restricting allowed resources
+- `coder/coderd/rbac/roles_internal_test.go` — comprehensive test cases for permission evaluation
+
+**Rust files to modify**:
+- `crates/coder-rbac/src/lib.rs` — expand `Actor` struct, add `Authorizer` with `authorize(actor, action, object) -> Result<(), Forbidden>`
+- `crates/coder-core/src/api.rs` — add `AuthorizationCheck` request/response types
+- `crates/coder-core/src/ports.rs` — if roles/permissions need DB storage, add trait methods
+- `crates/coder-db/src/store.rs` — implement any role/permission queries
+- `crates/coder-db/migrations/` — add `custom_roles` table if implementing custom role support
+
+**What to implement**:
+1. Define an `Action` enum: `Create`, `Read`, `Update`, `Delete`, `Use`, `Start`, `Stop`, `Connect`, `Assign`, `ViewInsights`, `SSH`, `ApplicationConnect`, `Debug`
+2. Expand `ResourceKind` from 8 → 44+ variants to match Go's `object_gen.go`
+3. Define `Object` struct: `{ resource: ResourceKind, owner_id: Option<Uuid>, org_id: Option<Uuid>, acl: HashMap<String, Vec<Action>> }`
+4. Define `Permission` struct: `{ negate: bool, resource: ResourceKind, action: Action }`
+5. Define built-in roles with permission sets matching Go's `roles.go`
+6. Implement `Authorizer::authorize(subject: &Actor, action: Action, object: &Object) -> Result<()>` that:
+   - Collects all permissions from the subject's roles (site + org)
+   - Applies scope restrictions from the API key
+   - Evaluates positive permissions, then negative (deny) overrides
+   - Returns `Forbidden` with a descriptive message on failure
+7. Add the `POST /api/v2/authcheck` route (bulk authorization check endpoint)
+8. Update existing handlers in `coder-server/src/app.rs` to use the new authorizer instead of basic role checks
+
+**Testing**: Port test cases from `coder/coderd/rbac/roles_internal_test.go`. Test combinations of roles × actions × resource types. Verify scope restrictions narrow permissions correctly.
+
+**Estimated effort**: 2–3 weeks
+
+---
+
+### Prompt 1B: Pub/Sub Event System (PostgreSQL LISTEN/NOTIFY)
+
+**Goal**: Implement a PostgreSQL-based pub/sub system for real-time event broadcasting, required by all SSE/WebSocket streaming endpoints.
+
+**Why now**: Workspace watch, agent log streaming, inbox notifications watch, and build log streaming all require real-time event delivery.
+
+**Go reference files**:
+- `coder/coderd/pubsub/pubsub.go` — `Pubsub` interface: `Subscribe(event string, listener)`, `Publish(event string, message []byte)`
+- `coder/coderd/pubsub/pubsub_linux.go` / `pubsub_memory.go` — PostgreSQL LISTEN/NOTIFY implementation and in-memory variant for tests
+- `coder/coderd/wspubsub/wspubsub.go` — workspace-specific pub/sub channels (`WorkspaceEvent`, `WorkspaceEventChannel`)
+
+**Rust files to modify**:
+- Create `crates/coder-core/src/pubsub.rs` (new module) — define `PubSub` trait: `async fn subscribe(channel: &str) -> Receiver<Vec<u8>>`, `async fn publish(channel: &str, message: &[u8])`
+- `crates/coder-db/src/store.rs` or new `crates/coder-db/src/pubsub.rs` — implement `PostgresPubSub` using `sqlx` raw LISTEN/NOTIFY or `tokio-postgres` listener
+- `crates/coder-server/src/app.rs` — add `PubSub` to `AppState`
+
+**What to implement**:
+1. Define `PubSub` trait with `subscribe`, `publish`, `close` methods
+2. Implement `PostgresPubSub` using a dedicated connection for LISTEN (separate from the connection pool)
+3. Use `tokio::sync::broadcast` channels internally to fan-out notifications to multiple subscribers
+4. Implement `InMemoryPubSub` for unit tests
+5. Define workspace-specific event channels: `workspace:{id}`, `workspace_agent:{id}`, `workspace_build_logs:{id}`
+6. Wire into `AppState` so handlers can access it
+
+**Testing**: Test subscribe → publish → receive cycle. Test multiple subscribers on same channel. Test unsubscribe cleanup. Test reconnection on connection loss.
+
+**Estimated effort**: 1–2 weeks
+
+---
+
+### Prompt 1C: File Upload & Storage
+
+**Goal**: Implement binary file upload and retrieval (`POST /files`, `GET /files/{fileID}`), required for template version creation.
+
+**Go reference files**:
+- `coder/coderd/files.go` — `postFile()` (binary body, SHA256 hash, content-type), `fileByID()` (retrieve by hash or UUID)
+- `coder/coderd/database/queries/files.sql` — `InsertFile`, `GetFileByID`, `GetFileByHashAndCreator`
+- `coder/codersdk/files.go` — `UploadResponse` struct
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — new migration creating `files` table (id UUID, hash VARCHAR, created_by UUID, created_at TIMESTAMP, mimetype VARCHAR, data BYTEA)
+- `crates/coder-core/src/api.rs` — add `UploadFileResponse { hash: String }`
+- `crates/coder-core/src/ports.rs` — add `FileStore` trait with `insert_file`, `get_file_by_id`, `get_file_by_hash_and_creator`
+- `crates/coder-db/src/store.rs` — implement file queries
+- `crates/coder-server/src/app.rs` — add `post_file` and `get_file` handlers, register routes
+
+**What to implement**:
+1. Create `files` table with columns: `id`, `hash`, `created_by`, `created_at`, `mimetype`, `data`
+2. `POST /files` handler: read raw binary body (via `axum::body::Bytes`), compute SHA256 hash, check for duplicate by hash+creator, insert, return `{ hash }`
+3. `GET /files/{fileID}` handler: fetch by UUID, return binary body with correct Content-Type header
+4. RBAC: require authenticated user for upload; file access controlled by template version ownership chain
+5. Size limit: Go enforces a 10MB upload limit — implement the same via `axum::extract::DefaultBodyLimit`
+
+**Testing**: Upload a file, retrieve it, verify hash and content match. Test duplicate detection. Test size limit enforcement.
+
+**Estimated effort**: 3–5 days
+
+---
+
+### Prompt 1D: Rate Limiting & HTTP Middleware
+
+**Goal**: Add missing cross-cutting HTTP middleware: request ID propagation, rate limiting, CSP headers, CSRF protection, HSTS, and real IP extraction.
+
+**Go reference files**:
+- `coder/coderd/httpmw/requestid.go` — UUID request ID generation and propagation
+- `coder/coderd/httpmw/ratelimit.go` — per-user and per-IP rate limiting
+- `coder/coderd/httpmw/csp.go` — Content Security Policy headers
+- `coder/coderd/httpmw/csrf.go` — CSRF token validation
+- `coder/coderd/httpmw/hsts.go` — HTTP Strict Transport Security
+- `coder/coderd/httpmw/realip.go` — trusted proxy IP extraction (X-Forwarded-For, X-Real-IP)
+- `coder/coderd/httpmw/prometheus.go` — Prometheus HTTP metrics
+
+**Rust files to modify**:
+- `crates/coder-server/src/app.rs` — add middleware layers to `build_router()`
+- Potentially create `crates/coder-server/src/middleware.rs` for complex middleware (or keep inline)
+
+**What to implement**:
+1. **Request ID**: Axum middleware that generates a UUID per request, sets `X-Request-ID` header, stores in request extensions for logging. Use `tower_http::request_id::SetRequestIdLayer` or custom.
+2. **Rate Limiting**: Per-IP rate limiting using `tower::limit::RateLimitLayer` or custom token bucket. Go uses 512 requests/minute per user, fallback to IP for unauthenticated. Consider `governor` crate.
+3. **CSP**: Add `Content-Security-Policy` header to all responses. Go constructs policy dynamically based on deployment config.
+4. **CSRF**: Validate `X-CSRF-Token` header on mutating requests when using cookie auth. Go uses `gorilla/csrf`.
+5. **HSTS**: Add `Strict-Transport-Security: max-age=31536000; includeSubDomains` when access URL is HTTPS.
+6. **Real IP**: Extract client IP from `X-Forwarded-For` / `X-Real-IP` headers when behind trusted proxies. Store in request extensions.
+7. **Prometheus metrics**: Use `axum-prometheus` or `metrics` crate to expose `http_request_duration_seconds`, `http_requests_total` histograms/counters.
+
+**Testing**: Test request ID propagation in responses. Test rate limiting triggers 429 after threshold. Test CSP header presence. Test HSTS only on HTTPS.
+
+**Estimated effort**: 1–2 weeks
+
+---
+
+### Prompt 2: Templates & Template Versions (33 routes)
+
+**Goal**: Port the full template and template version domain — the largest missing domain and prerequisite for workspace creation.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/templates.go` (1,151 lines), `coder/coderd/templateversions.go` (2,022 lines)
+- **SDK models**: `coder/codersdk/templates.go` (~18 structs), `coder/codersdk/templateversions.go` (~7 structs)
+- **SQL queries**: `coder/coderd/database/queries/templates.sql` (12 queries), `coder/coderd/database/queries/templateversions.sql` (15 queries)
+- **Parameters**: `coder/coderd/parameters.go` (205 lines), `coder/codersdk/parameters.go` (~10 structs), `coder/coderd/database/queries/templateversionparameters.sql`
+- **Presets**: `coder/coderd/presets.go` (74 lines), `coder/coderd/database/queries/presets.sql`
+- **DB schema**: `coder/coderd/database/dump.sql` — search for `CREATE TABLE templates`, `template_versions`, `template_version_parameters`, `template_version_variables`, `template_version_presets`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — new migration creating 10 tables: `templates`, `template_versions`, `template_version_parameters`, `template_version_variables`, `template_version_presets`, `template_version_preset_parameters`, `template_version_preset_prebuild_schedules`, `template_version_terraform_values`, `template_version_workspace_tags`, `template_usage_stats`
+- `crates/coder-core/src/api.rs` — add ~25 structs: `Template`, `CreateTemplateRequest`, `UpdateTemplateMeta`, `TemplateExample`, `TemplateVersion`, `CreateTemplateVersionRequest`, `TemplateVersionParameter`, `TemplateVersionVariable`, `TemplateVersionDryRunRequest`, `TemplateFilter`, etc.
+- `crates/coder-core/src/ports.rs` — add `TemplateStore` trait with ~27 methods (matching Go query files)
+- `crates/coder-core/` — add template domain types module (or extend `identity.rs`)
+- `crates/coder-db/src/store.rs` — implement all template/version queries
+- `crates/coder-server/src/app.rs` — add 33 handler functions, register routes in `build_router()`
+- `crates/coder-workspaces/src/lib.rs` — potentially house template service logic here
+
+**Routes to implement (33)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/organizations/{org}/templates` | Medium |
+| POST | `/organizations/{org}/templates` | Complex |
+| GET | `/organizations/{org}/templates/{name}` | Simple |
+| GET | `/organizations/{org}/templates/{name}/versions/{vname}` | Simple |
+| POST | `/organizations/{org}/templateversions` | Complex |
+| DELETE | `/templates/{template}` | Medium |
+| GET | `/templates/{template}` | Simple |
+| PATCH | `/templates/{template}` | Medium |
+| GET | `/templates/{template}/daus` | Medium |
+| GET | `/templates/{template}/examples` | Simple |
+| GET | `/templates/{template}/versions` | Medium |
+| GET | `/templates/{template}/versions/{vname}` | Simple |
+| PATCH | `/templateversions/{tv}` | Medium |
+| GET | `/templateversions/{tv}` | Simple |
+| POST | `/templateversions/{tv}/archive` | Medium |
+| PATCH | `/templateversions/{tv}/cancel` | Medium |
+| POST | `/templateversions/{tv}/dry-run` | Complex |
+| GET | `/templateversions/{tv}/dry-run/{jobID}` | Medium |
+| GET | `/templateversions/{tv}/dry-run/{jobID}/cancel` | Medium |
+| GET | `/templateversions/{tv}/dry-run/{jobID}/logs` | Complex |
+| GET | `/templateversions/{tv}/dry-run/{jobID}/resources` | Medium |
+| GET | `/templateversions/{tv}/external-auth` | Simple |
+| GET | `/templateversions/{tv}/logs` | Complex |
+| GET | `/templateversions/{tv}/parameters` | Simple |
+| GET | `/templateversions/{tv}/presets` | Simple |
+| GET | `/templateversions/{tv}/presets/{presetID}/parameters` | Simple |
+| GET | `/templateversions/{tv}/resources` | Medium |
+| GET | `/templateversions/{tv}/rich-parameters` | Simple |
+| GET | `/templateversions/{tv}/schema` | Simple (deprecated) |
+| POST | `/templateversions/{tv}/unarchive` | Medium |
+| GET | `/templateversions/{tv}/variables` | Simple |
+| GET | `/templateversions/{tv}/dry-run/{jobID}/resources` | Medium |
+
+**Key implementation notes**:
+- `POST /organizations/{org}/templates` is the most complex — it creates a template record, validates the referenced template version, and may trigger a provisioner import job.
+- `POST /organizations/{org}/templateversions` uploads a file reference and kicks off a provisioner import job. Without provisioner daemon orchestration (Prompt 7A), this can be stubbed to create the job record in "pending" state.
+- Template version dry-run routes depend on provisioner jobs — stub the job execution but implement the schema and state tracking.
+- DAU (Daily Active Users) queries require `template_usage_stats` and complex aggregation SQL.
+- Use `coder-rbac` `ResourceKind::Template` for authorization checks on all routes.
+
+**Dependencies**: Prompt 1A (RBAC), Prompt 1C (File Storage). Provisioner job orchestration (Prompt 7A) needed for full functionality but can be stubbed.
+
+**Estimated effort**: 6–8 weeks
+
+---
+
+### Prompt 3: Workspaces & Builds (32 routes)
+
+**Goal**: Port the full workspace lifecycle — creation, updates, builds, scheduling, dormancy, favorites, port sharing, and real-time watching.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/workspaces.go` (2,991 lines), `coder/coderd/workspacebuilds.go` (1,433 lines)
+- **SDK models**: `coder/codersdk/workspaces.go` (~23 structs), `coder/codersdk/workspacebuilds.go` (~10 structs)
+- **SQL queries**: `coder/coderd/database/queries/workspaces.sql` (33 queries), `coder/coderd/database/queries/workspacebuilds.sql` (17 queries)
+- **Port sharing**: `coder/coderd/workspaceagentportshare.go` (204 lines)
+- **DB schema**: `coder/coderd/database/dump.sql` — search for `CREATE TABLE workspaces`, `workspace_builds`, `workspace_build_parameters`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — expand `workspaces` table from stub to full schema (~25 columns), expand `workspace_builds` to full schema (~20 columns), add `workspace_build_parameters`, `workspace_agent_port_share`
+- `crates/coder-core/src/api.rs` — add ~33 structs: `Workspace`, `CreateWorkspaceRequest`, `WorkspaceFilter`, `UpdateWorkspaceRequest`, `UpdateWorkspaceAutostartRequest`, `UpdateWorkspaceTTLRequest`, `WorkspaceBuild`, `CreateWorkspaceBuildRequest`, `WorkspaceBuildTimings`, `WorkspaceQuota`, etc.
+- `crates/coder-core/src/ports.rs` — add `WorkspaceStore` trait with ~50 methods
+- `crates/coder-db/src/store.rs` — implement all workspace/build queries
+- `crates/coder-server/src/app.rs` — add 32 handler functions, register routes
+- `crates/coder-workspaces/src/lib.rs` — implement `WorkspaceService` with build orchestration logic
+
+**Routes to implement (32)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/workspaces` | Medium (filtered, paginated) |
+| GET | `/workspaces/{workspace}` | Simple |
+| PATCH | `/workspaces/{workspace}` | Medium |
+| DELETE | `/workspaces/{workspace}/acl` | Medium |
+| GET | `/workspaces/{workspace}/acl` | Simple |
+| PATCH | `/workspaces/{workspace}/acl` | Medium |
+| PUT | `/workspaces/{workspace}/autostart` | Simple |
+| PUT | `/workspaces/{workspace}/autoupdates` | Simple |
+| GET | `/workspaces/{workspace}/builds` | Medium |
+| POST | `/workspaces/{workspace}/builds` | Complex (provisioner job) |
+| PUT | `/workspaces/{workspace}/dormant` | Medium |
+| PUT | `/workspaces/{workspace}/extend` | Medium |
+| DELETE | `/workspaces/{workspace}/favorite` | Simple |
+| PUT | `/workspaces/{workspace}/favorite` | Simple |
+| DELETE | `/workspaces/{workspace}/port-share` | Simple |
+| GET | `/workspaces/{workspace}/port-share` | Simple |
+| POST | `/workspaces/{workspace}/port-share` | Medium |
+| GET | `/workspaces/{workspace}/resolve-autostart` | Medium |
+| GET | `/workspaces/{workspace}/timings` | Simple |
+| PUT | `/workspaces/{workspace}/ttl` | Simple |
+| POST | `/workspaces/{workspace}/usage` | Medium |
+| GET | `/workspaces/{workspace}/watch` | Complex (SSE) |
+| GET | `/workspaces/{workspace}/watch-ws` | Complex (WebSocket) |
+| GET | `/workspacebuilds/{build}` | Simple |
+| PATCH | `/workspacebuilds/{build}/cancel` | Medium |
+| GET | `/workspacebuilds/{build}/logs` | Complex (streaming) |
+| GET | `/workspacebuilds/{build}/parameters` | Simple |
+| GET | `/workspacebuilds/{build}/resources` | Simple (deprecated) |
+| GET | `/workspacebuilds/{build}/state` | Simple |
+| PUT | `/workspacebuilds/{build}/state` | Medium |
+| GET | `/workspacebuilds/{build}/timings` | Simple |
+| GET | `/users/{user}/workspace/{name}` | Medium |
+| GET | `/users/{user}/workspace/{name}/builds/{number}` | Medium |
+| POST | `/users/{user}/workspaces` | Complex (provisioner job) |
+
+**Key implementation notes**:
+- `POST /users/{user}/workspaces` creates a workspace + initial build. This triggers a provisioner job for the "start" transition. Without provisioner orchestration, stub the job but track state.
+- `POST /workspaces/{workspace}/builds` handles start/stop/delete transitions. Each creates a new `workspace_build` row linked to a provisioner job.
+- `GET /workspaces/{workspace}/watch` and `watch-ws` require Pub/Sub (Prompt 1B) to stream workspace state changes via SSE/WebSocket.
+- `GET /workspacebuilds/{build}/logs` streams provisioner job logs — requires pub/sub for real-time log tailing.
+- Workspace list (`GET /workspaces`) has complex filtering: by owner, template, name search, status, has-agent. Port the Go query builder pattern.
+- Dormancy, autostart, TTL, and extend are state management routes that update workspace metadata columns.
+
+**Dependencies**: Prompt 2 (Templates — workspaces reference template versions), Prompt 1A (RBAC), Prompt 1B (Pub/Sub for watch/logs).
+
+**Estimated effort**: 6–8 weeks
+
+---
+
+### Prompt 4A: Agent API Server & Tailnet/DERP Infrastructure
+
+**Goal**: Build the agent-side communication infrastructure: dRPC/WebSocket agent API server and tailnet/DERP coordination layer.
+
+**Why separate**: This is the most complex infrastructure component. It must be built before the agent HTTP routes (Prompt 4B) can function.
+
+**Go reference files**:
+- **Agent API**: `coder/coderd/agentapi/` (29 files, 8,994 lines) — `manifest.go`, `lifecycle.go`, `logs.go`, `metadata.go`, `stats.go`, `scripts.go`, `containers.go`, `subagent.go`
+- **Tailnet**: `coder/tailnet/` (26 files, 12,607 lines) — `coordinator.go`, `conn.go`, `derp.go`, `derp_mesh.go`, `node.go`, `peer.go`, `service.go`
+- **DERP**: `coder/coderd/derpmap.go`, DERP region configuration
+- **Agent proto**: `coder/agent/proto/*.proto` — protobuf definitions for agent ↔ server communication (lifecycle, metadata, logs, stats, scripts, timing)
+
+**Rust files to modify**:
+- `crates/coder-connectivity/src/lib.rs` — expand from health-only to include tailnet coordination and DERP
+- Potentially create `crates/coder-connectivity/src/tailnet.rs`, `crates/coder-connectivity/src/agentapi.rs`
+- `crates/coder-db/migrations/` — add `tailnet_*` tables (coordinators, peers, tunnels)
+- `crates/coder-core/src/ports.rs` — add tailnet/agent storage traits
+
+**What to implement**:
+1. **Agent API Server**: Define the agent-to-server RPC contract. Go uses dRPC (Storj's protobuf variant). In Rust, options include:
+   - `tonic` (gRPC) with WebSocket transport
+   - Custom WebSocket-based protocol mirroring Go's dRPC message format
+   - The agent connects via `GET /workspaceagents/me/rpc` (WebSocket upgrade)
+2. **Agent manifest delivery**: On connect, send the agent its workspace/app configuration
+3. **Lifecycle reporting**: Agent reports startup progress, ready state, shutting-down
+4. **Log collection**: Agent streams stdout/stderr logs to server, stored in `workspace_agent_logs`
+5. **Metadata reporting**: Agent periodically sends metadata key-value pairs
+6. **Stats collection**: Agent reports connection counts, latency, bandwidth
+7. **Tailnet coordinator**: Manage peer-to-peer WireGuard tunnel coordination between agents and clients
+8. **DERP relay**: When direct connections fail, relay traffic through DERP servers
+
+**Key implementation notes**:
+- This is architecturally the most complex component. Consider implementing in phases:
+  - Phase A: WebSocket connection handling + manifest delivery + lifecycle reporting
+  - Phase B: Log collection + metadata + stats
+  - Phase C: Tailnet coordination + DERP relay
+- The Go dRPC protocol is custom — study `coder/agent/proto/agent.proto` for the exact message format
+- Tailnet uses the Noise protocol for key exchange and WireGuard for data transport
+
+**Dependencies**: Prompt 1B (Pub/Sub for log streaming), database tables for agent state.
+
+**Estimated effort**: 8–12 weeks (this is the single largest component)
+
+---
+
+### Prompt 4B: Workspace Agent Routes (20 routes)
+
+**Goal**: Port all workspace agent HTTP endpoints — agent info, coordination, logs, PTY, metadata, containers, port sharing.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/workspaceagents.go` (2,284 lines), `coder/coderd/workspaceagentsrpc.go` (498 lines), `coder/coderd/workspaceresourceauth.go` (209 lines), `coder/coderd/workspaceapps.go` (94 lines), `coder/coderd/workspaceagentportshare.go` (204 lines)
+- **SDK models**: `coder/codersdk/workspaceagents.go` (~21 structs)
+- **SQL queries**: `coder/coderd/database/queries/workspaceagents.sql` (29 queries), `coder/coderd/database/queries/workspaceagentstats.sql`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — add full `workspace_agents` table (~30 columns), `workspace_apps`, `workspace_agent_scripts`, `workspace_agent_log_sources`, `workspace_agent_devcontainers`, `workspace_agent_memory_resource_monitors`, `workspace_agent_volume_resource_monitors`, `workspace_agent_script_timings`, `workspace_app_stats`, `workspace_app_statuses`, expand `workspace_agent_stats` from stub to full schema
+- `crates/coder-core/src/api.rs` — add ~21 structs: `WorkspaceAgent`, `WorkspaceAgentMetadata`, `WorkspaceAgentLog`, `WorkspaceAgentListeningPort`, `WorkspaceAgentConnectionInfo`, `DERPRegion`, `DERPNode`, `WorkspaceAgentContainer`, etc.
+- `crates/coder-core/src/ports.rs` — add `AgentStore` trait with ~29 methods
+- `crates/coder-db/src/store.rs` — implement all agent queries
+- `crates/coder-server/src/app.rs` — add 20 handler functions, register routes
+
+**Routes to implement (20)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/workspaceagents/{agent}` | Simple |
+| GET | `/workspaceagents/{agent}/connection` | Simple |
+| GET | `/workspaceagents/{agent}/containers` | Medium |
+| DELETE | `/workspaceagents/{agent}/containers/devcontainers/{dc}` | Medium |
+| POST | `/workspaceagents/{agent}/containers/devcontainers/{dc}/recreate` | Medium |
+| GET | `/workspaceagents/{agent}/containers/watch` | Complex (SSE) |
+| GET | `/workspaceagents/{agent}/coordinate` | Complex (WebSocket + tailnet) |
+| GET | `/workspaceagents/{agent}/listening-ports` | Simple |
+| GET | `/workspaceagents/{agent}/logs` | Complex (streaming) |
+| GET | `/workspaceagents/{agent}/pty` | Complex (WebSocket terminal) |
+| GET | `/workspaceagents/{agent}/watch-metadata` | Complex (SSE) |
+| GET | `/workspaceagents/{agent}/watch-metadata-ws` | Complex (WebSocket) |
+| GET | `/workspaceagents/connection` | Simple |
+| PATCH | `/workspaceagents/me/app-status` | Simple |
+| GET | `/workspaceagents/me/external-auth` | Medium |
+| POST | `/workspaceagents/me/log-source` | Simple |
+| PATCH | `/workspaceagents/me/logs` | Medium |
+| GET | `/workspaceagents/me/reinit` | Complex (long-poll) |
+| GET | `/workspaceagents/me/rpc` | Complex (dRPC/WebSocket) |
+| POST | `/workspaceagents/{cloud}-instance-identity` | Complex (3 cloud providers) |
+
+**Key implementation notes**:
+- `/workspaceagents/me/*` routes are called BY the agent itself (authenticated via agent token, not user session)
+- `/workspaceagents/{agent}/coordinate` upgrades to WebSocket and connects to the tailnet coordinator (Prompt 4A)
+- `/workspaceagents/{agent}/pty` provides a full terminal emulator via WebSocket — proxies to the agent's PTY
+- Instance identity auth (`POST /workspaceagents/{cloud}-instance-identity`) validates cloud provider instance metadata (AWS PKCS7, Azure OIDC, GCP JWT)
+- `/workspaceagents/{agent}/logs` can stream logs in real-time via pub/sub or return historical logs from DB
+
+**Dependencies**: Prompt 4A (Agent API/Tailnet), Prompt 3 (Workspaces — agents belong to workspace resources), Prompt 1B (Pub/Sub).
+
+**Estimated effort**: 4–6 weeks (after Prompt 4A infrastructure is in place)
+
+---
+
+### Prompt 5A: Notifications & Inbox (13 routes)
+
+**Goal**: Port the notification system — settings, templates, dispatch configuration, inbox management with real-time watching, and web push subscriptions.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/notifications.go` (458 lines), `coder/coderd/inboxnotifications.go` (460 lines), `coder/coderd/webpush.go` (148 lines)
+- **Dispatch system**: `coder/coderd/notifications/` (12 files, 4,671 lines) — `dispatch.go`, `manager.go`, `enqueuer.go`, `render.go`, methods (email, webhook, inbox)
+- **SDK models**: `coder/codersdk/notifications.go` (~12 structs)
+- **SQL queries**: `coder/coderd/database/queries/notifications.sql` (19 queries)
+- **DB schema**: search `dump.sql` for `notification_messages`, `notification_preferences`, `notification_templates`, `inbox_notifications`, `webpush_subscriptions`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — add 6 tables: `notification_messages`, `notification_preferences`, `notification_report_generator_logs`, `notification_templates`, `inbox_notifications`, `webpush_subscriptions`
+- `crates/coder-db/migrations/` — add enums: `notification_message_status`, `notification_method`, `notification_template_kind`, `inbox_notification_read_status`
+- `crates/coder-core/src/api.rs` — add ~12 structs for notification API types
+- `crates/coder-core/src/ports.rs` — add `NotificationStore` trait with ~19 methods
+- `crates/coder-db/src/store.rs` — implement notification queries
+- `crates/coder-notifications/src/lib.rs` — replace stub with real `NotificationService`: enqueue, dispatch, template rendering
+- `crates/coder-server/src/app.rs` — add 13 handler functions, register routes
+
+**Routes to implement (13)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/notifications/settings` | Simple |
+| PUT | `/notifications/settings` | Medium |
+| GET | `/notifications/templates` | Simple |
+| POST | `/notifications/test` | Medium |
+| PUT | `/notifications/templates/{id}/method` | Medium |
+| GET | `/notifications/dispatch-methods` | Simple |
+| GET | `/users/{user}/notifications/preferences` | Simple |
+| PUT | `/users/{user}/notifications/preferences` | Medium |
+| GET | `/inbox/notifications` | Medium |
+| PUT | `/inbox/notifications/mark-all-read` | Simple |
+| GET | `/inbox/notifications/watch` | Complex (SSE) |
+| PUT | `/inbox/notifications/{id}/read-status` | Simple |
+| DELETE | `/users/{user}/webpush/subscription` | Simple |
+| POST | `/users/{user}/webpush/subscription` | Simple |
+| POST | `/users/{user}/webpush/test` | Medium |
+
+**Key implementation notes**:
+- The notification dispatch system is a background service (see also Prompt 7C) that processes queued messages and sends via configured methods (email via SMTP, webhook, in-app inbox)
+- `GET /inbox/notifications/watch` uses SSE for real-time inbox updates — requires Pub/Sub (Prompt 1B)
+- Web push requires VAPID key pair generation and Web Push Protocol implementation. Consider the `web-push` crate.
+- Notification templates use Go's `html/template` — in Rust, use `handlebars` or `tera` for template rendering
+
+**Dependencies**: Prompt 1B (Pub/Sub for SSE watch), Prompt 1A (RBAC).
+
+**Estimated effort**: 3–4 weeks
+
+---
+
+### Prompt 5B: AI Tasks (10 routes)
+
+**Goal**: Port the AI task management system — task CRUD, status management, input handling, and log snapshots.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/aitasks.go` (1,439 lines)
+- **SDK models**: `coder/codersdk/aitasks.go` (~11 structs)
+- **SQL queries**: `coder/coderd/database/queries/tasks.sql` (12 queries)
+- **DB schema**: search `dump.sql` for `CREATE TABLE tasks`, `task_snapshots`, `task_workspace_apps`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — add 3 tables: `tasks`, `task_snapshots`, `task_workspace_apps`; add `task_status` enum
+- `crates/coder-core/src/api.rs` — add ~11 structs: `Task`, `CreateTaskRequest`, `TaskStatus`, `TaskInput`, `TaskLogSnapshot`, `PatchTaskRequest`, etc.
+- `crates/coder-core/src/ports.rs` — add `TaskStore` trait with ~12 methods
+- `crates/coder-db/src/store.rs` — implement task queries
+- `crates/coder-server/src/app.rs` — add 10 handler functions
+
+**Routes to implement (10)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/tasks` | Medium |
+| GET | `/tasks/{task}` | Simple |
+| GET | `/tasks/{task}/input` | Simple |
+| PATCH | `/tasks/{task}` | Complex (state machine) |
+| POST | `/workspaceagents/me/tasks/{task}/log-snapshot` | Medium |
+| POST | `/tasks` | Medium |
+| ... | (remaining task-related routes from `aitasks.go`) | Various |
+
+**Key implementation notes**:
+- Tasks have a state machine: `pending` → `running` → `completed`/`failed`/`paused`. The `PATCH` endpoint handles transitions with validation.
+- Tasks link to workspaces via `task_workspace_apps` — they track which workspace app the AI task is running in.
+- Log snapshots are point-in-time captures of task output, stored in `task_snapshots`.
+- This is a newer Go feature — verify the exact route paths against the current Go codebase.
+
+**Dependencies**: Prompt 3 (Workspaces — tasks reference workspaces), Prompt 1A (RBAC).
+
+**Estimated effort**: 1–2 weeks
+
+---
+
+### Prompt 5C: Chats (5 routes)
+
+**Goal**: Port the chat/AI conversation system — chat CRUD and message creation with LLM integration.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/chats.go` (3,697 lines — notably large, includes LLM streaming logic)
+- **SDK models**: `coder/codersdk/chats.go` (~48 structs — largest SDK file by struct count)
+- **SQL queries**: `coder/coderd/database/queries/chats.sql` (30 queries)
+- **DB schema**: search `dump.sql` for `CREATE TABLE chats`, `chat_messages`, `chat_files`, `chat_model_configs`, `chat_providers`, `chat_queued_messages`, `chat_diff_statuses`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — add 7 tables: `chats`, `chat_messages`, `chat_files`, `chat_model_configs`, `chat_providers`, `chat_queued_messages`, `chat_diff_statuses`; add enums: `chat_message_visibility`, `chat_status`
+- `crates/coder-core/src/api.rs` — add ~48 structs (this is the largest single-domain type addition)
+- `crates/coder-core/src/ports.rs` — add `ChatStore` trait with ~30 methods
+- `crates/coder-db/src/store.rs` — implement chat queries
+- `crates/coder-server/src/app.rs` — add 5 handler functions
+
+**Routes to implement (5)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| POST | `/chats` | Complex (LLM provider setup) |
+| GET | `/chats` | Medium |
+| DELETE | `/chats/{chat}` | Simple |
+| GET | `/chats/{chat}` | Simple |
+| POST | `/chats/{chat}/messages` | Complex (LLM streaming response) |
+
+**Key implementation notes**:
+- `POST /chats/{chat}/messages` is the most complex — it sends the conversation to an LLM provider and streams the response back. Go uses SSE (Server-Sent Events) for streaming.
+- LLM integration requires configurable providers (OpenAI API-compatible, Anthropic, etc.) stored in `chat_providers` and `chat_model_configs`.
+- Despite only 5 routes, the ~48 SDK structs and 30 queries make this a medium-effort domain due to type complexity.
+- Consider using the `async-openai` or `reqwest` with SSE streaming for LLM API calls.
+
+**Dependencies**: Prompt 1A (RBAC), Prompt 1B (Pub/Sub if chat events are broadcast).
+
+**Estimated effort**: 2–3 weeks
+
+---
+
+### Prompt 6A: Insights & Analytics (5 routes)
+
+**Goal**: Port analytics endpoints — DAU metrics, template insights, user activity/latency tracking, and user status counts.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/insights.go` (824 lines)
+- **SDK models**: `coder/codersdk/insights.go` (~19 structs)
+- **SQL queries**: `coder/coderd/database/queries/insights.sql` (11 queries) — these are complex aggregation queries with CTEs, window functions, and time-series bucketing
+- **DB schema**: `template_usage_stats`, `workspace_agent_stats`, `workspace_app_stats` tables
+
+**Rust files to modify**:
+- `crates/coder-core/src/api.rs` — add ~19 structs: `DAUsResponse`, `DAUEntry`, `TemplateInsightsResponse`, `TemplateInsightsIntervalReport`, `TemplateAppUsage`, `UserActivityInsightsResponse`, `UserLatencyInsightsResponse`, `UserStatusCountsResponse`, etc.
+- `crates/coder-core/src/ports.rs` — add `InsightsStore` trait with ~11 methods
+- `crates/coder-db/src/store.rs` — implement complex aggregation queries
+- `crates/coder-server/src/app.rs` — add 5 handlers
+
+**Routes to implement (5)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/insights/daus` | Simple |
+| GET | `/insights/templates` | Complex (time-series aggregation) |
+| GET | `/insights/user-activity` | Complex (per-user aggregation) |
+| GET | `/insights/user-latency` | Medium |
+| GET | `/insights/user-status-counts` | Medium |
+
+**Key implementation notes**:
+- The SQL queries are the most complex in the codebase — they use CTEs, `generate_series` for time bucketing, `COALESCE`, `LEFT JOIN LATERAL`, and window functions.
+- Template insights aggregate across `template_usage_stats` and `workspace_app_stats` over configurable time ranges.
+- Query parameters include `start_date`, `end_date`, `template_ids[]`, `interval` (day/week).
+- DAU data requires pre-aggregated stats — ensure `template_usage_stats` table is populated (depends on workspace stats background job).
+
+**Dependencies**: Prompt 2 (Templates), Prompt 3 (Workspaces — stats data), full `workspace_agent_stats` table.
+
+**Estimated effort**: 1–2 weeks
+
+---
+
+### Prompt 6B: Debug & Observability (11 routes)
+
+**Goal**: Port debug and observability endpoints — pprof, expvar, coordinator/tailnet/DERP diagnostics, and a debug WebSocket.
+
+**Go reference files**:
+- **Handlers**: `coder/coderd/debug.go` (385 lines)
+- Standard library: Go's `net/http/pprof`, `expvar`
+
+**Rust files to modify**:
+- `crates/coder-server/src/app.rs` — add 11 handler functions, register under `/debug/*` routes
+
+**Routes to implement (11)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/debug/pprof/*` | Simple (Rust equivalent) |
+| GET | `/debug/expvar` | Simple |
+| GET | `/debug/health` | Medium |
+| GET | `/debug/coordinator` | Medium |
+| GET | `/debug/tailnet` | Medium |
+| GET | `/debug/derp/traffic` | Medium |
+| GET | `/debug/websocket` | Simple (echo WebSocket) |
+| ... | (remaining debug routes) | Various |
+
+**Key implementation notes**:
+- Rust doesn't have direct `pprof` equivalents. Options:
+  - Use `pprof-rs` crate for CPU profiling
+  - Use `jemalloc` with heap profiling endpoints
+  - Expose `tracing` subscriber data
+  - Return Prometheus metrics dump via `/debug/expvar` equivalent
+- Coordinator/tailnet/DERP debug endpoints dump internal state — depends on Prompt 4A infrastructure
+- `/debug/websocket` is a simple echo WebSocket for connectivity testing
+- `/debug/health` is a stripped-down health check (may overlap with existing `/healthz` routes)
+
+**Dependencies**: Prompt 4A (Tailnet/DERP for coordinator/tailnet debug endpoints). pprof/expvar can be done independently.
+
+**Estimated effort**: 1–2 weeks
+
+---
+
+### Prompt 6C: Remaining Miscellaneous Routes (15 routes)
+
+**Goal**: Port all remaining miscellaneous routes — provisioner job management, provisioner daemon listing, workspace proxies, deprecated endpoints, and deployment config.
+
+**Go reference files**:
+- **Provisioner jobs**: `coder/coderd/provisionerjobs.go` (691 lines) — job listing, logs, cancel
+- **Provisioner daemons**: `coder/coderd/provisionerdaemons.go` (115 lines) — daemon listing
+- **Deprecated**: `coder/coderd/deprecated.go` (85 lines) — redirects/aliases
+- **Deployment config**: `coder/coderd/deployment.go` — `GET/PATCH /deployment/config`
+- **Workspace proxies**: `coder/coderd/workspaceproxies.go` (94 lines)
+
+**Rust files to modify**:
+- `crates/coder-core/src/api.rs` — add types for provisioner jobs, daemons, deployment config
+- `crates/coder-core/src/ports.rs` — add relevant store methods
+- `crates/coder-db/src/store.rs` — implement queries
+- `crates/coder-server/src/app.rs` — add handlers
+
+**Routes to implement (15)**:
+| Method | Path | Complexity |
+|--------|------|-----------|
+| GET | `/deployment/config` | Simple |
+| PATCH | `/deployment/config` | Medium |
+| GET | `/organizations/{org}/provisionerdaemons` | Medium |
+| GET | `/organizations/{org}/provisionerjobs` | Medium |
+| GET | `/organizations/{org}/provisionerjobs/{job}` | Simple |
+| PATCH | `/organizations/{org}/provisionerjobs/{job}/cancel` | Medium |
+| GET | `/organizations/{org}/provisionerjobs/{job}/logs` | Complex (streaming) |
+| GET | `/organizations/{org}/members/roles` | Simple |
+| PUT | `/organizations/{org}/members/{user}/roles` | Medium |
+| GET | `/applications/auth-redirect` | Medium |
+| GET | `/applications/host` | Simple |
+| GET | `/workspaceagents/me/gitsshkey` | Simple |
+| GET | `/workspaceagents/me/gitauth` | Simple (deprecated) |
+| GET | `/workspaceagents/{agent}/startup-logs` | Simple (deprecated) |
+| GET | `/templateversions/{tv}/schema` | Simple (deprecated) |
+
+**Key implementation notes**:
+- Deprecated endpoints (`gitauth`, `startup-logs`, `schema`) should redirect to their replacement routes with 301 status
+- Provisioner job logs (`GET .../provisionerjobs/{job}/logs`) requires streaming — reuse the pub/sub infrastructure from Prompt 1B
+- Deployment config `PATCH` needs careful validation — Go has extensive `DeploymentValues` validation
+- Organization member roles routes may already partially exist — check current implementation
+
+**Dependencies**: Various — provisioner job routes need Prompt 2 (Templates), deployment config is standalone, deprecated routes are trivial.
+
+**Estimated effort**: 2–3 weeks
+
+---
+
+### Prompt 7A: Provisioner Daemon Orchestration
+
+**Goal**: Build the provisioner job lifecycle system — job queueing, worker assignment, heartbeats, completion handling, and daemon registration.
+
+**Why critical**: Every template creation and workspace build depends on provisioner jobs. This is the engine that turns templates into running workspaces.
+
+**Go reference files**:
+- `coder/provisionerd/provisionerd.go` — daemon main loop, job acquisition, heartbeats
+- `coder/provisionerd/runner/runner.go` — single job execution: plan → apply, log streaming, resource extraction
+- `coder/provisionersdk/` — protobuf definitions for provisioner ↔ daemon communication
+- `coder/coderd/provisionerdserver/` — server-side job API: `AcquireJob`, `UpdateJob`, `CompleteJob`, `FailJob`
+- `coder/coderd/database/queries/provisionerjobs.sql` (16 queries) — `AcquireProvisionerJob`, `UpdateProvisionerJobWithCompleteByID`, `GetProvisionerJobsByIDs`
+
+**Rust files to modify**:
+- `crates/coder-provisioner/src/lib.rs` — replace stub with real `ProvisionerService`
+- `crates/coder-db/migrations/` — expand `provisioner_jobs` from stub to full schema (~20 columns), add `provisioner_job_logs`, `provisioner_job_timings`, `provisioner_keys`
+- `crates/coder-core/src/ports.rs` — add `ProvisionerStore` trait
+- `crates/coder-db/src/store.rs` — implement provisioner queries
+
+**What to implement**:
+1. **Job queue**: `provisioner_jobs` table tracks jobs with status (`pending`, `running`, `succeeded`, `failed`, `canceling`, `canceled`). Use PostgreSQL `FOR UPDATE SKIP LOCKED` for job acquisition.
+2. **Daemon registration**: External provisioner daemons connect and poll for jobs matching their tags.
+3. **Job types**: `template_version_import` (parse Terraform), `template_version_dry_run` (plan without apply), `workspace_build` (apply infrastructure).
+4. **Job lifecycle**: acquired → running (with periodic heartbeats) → succeeded/failed. Stale jobs (no heartbeat) get marked as failed by an "unhanger" background job.
+5. **Log streaming**: Daemons stream job logs which are stored in `provisioner_job_logs` and broadcast via pub/sub for real-time UI consumption.
+6. **Resource extraction**: On job completion, provisioner reports created resources (compute, agents, apps) which populate `workspace_resources`, `workspace_agents`, `workspace_apps`.
+
+**Key implementation notes**:
+- The Go implementation uses a long-polling gRPC/dRPC connection for daemon ↔ server communication. In Rust, consider WebSocket-based protocol or gRPC via `tonic`.
+- Job acquisition must be atomic and fair — the `FOR UPDATE SKIP LOCKED` pattern in PostgreSQL prevents double-assignment.
+- Heartbeat timeout (Go default: 30 seconds) determines when a job is considered abandoned.
+- The "unhanger" (`coder/coderd/unhanger/`) is a separate background goroutine that detects stuck jobs.
+
+**Dependencies**: Prompt 1B (Pub/Sub for log streaming). This prompt is a prerequisite for full functionality of Prompts 2 and 3.
+
+**Estimated effort**: 4–6 weeks
+
+---
+
+### Prompt 7B: Autobuild & Schedule System
+
+**Goal**: Implement workspace auto-start/stop scheduling and the autobuild executor that triggers workspace transitions based on schedules and TTLs.
+
+**Go reference files**:
+- `coder/coderd/autobuild/lifecycle_executor.go` (3,070 lines total) — main executor loop, workspace state evaluation, build creation
+- `coder/coderd/schedule/` (7 files, 1,538 lines) — `cron.go` (cron expression parsing), `template.go` (template-level schedule constraints), `user.go` (quiet hours), `autostart.go`, `autostop.go`
+
+**Rust files to modify**:
+- `crates/coder-workspaces/src/lib.rs` — add `AutobuildService` and `ScheduleService`
+- Potentially create `crates/coder-workspaces/src/schedule.rs` for scheduling logic
+
+**What to implement**:
+1. **Cron-based autostart**: Parse user-defined cron expressions (e.g., `0 9 * * MON-FRI`), trigger workspace start at scheduled times.
+2. **TTL-based autostop**: After workspace goes idle (no connections for `ttl` duration), trigger workspace stop.
+3. **Deadline extension**: Workspaces have a deadline after which they auto-stop. Users can extend via `PUT /workspaces/{id}/extend`.
+4. **Template schedule constraints**: Templates define max TTL, default TTL, and allowed autostart intervals.
+5. **Quiet hours**: User-configurable quiet hours during which autostop is preferred.
+6. **Executor loop**: Background task that runs every 30 seconds, evaluates all active workspaces, and creates builds for those that need state transitions.
+7. **Dormancy**: Workspaces unused for extended periods enter dormant state (locked), eventually auto-deleted after dormancy TTL.
+
+**Key implementation notes**:
+- Use `cron` crate for cron expression parsing
+- The executor needs to be idempotent — multiple replicas may run simultaneously
+- The schedule evaluation logic is complex: it considers autostart schedule, deadline, template max TTL, quiet hours, and current workspace state
+- Dormancy is a separate lifecycle from active → stopped: `active` → `dormant` → `deleted`
+
+**Dependencies**: Prompt 3 (Workspaces), Prompt 7A (Provisioner — autobuild creates provisioner jobs).
+
+**Estimated effort**: 2–3 weeks
+
+---
+
+### Prompt 7C: Notification Dispatch, Telemetry & Update Checker
+
+**Goal**: Implement three smaller background systems: notification dispatch pipeline, anonymous telemetry collection, and version update checking.
+
+**Go reference files**:
+- **Notification dispatch**: `coder/coderd/notifications/manager.go`, `dispatch.go`, `enqueuer.go` — background goroutine that processes `notification_messages` queue, renders templates, sends via configured method (SMTP email, webhook HTTP, inbox insert)
+- **Telemetry**: `coder/coderd/telemetry/telemetry.go` (3,814 lines) — periodic anonymous usage data collection (deployment ID, user counts, workspace counts, template counts), sent to telemetry endpoint
+- **Update checker**: `coder/coderd/updatecheck/updatecheck.go` (396 lines) — periodic check against GitHub releases API for newer versions
+
+**Rust files to modify**:
+- `crates/coder-notifications/src/lib.rs` — add dispatch pipeline: `NotificationManager` with background task loop, `NotificationEnqueuer` for creating notifications, method dispatchers (email, webhook, inbox)
+- `crates/coder-connectivity/src/lib.rs` or new module — add `TelemetryService` and `UpdateCheckService`
+- `crates/coder-core/src/api.rs` — telemetry and update check types are already partially present
+
+**What to implement**:
+1. **Notification dispatch loop**: Background task that polls `notification_messages` for pending messages, renders template content, dispatches via the configured method, marks as sent/failed.
+2. **Email dispatch**: SMTP client (use `lettre` crate) for sending HTML email notifications.
+3. **Webhook dispatch**: HTTP POST to configured webhook URL with notification payload.
+4. **Inbox dispatch**: Insert into `inbox_notifications` table + pub/sub broadcast.
+5. **Telemetry collection**: Periodic (daily) anonymous snapshot of deployment stats. Configurable opt-in/opt-out. POST to telemetry endpoint.
+6. **Update checker**: Periodic check (daily) against `https://api.github.com/repos/coder/coder/releases/latest`. Cache result. Expose via `GET /api/v2/updatecheck` (already partially implemented).
+
+**Dependencies**: Prompt 5A (Notification schema/routes), Prompt 1B (Pub/Sub for inbox notifications).
+
+**Estimated effort**: 2–3 weeks
+
+---
+
+### Prompt 8: Database Enum Types & Schema Completion
+
+**Goal**: Define all 46 missing PostgreSQL enum types and ensure all domain tables have complete column sets matching the Go schema.
+
+**Why separate**: Enum types are used across multiple domains. Defining them in a single migration ensures consistency and avoids circular dependencies between domain-specific migrations.
+
+**Go reference file**:
+- `coder/coderd/database/dump.sql` — search for `CREATE TYPE ... AS ENUM` to find all 48 enum definitions
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — new migration(s) defining all enum types
+- `crates/coder-core/` — Rust enum types matching each PostgreSQL enum, with `sqlx::Type` derives
+
+**Missing enum types (46)**:
+
+| Category | Enums to Define |
+|----------|----------------|
+| Agent | `workspace_agent_lifecycle_state`, `workspace_agent_monitor_state`, `workspace_agent_script_timing_stage`, `workspace_agent_script_timing_status`, `workspace_agent_subsystem` |
+| Workspace | `workspace_transition`, `workspace_app_health`, `workspace_app_open_in`, `workspace_app_status_state`, `automatic_updates`, `app_sharing_level` |
+| Provisioner | `provisioner_type`, `provisioner_storage_method`, `provisioner_job_type`, `provisioner_job_status`, `provisioner_job_timing_stage`, `provisioner_daemon_status` |
+| Build | `build_reason` |
+| Auth | `api_key_scope`, `agent_key_scope_enum` |
+| Audit | `audit_action` (expand from 5 → 13 variants), `resource_type` (expand from 8 → 27 variants) |
+| Notifications | `notification_message_status`, `notification_method`, `notification_template_kind`, `inbox_notification_read_status` |
+| Parameters | `parameter_destination_scheme`, `parameter_form_type`, `parameter_scope`, `parameter_source_scheme`, `parameter_type_system` |
+| Chat/AI | `chat_message_visibility`, `chat_status`, `task_status` |
+| Display | `display_app`, `log_level`, `log_source`, `startup_script_behavior` |
+| Network | `connection_status`, `connection_type`, `cors_behavior`, `tailnet_status`, `port_share_protocol` |
+| RBAC | `group_source`, `prebuild_status` |
+| Crypto | `crypto_key_feature` |
+
+**Key implementation notes**:
+- Each PostgreSQL enum needs a corresponding Rust enum with `#[derive(sqlx::Type)]` and `#[sqlx(type_name = "enum_name")]`
+- Consider creating a single large migration or one per domain grouping
+- Existing Rust enums (`login_type`, `user_status`) can serve as templates for the derive pattern
+- Expanding `audit_action` and `resource_type` requires updating `crates/coder-audit/src/lib.rs` and `crates/coder-rbac/src/lib.rs` respectively
+
+**Dependencies**: None — this can be done early as a prerequisite for domain-specific prompts.
+
+**Estimated effort**: 1 week
+
+---
+
+### Prompt 9: OAuth2 Provider (4 tables, ~8 routes)
+
+**Goal**: Implement Coder as an OAuth2 provider — allowing third-party applications to authenticate users via Coder.
+
+**Go reference files**:
+- `coder/coderd/oauth2provider.go` — provider registration, authorization endpoint, token endpoint
+- `coder/codersdk/oauth2.go` (~17 structs) — `OAuth2ProviderApp`, `OAuth2ProviderAppSecret`, request/response types
+- `coder/coderd/database/queries/oauth2.sql` — app CRUD, code/token lifecycle queries
+- `coder/coderd/database/dump.sql` — `oauth2_provider_apps`, `oauth2_provider_app_secrets`, `oauth2_provider_app_codes`, `oauth2_provider_app_tokens`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — add 4 tables
+- `crates/coder-core/src/api.rs` — add ~17 OAuth2 provider structs
+- `crates/coder-auth/src/lib.rs` — add OAuth2 provider service logic
+- `crates/coder-server/src/app.rs` — add handlers and routes
+
+**What to implement**:
+1. OAuth2 app registration (admin creates apps with name, callback URL)
+2. Authorization endpoint (`GET /oauth2/authorize`) — user consent flow
+3. Token endpoint (`POST /oauth2/token`) — code → token exchange, refresh token flow
+4. Token introspection and revocation
+5. App secret rotation
+6. Standard OAuth2 RFC 6749 compliance
+
+**Dependencies**: Prompt 1A (RBAC for admin-only app management).
+
+**Estimated effort**: 2–3 weeks
+
+---
+
+### Prompt 10: User Identity Supplements & Groups
+
+**Goal**: Port remaining user identity features — user links (OAuth identity), user configs, soft-delete tracking, status changes, user secrets, groups, and group membership.
+
+**Go reference files**:
+- `coder/coderd/database/queries/users.sql` — remaining unported queries (~12)
+- `coder/coderd/database/queries/groups.sql` — group CRUD and membership
+- `coder/coderd/database/dump.sql` — `user_links`, `user_configs`, `user_deleted`, `user_status_changes`, `user_secrets`, `custom_roles`, `groups`, `group_members`
+
+**Rust files to modify**:
+- `crates/coder-db/migrations/` — add 8 tables: `user_links`, `user_configs`, `user_deleted`, `user_status_changes`, `user_secrets`, `custom_roles`, `groups`, `group_members`
+- `crates/coder-core/src/ports.rs` — expand `IdentityStore` with group and supplemental user methods
+- `crates/coder-db/src/store.rs` — implement queries
+- `crates/coder-identity/src/lib.rs` — expand `IdentityService` with group management
+
+**What to implement**:
+1. **User links**: OAuth/OIDC identity provider links (used during external auth login to map provider identity to Coder user)
+2. **User configs**: Per-user key-value configuration (theme, notification prefs, etc.)
+3. **Soft-delete tracking**: `user_deleted` records when/why a user was deleted
+4. **Status changes**: Audit trail of `active` → `suspended` → `dormant` transitions
+5. **User secrets**: Encrypted user-stored secrets for workspace use
+6. **Groups**: User groups with membership, used for template ACLs and RBAC
+7. **Custom roles**: User-defined RBAC roles beyond the built-in set
+
+**Dependencies**: Prompt 1A (RBAC for custom roles and group-based permissions).
+
+**Estimated effort**: 2–3 weeks
+
+---
+
+> **Total estimated effort across all prompts**: 45–70 weeks for a single developer. Prompts 1A–1D (infrastructure) should be prioritized first as they unblock all subsequent domain work. Prompts can be parallelized across developers — for example, Prompt 5A (Notifications), Prompt 5B (AI Tasks), and Prompt 5C (Chats) have no mutual dependencies and can proceed simultaneously once infrastructure is in place.
+
+---
+
 ## Appendix A: Full Missing Route Inventory
 
 | # | Method | Path | Go Source | Complexity |
