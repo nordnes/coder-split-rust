@@ -310,7 +310,7 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/debug/pprof/profile", get(debug_pprof))
                 .route("/debug/pprof/symbol", get(debug_pprof))
                 .route("/debug/pprof/trace", get(debug_pprof))
-                .route("/debug/websocket", get(debug_websocket))
+                .route("/debug/ws", get(debug_websocket))
                 .route("/insights/daus", get(insights_daus))
                 .route("/insights/templates", get(insights_templates))
                 .route("/insights/user-activity", get(insights_user_activity))
