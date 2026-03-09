@@ -95,14 +95,20 @@ pub trait PubSub: Send + Sync {
 // In-memory implementation (for tests)
 // ---------------------------------------------------------------------------
 
+/// Internal state for [`InMemoryPubSub`], protected by a single mutex to
+/// prevent TOCTOU races between the `closed` flag and `channels` map.
+struct InMemoryPubSubInner {
+    closed: bool,
+    channels: HashMap<String, broadcast::Sender<Vec<u8>>>,
+}
+
 /// In-memory [`PubSub`] implementation backed by `tokio::sync::broadcast`
 /// channels.
 ///
 /// This is an exported type so that test code in downstream crates can
 /// construct it directly.
 pub struct InMemoryPubSub {
-    channels: Arc<Mutex<HashMap<String, broadcast::Sender<Vec<u8>>>>>,
-    closed: Arc<Mutex<bool>>,
+    inner: Arc<Mutex<InMemoryPubSubInner>>,
 }
 
 impl InMemoryPubSub {
@@ -110,8 +116,10 @@ impl InMemoryPubSub {
     #[must_use]
     pub fn new() -> Self {
         Self {
-            channels: Arc::new(Mutex::new(HashMap::new())),
-            closed: Arc::new(Mutex::new(false)),
+            inner: Arc::new(Mutex::new(InMemoryPubSubInner {
+                closed: false,
+                channels: HashMap::new(),
+            })),
         }
     }
 
@@ -136,41 +144,32 @@ impl Default for InMemoryPubSub {
 #[async_trait]
 impl PubSub for InMemoryPubSub {
     async fn subscribe(&self, channel: &str) -> Result<Subscription, PubSubError> {
-        let closed = self.closed.lock().await;
-        if *closed {
+        let mut inner = self.inner.lock().await;
+        if inner.closed {
             return Err(PubSubError::Closed);
         }
-        drop(closed);
-
-        let mut channels = self.channels.lock().await;
-        let sender = Self::get_or_create_sender(&mut channels, channel);
+        let sender = Self::get_or_create_sender(&mut inner.channels, channel);
         Ok(Subscription::new(sender.subscribe()))
     }
 
     async fn publish(&self, channel: &str, message: &[u8]) -> Result<(), PubSubError> {
-        let closed = self.closed.lock().await;
-        if *closed {
+        let mut inner = self.inner.lock().await;
+        if inner.closed {
             return Err(PubSubError::Closed);
         }
-        drop(closed);
-
-        let mut channels = self.channels.lock().await;
-        let sender = Self::get_or_create_sender(&mut channels, channel);
+        let sender = Self::get_or_create_sender(&mut inner.channels, channel);
         // It is fine if there are currently no receivers.
         let _ = sender.send(message.to_vec());
         Ok(())
     }
 
     async fn close(&self) -> Result<(), PubSubError> {
-        let mut closed = self.closed.lock().await;
-        if *closed {
+        let mut inner = self.inner.lock().await;
+        if inner.closed {
             return Ok(());
         }
-        *closed = true;
-        drop(closed);
-
-        let mut channels = self.channels.lock().await;
-        channels.clear();
+        inner.closed = true;
+        inner.channels.clear();
         Ok(())
     }
 }
@@ -248,7 +247,7 @@ pub struct WorkspaceEvent {
     pub workspace_id: Uuid,
     /// Agent identifier – only set for agent-specific events (excluding
     /// [`AgentTimeout`](WorkspaceEventKind::AgentTimeout)).
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_id: Option<Uuid>,
 }
 
