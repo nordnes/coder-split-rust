@@ -2859,7 +2859,7 @@ async fn insights_templates(
     };
     let template_ids = parse_template_ids(&query.template_ids);
 
-    let _sections: Vec<TemplateInsightsSection> = query
+    let sections: Vec<TemplateInsightsSection> = query
         .sections
         .as_deref()
         .unwrap_or("")
@@ -2872,10 +2872,22 @@ async fn insights_templates(
         })
         .collect();
 
-    let response = state
+    let mut response = state
         .store
         .get_template_insights(start_time, end_time, interval, template_ids)
         .await?;
+
+    // When the client specifies explicit sections, strip the parts they did
+    // not ask for.  An empty `sections` vec means "return everything".
+    if !sections.is_empty() {
+        if !sections.contains(&TemplateInsightsSection::Report) {
+            response.report = None;
+        }
+        if !sections.contains(&TemplateInsightsSection::IntervalReports) {
+            response.interval_reports = Vec::new();
+        }
+    }
+
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
