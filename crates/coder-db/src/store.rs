@@ -274,7 +274,7 @@ struct StoredNotificationTemplateRow {
     title_template: String,
     body_template: String,
     actions: Option<String>,
-    #[sqlx(rename = "\"group\"")]
+    #[sqlx(rename = "group")]
     group: Option<String>,
     method: Option<String>,
     kind: String,
@@ -310,11 +310,6 @@ struct StoredWebpushSubscriptionRow {
     endpoint: String,
     endpoint_p256dh_key: String,
     endpoint_auth_key: String,
-}
-
-#[derive(FromRow)]
-struct StoredNotificationsSettingsRow {
-    notifier_paused: bool,
 }
 
 impl PostgresStore {
@@ -2574,17 +2569,17 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_notifications_settings(&self) -> Result<NotificationsSettings, StorageError> {
-        let row = sqlx::query_as::<_, StoredNotificationsSettingsRow>(
-            "SELECT notifier_paused FROM site_configs WHERE key = 'notifications_settings' LIMIT 1",
+        let encoded: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM site_configs WHERE key = 'notifications_settings' LIMIT 1",
         )
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)?;
 
-        match row {
-            Some(r) => Ok(NotificationsSettings {
-                notifier_paused: r.notifier_paused,
-            }),
+        match encoded {
+            Some(encoded) => {
+                from_str(&encoded).map_err(|error| StorageError::invalid_data(error.to_string()))
+            }
             None => Ok(NotificationsSettings::default()),
         }
     }

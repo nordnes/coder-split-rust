@@ -102,5 +102,6 @@ CREATE TABLE webpush_subscriptions (
     created_at          TIMESTAMPTZ NOT NULL DEFAULT CURRENT_TIMESTAMP,
     endpoint            TEXT NOT NULL,
     endpoint_p256dh_key TEXT NOT NULL,
-    endpoint_auth_key   TEXT NOT NULL
+    endpoint_auth_key   TEXT NOT NULL,
+    UNIQUE (user_id, endpoint)
 );

@@ -1553,6 +1553,7 @@ pub struct NotificationMethodsResponse {
 pub struct NotificationPreference {
     pub id: Uuid,
     pub disabled: bool,
+    #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
 
@@ -1601,8 +1602,12 @@ pub struct InboxNotification {
     pub content: String,
     pub icon: String,
     pub actions: Vec<InboxNotificationAction>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
     pub read_at: Option<OffsetDateTime>,
+    #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
 
