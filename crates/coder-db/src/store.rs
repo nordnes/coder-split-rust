@@ -10,7 +10,7 @@ use coder_core::template::{
     CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
     TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
     TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
-    TemplateVersionVariableRecord,
+    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
 };
 use coder_core::{
     ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AppStore, AuditDiff,
@@ -2540,12 +2540,14 @@ impl AppStore for PostgresStore {
             WHERE ($1::uuid IS NULL OR t.organization_id = $1)
               AND ($2::text IS NULL OR t.name = $2)
               AND ($3::bool OR t.deleted = false)
+              AND ($4::text IS NULL OR t.name ILIKE '%' || $4 || '%' OR t.display_name ILIKE '%' || $4 || '%')
             ORDER BY t.name ASC
             "#,
         )
         .bind(filter.organization_id)
         .bind(filter.exact_name.as_deref())
         .bind(filter.deleted)
+        .bind(filter.search.as_deref())
         .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -2673,22 +2675,7 @@ impl AppStore for PostgresStore {
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn update_template_meta(
         &self,
-        template_id: Uuid,
-        name: &str,
-        display_name: &str,
-        description: &str,
-        icon: &str,
-        default_ttl: i64,
-        activity_bump: i64,
-        allow_user_autostart: bool,
-        allow_user_autostop: bool,
-        allow_user_cancel_workspace_jobs: bool,
-        failure_ttl: i64,
-        time_til_dormant: i64,
-        time_til_dormant_autodelete: i64,
-        require_active_version: bool,
-        deprecation_message: &str,
-        max_port_share_level: &str,
+        input: UpdateTemplateMetaInput,
     ) -> Result<Option<TemplateRecord>, StorageError> {
         let result = sqlx::query(
             r#"
@@ -2712,22 +2699,22 @@ impl AppStore for PostgresStore {
             WHERE id = $1
             "#,
         )
-        .bind(template_id)
-        .bind(name)
-        .bind(display_name)
-        .bind(description)
-        .bind(icon)
-        .bind(default_ttl)
-        .bind(activity_bump)
-        .bind(allow_user_autostart)
-        .bind(allow_user_autostop)
-        .bind(allow_user_cancel_workspace_jobs)
-        .bind(failure_ttl)
-        .bind(time_til_dormant)
-        .bind(time_til_dormant_autodelete)
-        .bind(require_active_version)
-        .bind(deprecation_message)
-        .bind(max_port_share_level)
+        .bind(input.template_id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.description)
+        .bind(&input.icon)
+        .bind(input.default_ttl)
+        .bind(input.activity_bump)
+        .bind(input.allow_user_autostart)
+        .bind(input.allow_user_autostop)
+        .bind(input.allow_user_cancel_workspace_jobs)
+        .bind(input.failure_ttl)
+        .bind(input.time_til_dormant)
+        .bind(input.time_til_dormant_autodelete)
+        .bind(input.require_active_version)
+        .bind(&input.deprecation_message)
+        .bind(&input.max_port_share_level)
         .execute(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -2735,7 +2722,7 @@ impl AppStore for PostgresStore {
         if result.rows_affected() == 0 {
             return Ok(None);
         }
-        self.find_template_by_id(template_id).await
+        self.find_template_by_id(input.template_id).await
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -3109,9 +3096,10 @@ impl AppStore for PostgresStore {
             SELECT id, created_at, updated_at, started_at, canceled_at, completed_at,
                    error, organization_id, initiator_id, provisioner,
                    CASE
+                       WHEN completed_at IS NOT NULL AND canceled_at IS NOT NULL THEN 'canceled'
                        WHEN completed_at IS NOT NULL AND error != '' THEN 'failed'
                        WHEN completed_at IS NOT NULL THEN 'succeeded'
-                       WHEN canceled_at IS NOT NULL THEN 'canceled'
+                       WHEN canceled_at IS NOT NULL THEN 'canceling'
                        WHEN started_at IS NOT NULL THEN 'running'
                        ELSE 'pending'
                    END AS job_status,

@@ -22,7 +22,7 @@ use crate::template::{
     CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
     TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
     TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
-    TemplateVersionVariableRecord,
+    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
 };
 
 /// Deployment metadata required by the HTTP layer.
@@ -1276,41 +1276,9 @@ pub trait AppStore: DeploymentStore + Send + Sync {
     /// Updates a template's metadata.
     async fn update_template_meta(
         &self,
-        template_id: Uuid,
-        name: &str,
-        display_name: &str,
-        description: &str,
-        icon: &str,
-        default_ttl: i64,
-        activity_bump: i64,
-        allow_user_autostart: bool,
-        allow_user_autostop: bool,
-        allow_user_cancel_workspace_jobs: bool,
-        failure_ttl: i64,
-        time_til_dormant: i64,
-        time_til_dormant_autodelete: i64,
-        require_active_version: bool,
-        deprecation_message: &str,
-        max_port_share_level: &str,
+        input: UpdateTemplateMetaInput,
     ) -> Result<Option<TemplateRecord>, StorageError> {
-        let _ = (
-            template_id,
-            name,
-            display_name,
-            description,
-            icon,
-            default_ttl,
-            activity_bump,
-            allow_user_autostart,
-            allow_user_autostop,
-            allow_user_cancel_workspace_jobs,
-            failure_ttl,
-            time_til_dormant,
-            time_til_dormant_autodelete,
-            require_active_version,
-            deprecation_message,
-            max_port_share_level,
-        );
+        let _ = input;
         Err(StorageError::unavailable("templates are not implemented"))
     }
 

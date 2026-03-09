@@ -34,7 +34,7 @@ use coder_core::api::{
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
     CreateTemplateVersionInput, ProvisionerJobRecord, TemplateListFilter, TemplateRecord,
-    TemplateVersionListFilter, TemplateVersionRecord,
+    TemplateVersionListFilter, TemplateVersionRecord, UpdateTemplateMetaInput,
 };
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
@@ -2630,15 +2630,14 @@ async fn list_org_templates(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let org_record = state
-        .store
-        .find_organization_by_name(&org)
-        .await?
-        .ok_or_else(|| {
-            AppError::from(StorageError::invalid_data(format!(
-                "organization {org} not found"
-            )))
-        })?;
+    let org_record = match state.store.find_organization_by_name(&org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
 
     let templates = state
         .store
@@ -2667,15 +2666,14 @@ async fn post_org_template(
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
-    let org_record = state
-        .store
-        .find_organization_by_name(&org)
-        .await?
-        .ok_or_else(|| {
-            AppError::from(StorageError::invalid_data(format!(
-                "organization {org} not found"
-            )))
-        })?;
+    let org_record = match state.store.find_organization_by_name(&org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
 
     let now = OffsetDateTime::now_utc();
     let template_id = Uuid::new_v4();
@@ -2741,15 +2739,14 @@ async fn get_org_template_by_name(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let org_record = state
-        .store
-        .find_organization_by_name(&org)
-        .await?
-        .ok_or_else(|| {
-            AppError::from(StorageError::invalid_data(format!(
-                "organization {org} not found"
-            )))
-        })?;
+    let org_record = match state.store.find_organization_by_name(&org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
 
     let template = state
         .store
@@ -2772,15 +2769,14 @@ async fn get_org_template_version_by_name(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let org_record = state
-        .store
-        .find_organization_by_name(&org)
-        .await?
-        .ok_or_else(|| {
-            AppError::from(StorageError::invalid_data(format!(
-                "organization {org} not found"
-            )))
-        })?;
+    let org_record = match state.store.find_organization_by_name(&org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
 
     let ver = state
         .store
@@ -2811,15 +2807,14 @@ async fn post_org_template_version(
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
-    let org_record = state
-        .store
-        .find_organization_by_name(&org)
-        .await?
-        .ok_or_else(|| {
-            AppError::from(StorageError::invalid_data(format!(
-                "organization {org} not found"
-            )))
-        })?;
+    let org_record = match state.store.find_organization_by_name(&org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
 
     let now = OffsetDateTime::now_utc();
     let job_id = Uuid::new_v4();
@@ -2937,11 +2932,10 @@ async fn patch_template(
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
     // Fetch existing template to use current values as defaults.
-    let existing = state
-        .store
-        .find_template_by_id(template_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template not found")))?;
+    let existing = match state.store.find_template_by_id(template_id).await? {
+        Some(t) => t,
+        None => return Ok(not_found_response("Template not found.")),
+    };
 
     let name = if body.name.is_empty() {
         &existing.name
@@ -2965,38 +2959,47 @@ async fn patch_template(
 
     let updated = state
         .store
-        .update_template_meta(
+        .update_template_meta(UpdateTemplateMetaInput {
             template_id,
-            name,
-            display_name,
-            description,
-            icon,
-            body.default_ttl_ms
+            name: name.to_owned(),
+            display_name: display_name.to_owned(),
+            description: description.to_owned(),
+            icon: icon.to_owned(),
+            default_ttl: body
+                .default_ttl_ms
                 .unwrap_or(existing.default_ttl / 1_000_000)
                 * 1_000_000,
-            body.activity_bump_ms
+            activity_bump: body
+                .activity_bump_ms
                 .unwrap_or(existing.activity_bump / 1_000_000)
                 * 1_000_000,
-            body.allow_user_autostart
+            allow_user_autostart: body
+                .allow_user_autostart
                 .unwrap_or(existing.allow_user_autostart),
-            body.allow_user_autostop
+            allow_user_autostop: body
+                .allow_user_autostop
                 .unwrap_or(existing.allow_user_autostop),
-            body.allow_user_cancel_workspace_jobs
+            allow_user_cancel_workspace_jobs: body
+                .allow_user_cancel_workspace_jobs
                 .unwrap_or(existing.allow_user_cancel_workspace_jobs),
-            body.failure_ttl_ms
+            failure_ttl: body
+                .failure_ttl_ms
                 .unwrap_or(existing.failure_ttl / 1_000_000)
                 * 1_000_000,
-            body.time_til_dormant_ms
+            time_til_dormant: body
+                .time_til_dormant_ms
                 .unwrap_or(existing.time_til_dormant / 1_000_000)
                 * 1_000_000,
-            body.time_til_dormant_autodelete_ms
+            time_til_dormant_autodelete: body
+                .time_til_dormant_autodelete_ms
                 .unwrap_or(existing.time_til_dormant_autodelete / 1_000_000)
                 * 1_000_000,
-            body.require_active_version
+            require_active_version: body
+                .require_active_version
                 .unwrap_or(existing.require_active_version),
-            deprecation_message,
-            max_port_share_level,
-        )
+            deprecation_message: deprecation_message.to_owned(),
+            max_port_share_level: max_port_share_level.to_owned(),
+        })
         .await?;
 
     match updated {
@@ -3142,11 +3145,10 @@ async fn patch_template_version(
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
-    let existing = state
-        .store
-        .find_template_version_by_id(version_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+    let existing = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
 
     let name = if body.name.is_empty() {
         &existing.name
@@ -3209,11 +3211,10 @@ async fn post_cancel_template_version(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let ver = state
-        .store
-        .find_template_version_by_id(version_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
 
     let canceled = state.store.cancel_provisioner_job(ver.job_id).await?;
     if !canceled {
@@ -3247,11 +3248,10 @@ async fn post_template_version_dry_run(
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
     // Ensure the template version exists.
-    let ver = state
-        .store
-        .find_template_version_by_id(version_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
 
     let now = OffsetDateTime::now_utc();
     let job_id = Uuid::new_v4();
@@ -3367,11 +3367,10 @@ async fn get_template_version_dry_run_logs(
     };
 
     // Verify the job exists.
-    let _job = state
-        .store
-        .find_provisioner_job_by_id(job_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("dry-run job not found")))?;
+    let _job = match state.store.find_provisioner_job_by_id(job_id).await? {
+        Some(j) => j,
+        None => return Ok(not_found_response("Dry-run job not found.")),
+    };
 
     // Provisioner logs are not stored in the stub implementation.
     let logs: Vec<ProvisionerJobLog> = Vec::new();
@@ -3388,11 +3387,10 @@ async fn get_template_version_dry_run_resources(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _job = state
-        .store
-        .find_provisioner_job_by_id(job_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("dry-run job not found")))?;
+    let _job = match state.store.find_provisioner_job_by_id(job_id).await? {
+        Some(j) => j,
+        None => return Ok(not_found_response("Dry-run job not found.")),
+    };
 
     // Resources are populated by the provisioner daemon. Return empty for stub.
     let resources: Vec<WorkspaceResource> = Vec::new();
@@ -3410,11 +3408,10 @@ async fn get_template_version_external_auth(
     };
 
     // Verify the version exists.
-    let _ver = state
-        .store
-        .find_template_version_by_id(version_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
 
     // External auth requirements come from provisioner output. Return empty for stub.
     let auths: Vec<TemplateVersionExternalAuth> = Vec::new();
@@ -3431,11 +3428,10 @@ async fn get_template_version_logs(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = state
-        .store
-        .find_template_version_by_id(version_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
 
     let logs: Vec<ProvisionerJobLog> = Vec::new();
     Ok((StatusCode::OK, Json(logs)).into_response())
@@ -3573,11 +3569,10 @@ async fn get_template_version_resources(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = state
-        .store
-        .find_template_version_by_id(version_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
 
     // Resources are populated by the provisioner daemon. Return empty for stub.
     let resources: Vec<WorkspaceResource> = Vec::new();
@@ -3594,11 +3589,10 @@ async fn get_template_version_schema(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = state
-        .store
-        .find_template_version_by_id(version_id)
-        .await?
-        .ok_or_else(|| AppError::from(StorageError::invalid_data("template version not found")))?;
+    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
 
     // Deprecated endpoint — return empty array.
     let schema: Vec<Value> = Vec::new();

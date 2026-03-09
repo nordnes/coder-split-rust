@@ -357,6 +357,43 @@ pub struct CreateProvisionerJobInput {
     pub tags: HashMap<String, String>,
 }
 
+/// Input for updating template metadata.
+#[derive(Clone, Debug)]
+pub struct UpdateTemplateMetaInput {
+    /// Template identifier.
+    pub template_id: Uuid,
+    /// Template name.
+    pub name: String,
+    /// Display name.
+    pub display_name: String,
+    /// Description.
+    pub description: String,
+    /// Icon path or URL.
+    pub icon: String,
+    /// Default TTL in nanoseconds.
+    pub default_ttl: i64,
+    /// Activity bump duration in nanoseconds.
+    pub activity_bump: i64,
+    /// Allow user autostart.
+    pub allow_user_autostart: bool,
+    /// Allow user autostop.
+    pub allow_user_autostop: bool,
+    /// Allow user cancel workspace jobs.
+    pub allow_user_cancel_workspace_jobs: bool,
+    /// Failure TTL in nanoseconds.
+    pub failure_ttl: i64,
+    /// Time til dormant in nanoseconds.
+    pub time_til_dormant: i64,
+    /// Time til dormant auto-delete in nanoseconds.
+    pub time_til_dormant_autodelete: i64,
+    /// Require active version.
+    pub require_active_version: bool,
+    /// Deprecation message.
+    pub deprecation_message: String,
+    /// Max port share level.
+    pub max_port_share_level: String,
+}
+
 /// Template list filter for store queries.
 #[derive(Clone, Debug, Default)]
 pub struct TemplateListFilter {
