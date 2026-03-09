@@ -1,10 +1,86 @@
 You are an experienced, pragmatic software engineering AI agent. Do not over-engineer a solution when a simple one is possible. Keep edits minimal. If you want an exception to ANY rule, you MUST stop and get permission first.
 
-# Project Overview
+# Mission
 
-`coder-split-rust` is the Rust rewrite of the Coder backend (originally Go). The original Go monorepo is vendored under `coder/`. The Rust workspace incrementally ports API routes, starting with identity, auth, RBAC, audit, and deployment endpoints.
+This repo is a **complete Rust rewrite of the Coder backend**. The objective is to reproduce ALL backend features from the original Go codebase (`https://github.com/coder/coder`) in Rust, achieving full route and behavior parity.
 
-## Technology
+**Current progress: 72 of 229 OSS routes ported (31%).**
+
+See [`docs/parity-matrix.md`](docs/parity-matrix.md) for full route-by-route status.
+
+# The Go Reference (`coder/`)
+
+`coder/` contains a checkout of the original Go monorepo. It is the primary reference for understanding what each route does.
+
+## ⚠️ CRITICAL RULES for `coder/`
+
+- **NEVER modify any file under `coder/`** — it is read-only reference material
+- **NEVER commit changes to `coder/`**
+- Files under `coder/` are Go code; your Rust work goes in `crates/` and `apps/`
+
+## Navigating the Go Source
+
+- Route handlers: `coder/coderd/*.go` (e.g., `users.go`, `workspaces.go`, `templates.go`)
+- SDK/API models: `coder/codersdk/*.go`
+- Database queries: `coder/coderd/database/queries/*.sql`
+- Database models: `coder/coderd/database/*.go`
+- Migrations: `coder/coderd/database/migrations/`
+
+# How to Port a Route (Vertical Slice Method)
+
+1. Find the missing route in `docs/parity-matrix.md`
+2. Read the Go handler in `coder/coderd/<file>.go`
+3. Read the SDK models in `coder/codersdk/<file>.go`
+4. Read the SQL queries in `coder/coderd/database/queries/<file>.sql`
+5. Define Rust domain types / API models in `coder-core` or the appropriate feature crate
+6. Port storage access and migrations into `coder-db`
+7. Port the HTTP handler into `coder-server` (or the appropriate feature crate)
+8. Add tests in `#[cfg(test)]` modules alongside the code
+9. Run validation: `cargo fmt --all && cargo clippy --workspace --all-targets && cargo test`
+
+# What's Been Ported vs What Remains
+
+## ✅ Ported (72 routes, 31%)
+
+- User management — CRUD, profiles, roles, status, passwords, appearance, preferences
+- Authentication — login, logout, first user bootstrap, API keys/tokens, OTP, external auth
+- Organizations — list, get, members, paginated members, member roles
+- Deployment ops — config, stats, SSH, health checks, health settings
+- Audit logging — list, test generate
+- Misc — build info, experiments, CSP reports, init scripts, update check, latency check
+
+## ❌ Remaining (157 routes, 69%)
+
+| Domain | Routes | Go Source Files |
+|--------|--------|-----------------|
+| Templates & Versions | 33 | `templates.go`, `templateversions.go` |
+| Workspaces & Builds | 32 | `workspaces.go`, `workspacebuilds.go` |
+| Workspace Agents | 20 | `workspaceagents.go`, `workspaceagentsrpc.go` |
+| Debug & Observability | 11 | `debug.go` |
+| AI Tasks | 10 | `aitasks.go` |
+| Notifications & Inbox | 13 | `notifications.go`, `inboxnotifications.go`, `webpush.go` |
+| Insights & Analytics | 5 | `insights.go` |
+| Chats | 5 | `chats.go` |
+| Files | 2 | `files.go` |
+| Other (params, presets, provisioner jobs, deprecated) | 26 | various |
+
+# Crate Architecture (Go → Rust Mapping)
+
+| Go Area | Rust Crate | Status |
+|---------|------------|--------|
+| `coderd/userauth.go`, sessions, API keys, OIDC, OAuth2 | `crates/coder-auth` | Partial — password auth, sessions, external auth done |
+| `coderd/users.go`, organizations, RBAC | `crates/coder-identity` | Partial — user CRUD, org membership done |
+| `coderd/rbac/*` | `crates/coder-rbac` | Partial — basic actor checks |
+| `coderd/audit/*` | `crates/coder-audit` | Partial — structured audit sink |
+| Templates, workspaces, builds, presets | `crates/coder-workspaces` | Stub — only deployment stats cache |
+| Provisioner APIs and background jobs | `crates/coder-provisioner` | Stub — only init scripts |
+| Notifications, inbox, webpush | `crates/coder-notifications` | Stub — placeholder only |
+| DERP, tailnet, agent RPC, workspace apps | `crates/coder-connectivity` | Partial — health checks, SSH keys |
+| Shared SQL repositories and migrations | `crates/coder-db` | Active — user/org/auth/audit queries |
+| HTTP composition and cross-cutting middleware | `crates/coder-server` | Active — 72 route handlers |
+| Shared types: config, identity, API models, passwords | `crates/coder-core` | Active — foundational types |
+
+# Technology
 
 - **Language:** Rust (edition 2024, MSRV 1.85, toolchain 1.94.0)
 - **Web framework:** Axum 0.8
@@ -13,12 +89,10 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 - **Serialization:** serde / serde_json
 - **Auth:** Custom (API keys, sessions, PBKDF2 password hashing)
 - **Observability:** tracing + tracing-subscriber
-- **HTTP client:** reqwest (rustls)
+- **HTTP client:** reqwest with rustls
 - **License:** AGPL-3.0-only
 
-# Reference
-
-## Project Structure
+# Project Structure
 
 ```
 Cargo.toml              # Workspace root — all deps centralized here
@@ -39,17 +113,20 @@ crates/
   coder-connectivity/   # Connectivity checks (stub)
   coder-notifications/  # Notification system (stub)
 docs/                   # Design docs, parity matrix, conformance harness
-coder/                  # Vendored original Go monorepo (read-only reference)
+coder/                  # ⛔ Original Go monorepo — READ-ONLY REFERENCE
 ```
 
-## Key Files
+# Key Files
 
-- `crates/coder-server/src/app.rs` — Main route definitions and handlers
+- `crates/coder-server/src/app.rs` — All route definitions and handlers (6,566 lines)
 - `crates/coder-server/src/error.rs` — Error types
-- `crates/coder-db/src/store.rs` — Database store implementation
+- `crates/coder-db/src/store.rs` — Database store implementation (2,893 lines)
+- `crates/coder-core/src/ports.rs` — Port/trait definitions (2,081 lines)
+- `crates/coder-core/src/api.rs` — API request/response models (1,528 lines)
 - `crates/coder-core/src/config.rs` — Configuration types
-- `crates/coder-core/src/api.rs` — API request/response models
 - `apps/coderd/src/main.rs` — Server entry point
+- `docs/parity-matrix.md` — Generated route parity status (source of truth)
+- `docs/backend-rewrite.md` — Migration map and methodology
 
 # Essential Commands
 
@@ -57,19 +134,13 @@ coder/                  # Vendored original Go monorepo (read-only reference)
 # Build the entire workspace
 cargo build
 
-# Build in release mode
-cargo build --release
-
 # Run the coderd server
 cargo run --bin coderd
 
-# Run all tests (unit tests are in-file with #[cfg(test)])
+# Run all tests
 cargo test
 
-# Run tests for a specific crate
-cargo test -p coder-server
-
-# Lint (clippy — strict rules enforced, see below)
+# Lint (strict rules enforced)
 cargo clippy --workspace --all-targets
 
 # Format
@@ -78,15 +149,11 @@ cargo fmt --all
 # Check formatting without modifying
 cargo fmt --all -- --check
 
-# Clean build artifacts
-cargo clean
-```
+# Regenerate the parity matrix (requires Go source in coder/)
+cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope oss --output docs/parity-matrix.md
 
-### Provisioner Bootstrap Scripts
-
-```bash
-crates/coder-provisioner/scripts/bootstrap_linux.sh
-crates/coder-provisioner/scripts/bootstrap_darwin.sh
+# Run tests for a specific crate
+cargo test -p coder-server
 ```
 
 # Patterns
@@ -135,8 +202,9 @@ Handlers are defined in `crates/coder-server/src/app.rs`. Follow existing patter
 - **No `unsafe` code** — Forbidden workspace-wide.
 - **No per-crate dependency versions** — Always use `workspace = true` references.
 - **Do not modify files under `coder/`** — This is the vendored Go reference. Treat as read-only.
+- **Do not create separate `tests/` directories** — Use `#[cfg(test)]` in-file.
 
-# Commit and Pull Request Guidelines
+# Commit and PR Guidelines
 
 ## Before Committing
 
@@ -148,11 +216,6 @@ Handlers are defined in `crates/coder-server/src/app.rs`. Follow existing patter
 ## Commit Messages
 
 Use the conventional format: `type: message`
-
-Examples from this repo:
-```
-feat: Rust backend rewrite — auth, identity, RBAC, and operational surfaces
-```
 
 Common types: `feat`, `fix`, `refactor`, `docs`, `test`, `chore`.
 
