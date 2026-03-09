@@ -2611,7 +2611,7 @@ impl AppStore for PostgresStore {
         kind: &str,
     ) -> Result<Vec<NotificationTemplate>, StorageError> {
         let rows = sqlx::query_as::<_, StoredNotificationTemplateRow>(
-            r#"SELECT id, name, title_template, body_template, actions, "group", method,
+            r#"SELECT id, name, title_template, body_template, actions::text, "group", method::text,
                       kind::text, enabled_by_default
                FROM notification_templates
                WHERE ($1 = '' OR kind::text = $1)
@@ -2646,9 +2646,9 @@ impl AppStore for PostgresStore {
     ) -> Result<Option<NotificationTemplate>, StorageError> {
         let row = sqlx::query_as::<_, StoredNotificationTemplateRow>(
             r#"UPDATE notification_templates
-               SET method = $2
+               SET method = $2::notification_method
                WHERE id = $1
-               RETURNING id, name, title_template, body_template, actions, "group", method,
+               RETURNING id, name, title_template, body_template, actions::text, "group", method::text,
                          kind::text, enabled_by_default"#,
         )
         .bind(template_id)
@@ -2729,7 +2729,7 @@ impl AppStore for PostgresStore {
         created_before: Option<OffsetDateTime>,
     ) -> Result<Vec<InboxNotification>, StorageError> {
         let rows = sqlx::query_as::<_, StoredInboxNotificationRow>(
-            r#"SELECT id, user_id, template_id, targets, title, content, icon, actions,
+            r#"SELECT id, user_id, template_id, targets, title, content, icon, actions::text,
                       read_at, created_at
                FROM inbox_notifications
                WHERE user_id = $1
@@ -2775,7 +2775,7 @@ impl AppStore for PostgresStore {
         id: Uuid,
     ) -> Result<Option<InboxNotification>, StorageError> {
         let row = sqlx::query_as::<_, StoredInboxNotificationRow>(
-            "SELECT id, user_id, template_id, targets, title, content, icon, actions,
+            "SELECT id, user_id, template_id, targets, title, content, icon, actions::text,
                     read_at, created_at
              FROM inbox_notifications WHERE id = $1",
         )

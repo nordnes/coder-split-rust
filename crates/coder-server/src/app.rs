@@ -395,14 +395,14 @@ pub fn build_router(state: AppState) -> Router {
                     get(get_user_notification_preferences).put(put_user_notification_preferences),
                 )
                 // Inbox domain
-                .route("/inbox/notifications", get(list_inbox_notifications))
+                .route("/notifications/inbox", get(list_inbox_notifications))
                 .route(
-                    "/inbox/notifications/mark-all-read",
+                    "/notifications/inbox/mark-all-as-read",
                     put(put_mark_all_inbox_notifications_read),
                 )
-                .route("/inbox/notifications/watch", get(watch_inbox_notifications))
+                .route("/notifications/inbox/watch", get(watch_inbox_notifications))
                 .route(
-                    "/inbox/notifications/{id}/read-status",
+                    "/notifications/inbox/{id}/read-status",
                     put(put_inbox_notification_read_status),
                 )
                 // Webpush domain
