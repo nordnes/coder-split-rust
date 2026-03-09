@@ -7,7 +7,8 @@ use tracing::info;
 use uuid::Uuid;
 
 /// Audit actions emitted by the current Rust slice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, sqlx::Type)]
+#[sqlx(type_name = "audit_action", rename_all = "snake_case")]
 pub enum AuditAction {
     /// A resource was created.
     Create,
@@ -15,10 +16,26 @@ pub enum AuditAction {
     Write,
     /// A resource was deleted.
     Delete,
+    /// A workspace or service was started.
+    Start,
+    /// A workspace or service was stopped.
+    Stop,
     /// A user authenticated successfully.
     Login,
     /// A user terminated a session.
     Logout,
+    /// A new user registered.
+    Register,
+    /// A password reset was requested.
+    RequestPasswordReset,
+    /// A connection was established (deprecated).
+    Connect,
+    /// A connection was terminated (deprecated).
+    Disconnect,
+    /// A resource was opened (deprecated).
+    Open,
+    /// A resource was closed (deprecated).
+    Close,
 }
 
 impl AuditAction {
@@ -28,8 +45,16 @@ impl AuditAction {
             Self::Create => "create",
             Self::Write => "write",
             Self::Delete => "delete",
+            Self::Start => "start",
+            Self::Stop => "stop",
             Self::Login => "login",
             Self::Logout => "logout",
+            Self::Register => "register",
+            Self::RequestPasswordReset => "request_password_reset",
+            Self::Connect => "connect",
+            Self::Disconnect => "disconnect",
+            Self::Open => "open",
+            Self::Close => "close",
         }
     }
 }
