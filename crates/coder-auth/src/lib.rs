@@ -2368,10 +2368,17 @@ where
         }
 
         // Delete the old token.  Propagate errors so that token replay
-        // is prevented if deletion fails (RFC 6749 §10.4).
-        self.store
+        // is prevented if deletion fails (RFC 6749 §10.4).  Check the
+        // bool return to detect concurrent refresh attempts (race).
+        if !self
+            .store
             .delete_oauth2_provider_app_token(token_record.id)
-            .await?;
+            .await?
+        {
+            return Err(OAuth2ProviderError::unauthorized(
+                "Refresh token already consumed.",
+            ));
+        }
 
         // Generate a new token pair.
         let result = self
