@@ -1526,3 +1526,243 @@ impl fmt::Display for ApiAllowListTarget {
         write!(f, "{}:{}", self.type_name, self.id)
     }
 }
+
+// ---------------------------------------------------------------------------
+// Insights / Analytics
+// ---------------------------------------------------------------------------
+
+/// The interval of time over which to generate a smaller insights report.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum InsightsReportInterval {
+    #[serde(rename = "day")]
+    Day,
+    #[serde(rename = "week")]
+    Week,
+}
+
+impl InsightsReportInterval {
+    /// Returns the number of days in this interval.
+    #[must_use]
+    pub fn days(&self) -> i32 {
+        match self {
+            Self::Day => 1,
+            Self::Week => 7,
+        }
+    }
+}
+
+/// Section to include in the template insights response.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TemplateInsightsSection {
+    #[serde(rename = "interval_reports")]
+    IntervalReports,
+    #[serde(rename = "report")]
+    Report,
+}
+
+/// Type of app reported in template insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum TemplateAppsType {
+    #[serde(rename = "builtin")]
+    Builtin,
+    #[serde(rename = "app")]
+    App,
+}
+
+/// Connection latency percentiles.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ConnectionLatency {
+    pub p50: f64,
+    pub p95: f64,
+}
+
+/// A single DAU entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DAUEntry {
+    pub date: String,
+    pub amount: i64,
+}
+
+/// Response from the DAU endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DAUsResponse {
+    pub tz_hour_offset: i32,
+    pub entries: Vec<DAUEntry>,
+}
+
+/// Per-user latency data.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct UserLatency {
+    pub template_ids: Vec<Uuid>,
+    pub user_id: Uuid,
+    pub username: String,
+    pub avatar_url: String,
+    pub latency_ms: ConnectionLatency,
+}
+
+/// Report for user latency insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct UserLatencyInsightsReport {
+    #[serde(with = "time::serde::rfc3339")]
+    pub start_time: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub end_time: OffsetDateTime,
+    pub template_ids: Vec<Uuid>,
+    pub users: Vec<UserLatency>,
+}
+
+/// Response for user latency insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct UserLatencyInsightsResponse {
+    pub report: UserLatencyInsightsReport,
+}
+
+/// Per-user activity data.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserActivity {
+    pub template_ids: Vec<Uuid>,
+    pub user_id: Uuid,
+    pub username: String,
+    pub avatar_url: String,
+    pub seconds: i64,
+}
+
+/// Report for user activity insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserActivityInsightsReport {
+    #[serde(with = "time::serde::rfc3339")]
+    pub start_time: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub end_time: OffsetDateTime,
+    pub template_ids: Vec<Uuid>,
+    pub users: Vec<UserActivity>,
+}
+
+/// Response for user activity insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserActivityInsightsResponse {
+    pub report: UserActivityInsightsReport,
+}
+
+/// App usage entry for template insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TemplateAppUsage {
+    pub template_ids: Vec<Uuid>,
+    #[serde(rename = "type")]
+    pub app_type: TemplateAppsType,
+    pub display_name: String,
+    pub slug: String,
+    pub icon: String,
+    pub seconds: i64,
+    #[serde(default)]
+    pub times_used: i64,
+}
+
+/// Parameter value usage entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TemplateParameterValue {
+    pub value: String,
+    pub count: i64,
+}
+
+/// Parameter usage entry for template insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TemplateParameterUsage {
+    pub template_ids: Vec<Uuid>,
+    pub display_name: String,
+    pub name: String,
+    #[serde(rename = "type")]
+    pub param_type: String,
+    pub description: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<Value>,
+    pub values: Vec<TemplateParameterValue>,
+}
+
+/// Full report for template insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TemplateInsightsReport {
+    #[serde(with = "time::serde::rfc3339")]
+    pub start_time: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub end_time: OffsetDateTime,
+    pub template_ids: Vec<Uuid>,
+    pub active_users: i64,
+    pub apps_usage: Vec<TemplateAppUsage>,
+    pub parameters_usage: Vec<TemplateParameterUsage>,
+}
+
+/// Per-interval report for template insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TemplateInsightsIntervalReport {
+    #[serde(with = "time::serde::rfc3339")]
+    pub start_time: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub end_time: OffsetDateTime,
+    pub template_ids: Vec<Uuid>,
+    pub interval: InsightsReportInterval,
+    pub active_users: i64,
+}
+
+/// Response for template insights.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct TemplateInsightsResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub report: Option<TemplateInsightsReport>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub interval_reports: Vec<TemplateInsightsIntervalReport>,
+}
+
+/// Count of users in a given status at a specific date.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct UserStatusChangeCount {
+    #[serde(with = "time::serde::rfc3339")]
+    pub date: OffsetDateTime,
+    pub count: i64,
+}
+
+/// Response for user status counts over time.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct GetUserStatusCountsResponse {
+    pub status_counts: HashMap<String, Vec<UserStatusChangeCount>>,
+}
+
+// ---------------------------------------------------------------------------
+// Debug / Observability
+// ---------------------------------------------------------------------------
+
+/// Response from the debug coordinator endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugCoordinatorResponse {
+    pub message: String,
+}
+
+/// Response from the debug tailnet endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugTailnetResponse {
+    pub message: String,
+}
+
+/// Response from the debug DERP traffic endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugDerpTrafficResponse {
+    pub message: String,
+}
+
+/// Response from the debug expvar endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugExpvarResponse {
+    pub vars: HashMap<String, Value>,
+}
+
+/// Response from the debug websocket test endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugWebsocketResponse {
+    pub message: String,
+}
+
+/// Response from the debug pprof endpoint.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DebugPprofResponse {
+    pub message: String,
+}

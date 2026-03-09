@@ -22,6 +22,10 @@ use coder_auth::{
     supported_auth_methods,
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
+use coder_core::api::{
+    DebugCoordinatorResponse, DebugDerpTrafficResponse, DebugExpvarResponse, DebugPprofResponse,
+    DebugTailnetResponse, DebugWebsocketResponse, InsightsReportInterval, TemplateInsightsSection,
+};
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
     AvailableExperiments, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
@@ -222,6 +226,48 @@ struct CspViolationReport {
     report: HashMap<String, Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct InsightsDausQuery {
+    #[serde(default)]
+    tz_offset: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsTemplatesQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    interval: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+    #[serde(default)]
+    sections: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsUserActivityQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsUserLatencyQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsUserStatusCountsQuery {
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    tz_offset: Option<i32>,
+}
+
 /// Builds the Axum router for the current Rust backend slice.
 pub fn build_router(state: AppState) -> Router {
     let request_id_header = HeaderName::from_static("x-request-id");
@@ -254,6 +300,24 @@ pub fn build_router(state: AppState) -> Router {
                 .route(
                     "/debug/health/settings",
                     get(get_health_settings).put(put_health_settings),
+                )
+                .route("/debug/coordinator", get(debug_coordinator))
+                .route("/debug/tailnet", get(debug_tailnet))
+                .route("/debug/derp/traffic", get(debug_derp_traffic))
+                .route("/debug/expvar", get(debug_expvar))
+                .route("/debug/pprof", get(debug_pprof))
+                .route("/debug/pprof/cmdline", get(debug_pprof))
+                .route("/debug/pprof/profile", get(debug_pprof))
+                .route("/debug/pprof/symbol", get(debug_pprof))
+                .route("/debug/pprof/trace", get(debug_pprof))
+                .route("/debug/websocket", get(debug_websocket))
+                .route("/insights/daus", get(insights_daus))
+                .route("/insights/templates", get(insights_templates))
+                .route("/insights/user-activity", get(insights_user_activity))
+                .route("/insights/user-latency", get(insights_user_latency))
+                .route(
+                    "/insights/user-status-counts",
+                    get(insights_user_status_counts),
                 )
                 .route("/experiments", get(get_enabled_experiments))
                 .route("/experiments/available", get(get_available_experiments))
@@ -2712,6 +2776,373 @@ fn resource_not_found_response() -> Response {
         )),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Insights / Analytics handlers
+// ---------------------------------------------------------------------------
+
+async fn insights_daus(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsDausQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view deployment DAUs.",
+        ));
+    }
+
+    let tz_offset = query.tz_offset.unwrap_or(0);
+    let response = state.store.get_deployment_daus(tz_offset).await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+fn parse_template_ids(raw: &Option<String>) -> Vec<Uuid> {
+    raw.as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| Uuid::from_str(s.trim()).ok())
+        .collect()
+}
+
+fn parse_rfc3339(raw: &Option<String>) -> Option<OffsetDateTime> {
+    raw.as_deref()
+        .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
+}
+
+async fn insights_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsTemplatesQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view template insights.",
+        ));
+    }
+
+    let start_time = match parse_rfc3339(&query.start_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "start_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let end_time = match parse_rfc3339(&query.end_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "end_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let interval = match query.interval.as_deref() {
+        Some("week") => InsightsReportInterval::Week,
+        _ => InsightsReportInterval::Day,
+    };
+    let template_ids = parse_template_ids(&query.template_ids);
+
+    let _sections: Vec<TemplateInsightsSection> = query
+        .sections
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.trim() {
+            "interval_reports" => Some(TemplateInsightsSection::IntervalReports),
+            "report" => Some(TemplateInsightsSection::Report),
+            _ => None,
+        })
+        .collect();
+
+    let response = state
+        .store
+        .get_template_insights(start_time, end_time, interval, template_ids)
+        .await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn insights_user_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsUserActivityQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view user activity insights.",
+        ));
+    }
+
+    let start_time = match parse_rfc3339(&query.start_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "start_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let end_time = match parse_rfc3339(&query.end_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "end_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let template_ids = parse_template_ids(&query.template_ids);
+
+    let response = state
+        .store
+        .get_user_activity_insights(start_time, end_time, template_ids)
+        .await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn insights_user_latency(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsUserLatencyQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view user latency insights.",
+        ));
+    }
+
+    let start_time = match parse_rfc3339(&query.start_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "start_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let end_time = match parse_rfc3339(&query.end_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "end_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let template_ids = parse_template_ids(&query.template_ids);
+
+    let response = state
+        .store
+        .get_user_latency_insights(start_time, end_time, template_ids)
+        .await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn insights_user_status_counts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsUserStatusCountsQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view user status counts.",
+        ));
+    }
+
+    // Resolve timezone from query params, following Go's Etc/GMT±N convention.
+    let timezone = match (&query.timezone, query.tz_offset) {
+        (Some(tz), _) if !tz.is_empty() => tz.clone(),
+        (_, Some(offset)) if offset > 0 => format!("Etc/GMT-{offset}"),
+        (_, Some(offset)) if offset < 0 => {
+            let abs = offset.saturating_neg();
+            format!("Etc/GMT+{abs}")
+        }
+        _ => "UTC".to_owned(),
+    };
+
+    let response = state.store.get_user_status_counts(&timezone).await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Debug / Observability handlers
+// ---------------------------------------------------------------------------
+
+async fn debug_coordinator(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view coordinator debug information.",
+        ));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(DebugCoordinatorResponse {
+            message: "Coordinator debug endpoint is not yet implemented in the Rust backend."
+                .to_owned(),
+        }),
+    )
+        .into_response())
+}
+
+async fn debug_tailnet(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view tailnet debug information.",
+        ));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(DebugTailnetResponse {
+            message: "Tailnet debug endpoint is not yet implemented in the Rust backend."
+                .to_owned(),
+        }),
+    )
+        .into_response())
+}
+
+async fn debug_derp_traffic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view DERP traffic debug information.",
+        ));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(DebugDerpTrafficResponse {
+            message: "DERP traffic debug endpoint is not yet implemented in the Rust backend."
+                .to_owned(),
+        }),
+    )
+        .into_response())
+}
+
+async fn debug_expvar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view expvar debug information.",
+        ));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(DebugExpvarResponse {
+            vars: HashMap::new(),
+        }),
+    )
+        .into_response())
+}
+
+async fn debug_pprof(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view pprof debug information.",
+        ));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(DebugPprofResponse {
+            message:
+                "Rust does not support Go-style pprof. Use tracing or jemalloc profiling instead."
+                    .to_owned(),
+        }),
+    )
+        .into_response())
+}
+
+async fn debug_websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to use the debug websocket.",
+        ));
+    }
+
+    // In Go this upgrades to a WebSocket echo. For now return a stub JSON response.
+    Ok((
+        StatusCode::OK,
+        Json(DebugWebsocketResponse {
+            message: "WebSocket echo endpoint is not yet implemented in the Rust backend."
+                .to_owned(),
+        }),
+    )
+        .into_response())
 }
 
 #[cfg(test)]
