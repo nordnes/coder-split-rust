@@ -2249,7 +2249,13 @@ where
 
         // Verify app ownership BEFORE leaking any information about
         // client secrets or PKCE verifiers (prevents oracle attacks).
+        // If the client_id doesn't match, delete the code to prevent reuse
+        // (RFC 6749 §4.1.2: authorization codes MUST be single-use).
         if code_record.app_id != client_id {
+            let _ = self
+                .store
+                .delete_oauth2_provider_app_code(code_record.id)
+                .await;
             return Err(OAuth2ProviderError::unauthorized(
                 "Authorization code does not belong to this client.",
             ));

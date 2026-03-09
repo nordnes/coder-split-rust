@@ -3067,6 +3067,24 @@ async fn get_oauth2_authorize(
                 .into_response());
         }
     };
+
+    // Validate the app and its callback URL BEFORE creating the authorization
+    // code.  This prevents orphaned codes when the callback URL is invalid.
+    let app = match state.oauth2_provider.get_app(client_id).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let mut redirect_url = match url::Url::parse(&app.callback_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("App has invalid callback URL.")),
+            )
+                .into_response());
+        }
+    };
+
     let raw_code = match state
         .oauth2_provider
         .create_authorization_code(
@@ -3083,20 +3101,6 @@ async fn get_oauth2_authorize(
     };
 
     // Build the redirect URL with the code and state.
-    let app = match state.oauth2_provider.get_app(client_id).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
-    let mut redirect_url = match url::Url::parse(&app.callback_url) {
-        Ok(url) => url,
-        Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
-            )
-                .into_response());
-        }
-    };
     redirect_url
         .query_pairs_mut()
         .append_pair("code", &raw_code)
@@ -3138,6 +3142,24 @@ async fn post_oauth2_authorize(
                 .into_response());
         }
     };
+
+    // Validate the app and its callback URL BEFORE creating the authorization
+    // code.  This prevents orphaned codes when the callback URL is invalid.
+    let app = match state.oauth2_provider.get_app(client_id).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let mut redirect_url = match url::Url::parse(&app.callback_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("App has invalid callback URL.")),
+            )
+                .into_response());
+        }
+    };
+
     let raw_code = match state
         .oauth2_provider
         .create_authorization_code(
@@ -3154,20 +3176,6 @@ async fn post_oauth2_authorize(
     };
 
     // Build the redirect URL with the code and state.
-    let app = match state.oauth2_provider.get_app(client_id).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
-    let mut redirect_url = match url::Url::parse(&app.callback_url) {
-        Ok(url) => url,
-        Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
-            )
-                .into_response());
-        }
-    };
     redirect_url
         .query_pairs_mut()
         .append_pair("code", &raw_code)

@@ -542,30 +542,24 @@ where
 
     /// Collects a telemetry snapshot.
     pub async fn collect_snapshot(&self) -> Result<TelemetrySnapshot, coder_core::StorageError> {
-        let stats = self.store.deployment_stats().await.ok();
-        let (active_sessions, workspaces) = match stats {
-            Some(ref s) => {
-                let sessions = u64::try_from(s.session_count.vscode)
-                    .unwrap_or_default()
-                    .saturating_add(u64::try_from(s.session_count.ssh).unwrap_or_default())
-                    .saturating_add(u64::try_from(s.session_count.jetbrains).unwrap_or_default())
-                    .saturating_add(
-                        u64::try_from(s.session_count.reconnecting_pty).unwrap_or_default(),
-                    );
-                let ws = u64::try_from(s.workspaces.pending)
-                    .unwrap_or_default()
-                    .saturating_add(u64::try_from(s.workspaces.building).unwrap_or_default())
-                    .saturating_add(u64::try_from(s.workspaces.running).unwrap_or_default())
-                    .saturating_add(u64::try_from(s.workspaces.stopped).unwrap_or_default())
-                    .saturating_add(u64::try_from(s.workspaces.failed).unwrap_or_default());
-                (sessions, ws)
-            }
-            None => (0, 0),
-        };
+        let stats = self.store.deployment_stats().await?;
+        let sessions = u64::try_from(stats.session_count.vscode)
+            .unwrap_or_default()
+            .saturating_add(u64::try_from(stats.session_count.ssh).unwrap_or_default())
+            .saturating_add(u64::try_from(stats.session_count.jetbrains).unwrap_or_default())
+            .saturating_add(
+                u64::try_from(stats.session_count.reconnecting_pty).unwrap_or_default(),
+            );
+        let workspaces = u64::try_from(stats.workspaces.pending)
+            .unwrap_or_default()
+            .saturating_add(u64::try_from(stats.workspaces.building).unwrap_or_default())
+            .saturating_add(u64::try_from(stats.workspaces.running).unwrap_or_default())
+            .saturating_add(u64::try_from(stats.workspaces.stopped).unwrap_or_default())
+            .saturating_add(u64::try_from(stats.workspaces.failed).unwrap_or_default());
 
         Ok(TelemetrySnapshot {
             deployment_id: self.deployment_id.clone(),
-            active_sessions,
+            active_sessions: sessions,
             workspaces,
             templates: 0,
             version: self.version.clone(),
