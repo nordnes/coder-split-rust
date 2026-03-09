@@ -1452,6 +1452,22 @@ impl Authorizer {
                     }
                 }
             }
+        } else if object.any_org {
+            // If any_org is set, check if any org's deny permissions match.
+            for org_perms in role.by_org_id.values() {
+                for perm in &org_perms.org {
+                    if perm.negate && perm.matches(object.resource_type, action) {
+                        return true;
+                    }
+                }
+                if object.owner_id == Some(actor.user_id) {
+                    for perm in &org_perms.member {
+                        if perm.negate && perm.matches(object.resource_type, action) {
+                            return true;
+                        }
+                    }
+                }
+            }
         }
 
         false
@@ -1983,6 +1999,24 @@ mod tests {
             Action::Read,
             &ws
         ));
+    }
+
+    #[test]
+    fn workspace_creation_ban_denies_with_any_org() {
+        let authorizer = Authorizer::new();
+        let org_id = Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap_or_default();
+        let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap_or_default();
+        let member_role = format!("{ROLE_ORGANIZATION_MEMBER}:{org_id}");
+        let ban_role = format!("{ROLE_ORGANIZATION_WORKSPACE_CREATION_BAN}:{org_id}");
+        let actor = test_actor_with_orgs(&[], &[&member_role, &ban_role], &[org_id]);
+
+        // With any_org = true, the deny from workspace-creation-ban must still apply.
+        let ws = Object::new(ResourceType::Workspace)
+            .any_organization()
+            .with_owner(user_id);
+        assert!(authorizer.authorize(&actor, Action::Create, &ws).is_err());
+        // Reading should still work via the member role.
+        assert!(authorizer.authorize(&actor, Action::Read, &ws).is_ok());
     }
 
     #[test]
