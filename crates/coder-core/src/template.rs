@@ -392,6 +392,12 @@ pub struct UpdateTemplateMetaInput {
     pub deprecation_message: String,
     /// Max port share level.
     pub max_port_share_level: String,
+    /// CORS behavior.
+    pub cors_behavior: String,
+    /// Use classic parameter flow.
+    pub use_classic_parameter_flow: bool,
+    /// Disable module cache.
+    pub disable_module_cache: bool,
 }
 
 /// Template list filter for store queries.

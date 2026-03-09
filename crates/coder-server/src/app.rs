@@ -2999,6 +2999,17 @@ async fn patch_template(
                 .unwrap_or(existing.require_active_version),
             deprecation_message: deprecation_message.to_owned(),
             max_port_share_level: max_port_share_level.to_owned(),
+            cors_behavior: body
+                .cors_behavior
+                .as_deref()
+                .unwrap_or(&existing.cors_behavior)
+                .to_owned(),
+            use_classic_parameter_flow: body
+                .use_classic_parameter_flow
+                .unwrap_or(existing.use_classic_parameter_flow),
+            disable_module_cache: body
+                .disable_module_cache
+                .unwrap_or(existing.disable_module_cache),
         })
         .await?;
 

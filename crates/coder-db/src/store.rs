@@ -2695,6 +2695,9 @@ impl AppStore for PostgresStore {
                 require_active_version = $14,
                 deprecated = $15,
                 max_port_sharing_level = $16,
+                cors_behavior = $17,
+                use_classic_parameter_flow = $18,
+                disable_module_cache = $19,
                 updated_at = NOW()
             WHERE id = $1
             "#,
@@ -2715,6 +2718,9 @@ impl AppStore for PostgresStore {
         .bind(input.require_active_version)
         .bind(&input.deprecation_message)
         .bind(&input.max_port_share_level)
+        .bind(&input.cors_behavior)
+        .bind(input.use_classic_parameter_flow)
+        .bind(input.disable_module_cache)
         .execute(&self.pool)
         .await
         .map_err(storage_error)?;
