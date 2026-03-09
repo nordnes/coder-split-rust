@@ -2039,6 +2039,11 @@ where
         if name.trim().is_empty() {
             return Err(OAuth2ProviderError::bad_request("App name is required."));
         }
+        if callback_url.trim().is_empty() {
+            return Err(OAuth2ProviderError::bad_request(
+                "Callback URL is required.",
+            ));
+        }
 
         let input = coder_core::identity::UpdateOAuth2ProviderAppInput {
             id: app_id,
@@ -2241,27 +2246,17 @@ where
             }
         }
 
-        // Verify the client secret.
+        // Verify the client secret by hashing it and comparing against
+        // all registered secrets for this app.
         let secret_hash = sha2::Sha256::digest(client_secret.as_bytes()).to_vec();
-        let app_secret = self
-            .store
-            .find_oauth2_provider_app_secret_by_id(code_record.app_id)
-            .await?;
-        // Check that at least one secret matches the client secret.
         let secrets = self
             .store
             .list_oauth2_provider_app_secrets(code_record.app_id)
             .await?;
-        let secret_match = secrets.iter().find(|s| s.hashed_secret == secret_hash);
-        let matched_secret = match (secret_match, app_secret) {
-            (Some(s), _) => s.clone(),
-            (None, Some(s)) if s.hashed_secret == secret_hash => s,
-            _ => {
-                return Err(OAuth2ProviderError::unauthorized(
-                    "Invalid client credentials.",
-                ));
-            }
-        };
+        let matched_secret = secrets
+            .into_iter()
+            .find(|s| s.hashed_secret == secret_hash)
+            .ok_or_else(|| OAuth2ProviderError::unauthorized("Invalid client credentials."))?;
 
         // Verify app ownership.
         if code_record.app_id != client_id {
@@ -2295,7 +2290,7 @@ where
         &self,
         refresh_token: &str,
         client_id: Uuid,
-        _client_secret: &str,
+        client_secret: &str,
     ) -> Result<OAuth2TokenResult, OAuth2ProviderError> {
         use sha2::Digest;
 
@@ -2332,6 +2327,22 @@ where
         if secret.app_id != client_id {
             return Err(OAuth2ProviderError::unauthorized(
                 "Refresh token does not belong to this client.",
+            ));
+        }
+
+        // Verify the client secret (RFC 6749 Section 6: confidential clients
+        // MUST authenticate when refreshing tokens).
+        let client_secret_hash = sha2::Sha256::digest(client_secret.as_bytes()).to_vec();
+        let app_secrets = self
+            .store
+            .list_oauth2_provider_app_secrets(secret.app_id)
+            .await?;
+        if !app_secrets
+            .iter()
+            .any(|s| s.hashed_secret == client_secret_hash)
+        {
+            return Err(OAuth2ProviderError::unauthorized(
+                "Invalid client credentials.",
             ));
         }
 

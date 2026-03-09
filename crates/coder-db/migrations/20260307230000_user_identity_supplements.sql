@@ -55,7 +55,10 @@ CREATE INDEX IF NOT EXISTS idx_user_status_changes_user_id
     ON user_status_changes (user_id);
 
 -- custom_roles: user-defined RBAC roles
+-- organization_id is nullable (NULL = site-scoped role), so we use a
+-- UNIQUE constraint instead of PRIMARY KEY to allow NULLs.
 CREATE TABLE IF NOT EXISTS custom_roles (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     name TEXT NOT NULL,
     display_name TEXT NOT NULL DEFAULT '',
     organization_id UUID REFERENCES organizations(id) ON DELETE CASCADE,
@@ -64,7 +67,7 @@ CREATE TABLE IF NOT EXISTS custom_roles (
     user_permissions JSONB NOT NULL DEFAULT '[]'::JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-    PRIMARY KEY (name, organization_id)
+    UNIQUE (name, organization_id)
 );
 
 -- groups: user groups for template ACLs and RBAC
