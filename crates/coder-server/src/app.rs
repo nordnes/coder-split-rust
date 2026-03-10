@@ -6666,7 +6666,7 @@ async fn get_workspace_agent_logs(
         ));
     }
 
-    let limit = query.limit.unwrap_or(256).min(10000);
+    let limit = query.limit.unwrap_or(256).clamp(1, 10000);
     let log_rows = state
         .store
         .list_workspace_agent_logs(agent_id, query.after, limit)

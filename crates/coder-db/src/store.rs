@@ -2977,7 +2977,8 @@ impl AppStore for PostgresStore {
         log_source_id: Uuid,
         logs: &[InsertAgentLogInput],
     ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
-        let log_count = logs.len() as i32;
+        let log_count = i32::try_from(logs.len())
+            .map_err(|_| StorageError::invalid_data("too many log entries"))?;
 
         let mut created_ats = Vec::with_capacity(logs.len());
         let mut outputs = Vec::with_capacity(logs.len());
