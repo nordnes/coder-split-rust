@@ -4,7 +4,8 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{Form, OriginalUri, Path, Query, State, rejection::JsonRejection},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Form, OriginalUri, Path, Query, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
@@ -12,6 +13,7 @@ use axum::{
             ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE, LOCATION,
         },
     },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
@@ -31,16 +33,16 @@ use coder_core::{
     CreateFirstUserResponse, CreateTestAuditLogRequest, CreateTokenRequest,
     CreateUserRequestWithOrgs, DeploymentConfigResponse, ExternalApiKeyScopes,
     ExternalAuthDeviceExchangeRequest, GetUsersResponse, HealthSettings, HealthcheckReport,
-    LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
-    OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
+    InsertFileInput, LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest,
+    OAuth2ProviderAppEndpoints, OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
     OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse, OrganizationMember,
     OrganizationMemberWithUserData, OrganizationResponse, PaginatedMembersResponse,
     PersistAuditLogInput, PostOAuth2ProviderAppRequest, PutOAuth2ProviderAppRequest,
     RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse, UpdateCheckResponse,
     UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
-    UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
-    UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
+    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UploadFileResponse,
+    UserAppearanceSettings, UserListFilter, UserParameter, UserPreferenceSettings, UserRecord,
+    UserResponse, UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
@@ -48,6 +50,8 @@ use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, 
 use coder_workspaces::DeploymentStatsService;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::net::IpAddr;
 use time::OffsetDateTime;
 use tower_http::{
     normalize_path::NormalizePathLayer,
@@ -467,13 +471,24 @@ pub fn build_router(state: AppState) -> Router {
                 .route(
                     "/oauth2-provider/apps/{app_id}/tokens",
                     axum::routing::delete(delete_oauth2_provider_app_tokens),
-                ),
+                )
+                .route(
+                    "/files",
+                    post(post_file).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+                )
+                .route("/files/{fileid}", get(get_file_by_id)),
         )
         .route(
             "/oauth2/authorize",
             get(get_oauth2_authorize).post(post_oauth2_authorize),
         )
         .route("/oauth2/tokens", post(post_oauth2_token))
+        // route_layer runs *after* routing so MatchedPath is populated.
+        .route_layer(middleware::from_fn(prometheus_middleware))
+        .layer(middleware::from_fn(csrf_middleware))
+        .layer(middleware::from_fn(csp_middleware))
+        .layer(middleware::from_fn(hsts_middleware))
+        .layer(middleware::from_fn(real_ip_middleware))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new())
@@ -3874,6 +3889,278 @@ async fn debug_websocket(
     ))
 }
 
+// ---------------------------------------------------------------------------
+// File upload / download handlers
+// ---------------------------------------------------------------------------
+
+const TAR_MIME_TYPE: &str = "application/x-tar";
+const ZIP_MIME_TYPE: &str = "application/zip";
+const WINDOWS_ZIP_MIME_TYPE: &str = "application/x-zip-compressed";
+
+/// POST /api/v2/files – upload a binary file, deduplicate by SHA-256 hash.
+async fn post_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let raw_content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    // Strip optional parameters (e.g. "; charset=binary") before matching.
+    let content_type = raw_content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+
+    match content_type {
+        TAR_MIME_TYPE | ZIP_MIME_TYPE | WINDOWS_ZIP_MIME_TYPE => {}
+        _ => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(format!(
+                    "Unsupported content type header \"{content_type}\"."
+                ))),
+            )
+                .into_response());
+        }
+    }
+
+    let data: Vec<u8> = body.to_vec();
+    let mimetype = content_type.to_owned();
+
+    // Compute SHA-256 hash of the raw bytes.
+    let hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        format!("{:x}", hasher.finalize())
+    };
+
+    let file_id = Uuid::new_v4();
+    let input = InsertFileInput {
+        id: file_id,
+        hash,
+        created_by: context.user.id,
+        mimetype,
+        data,
+    };
+
+    // INSERT … ON CONFLICT handles the race atomically – if a duplicate
+    // exists the DB returns the existing row instead of raising an error.
+    let result = state.store.insert_file(input).await?;
+
+    // If the returned id differs from the one we generated, a duplicate
+    // already existed and the DB returned the existing row.
+    let status = if result.id == file_id {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(UploadFileResponse { id: result.id })).into_response())
+}
+
+/// GET /api/v2/files/{fileid} – retrieve a file by UUID.
+async fn get_file_by_id(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(file_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let file = state.store.get_file_by_id(file_id).await?;
+    let Some(file) = file else {
+        return Ok(resource_not_found_response());
+    };
+
+    let content_type = HeaderValue::from_str(&file.mimetype)
+        .unwrap_or(HeaderValue::from_static("application/octet-stream"));
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(CONTENT_TYPE, content_type);
+
+    Ok((StatusCode::OK, response_headers, file.data).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Middleware
+// ---------------------------------------------------------------------------
+
+/// Stored in request extensions so downstream handlers can read the real
+/// client IP even when the server is behind a reverse proxy.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct RealIp(pub(crate) IpAddr);
+
+/// Middleware: extract the real client IP from X-Forwarded-For / X-Real-IP
+/// headers and store it in request extensions.
+async fn real_ip_middleware(mut request: axum::extract::Request, next: Next) -> Response {
+    let ip = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        });
+
+    if let Some(ip) = ip {
+        request.extensions_mut().insert(RealIp(ip));
+    }
+
+    next.run(request).await
+}
+
+/// Middleware: set Content-Security-Policy on every response.
+async fn csp_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    // Use a restrictive default policy; callers can override per-route if needed.
+    if let Ok(value) =
+        HeaderValue::from_str("default-src 'self'; frame-ancestors 'none'; form-action 'self'")
+    {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("content-security-policy"), value);
+    }
+    response
+}
+
+/// Middleware: add Strict-Transport-Security header when the request arrived
+/// over HTTPS (indicated by scheme or X-Forwarded-Proto).
+async fn hsts_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let is_https = request
+        .uri()
+        .scheme_str()
+        .map(|s| s == "https")
+        .unwrap_or(false)
+        || request
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().eq_ignore_ascii_case("https"))
+            .unwrap_or(false);
+
+    let mut response = next.run(request).await;
+
+    if is_https {
+        if let Ok(value) = HeaderValue::from_str("max-age=31536000; includeSubDomains") {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("strict-transport-security"), value);
+        }
+    }
+
+    response
+}
+
+/// Middleware: CSRF protection – require a non-empty X-CSRF-Token header on
+/// mutating requests (POST / PUT / DELETE / PATCH) that carry cookie-based
+/// authentication.
+///
+/// Pre-authentication endpoints are exempt because the browser may still hold
+/// an expired session cookie when the user tries to log in again, and there is
+/// no way for the client to obtain a CSRF token before authenticating.  CSP
+/// violation reports are also exempt because browsers send them automatically
+/// without custom headers.
+async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Response {
+    use http::Method;
+
+    /// Paths that are exempt from CSRF validation.  These are either
+    /// pre-authentication endpoints or browser-initiated reports that cannot
+    /// carry custom headers.
+    const CSRF_EXEMPT_PATHS: &[&str] = &[
+        "/api/v2/users/login",
+        "/api/v2/users/first",
+        "/api/v2/users/otp/request",
+        "/api/v2/users/otp/change-password",
+        "/api/v2/csp/reports",
+        "/oauth2/tokens",
+    ];
+
+    let path = request.uri().path();
+    let is_exempt = CSRF_EXEMPT_PATHS.contains(&path);
+
+    if is_exempt {
+        return next.run(request).await;
+    }
+
+    let is_mutating_method = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::DELETE | Method::PATCH
+    );
+
+    let has_cookie = request.headers().contains_key(http::header::COOKIE);
+
+    if is_mutating_method && has_cookie {
+        let has_csrf = request
+            .headers()
+            .get("x-csrf-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !has_csrf {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiResponse::ok(
+                    "CSRF token required for cookie-authenticated mutating requests.",
+                )),
+            )
+                .into_response();
+        }
+    }
+
+    next.run(request).await
+}
+
+/// Middleware: record basic Prometheus-style HTTP metrics using the `metrics`
+/// crate.  Counters and histograms are registered lazily on first use.
+async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_owned())
+        .unwrap_or_else(|| "unmatched".to_owned());
+
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = start.elapsed().as_secs_f64();
+
+    let status = response.status().as_u16().to_string();
+
+    metrics::counter!(
+        "coderd_api_requests_processed_total",
+        "code" => status,
+        "method" => method.clone(),
+        "path" => path.clone(),
+    )
+    .increment(1);
+
+    metrics::histogram!(
+        "coderd_api_request_latencies_seconds",
+        "method" => method,
+        "path" => path,
+    )
+    .record(elapsed);
+
+    response
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -3905,10 +4192,11 @@ mod tests {
         CreateFirstUserStoreError, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
         CreateUserRequestWithOrgs, CreateUserStoreError, DatabaseConfig, DeploymentMetadata,
         DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, GitSshKeyRecord,
-        HealthSettings, InsertOrganizationMemberError, LogFormat, LoginType,
-        LoginWithPasswordRequest, OrganizationMemberListFilter, OrganizationMemberRecord,
-        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
+        GitSshKeyRecord, HealthSettings, InsertFileInput, InsertFileResult,
+        InsertOrganizationMemberError, LogFormat, LoginType, LoginWithPasswordRequest,
+        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
         ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, RequestOneTimePasscodeRequest,
         ServerConfig, SessionCountDeploymentStatsResponse, SlimRoleRecord, SshConfig, StorageError,
         TokenConfigRecord, UpdateRolesRequest, UpdateUserAppearanceSettingsRequest,
@@ -3965,6 +4253,7 @@ mod tests {
         stats_agents: Mutex<Vec<WorkspaceAgentStatInput>>,
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
+        files: Mutex<HashMap<Uuid, FileRecord>>,
     }
 
     impl FakeStore {
@@ -3990,6 +4279,7 @@ mod tests {
                 stats_agents: Mutex::new(Vec::new()),
                 workspace_proxies: Mutex::new(HashMap::new()),
                 provisioner_daemons: Mutex::new(HashMap::new()),
+                files: Mutex::new(HashMap::new()),
             }
         }
 
@@ -5695,6 +5985,60 @@ mod tests {
             Ok(coder_core::api::GetUserStatusCountsResponse {
                 status_counts: HashMap::new(),
             })
+        }
+
+        async fn insert_file(
+            &self,
+            input: InsertFileInput,
+        ) -> Result<InsertFileResult, StorageError> {
+            let mut files = self
+                .files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+
+            // Mimic ON CONFLICT (hash, created_by) DO UPDATE SET id = files.id
+            // – return the existing record's id when a duplicate exists.
+            if let Some(existing) = files
+                .values()
+                .find(|f| f.hash == input.hash && f.created_by == input.created_by)
+            {
+                return Ok(InsertFileResult { id: existing.id });
+            }
+
+            let id = input.id;
+            let record = FileRecord {
+                id,
+                hash: input.hash,
+                created_by: input.created_by,
+                created_at: OffsetDateTime::now_utc(),
+                mimetype: input.mimetype,
+                data: input.data,
+            };
+            files.insert(record.id, record);
+            Ok(InsertFileResult { id })
+        }
+
+        async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
+            self.files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|files| files.get(&file_id).cloned())
+        }
+
+        async fn get_file_by_hash_and_creator(
+            &self,
+            hash: &str,
+            creator_id: Uuid,
+        ) -> Result<Option<FileRecord>, StorageError> {
+            self.files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|files| {
+                    files
+                        .values()
+                        .find(|f| f.hash == hash && f.created_by == creator_id)
+                        .cloned()
+                })
         }
     }
 
@@ -8280,6 +8624,254 @@ mod tests {
         )
         .await?;
         assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // File upload / download tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn file_upload_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .body(Body::from(vec![1u8, 2, 3]))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_upload_rejects_unsupported_content_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "text/plain")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(vec![1u8, 2, 3]))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_upload_and_download_round_trip() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let payload = b"hello tar world".to_vec();
+        let upload_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(payload.clone()))?;
+        let upload_response = call(app.clone(), upload_req).await?;
+        assert_eq!(upload_response.status(), StatusCode::CREATED);
+
+        let upload_body = response_json(upload_response).await?;
+        let file_id = upload_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash in upload response")?;
+
+        // Download
+        let download_req = authenticated_request(
+            Method::GET,
+            &format!("/api/v2/files/{file_id}"),
+            &session_token,
+        )?;
+        let download_response = call(app, download_req).await?;
+        assert_eq!(download_response.status(), StatusCode::OK);
+        assert_eq!(
+            download_response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-tar"),
+        );
+        let bytes = to_bytes(download_response.into_body(), usize::MAX).await?;
+        assert_eq!(bytes.to_vec(), payload);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_upload_duplicate_returns_existing_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let payload = b"duplicate content".to_vec();
+
+        let first = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(payload.clone()))?;
+        let first_response = call(app.clone(), first).await?;
+        assert_eq!(first_response.status(), StatusCode::CREATED);
+        let first_body = response_json(first_response).await?;
+        let first_id = first_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash")?
+            .to_owned();
+
+        let second = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(payload))?;
+        let second_response = call(app, second).await?;
+        // Duplicate returns 200 OK, not 201
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let second_body = response_json(second_response).await?;
+        let second_id = second_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash")?;
+        assert_eq!(first_id, second_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_download_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let random_id = Uuid::new_v4();
+        let req = authenticated_request(
+            Method::GET,
+            &format!("/api/v2/files/{random_id}"),
+            &session_token,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Middleware tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn csp_header_present_on_responses() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/")?).await?;
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok());
+        assert!(csp.is_some(), "CSP header should be present");
+        assert!(
+            csp.map(|v| v.contains("default-src")).unwrap_or(false),
+            "CSP should contain default-src directive"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hsts_header_present_when_https() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        let hsts = response
+            .headers()
+            .get("strict-transport-security")
+            .and_then(|v| v.to_str().ok());
+        assert!(hsts.is_some(), "HSTS header should be present for HTTPS");
+        assert!(
+            hsts.map(|v| v.contains("max-age=31536000"))
+                .unwrap_or(false),
+            "HSTS should contain correct max-age"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hsts_header_absent_when_http() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/")?).await?;
+        let hsts = response.headers().get("strict-transport-security");
+        assert!(hsts.is_none(), "HSTS header should not be present for HTTP");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_rejects_mutating_cookie_request_without_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        // Use a non-exempt path so the CSRF middleware actually fires.
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/users",
+            &[("coder_session_token", "fake")],
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_allows_get_with_cookies() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = request_with_cookies(Method::GET, "/", &[("coder_session_token", "fake")])?;
+        let response = call(app, req).await?;
+        // GET requests should not be blocked by CSRF middleware
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_allows_mutating_request_with_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/users")
+            .header(http::header::COOKIE, "coder_session_token=fake")
+            .header("x-csrf-token", "some-token-value")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))?;
+        let response = call(app, req).await?;
+        // Should pass CSRF check (might fail auth, but not CSRF)
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_exempts_login_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        // Login is exempt: even with a cookie and no CSRF token the
+        // middleware must not return 403.
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/users/login",
+            &[("coder_session_token", "expired")],
+        )?;
+        let response = call(app, req).await?;
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_exempts_csp_reports_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/csp/reports",
+            &[("coder_session_token", "expired")],
+        )?;
+        let response = call(app, req).await?;
+        // CSP reports are exempt from CSRF; should not get 403.
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 }
