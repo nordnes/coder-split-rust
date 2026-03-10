@@ -3652,7 +3652,7 @@ async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Respons
         "/api/v2/users/otp/request",
         "/api/v2/users/otp/change-password",
         "/api/v2/csp/reports",
-        "/api/v2/oauth2/tokens",
+        "/oauth2/tokens",
     ];
 
     let path = request.uri().path();
