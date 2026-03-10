@@ -7359,7 +7359,13 @@ fn workspace_transition_from_str(s: &str) -> coder_core::api::WorkspaceTransitio
         "start" => coder_core::api::WorkspaceTransition::Start,
         "stop" => coder_core::api::WorkspaceTransition::Stop,
         "delete" => coder_core::api::WorkspaceTransition::Delete,
-        _ => coder_core::api::WorkspaceTransition::Start,
+        other => {
+            tracing::warn!(
+                transition = other,
+                "unknown workspace transition, defaulting to start"
+            );
+            coder_core::api::WorkspaceTransition::Start
+        }
     }
 }
 
