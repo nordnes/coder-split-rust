@@ -1813,22 +1813,130 @@ pub struct ProvisionerDaemonResponse {
     pub tags: HashMap<String, String>,
 }
 
-/// Provisioner job log entry matching `codersdk.ProvisionerJobLog`.
-#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
-pub struct ProvisionerJobLogResponse {
-    /// Stable log entry identifier.
-    pub id: i64,
-    /// When the log entry was created.
+// ---------------------------------------------------------------------------
+// Notifications domain
+// ---------------------------------------------------------------------------
+
+/// Global notification dispatch settings.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NotificationsSettings {
+    #[serde(default)]
+    pub notifier_paused: bool,
+}
+
+/// A single notification template row.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationTemplate {
+    pub id: Uuid,
+    pub name: String,
+    pub title_template: String,
+    pub body_template: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actions: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    pub kind: String,
+    pub enabled_by_default: bool,
+}
+
+/// Response listing available and default dispatch methods.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationMethodsResponse {
+    pub available: Vec<String>,
+    pub default: String,
+}
+
+/// A single per-user notification preference.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NotificationPreference {
+    pub id: Uuid,
+    pub disabled: bool,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// Request body for PUT notification template method.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateNotificationTemplateMethod {
+    #[serde(default)]
+    pub method: Option<String>,
+}
+
+/// Request body for PUT user notification preferences.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateUserNotificationPreferences {
+    pub template_disabled_map: HashMap<String, bool>,
+}
+
+/// A web push subscription registration.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebpushSubscription {
+    pub endpoint: String,
+    pub auth_key: String,
+    pub p256dh_key: String,
+}
+
+/// Request body for DELETE web push subscription.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DeleteWebpushSubscription {
+    pub endpoint: String,
+}
+
+/// An action inside an inbox notification.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboxNotificationAction {
+    pub label: String,
+    pub url: String,
+}
+
+/// A single inbox notification.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboxNotification {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub template_id: Uuid,
+    pub targets: Vec<Uuid>,
+    pub title: String,
+    pub content: String,
+    pub icon: String,
+    pub actions: Vec<InboxNotificationAction>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub read_at: Option<OffsetDateTime>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
-    /// Log source.
-    pub source: String,
-    /// Log level.
-    pub level: String,
-    /// Pipeline stage.
-    pub stage: String,
-    /// Log output text.
-    pub output: String,
+}
+
+/// Response for listing inbox notifications.
+#[derive(Clone, Debug, Serialize)]
+pub struct ListInboxNotificationsResponse {
+    pub notifications: Vec<InboxNotification>,
+    pub unread_count: i64,
+}
+
+/// Request body for updating inbox notification read status.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateInboxNotificationReadStatusRequest {
+    pub is_read: bool,
+}
+
+/// Response for updating inbox notification read status.
+#[derive(Clone, Debug, Serialize)]
+pub struct UpdateInboxNotificationReadStatusResponse {
+    pub notification: InboxNotification,
+    pub unread_count: i64,
+}
+
+/// Response for the watch endpoint (single notification + unread count).
+#[derive(Clone, Debug, Serialize)]
+pub struct GetInboxNotificationResponse {
+    pub notification: InboxNotification,
+    pub unread_count: i64,
 }
 
 fn value_is_null_or_empty_object(value: &Value) -> bool {
