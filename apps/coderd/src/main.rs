@@ -5,12 +5,13 @@ use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use coder_audit::{AuditEvent, AuditSink};
+use coder_core::pubsub::PubSub;
 use coder_core::{
     AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
     ExternalAuthLinkProvider, LogFormat, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError,
 };
-use coder_db::{DatabaseInitError, PostgresStore};
+use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
 use coder_server::{AppState, build_router};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -191,7 +192,14 @@ async fn run() -> Result<(), MainError> {
     let store = PostgresStore::connect(&config.database).await?;
     store.migrate().await?;
     let deployment_metadata = store.ensure_deployment_metadata().await?;
+    let pool = store.pool();
     let store: Arc<dyn AppStore> = Arc::new(store);
+
+    let pubsub: Arc<dyn PubSub> = Arc::new(
+        PostgresPubSub::new(pool)
+            .await
+            .map_err(|error| MainError::Config(format!("create pubsub: {error}")))?,
+    );
 
     let state = AppState::new(
         config.clone(),
@@ -199,6 +207,7 @@ async fn run() -> Result<(), MainError> {
         deployment_metadata.deployment_id,
         store.clone(),
         Arc::new(PersistingAuditSink::new(store)),
+        pubsub.clone(),
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
@@ -216,10 +225,18 @@ async fn run() -> Result<(), MainError> {
         "starting Rust coderd"
     );
 
-    axum::serve(listener, application.into_make_service())
+    let serve_result = axum::serve(listener, application.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(MainError::Serve)
+        .map_err(MainError::Serve);
+
+    // Shut down the pub/sub background listener task and release its dedicated
+    // PgListener database connection.
+    if let Err(close_err) = pubsub.close().await {
+        warn!(error = %close_err, "failed to close pubsub during shutdown");
+    }
+
+    serve_result
 }
 
 fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {

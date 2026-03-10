@@ -9,12 +9,14 @@ pub mod enums;
 pub mod identity;
 pub mod password;
 pub mod ports;
+pub mod pubsub;
 pub mod template;
 
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,
     ApiResponse, AssignableRoleResponse, AuditDiff, AuditDiffField, AuditLog, AuditLogAction,
-    AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods, AvailableExperiments,
+    AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods, AuthorizationCheck,
+    AuthorizationObject, AuthorizationRequest, AuthorizationResponse, AvailableExperiments,
     BaseHealthReport, BuildInfoResponse, ChangePasswordWithOneTimePasscodeRequest, ConfigOption,
     ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
     CreateOrganizationRequest, CreateTemplateRequest, CreateTestAuditLogRequest,
