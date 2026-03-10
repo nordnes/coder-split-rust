@@ -14,7 +14,7 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END; $$;
 
 -- Tasks table
-CREATE TABLE tasks (
+CREATE TABLE IF NOT EXISTS tasks (
     id              UUID        NOT NULL PRIMARY KEY,
     organization_id UUID        NOT NULL,
     owner_id        UUID        NOT NULL,
@@ -31,7 +31,7 @@ CREATE TABLE tasks (
 COMMENT ON COLUMN tasks.display_name IS 'Display name is a custom, human-friendly task name.';
 
 -- Task snapshots table
-CREATE TABLE task_snapshots (
+CREATE TABLE IF NOT EXISTS task_snapshots (
     task_id                 UUID        NOT NULL PRIMARY KEY REFERENCES tasks(id),
     log_snapshot            JSONB       NOT NULL,
     log_snapshot_created_at TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -43,7 +43,7 @@ COMMENT ON COLUMN task_snapshots.log_snapshot IS 'Task conversation history in J
 COMMENT ON COLUMN task_snapshots.log_snapshot_created_at IS 'When this log snapshot was captured.';
 
 -- Task workspace apps table
-CREATE TABLE task_workspace_apps (
+CREATE TABLE IF NOT EXISTS task_workspace_apps (
     task_id                 UUID    NOT NULL REFERENCES tasks(id),
     workspace_agent_id      UUID,
     workspace_app_id        UUID,
@@ -74,7 +74,7 @@ EXCEPTION WHEN duplicate_object THEN NULL;
 END; $$;
 
 -- Chats table
-CREATE TABLE chats (
+CREATE TABLE IF NOT EXISTS chats (
     id                  UUID        DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     owner_id            UUID        NOT NULL,
     workspace_id        UUID,
@@ -93,7 +93,7 @@ CREATE TABLE chats (
 );
 
 -- Chat messages table
-CREATE TABLE chat_messages (
+CREATE TABLE IF NOT EXISTS chat_messages (
     id              BIGSERIAL   NOT NULL PRIMARY KEY,
     chat_id         UUID        NOT NULL REFERENCES chats(id),
     model_config_id UUID,
@@ -112,7 +112,7 @@ CREATE TABLE chat_messages (
 );
 
 -- Chat files table
-CREATE TABLE chat_files (
+CREATE TABLE IF NOT EXISTS chat_files (
     id              UUID        DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     owner_id        UUID        NOT NULL,
     organization_id UUID        NOT NULL,
@@ -123,7 +123,7 @@ CREATE TABLE chat_files (
 );
 
 -- Chat model configs table
-CREATE TABLE chat_model_configs (
+CREATE TABLE IF NOT EXISTS chat_model_configs (
     id                      UUID        DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     provider                TEXT        NOT NULL,
     model                   TEXT        NOT NULL,
@@ -144,7 +144,7 @@ CREATE TABLE chat_model_configs (
 );
 
 -- Chat providers table
-CREATE TABLE chat_providers (
+CREATE TABLE IF NOT EXISTS chat_providers (
     id              UUID        DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     provider        TEXT        NOT NULL,
     display_name    TEXT        NOT NULL DEFAULT '',
@@ -161,7 +161,7 @@ CREATE TABLE chat_providers (
 COMMENT ON COLUMN chat_providers.api_key_key_id IS 'The ID of the key used to encrypt the provider API key. If this is NULL, the API key is not encrypted';
 
 -- Chat queued messages table
-CREATE TABLE chat_queued_messages (
+CREATE TABLE IF NOT EXISTS chat_queued_messages (
     id          BIGSERIAL   NOT NULL PRIMARY KEY,
     chat_id     UUID        NOT NULL REFERENCES chats(id),
     content     JSONB       NOT NULL,
@@ -169,7 +169,7 @@ CREATE TABLE chat_queued_messages (
 );
 
 -- Chat diff statuses table
-CREATE TABLE chat_diff_statuses (
+CREATE TABLE IF NOT EXISTS chat_diff_statuses (
     chat_id             UUID        NOT NULL PRIMARY KEY REFERENCES chats(id),
     url                 TEXT,
     pull_request_state  TEXT,

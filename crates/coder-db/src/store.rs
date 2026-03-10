@@ -2765,7 +2765,7 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(chat_record_from_row(row))
+        chat_record_from_row(row)
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2779,7 +2779,7 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(row.map(chat_record_from_row))
+        row.map(chat_record_from_row).transpose()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2801,7 +2801,7 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(rows.into_iter().map(chat_record_from_row).collect())
+        rows.into_iter().map(chat_record_from_row).collect()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2839,7 +2839,7 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(rows.into_iter().map(chat_message_record_from_row).collect())
+        rows.into_iter().map(chat_message_record_from_row).collect()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2866,7 +2866,7 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(chat_message_record_from_row(row))
+        chat_message_record_from_row(row)
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -3287,7 +3287,7 @@ fn task_record_from_row(row: StoredTaskRow) -> TaskRecord {
     }
 }
 
-fn chat_record_from_row(row: StoredChatRow) -> ChatRecord {
+fn chat_record_from_row(row: StoredChatRow) -> Result<ChatRecord, StorageError> {
     let status = match row.status.as_str() {
         "waiting" => ChatStatus::Waiting,
         "pending" => ChatStatus::Pending,
@@ -3295,9 +3295,13 @@ fn chat_record_from_row(row: StoredChatRow) -> ChatRecord {
         "paused" => ChatStatus::Paused,
         "completed" => ChatStatus::Completed,
         "error" => ChatStatus::Error,
-        _ => ChatStatus::Waiting,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown chat status: {other}"
+            )));
+        }
     };
-    ChatRecord {
+    Ok(ChatRecord {
         id: row.id,
         owner_id: row.owner_id,
         workspace_id: row.workspace_id,
@@ -3310,16 +3314,23 @@ fn chat_record_from_row(row: StoredChatRow) -> ChatRecord {
         archived: row.archived,
         created_at: row.created_at,
         updated_at: row.updated_at,
-    }
+    })
 }
 
-fn chat_message_record_from_row(row: StoredChatMessageRow) -> ChatMessageRecord {
+fn chat_message_record_from_row(
+    row: StoredChatMessageRow,
+) -> Result<ChatMessageRecord, StorageError> {
     let visibility = match row.visibility.as_str() {
         "user" => ChatMessageVisibility::User,
         "model" => ChatMessageVisibility::Model,
-        _ => ChatMessageVisibility::Both,
+        "both" => ChatMessageVisibility::Both,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown chat message visibility: {other}"
+            )));
+        }
     };
-    ChatMessageRecord {
+    Ok(ChatMessageRecord {
         id: row.id,
         chat_id: row.chat_id,
         model_config_id: row.model_config_id,
@@ -3335,7 +3346,7 @@ fn chat_message_record_from_row(row: StoredChatMessageRow) -> ChatMessageRecord 
         cache_read_tokens: row.cache_read_tokens,
         context_limit: row.context_limit,
         compressed: row.compressed,
-    }
+    })
 }
 
 fn is_unique_violation(error: &sqlx::Error) -> bool {
