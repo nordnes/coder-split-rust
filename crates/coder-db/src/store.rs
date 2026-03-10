@@ -2992,7 +2992,7 @@ impl AppStore for PostgresStore {
         sqlx::query(
             "UPDATE workspace_agents
              SET logs_length = LEAST(logs_length + $2, 1048576),
-                 logs_overflowed = (logs_length + $2 > 1048576)
+                 logs_overflowed = logs_overflowed OR (logs_length + $2 > 1048576)
              WHERE id = $1",
         )
         .bind(agent_id)

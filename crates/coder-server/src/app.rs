@@ -589,7 +589,7 @@ pub fn build_router(state: AppState) -> Router {
                 .route(
                     "/workspaceagents/{agent}/containers/devcontainers/{devcontainer}",
                     post(post_workspace_agent_recreate_devcontainer)
-                        .delete(axum::routing::delete(delete_workspace_agent_devcontainer)),
+                        .delete(delete_workspace_agent_devcontainer),
                 )
                 .route(
                     "/workspaceagents/{agent}/containers/watch",
@@ -5505,7 +5505,7 @@ async fn post_workspace_agent_instance_identity_aws(
     State(state): State<AppState>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(state, "aws", body).await
+    post_workspace_agent_instance_identity(&state, "aws", body).await
 }
 
 /// POST /api/v2/workspaceagents/azure-instance-identity — Azure instance identity auth.
@@ -5513,7 +5513,7 @@ async fn post_workspace_agent_instance_identity_azure(
     State(state): State<AppState>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(state, "azure", body).await
+    post_workspace_agent_instance_identity(&state, "azure", body).await
 }
 
 /// POST /api/v2/workspaceagents/google-instance-identity — Google instance identity auth.
@@ -5521,11 +5521,11 @@ async fn post_workspace_agent_instance_identity_google(
     State(state): State<AppState>,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(state, "google", body).await
+    post_workspace_agent_instance_identity(&state, "google", body).await
 }
 
 async fn post_workspace_agent_instance_identity(
-    state: AppState,
+    state: &AppState,
     cloud: &str,
     body: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
