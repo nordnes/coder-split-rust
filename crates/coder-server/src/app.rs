@@ -11931,13 +11931,13 @@ async fn tailnet_rpc_conn(
         // Start a coordination session — this returns a handle with a
         // channel that receives responses pushed by the coordinator when
         // tunnel peers update their node info.
-        // TODO(peer-kind): All peers are currently registered as Client.
-        // The Go reference distinguishes agents from clients — agents use
-        // authenticate_agent_request() with an agent auth token, whereas
-        // clients use authenticate_request() with a session token (as we
-        // do here).  When agent coordination is routed through this same
-        // handler (or a dedicated one), the PeerKind should be determined
-        // from the authentication context.
+        // NOTE: All peers are currently registered as PeerKind::Client.
+        // The Go reference distinguishes agents from clients — agents
+        // authenticate via authenticate_agent_request() with an agent
+        // auth token, whereas clients use authenticate_request() with a
+        // session token (as we do here).  Agent coordination will use a
+        // separate auth path (or a dedicated handler) where PeerKind is
+        // determined from the authentication context.
         let mut handle =
             coordinator.coordinate(peer_id, peer_name, PeerKind::Client);
 
@@ -14360,17 +14360,46 @@ mod tests {
             &self,
             input: AcquireProvisionerJobInput,
         ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-            // TODO: This simplified implementation does not filter by
-            // organization_id, types, or provisioner_tags. It simply grabs
-            // the first pending job. The real PostgresStore filters by all
-            // three fields — add matching logic if tests require it.
             let mut jobs = self
                 .prov_jobs
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let found = jobs
-                .values_mut()
-                .find(|j| j.job_status == ProvisionerJobStatus::Pending);
+
+            // Filter by organization_id: job must belong to the requesting org.
+            // Filter by types: if the daemon advertises specific provisioner
+            // types, the job's provisioner type must be in that list.
+            // Filter by provisioner_tags: the daemon's tags must be a superset
+            // of the job's tags (every key in the job tags must exist in the
+            // daemon tags with the same value).
+            let daemon_tags: HashMap<String, String> =
+                serde_json::from_value(input.provisioner_tags.clone()).unwrap_or_default();
+
+            let found = jobs.values_mut().find(|j| {
+                if j.job_status != ProvisionerJobStatus::Pending {
+                    return false;
+                }
+                // Organization filter.
+                if let Some(job_org) = j.organization_id {
+                    if job_org != input.organization_id {
+                        return false;
+                    }
+                }
+                // Provisioner type filter.
+                if !input.types.is_empty() && !input.types.contains(&j.provisioner) {
+                    return false;
+                }
+                // Tag superset filter: daemon tags must contain every job tag.
+                let job_tags: HashMap<String, String> =
+                    serde_json::from_value(j.tags.clone()).unwrap_or_default();
+                for (k, v) in &job_tags {
+                    match daemon_tags.get(k) {
+                        Some(dv) if dv == v => {}
+                        _ => return false,
+                    }
+                }
+                true
+            });
+
             if let Some(job) = found {
                 job.job_status = ProvisionerJobStatus::Running;
                 job.started_at = Some(input.started_at);
