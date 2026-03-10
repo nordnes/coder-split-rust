@@ -2156,6 +2156,393 @@ pub struct DebugPprofResponse {
 }
 
 // ---------------------------------------------------------------------------
+// AI Tasks
+// ---------------------------------------------------------------------------
+
+/// TaskStatus represents the status of a task.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskStatus {
+    Pending,
+    Initializing,
+    Active,
+    Paused,
+    Unknown,
+    Error,
+}
+
+impl TaskStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Initializing => "initializing",
+            Self::Active => "active",
+            Self::Paused => "paused",
+            Self::Unknown => "unknown",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for TaskStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// TaskState represents the high-level lifecycle of a task.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskState {
+    Working,
+    Idle,
+    Complete,
+    Failed,
+}
+
+/// TaskStateEntry represents a single entry in the task's state history.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskStateEntry {
+    #[serde(with = "time::serde::rfc3339")]
+    pub timestamp: OffsetDateTime,
+    pub state: TaskState,
+    pub message: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uri: String,
+}
+
+/// Task represents a task.
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskResponse {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub owner_id: Uuid,
+    pub owner_name: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub owner_avatar_url: String,
+    pub name: String,
+    pub display_name: String,
+    pub template_version_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
+    pub initial_prompt: String,
+    pub status: TaskStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_state: Option<TaskStateEntry>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+/// TasksListResponse is the response for the task list endpoint.
+#[derive(Clone, Debug, Serialize)]
+pub struct TasksListResponse {
+    pub tasks: Vec<TaskResponse>,
+    pub count: usize,
+}
+
+/// CreateTaskRequest is the request to create a new task.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateTaskRequest {
+    pub template_version_id: Uuid,
+    pub input: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub display_name: Option<String>,
+}
+
+/// UpdateTaskInputRequest is used to update a task's input.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateTaskInputRequest {
+    pub input: String,
+}
+
+/// TaskSendRequest is used to send task input to the tasks sidebar app.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TaskSendRequest {
+    pub input: String,
+}
+
+/// TaskLogType indicates the source of a task log entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum TaskLogType {
+    Input,
+    Output,
+}
+
+/// TaskLogEntry represents a single log entry for a task.
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskLogEntry {
+    pub id: i32,
+    pub content: String,
+    #[serde(rename = "type")]
+    pub log_type: TaskLogType,
+    #[serde(with = "time::serde::rfc3339")]
+    pub time: OffsetDateTime,
+}
+
+/// TaskLogsResponse contains task logs and metadata.
+#[derive(Clone, Debug, Serialize)]
+pub struct TaskLogsResponse {
+    pub logs: Vec<TaskLogEntry>,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub snapshot: bool,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub snapshot_at: Option<OffsetDateTime>,
+}
+
+/// TaskLogSnapshotEnvelope wraps a task log snapshot posted by an agent.
+#[derive(Clone, Debug, Deserialize)]
+pub struct TaskLogSnapshotEnvelope {
+    pub log_snapshot: Value,
+}
+
+// ---------------------------------------------------------------------------
+// Chats
+// ---------------------------------------------------------------------------
+
+/// ChatStatus represents the status of a chat.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatStatus {
+    Waiting,
+    Pending,
+    Running,
+    Paused,
+    Completed,
+    Error,
+}
+
+impl ChatStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Waiting => "waiting",
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Paused => "paused",
+            Self::Completed => "completed",
+            Self::Error => "error",
+        }
+    }
+}
+
+impl fmt::Display for ChatStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// ChatMessageVisibility controls who sees a chat message.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatMessageVisibility {
+    User,
+    Model,
+    Both,
+}
+
+/// ChatMessagePartType represents a structured message part type.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChatMessagePartType {
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "reasoning")]
+    Reasoning,
+    #[serde(rename = "tool-call")]
+    ToolCall,
+    #[serde(rename = "tool-result")]
+    ToolResult,
+    #[serde(rename = "source")]
+    Source,
+    #[serde(rename = "file")]
+    File,
+    #[serde(rename = "file-reference")]
+    FileReference,
+}
+
+/// ChatMessagePart is a structured chunk of a chat message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatMessagePart {
+    #[serde(rename = "type")]
+    pub part_type: ChatMessagePartType,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub text: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub signature: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_call_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tool_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub args: Option<Value>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub args_delta: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub result: Option<Value>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub result_delta: String,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub is_error: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source_id: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub media_type: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<Uuid>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub file_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<i32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub end_line: Option<i32>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub content: String,
+}
+
+/// ChatMessageUsage contains token usage information for a chat message.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatMessageUsage {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub total_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_creation_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache_read_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_limit: Option<i64>,
+}
+
+/// ChatMessage represents a single message in a chat.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatMessageResponse {
+    pub id: i64,
+    pub chat_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_config_id: Option<Uuid>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    pub role: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub content: Vec<ChatMessagePart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub usage: Option<ChatMessageUsage>,
+}
+
+/// Chat represents a chat session.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatResponse {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_chat_id: Option<Uuid>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub root_chat_id: Option<Uuid>,
+    pub last_model_config_id: Uuid,
+    pub title: String,
+    pub status: ChatStatus,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_error: Option<String>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+    pub archived: bool,
+}
+
+/// ChatQueuedMessage represents a queued message waiting to be processed.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatQueuedMessageResponse {
+    pub id: i64,
+    pub chat_id: Uuid,
+    pub content: Vec<ChatMessagePart>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+/// ChatWithMessages is a chat along with its messages.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatWithMessagesResponse {
+    pub chat: ChatResponse,
+    pub messages: Vec<ChatMessageResponse>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_messages: Vec<ChatQueuedMessageResponse>,
+}
+
+/// ChatInputPartType represents an input part type for user chat input.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ChatInputPartType {
+    #[serde(rename = "text")]
+    Text,
+    #[serde(rename = "file")]
+    File,
+    #[serde(rename = "file-reference")]
+    FileReference,
+}
+
+/// ChatInputPart is a single user input part for creating a chat.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatInputPart {
+    #[serde(rename = "type")]
+    pub part_type: ChatInputPartType,
+    #[serde(default)]
+    pub text: String,
+    #[serde(default)]
+    pub file_id: Option<Uuid>,
+    #[serde(default)]
+    pub file_name: String,
+    #[serde(default)]
+    pub start_line: Option<i32>,
+    #[serde(default)]
+    pub end_line: Option<i32>,
+    #[serde(default)]
+    pub content: String,
+}
+
+/// CreateChatRequest is the request to create a new chat.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateChatRequest {
+    pub content: Vec<ChatInputPart>,
+    #[serde(default)]
+    pub workspace_id: Option<Uuid>,
+    #[serde(default)]
+    pub model_config_id: Option<Uuid>,
+}
+
+/// CreateChatMessageRequest is the request to add a message to a chat.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CreateChatMessageRequest {
+    pub content: Vec<ChatInputPart>,
+    #[serde(default)]
+    pub model_config_id: Option<Uuid>,
+}
+
+/// CreateChatMessageResponse is the response from adding a message.
+#[derive(Clone, Debug, Serialize)]
+pub struct CreateChatMessageApiResponse {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<ChatMessageResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub queued_message: Option<ChatQueuedMessageResponse>,
+    pub queued: bool,
+}
+
+// ---------------------------------------------------------------------------
 // Workspace Agent types
 // ---------------------------------------------------------------------------
 
@@ -3496,6 +3883,8 @@ pub struct DeleteWorkspaceAgentPortShareRequest {
     /// Port number.
     pub port: i32,
 }
+
+// ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
 // Template & Template Version API types
