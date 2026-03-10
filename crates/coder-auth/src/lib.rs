@@ -2049,11 +2049,15 @@ where
             ));
         }
 
+        // Fetch existing app to preserve redirect_uris when not explicitly provided.
+        let existing = self.get_app(app_id).await?;
+
         let input = coder_core::identity::UpdateOAuth2ProviderAppInput {
             id: app_id,
             name: name.trim().to_owned(),
             icon: icon.to_owned(),
             callback_url: callback_url.trim().to_owned(),
+            redirect_uris: existing.redirect_uris,
         };
         self.store
             .update_oauth2_provider_app(&input)
@@ -2111,7 +2115,12 @@ where
 
         let record = self
             .store
-            .create_oauth2_provider_app_secret(app_id, &hashed, &display_secret)
+            .create_oauth2_provider_app_secret(
+                app_id,
+                raw_secret.as_bytes()[..8].as_ref(),
+                &hashed,
+                &display_secret,
+            )
             .await?;
         Ok((raw_secret, record))
     }
@@ -2190,6 +2199,8 @@ where
                 resource_uri,
                 code_challenge,
                 code_challenge_method,
+                None,
+                None,
             )
             .await?;
 
