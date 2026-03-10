@@ -769,72 +769,78 @@ mod tests {
         let b = a;
         assert_eq!(a, b, "AutobuildAction should be Copy");
 
-        // Dormancy evaluator returns Dormant for idle workspaces
-        let long_ago = OffsetDateTime::now_utc() - time::Duration::days(100);
-        assert_eq!(evaluate_dormancy(long_ago, 90), AutobuildAction::Dormant);
+        // Dormancy evaluator: boundary case — exactly at threshold
+        let at_threshold = OffsetDateTime::now_utc() - time::Duration::days(90);
+        assert_eq!(
+            evaluate_dormancy(at_threshold, 90),
+            AutobuildAction::Dormant,
+            "at exact threshold should be dormant"
+        );
 
-        // ... and None for active workspaces
-        let recent = OffsetDateTime::now_utc() - time::Duration::days(10);
-        assert_eq!(evaluate_dormancy(recent, 90), AutobuildAction::None);
-    }
-
-    #[test]
-    fn test_workspace_status_derivation() {
-        // QuietHoursWindow determines whether to suppress actions
-        let window = QuietHoursWindow {
-            start_hour: 22,
-            end_hour: 6,
-        };
-
-        // During quiet hours: 23:00 UTC
-        let quiet_time = time::macros::datetime!(2026-03-09 23:00:00 UTC);
-        assert!(window.is_quiet(quiet_time), "23:00 should be quiet");
-
-        // During quiet hours: 02:00 UTC (wraps midnight)
-        let quiet_time_2 = time::macros::datetime!(2026-03-09 02:00:00 UTC);
-        assert!(window.is_quiet(quiet_time_2), "02:00 should be quiet");
-
-        // Outside quiet hours: 12:00 UTC
-        let active_time = time::macros::datetime!(2026-03-09 12:00:00 UTC);
-        assert!(!window.is_quiet(active_time), "12:00 should not be quiet");
-
-        // An autostop policy with a short TTL should trigger stop
-        let policy = AutostopPolicy { ttl_minutes: 30 };
-        let one_hour_ago = OffsetDateTime::now_utc() - time::Duration::hours(1);
-        assert!(policy.should_stop(one_hour_ago), "expired TTL should stop");
-
-        // ... but not if activity was recent
-        let five_minutes_ago = OffsetDateTime::now_utc() - time::Duration::minutes(5);
-        assert!(
-            !policy.should_stop(five_minutes_ago),
-            "recent activity should not stop"
+        // Dormancy evaluator: one day before threshold — still active
+        let just_before = OffsetDateTime::now_utc() - time::Duration::days(89);
+        assert_eq!(
+            evaluate_dormancy(just_before, 90),
+            AutobuildAction::None,
+            "one day before threshold should not be dormant"
         );
     }
 
     #[test]
-    fn test_workspace_build_number_ordering() {
+    fn test_workspace_status_derivation() {
+        // Non-wrapping window (same-day range)
+        let daytime_window = QuietHoursWindow {
+            start_hour: 1,
+            end_hour: 5,
+        };
+        let inside = time::macros::datetime!(2026-03-09 03:00:00 UTC);
+        assert!(
+            daytime_window.is_quiet(inside),
+            "03:00 in 1-5 should be quiet"
+        );
+        let outside = time::macros::datetime!(2026-03-09 06:00:00 UTC);
+        assert!(
+            !daytime_window.is_quiet(outside),
+            "06:00 outside 1-5 should not be quiet"
+        );
+
+        // Boundary: exactly at start_hour (22:00)
+        let midnight_wrap = QuietHoursWindow {
+            start_hour: 22,
+            end_hour: 6,
+        };
+        let at_start = time::macros::datetime!(2026-03-09 22:00:00 UTC);
+        assert!(
+            midnight_wrap.is_quiet(at_start),
+            "exactly at start_hour should be quiet"
+        );
+        // Boundary: exactly at end_hour (06:00) — should NOT be quiet
+        let at_end = time::macros::datetime!(2026-03-09 06:00:00 UTC);
+        assert!(
+            !midnight_wrap.is_quiet(at_end),
+            "exactly at end_hour should not be quiet"
+        );
+    }
+
+    #[test]
+    fn test_deadline_extension_ordering_and_clamping() {
         // Deadline extension preserves ordering: later deadlines remain later.
         let base = OffsetDateTime::now_utc();
         let build_1_deadline = base + time::Duration::minutes(30);
         let build_2_deadline = base + time::Duration::minutes(60);
 
-        // Extend build 1 by 15 minutes
+        // Extend both by 15 minutes
         let extended_1 = compute_extended_deadline(build_1_deadline, 15, None);
-        // Extend build 2 by 15 minutes
         let extended_2 = compute_extended_deadline(build_2_deadline, 15, None);
 
         assert!(
             extended_1 < extended_2,
-            "build ordering should be preserved after extension"
+            "ordering should be preserved after extension"
         );
 
-        // With a max deadline, build 2 may be clamped but still >= build 1
+        // When max clamps build 2, verify it equals the max
         let max = base + time::Duration::minutes(65);
         let clamped_2 = compute_extended_deadline(build_2_deadline, 15, Some(max));
-        assert!(
-            clamped_2 >= extended_1 || clamped_2 == max,
-            "clamped deadline should respect max"
-        );
         assert_eq!(clamped_2, max, "build 2 extension should be clamped to max");
     }
 
@@ -843,25 +849,28 @@ mod tests {
         // Basic 5-field cron (every weekday at 9:30)
         let basic = AutostartSchedule::parse("30 9 * * 1-5");
         assert!(basic.is_ok(), "basic cron should parse");
-        let basic = basic.unwrap_or_else(|_| unreachable!());
-        assert_eq!(basic.timezone(), "UTC");
-        assert_eq!(basic.expression(), "30 9 * * 1-5");
+        if let Ok(s) = basic {
+            assert_eq!(s.timezone(), "UTC");
+            assert_eq!(s.expression(), "30 9 * * 1-5");
+        }
 
         // With CRON_TZ prefix
         let tz = AutostartSchedule::parse("CRON_TZ=America/New_York 0 8 * * *");
         assert!(tz.is_ok(), "cron with TZ should parse");
-        let tz = tz.unwrap_or_else(|_| unreachable!());
-        assert_eq!(tz.timezone(), "America/New_York");
+        if let Ok(s) = tz {
+            assert_eq!(s.timezone(), "America/New_York");
+        }
 
-        // Every-minute schedule
+        // Every-minute schedule — verify next_after_utc returns Some
         let every_min = AutostartSchedule::parse("* * * * *");
         assert!(every_min.is_ok(), "every-minute cron should parse");
-        let every_min = every_min.unwrap_or_else(|_| unreachable!());
-        let next = every_min.next_after_utc();
-        assert!(
-            next.is_some(),
-            "every-minute schedule should have next occurrence"
-        );
+        if let Ok(s) = every_min {
+            let next = s.next_after_utc();
+            assert!(
+                next.is_some(),
+                "every-minute schedule should have next occurrence"
+            );
+        }
 
         // Invalid cron expressions
         let invalid_cases = ["not a cron", "", "1 2 3", "60 25 * * *"];
@@ -876,47 +885,20 @@ mod tests {
         // CRON_TZ with unknown timezone falls back to UTC in next_after_utc
         let unknown_tz = AutostartSchedule::parse("CRON_TZ=Fake/Zone * * * * *");
         assert!(unknown_tz.is_ok(), "unknown TZ still parses the cron part");
-        let unknown_tz = unknown_tz.unwrap_or_else(|_| unreachable!());
-        assert_eq!(unknown_tz.timezone(), "Fake/Zone");
-        // Should still return a next occurrence (falls back to UTC)
-        let next = unknown_tz.next_after_utc();
-        assert!(next.is_some(), "unknown TZ should fall back to UTC");
+        if let Ok(s) = unknown_tz {
+            assert_eq!(s.timezone(), "Fake/Zone");
+            // Should still return a next occurrence (falls back to UTC)
+            let next = s.next_after_utc();
+            assert!(next.is_some(), "unknown TZ should fall back to UTC");
+        }
     }
 
     #[test]
     fn test_workspace_ttl_calculation() {
-        // Basic deadline extension
+        // Zero extension — novel scenario not in existing tests
         let now = OffsetDateTime::now_utc();
-        let extended = compute_extended_deadline(now, 60, None);
-        let diff = (extended - now).whole_minutes();
-        assert_eq!(diff, 60, "60 min extension should add 60 minutes");
-
-        // Extension clamped to max
-        let max = now + time::Duration::minutes(30);
-        let clamped = compute_extended_deadline(now, 60, Some(max));
-        assert_eq!(clamped, max, "should be clamped to max deadline");
-
-        // Zero extension
         let zero = compute_extended_deadline(now, 0, None);
         assert_eq!(zero, now, "zero extension should not change deadline");
-
-        // AutostopPolicy TTL calculations
-        let policy = AutostopPolicy { ttl_minutes: 120 };
-        let within_ttl = OffsetDateTime::now_utc() - time::Duration::minutes(60);
-        assert!(
-            !policy.should_stop(within_ttl),
-            "within TTL should not stop"
-        );
-
-        let beyond_ttl = OffsetDateTime::now_utc() - time::Duration::minutes(180);
-        assert!(policy.should_stop(beyond_ttl), "beyond TTL should stop");
-
-        // Exact TTL boundary
-        let at_ttl = OffsetDateTime::now_utc() - time::Duration::minutes(120);
-        assert!(
-            policy.should_stop(at_ttl),
-            "at exact TTL boundary should stop"
-        );
 
         // Large (but safe) TTL should not stop recent activity
         let large_policy = AutostopPolicy {

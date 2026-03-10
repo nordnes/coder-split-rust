@@ -1472,10 +1472,10 @@ mod tests {
         assert!(bad.is_err(), "unknown login type should fail to parse");
     }
 
-    // ── External auth / OIDC config validation ──────────────────
+    // ── Create-user validation tests ─────────────────────────────
 
     #[test]
-    fn test_external_auth_provider_config() {
+    fn test_non_password_login_type_rejects_password() {
         // Validate that create-user validation rejects passwords for
         // non-password login types (Github, Oidc, None).
         for login_type in [LoginType::Github, LoginType::Oidc, LoginType::None] {
@@ -1503,7 +1503,7 @@ mod tests {
     }
 
     #[test]
-    fn test_oidc_config_validation() {
+    fn test_unsupported_and_password_login_type_validation() {
         // Token and Oauth2ProviderApp are unsupported for manual user creation.
         for login_type in [LoginType::Token, LoginType::Oauth2ProviderApp] {
             let validations = validate_create_user_request(
@@ -1552,6 +1552,9 @@ mod tests {
 
     #[test]
     fn test_user_link_record_creation() {
+        // NOTE: Intentional construction-validation smoke test for UserLinkRecord.
+        // This struct has no behavior methods, so we verify all fields survive round-trip
+        // construction to guard against accidental field reordering or type changes.
         let user_id = Uuid::new_v4();
         let now = time::OffsetDateTime::now_utc();
         let link = UserLinkRecord {
@@ -1587,7 +1590,8 @@ mod tests {
 
     #[test]
     fn test_identity_provider_display_names() {
-        // Site-level roles must have human-readable display names
+        // Site-level roles must have human-readable display names.
+        // These must match coder_rbac::site_builtin_roles() — update if roles change.
         let site_roles = site_builtin_roles();
         assert!(!site_roles.is_empty(), "should have site roles");
 

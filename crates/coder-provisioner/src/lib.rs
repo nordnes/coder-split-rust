@@ -1067,6 +1067,9 @@ mod tests {
 
     #[test]
     fn test_provisioner_daemon_registration() {
+        // NOTE: Intentional construction-validation smoke test for ProvisionerDaemonRecord.
+        // This struct has no behavior methods, so we verify all fields survive round-trip
+        // construction to guard against accidental field reordering or type changes.
         use std::collections::HashMap;
 
         let org_id = Uuid::new_v4();
@@ -1106,6 +1109,9 @@ mod tests {
 
     #[test]
     fn test_provisioner_job_creation() {
+        // NOTE: Intentional construction-validation smoke test for ProvisionerJobRecord.
+        // This struct has no behavior methods, so we verify all fields survive round-trip
+        // construction to guard against accidental field reordering or type changes.
         use coder_core::{ProvisionerJobType, ProvisionerStorageMethod, ProvisionerType};
 
         let now = OffsetDateTime::now_utc();
@@ -1170,11 +1176,13 @@ mod tests {
     }
 
     #[test]
-    fn test_provisioner_tag_matching() {
+    fn test_provisioner_tag_matching_contract() {
+        // NOTE: This test validates the expected contract of tag matching
+        // (daemon tags must be a superset of job tags) until a Rust-side
+        // helper is extracted from the DB layer. The real matching lives
+        // in Postgres SQL (tags <@ $5::JSONB in coder-db).
         use std::collections::HashMap;
 
-        // Simulate tag matching logic: a daemon's tags should be a superset
-        // of the job's required tags for the job to be eligible.
         let mut daemon_tags: HashMap<String, String> = HashMap::new();
         daemon_tags.insert("scope".to_owned(), "organization".to_owned());
         daemon_tags.insert("owner".to_owned(), String::new());
