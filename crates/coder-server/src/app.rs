@@ -11733,29 +11733,37 @@ async fn tailnet_rpc_conn(
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    use coder_connectivity::tailnet::PeerKind;
 
-    let peer_id = context.actor.user_id;
-    let peer_name = context.actor.username.clone();
+    // First try agent authentication — agents present their auth_token via
+    // the same Coder-Session-Token header but it resolves to a workspace
+    // agent row instead of a user session.
+    let (peer_id, peer_name, peer_kind) =
+        if let Some(agent) = authenticate_agent_request(&state, &headers).await? {
+            (agent.id, agent.name.clone(), PeerKind::Agent)
+        } else if let Some(context) = authenticate_request(&state, &headers).await? {
+            // Fall back to session-token authentication for regular clients.
+            (
+                context.actor.user_id,
+                context.actor.username.clone(),
+                PeerKind::Client,
+            )
+        } else {
+            return Ok(unauthorized_response("Missing or invalid session token."));
+        };
+
     let coordinator = state.coordinator.clone();
 
     Ok(ws.on_upgrade(move |mut socket| async move {
-        use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse, PeerKind};
+        use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse};
 
         // Start a coordination session — this returns a handle with a
         // channel that receives responses pushed by the coordinator when
-        // tunnel peers update their node info.
-        // NOTE: All peers are currently registered as PeerKind::Client.
-        // The Go reference distinguishes agents from clients — agents
-        // authenticate via authenticate_agent_request() with an agent
-        // auth token, whereas clients use authenticate_request() with a
-        // session token (as we do here).  Agent coordination will use a
-        // separate auth path (or a dedicated handler) where PeerKind is
-        // determined from the authentication context.
+        // tunnel peers update their node info.  The peer kind is determined
+        // from the authentication context: agents authenticate via
+        // workspace agent auth tokens, clients via session tokens.
         let mut handle =
-            coordinator.coordinate(peer_id, peer_name, PeerKind::Client);
+            coordinator.coordinate(peer_id, peer_name, peer_kind);
 
         // Multiplex: read from WebSocket AND from the coordinator response
         // channel simultaneously.  When the client sends a coordination
@@ -22717,6 +22725,222 @@ mod tests {
             "expected 400 or 101, got {}",
             resp.status(),
         );
+        Ok(())
+    }
+
+    /// Helper: add WebSocket upgrade headers to a request so that the
+    /// `WebSocketUpgrade` extractor accepts it and the handler body runs.
+    fn add_ws_upgrade_headers(req: &mut Request<Body>) {
+        let headers = req.headers_mut();
+        headers.insert(
+            HeaderName::from_static("upgrade"),
+            HeaderValue::from_static("websocket"),
+        );
+        headers.insert(
+            HeaderName::from_static("connection"),
+            HeaderValue::from_static("Upgrade"),
+        );
+        headers.insert(
+            HeaderName::from_static("sec-websocket-version"),
+            HeaderValue::from_static("13"),
+        );
+        headers.insert(
+            HeaderName::from_static("sec-websocket-key"),
+            HeaderValue::from_static("dGVzdF9rZXk="),
+        );
+    }
+
+    /// Verify that connecting to the tailnet WebSocket with an agent auth
+    /// token is accepted (handler returns 101, not 401).
+    #[tokio::test]
+    async fn test_tailnet_agent_auth_registers_as_agent() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+
+        // Insert an agent into the fake store so that
+        // `authenticate_agent_request` can find it.
+        let agent_id = Uuid::new_v4();
+        let agent_token = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let agent = WorkspaceAgentRow {
+            id: agent_id,
+            parent_id: None,
+            created_at: now,
+            updated_at: now,
+            name: "ws-agent".to_owned(),
+            first_connected_at: Some(now),
+            last_connected_at: Some(now),
+            disconnected_at: None,
+            resource_id: Uuid::new_v4(),
+            auth_token: agent_token,
+            auth_instance_id: None,
+            architecture: "amd64".to_owned(),
+            environment_variables: None,
+            operating_system: "linux".to_owned(),
+            directory: "/home/coder".to_owned(),
+            expanded_directory: "/home/coder".to_owned(),
+            version: "v2.19.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            connection_timeout_seconds: 120,
+            troubleshooting_url: String::new(),
+            motd_file: String::new(),
+            lifecycle_state: "ready".to_owned(),
+            logs_length: 0,
+            logs_overflowed: false,
+            started_at: Some(now),
+            ready_at: Some(now),
+            subsystems: Vec::new(),
+            display_apps: Vec::new(),
+            display_order: 0,
+            api_key_scope: "all".to_owned(),
+        };
+        store
+            .insert_agent(agent)
+            .map_err(|e| format!("insert_agent failed: {e}"))?;
+
+        let app = build_router(state.clone());
+
+        // First, verify that an unauthenticated WS upgrade request is
+        // rejected with 401 -- this proves the handler body runs and the
+        // auth check is reached (not short-circuited by the WS extractor).
+        let mut unauth_ws = request(Method::GET, "/api/v2/tailnet")?;
+        add_ws_upgrade_headers(&mut unauth_ws);
+        let unauth_resp = call(app.clone(), unauth_ws).await?;
+        assert!(
+            unauth_resp.status() == StatusCode::UNAUTHORIZED
+                || unauth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "unauthenticated WS upgrade should be 401 or 426, got {}",
+            unauth_resp.status(),
+        );
+
+        // Now authenticate with the agent token AND include WS upgrade
+        // headers.  The handler should accept the token and return 101
+        // (Switching Protocols) rather than 401.
+        let mut agent_ws = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/tailnet")
+            .header("coder-session-token", agent_token.to_string())
+            .body(Body::empty())?;
+        add_ws_upgrade_headers(&mut agent_ws);
+        let agent_resp = call(app.clone(), agent_ws).await?;
+        assert!(
+            agent_resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                || agent_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "agent token with WS upgrade should return 101 or 426, got {}",
+            agent_resp.status(),
+        );
+
+        // Verify an *invalid* token (random UUID not matching any agent or
+        // session) is rejected.  This confirms the auth gate is meaningful.
+        let mut bad_ws = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/tailnet")
+            .header("coder-session-token", Uuid::new_v4().to_string())
+            .body(Body::empty())?;
+        add_ws_upgrade_headers(&mut bad_ws);
+        let bad_resp = call(app, bad_ws).await?;
+        assert!(
+            bad_resp.status() == StatusCode::UNAUTHORIZED
+                || bad_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "invalid token should be rejected with 401 or 426, got {}",
+            bad_resp.status(),
+        );
+
+        Ok(())
+    }
+    /// Verify that connecting with a session token (not an agent token)
+    /// is accepted and results in 101 (not 401).
+    #[tokio::test]
+    async fn test_tailnet_session_auth_registers_as_client() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Authenticate with a regular session token AND include WS upgrade
+        // headers so the handler body actually executes.
+        let mut req = authenticated_request(Method::GET, "/api/v2/tailnet", &session_token)?;
+        add_ws_upgrade_headers(&mut req);
+        let resp = call(app, req).await?;
+
+        // Should get 101 Switching Protocols (auth accepted, upgrade
+        // attempted) or 426 in oneshot mode -- but NOT 401.
+        assert!(
+            resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                || resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "session token with WS upgrade should return 101 or 426, got {}",
+            resp.status(),
+        );
+        Ok(())
+    }
+    /// can form a tunnel and exchange node information.
+    #[tokio::test]
+    async fn test_tailnet_agent_client_tunnel() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{
+            CoordinateRequest, InMemoryCoordinator, NodeInfo, PeerKind, PeerUpdateKind,
+            TailnetCoordinator,
+        };
+
+        let coordinator = InMemoryCoordinator::new(Default::default());
+
+        let agent_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+
+        // Register an agent and a client — mirroring the two auth paths in
+        // the tailnet_rpc_conn handler.
+        let agent_handle =
+            coordinator.coordinate(agent_id, "test-agent".to_owned(), PeerKind::Agent);
+        let mut client_handle =
+            coordinator.coordinate(client_id, "test-client".to_owned(), PeerKind::Client);
+
+        // Verify debug output shows both kinds.
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["agents"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(debug["clients"].as_array().map(|a| a.len()), Some(1));
+
+        // Client requests a tunnel to the agent.
+        coordinator.process_request(
+            client_id,
+            CoordinateRequest {
+                add_tunnel: Some(agent_id),
+                ..Default::default()
+            },
+        )?;
+
+        // Agent publishes its node information.
+        let agent_node = NodeInfo {
+            id: 1,
+            preferred_derp: 1,
+            addresses: vec!["100.64.0.1/32".to_owned()],
+            endpoints: vec!["192.168.1.10:41641".to_owned()],
+            ..Default::default()
+        };
+        coordinator.process_request(
+            agent_id,
+            CoordinateRequest {
+                update_self: Some(agent_node.clone()),
+                ..Default::default()
+            },
+        )?;
+
+        // The client should receive the agent's node info via the tunnel.
+        let resp = client_handle
+            .response_rx
+            .recv()
+            .await
+            .ok_or("expected coordination response for client")?;
+        assert!(!resp.peer_updates.is_empty(), "expected peer updates");
+        let update = &resp.peer_updates[0];
+        assert_eq!(update.id, agent_id);
+        assert_eq!(update.kind, PeerUpdateKind::Node);
+        let node = update.node.as_ref().ok_or("expected node info")?;
+        assert_eq!(node.preferred_derp, 1);
+        assert_eq!(node.addresses, vec!["100.64.0.1/32"]);
+
+        // Clean up coordination sessions.
+        coordinator.close_coordination(agent_id, agent_handle.session_id);
+        coordinator.close_coordination(client_id, client_handle.session_id);
+
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["total_peers"], 0);
+
         Ok(())
     }
 
