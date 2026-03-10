@@ -8491,7 +8491,7 @@ async fn post_custom_notification(
             Json(ApiResponse::error(
                 "Invalid request body",
                 format!(
-                    "'content.title' must be less than {} characters",
+                    "'content.title' must be at most {} characters",
                     MAX_CUSTOM_NOTIFICATION_TITLE_LEN
                 ),
             )),
@@ -8506,7 +8506,7 @@ async fn post_custom_notification(
             Json(ApiResponse::error(
                 "Invalid request body",
                 format!(
-                    "'content.message' must be less than {} characters",
+                    "'content.message' must be at most {} characters",
                     MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN
                 ),
             )),

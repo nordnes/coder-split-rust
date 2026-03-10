@@ -4655,5 +4655,6 @@ pub struct CustomNotificationContent {
 /// Request to send a custom notification.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomNotificationRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<CustomNotificationContent>,
 }
