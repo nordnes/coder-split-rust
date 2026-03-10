@@ -21,6 +21,13 @@ use crate::identity::{
     UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter,
     UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
 };
+use crate::template::{
+    CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
+    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
+    TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
+    TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
+    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
+};
 
 /// Deployment metadata required by the HTTP layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -438,83 +445,6 @@ pub struct WorkspaceBuildRecord {
     pub daily_cost: i32,
 }
 
-/// Stored provisioner job record.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ProvisionerJobRecord {
-    /// Job identifier.
-    pub id: Uuid,
-    /// Creation time.
-    pub created_at: OffsetDateTime,
-    /// Update time.
-    pub updated_at: OffsetDateTime,
-    /// Started time.
-    pub started_at: Option<OffsetDateTime>,
-    /// Canceled time.
-    pub canceled_at: Option<OffsetDateTime>,
-    /// Completed time.
-    pub completed_at: Option<OffsetDateTime>,
-    /// Error message.
-    pub error: String,
-    /// Organization identifier.
-    pub organization_id: Uuid,
-    /// Initiator identifier.
-    pub initiator_id: Uuid,
-    /// Provisioner type.
-    pub provisioner: String,
-    /// Job type.
-    pub job_type: String,
-    /// Worker identifier.
-    pub worker_id: Option<Uuid>,
-    /// Job tags.
-    pub tags: Value,
-}
-
-/// Stored template record (minimal for workspace lookups).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TemplateRecord {
-    /// Template identifier.
-    pub id: Uuid,
-    /// Creation time.
-    pub created_at: OffsetDateTime,
-    /// Update time.
-    pub updated_at: OffsetDateTime,
-    /// Organization identifier.
-    pub organization_id: Uuid,
-    /// Template name.
-    pub name: String,
-    /// Display name.
-    pub display_name: String,
-    /// Icon URL or identifier.
-    pub icon: String,
-    /// Active version identifier.
-    pub active_version_id: Uuid,
-    /// Whether user cancel is allowed.
-    pub allow_user_cancel_workspace_jobs: bool,
-    /// Whether active version is required.
-    pub require_active_version: bool,
-    /// Max port sharing level.
-    pub max_port_sharing_level: String,
-    /// Soft-delete flag.
-    pub deleted: bool,
-}
-
-/// Stored template version record (minimal).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct TemplateVersionRecord {
-    /// Version identifier.
-    pub id: Uuid,
-    /// Parent template identifier.
-    pub template_id: Option<Uuid>,
-    /// Creation time.
-    pub created_at: OffsetDateTime,
-    /// Update time.
-    pub updated_at: OffsetDateTime,
-    /// Version name.
-    pub name: String,
-    /// Organization identifier.
-    pub organization_id: Uuid,
-}
-
 /// Stored workspace resource record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceResourceRecord {
@@ -679,25 +609,6 @@ pub struct CreateWorkspaceBuildInput {
     pub deadline: Option<OffsetDateTime>,
     /// Max deadline.
     pub max_deadline: Option<OffsetDateTime>,
-}
-
-/// Input for creating a provisioner job.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CreateProvisionerJobInput {
-    /// Job identifier.
-    pub id: Uuid,
-    /// Organization identifier.
-    pub organization_id: Uuid,
-    /// Initiator identifier.
-    pub initiator_id: Uuid,
-    /// Provisioner type.
-    pub provisioner: String,
-    /// Job type.
-    pub job_type: String,
-    /// Job input JSON.
-    pub input: Value,
-    /// Tags.
-    pub tags: Value,
 }
 
 /// Input for upserting a port share.
@@ -1670,6 +1581,140 @@ pub trait OperationalStore: Send + Sync {
     }
 }
 
+/// Narrow storage contract for template and template-version domain logic.
+#[async_trait]
+pub trait TemplateStore: Send + Sync {
+    /// Lists templates matching the supplied filter.
+    async fn list_templates(
+        &self,
+        filter: TemplateListFilter,
+    ) -> Result<Vec<TemplateRecord>, StorageError>;
+
+    /// Finds a template by identifier.
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError>;
+
+    /// Finds a template by organization and name.
+    async fn find_template_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateRecord>, StorageError>;
+
+    /// Creates a new template.
+    async fn insert_template(
+        &self,
+        input: CreateTemplateInput,
+    ) -> Result<TemplateRecord, CreateTemplateStoreError>;
+
+    /// Updates a template's metadata.
+    async fn update_template_meta(
+        &self,
+        input: UpdateTemplateMetaInput,
+    ) -> Result<Option<TemplateRecord>, StorageError>;
+
+    /// Soft-deletes a template.
+    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Updates the active version on a template.
+    async fn update_template_active_version(
+        &self,
+        template_id: Uuid,
+        active_version_id: Uuid,
+    ) -> Result<bool, StorageError>;
+
+    /// Returns DAU rows for a template.
+    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError>;
+
+    /// Lists template versions matching the supplied filter.
+    async fn list_template_versions(
+        &self,
+        filter: TemplateVersionListFilter,
+    ) -> Result<Vec<TemplateVersionRecord>, StorageError>;
+
+    /// Finds a template version by identifier.
+    async fn find_template_version_by_id(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
+    /// Finds a template version by template ID and name.
+    async fn find_template_version_by_template_and_name(
+        &self,
+        template_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
+    /// Finds a template version by organization and name.
+    async fn find_template_version_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
+    /// Creates a new template version.
+    async fn insert_template_version(
+        &self,
+        input: CreateTemplateVersionInput,
+    ) -> Result<TemplateVersionRecord, StorageError>;
+
+    /// Updates a template version's name and message.
+    async fn update_template_version(
+        &self,
+        version_id: Uuid,
+        name: &str,
+        message: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
+    /// Archives a template version.
+    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Unarchives a template version.
+    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Lists parameters for a template version.
+    async fn list_template_version_parameters(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError>;
+
+    /// Lists variables for a template version.
+    async fn list_template_version_variables(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError>;
+
+    /// Lists presets for a template version.
+    async fn list_template_version_presets(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError>;
+
+    /// Lists preset parameters for a specific preset.
+    async fn list_template_version_preset_parameters(
+        &self,
+        preset_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError>;
+
+    /// Creates a provisioner job.
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError>;
+
+    /// Finds a provisioner job by identifier.
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError>;
+
+    /// Cancels a provisioner job.
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
+}
+
 /// Aggregate store contract used by the current Rust backend slice.
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
@@ -2229,24 +2274,6 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
-    /// Looks up a template by stable identifier.
-    async fn find_template_by_id(
-        &self,
-        template_id: Uuid,
-    ) -> Result<Option<TemplateRecord>, StorageError> {
-        let _ = template_id;
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
-
-    /// Looks up a template version by stable identifier.
-    async fn find_template_version_by_id(
-        &self,
-        template_version_id: Uuid,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        let _ = template_version_id;
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
-
     /// Lists workspace builds for a workspace.
     async fn list_workspace_builds(
         &self,
@@ -2361,40 +2388,6 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         ))
     }
 
-    /// Looks up a provisioner job by stable identifier.
-    async fn find_provisioner_job_by_id(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-        let _ = job_id;
-        Err(StorageError::unavailable(
-            "provisioner jobs are not implemented",
-        ))
-    }
-
-    /// Creates a new provisioner job.
-    async fn insert_provisioner_job(
-        &self,
-        input: CreateProvisionerJobInput,
-    ) -> Result<ProvisionerJobRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "provisioner jobs are not implemented",
-        ))
-    }
-
-    /// Cancels a provisioner job.
-    async fn cancel_provisioner_job(
-        &self,
-        job_id: Uuid,
-        now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        let _ = (job_id, now);
-        Err(StorageError::unavailable(
-            "provisioner jobs are not implemented",
-        ))
-    }
-
     /// Lists provisioner job logs.
     async fn list_provisioner_job_logs(
         &self,
@@ -2467,6 +2460,239 @@ pub trait AppStore: DeploymentStore + Send + Sync {
     ) -> Result<bool, StorageError> {
         let _ = (workspace_id, agent_name, port);
         Err(StorageError::unavailable("port shares are not implemented"))
+    }
+
+    // ----- Template Store Methods -----
+
+    /// Lists templates matching the supplied filter.
+    async fn list_templates(
+        &self,
+        filter: TemplateListFilter,
+    ) -> Result<Vec<TemplateRecord>, StorageError> {
+        let _ = filter;
+        Err(StorageError::unavailable("templates are not implemented"))
+    }
+
+    /// Finds a template by identifier.
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        let _ = template_id;
+        Err(StorageError::unavailable("templates are not implemented"))
+    }
+
+    /// Finds a template by organization and name.
+    async fn find_template_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        let _ = (organization_id, name);
+        Err(StorageError::unavailable("templates are not implemented"))
+    }
+
+    /// Creates a new template.
+    async fn insert_template(
+        &self,
+        input: CreateTemplateInput,
+    ) -> Result<TemplateRecord, CreateTemplateStoreError> {
+        let _ = input;
+        Err(CreateTemplateStoreError::Storage(
+            StorageError::unavailable("templates are not implemented"),
+        ))
+    }
+
+    /// Updates a template's metadata.
+    async fn update_template_meta(
+        &self,
+        input: UpdateTemplateMetaInput,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("templates are not implemented"))
+    }
+
+    /// Soft-deletes a template.
+    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError> {
+        let _ = template_id;
+        Err(StorageError::unavailable("templates are not implemented"))
+    }
+
+    /// Updates the active version on a template.
+    async fn update_template_active_version(
+        &self,
+        template_id: Uuid,
+        active_version_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = (template_id, active_version_id);
+        Err(StorageError::unavailable("templates are not implemented"))
+    }
+
+    /// Returns DAU rows for a template.
+    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError> {
+        let _ = template_id;
+        Err(StorageError::unavailable("templates are not implemented"))
+    }
+
+    /// Lists template versions matching the supplied filter.
+    async fn list_template_versions(
+        &self,
+        filter: TemplateVersionListFilter,
+    ) -> Result<Vec<TemplateVersionRecord>, StorageError> {
+        let _ = filter;
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Finds a template version by identifier.
+    async fn find_template_version_by_id(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let _ = version_id;
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Finds a template version by template ID and name.
+    async fn find_template_version_by_template_and_name(
+        &self,
+        template_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let _ = (template_id, name);
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Finds a template version by organization and name.
+    async fn find_template_version_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let _ = (organization_id, template_name, version_name);
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Creates a new template version.
+    async fn insert_template_version(
+        &self,
+        input: CreateTemplateVersionInput,
+    ) -> Result<TemplateVersionRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Updates a template version's name and message.
+    async fn update_template_version(
+        &self,
+        version_id: Uuid,
+        name: &str,
+        message: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let _ = (version_id, name, message);
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Archives a template version.
+    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        let _ = version_id;
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Unarchives a template version.
+    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        let _ = version_id;
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Lists parameters for a template version.
+    async fn list_template_version_parameters(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
+        let _ = version_id;
+        Err(StorageError::unavailable(
+            "template version parameters are not implemented",
+        ))
+    }
+
+    /// Lists variables for a template version.
+    async fn list_template_version_variables(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError> {
+        let _ = version_id;
+        Err(StorageError::unavailable(
+            "template version variables are not implemented",
+        ))
+    }
+
+    /// Lists presets for a template version.
+    async fn list_template_version_presets(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError> {
+        let _ = version_id;
+        Err(StorageError::unavailable(
+            "template version presets are not implemented",
+        ))
+    }
+
+    /// Lists preset parameters for a specific preset.
+    async fn list_template_version_preset_parameters(
+        &self,
+        preset_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError> {
+        let _ = preset_id;
+        Err(StorageError::unavailable(
+            "template version preset parameters are not implemented",
+        ))
+    }
+
+    /// Creates a provisioner job.
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "provisioner jobs are not implemented",
+        ))
+    }
+
+    /// Finds a provisioner job by identifier.
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        let _ = job_id;
+        Err(StorageError::unavailable(
+            "provisioner jobs are not implemented",
+        ))
+    }
+
+    /// Cancels a provisioner job.
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        let _ = job_id;
+        Err(StorageError::unavailable(
+            "provisioner jobs are not implemented",
+        ))
     }
 
     // ----- User identity supplements (forwarded from IdentityStore) -----
@@ -3082,11 +3308,7 @@ pub trait WorkspaceStore: Send + Sync {
     ) -> Result<ProvisionerJobRecord, StorageError>;
 
     /// Cancels a provisioner job.
-    async fn cancel_provisioner_job(
-        &self,
-        job_id: Uuid,
-        now: OffsetDateTime,
-    ) -> Result<bool, StorageError>;
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists provisioner job logs.
     async fn list_provisioner_job_logs(
@@ -4229,12 +4451,8 @@ where
         AppStore::insert_provisioner_job(self, input).await
     }
 
-    async fn cancel_provisioner_job(
-        &self,
-        job_id: Uuid,
-        now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        AppStore::cancel_provisioner_job(self, job_id, now).await
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::cancel_provisioner_job(self, job_id).await
     }
 
     async fn list_provisioner_job_logs(
@@ -4519,12 +4737,8 @@ where
         (**self).insert_provisioner_job(input).await
     }
 
-    async fn cancel_provisioner_job(
-        &self,
-        job_id: Uuid,
-        now: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        (**self).cancel_provisioner_job(job_id, now).await
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        (**self).cancel_provisioner_job(job_id).await
     }
 
     async fn list_provisioner_job_logs(
@@ -4583,5 +4797,341 @@ where
         (**self)
             .delete_workspace_port_share(workspace_id, agent_name, port)
             .await
+    }
+}
+
+#[async_trait]
+impl<T> TemplateStore for T
+where
+    T: AppStore + ?Sized,
+{
+    async fn list_templates(
+        &self,
+        filter: TemplateListFilter,
+    ) -> Result<Vec<TemplateRecord>, StorageError> {
+        AppStore::list_templates(self, filter).await
+    }
+
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        AppStore::find_template_by_id(self, template_id).await
+    }
+
+    async fn find_template_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        AppStore::find_template_by_org_and_name(self, organization_id, name).await
+    }
+
+    async fn insert_template(
+        &self,
+        input: CreateTemplateInput,
+    ) -> Result<TemplateRecord, CreateTemplateStoreError> {
+        AppStore::insert_template(self, input).await
+    }
+
+    async fn update_template_meta(
+        &self,
+        input: UpdateTemplateMetaInput,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        AppStore::update_template_meta(self, input).await
+    }
+
+    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::soft_delete_template(self, template_id).await
+    }
+
+    async fn update_template_active_version(
+        &self,
+        template_id: Uuid,
+        active_version_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_template_active_version(self, template_id, active_version_id).await
+    }
+
+    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError> {
+        AppStore::template_daus(self, template_id).await
+    }
+
+    async fn list_template_versions(
+        &self,
+        filter: TemplateVersionListFilter,
+    ) -> Result<Vec<TemplateVersionRecord>, StorageError> {
+        AppStore::list_template_versions(self, filter).await
+    }
+
+    async fn find_template_version_by_id(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        AppStore::find_template_version_by_id(self, version_id).await
+    }
+
+    async fn find_template_version_by_template_and_name(
+        &self,
+        template_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        AppStore::find_template_version_by_template_and_name(self, template_id, name).await
+    }
+
+    async fn find_template_version_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        AppStore::find_template_version_by_org_and_name(
+            self,
+            organization_id,
+            template_name,
+            version_name,
+        )
+        .await
+    }
+
+    async fn insert_template_version(
+        &self,
+        input: CreateTemplateVersionInput,
+    ) -> Result<TemplateVersionRecord, StorageError> {
+        AppStore::insert_template_version(self, input).await
+    }
+
+    async fn update_template_version(
+        &self,
+        version_id: Uuid,
+        name: &str,
+        message: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        AppStore::update_template_version(self, version_id, name, message).await
+    }
+
+    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::archive_template_version(self, version_id).await
+    }
+
+    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::unarchive_template_version(self, version_id).await
+    }
+
+    async fn list_template_version_parameters(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
+        AppStore::list_template_version_parameters(self, version_id).await
+    }
+
+    async fn list_template_version_variables(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError> {
+        AppStore::list_template_version_variables(self, version_id).await
+    }
+
+    async fn list_template_version_presets(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError> {
+        AppStore::list_template_version_presets(self, version_id).await
+    }
+
+    async fn list_template_version_preset_parameters(
+        &self,
+        preset_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError> {
+        AppStore::list_template_version_preset_parameters(self, preset_id).await
+    }
+
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError> {
+        AppStore::insert_provisioner_job(self, input).await
+    }
+
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        AppStore::find_provisioner_job_by_id(self, job_id).await
+    }
+
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::cancel_provisioner_job(self, job_id).await
+    }
+}
+
+#[async_trait]
+impl<T> TemplateStore for Arc<T>
+where
+    T: TemplateStore + ?Sized,
+{
+    async fn list_templates(
+        &self,
+        filter: TemplateListFilter,
+    ) -> Result<Vec<TemplateRecord>, StorageError> {
+        (**self).list_templates(filter).await
+    }
+
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        (**self).find_template_by_id(template_id).await
+    }
+
+    async fn find_template_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        (**self)
+            .find_template_by_org_and_name(organization_id, name)
+            .await
+    }
+
+    async fn insert_template(
+        &self,
+        input: CreateTemplateInput,
+    ) -> Result<TemplateRecord, CreateTemplateStoreError> {
+        (**self).insert_template(input).await
+    }
+
+    async fn update_template_meta(
+        &self,
+        input: UpdateTemplateMetaInput,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        (**self).update_template_meta(input).await
+    }
+
+    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError> {
+        (**self).soft_delete_template(template_id).await
+    }
+
+    async fn update_template_active_version(
+        &self,
+        template_id: Uuid,
+        active_version_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_template_active_version(template_id, active_version_id)
+            .await
+    }
+
+    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError> {
+        (**self).template_daus(template_id).await
+    }
+
+    async fn list_template_versions(
+        &self,
+        filter: TemplateVersionListFilter,
+    ) -> Result<Vec<TemplateVersionRecord>, StorageError> {
+        (**self).list_template_versions(filter).await
+    }
+
+    async fn find_template_version_by_id(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        (**self).find_template_version_by_id(version_id).await
+    }
+
+    async fn find_template_version_by_template_and_name(
+        &self,
+        template_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        (**self)
+            .find_template_version_by_template_and_name(template_id, name)
+            .await
+    }
+
+    async fn find_template_version_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        (**self)
+            .find_template_version_by_org_and_name(organization_id, template_name, version_name)
+            .await
+    }
+
+    async fn insert_template_version(
+        &self,
+        input: CreateTemplateVersionInput,
+    ) -> Result<TemplateVersionRecord, StorageError> {
+        (**self).insert_template_version(input).await
+    }
+
+    async fn update_template_version(
+        &self,
+        version_id: Uuid,
+        name: &str,
+        message: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        (**self)
+            .update_template_version(version_id, name, message)
+            .await
+    }
+
+    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        (**self).archive_template_version(version_id).await
+    }
+
+    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        (**self).unarchive_template_version(version_id).await
+    }
+
+    async fn list_template_version_parameters(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
+        (**self).list_template_version_parameters(version_id).await
+    }
+
+    async fn list_template_version_variables(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError> {
+        (**self).list_template_version_variables(version_id).await
+    }
+
+    async fn list_template_version_presets(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError> {
+        (**self).list_template_version_presets(version_id).await
+    }
+
+    async fn list_template_version_preset_parameters(
+        &self,
+        preset_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError> {
+        (**self)
+            .list_template_version_preset_parameters(preset_id)
+            .await
+    }
+
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError> {
+        (**self).insert_provisioner_job(input).await
+    }
+
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        (**self).find_provisioner_job_by_id(job_id).await
+    }
+
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        (**self).cancel_provisioner_job(job_id).await
     }
 }

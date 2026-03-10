@@ -10,6 +10,7 @@ pub mod identity;
 pub mod password;
 pub mod ports;
 pub mod pubsub;
+pub mod template;
 
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,
@@ -18,27 +19,28 @@ pub use api::{
     AuthorizationObject, AuthorizationRequest, AuthorizationResponse, AvailableExperiments,
     BaseHealthReport, BuildInfoResponse, ChangePasswordWithOneTimePasscodeRequest, ConfigOption,
     ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
-    CreateOrganizationRequest, CreateTestAuditLogRequest, CreateTokenRequest,
-    CreateUserRequestWithOrgs, DatabaseHealthReport, DeleteExternalAuthByIdResponse,
-    DeploymentConfigResponse, DeploymentStatsResponse, DerpHealthReport, ExternalApiKeyScopes,
-    ExternalAuthAppInstallation, ExternalAuthDevice, ExternalAuthDeviceExchangeRequest,
-    ExternalAuthLink, ExternalAuthLinkProvider, ExternalAuthResponse, ExternalAuthUser,
-    GenerateApiKeyResponse, GetUsersResponse, GitSshKeyResponse, GithubAuthMethod, HealthSettings,
-    HealthSeverity, HealthcheckReport, ListUserExternalAuthResponse, LoginWithPasswordRequest,
-    LoginWithPasswordResponse, MinimalOrganization, MinimalUser, OAuth2AuthorizeRequest,
-    OAuth2ProviderAppEndpoints, OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
+    CreateOrganizationRequest, CreateTemplateRequest, CreateTestAuditLogRequest,
+    CreateTokenRequest, CreateUserRequestWithOrgs, DatabaseHealthReport,
+    DeleteExternalAuthByIdResponse, DeploymentConfigResponse, DeploymentStatsResponse,
+    DerpHealthReport, ExternalApiKeyScopes, ExternalAuthAppInstallation, ExternalAuthDevice,
+    ExternalAuthDeviceExchangeRequest, ExternalAuthLink, ExternalAuthLinkProvider,
+    ExternalAuthResponse, ExternalAuthUser, GenerateApiKeyResponse, GetUsersResponse,
+    GitSshKeyResponse, GithubAuthMethod, HealthSettings, HealthSeverity, HealthcheckReport,
+    ListUserExternalAuthResponse, LoginWithPasswordRequest, LoginWithPasswordResponse,
+    MinimalOrganization, MinimalUser, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
+    OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
     OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse,
     OAuthConversionResponse, OidcAuthMethod, OrganizationMember, OrganizationMemberWithUserData,
     OrganizationResponse, PaginatedMembersResponse, PermissionResponse,
     PostOAuth2ProviderAppRequest, ProvisionerDaemonsHealthReport, PutOAuth2ProviderAppRequest,
     ReducedUser, RequestOneTimePasscodeRequest, RoleResponse, SessionCountDeploymentStatsResponse,
     SlimRole, SshConfigResponse, TokenConfig, UpdateCheckResponse, UpdateOrganizationRequest,
-    UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UploadFileResponse,
-    UserAppearanceSettings, UserLoginType, UserParameter, UserPreferenceSettings, UserResponse,
-    UserRolesResponse, ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
-    WebsocketHealthReport, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceProxyHealthReport,
+    UpdateRolesRequest, UpdateTemplateMeta, UpdateUserAppearanceSettingsRequest,
+    UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
+    UploadFileResponse, UserAppearanceSettings, UserLoginType, UserParameter,
+    UserPreferenceSettings, UserResponse, UserRolesResponse, ValidateUserPasswordRequest,
+    ValidateUserPasswordResponse, ValidationError, WebsocketHealthReport,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthReport,
 };
 pub use build_info::BuildMetadata;
 pub use config::{
@@ -62,15 +64,21 @@ pub use password::{
     validate_email, validate_password, validate_real_name, validate_username, verify_password,
 };
 pub use ports::{
-    AppStore, AuditLogListFilter, AuthStore, CreateProvisionerJobInput, CreateWorkspaceBuildInput,
-    CreateWorkspaceInput, DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord,
-    GitSshKeyRecord, IdentityStore, InsertFileInput, InsertFileResult, OperationalStore,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatsInput,
-    ProvisionerJobTimingRecord, StorageError, TemplateRecord, TemplateVersionRecord,
+    AppStore, AuditLogListFilter, AuthStore, CreateWorkspaceBuildInput, CreateWorkspaceInput,
+    DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord,
+    IdentityStore, InsertFileInput, InsertFileResult, OperationalStore, PersistAuditLogInput,
+    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord,
+    ProvisionerJobStatsInput, ProvisionerJobTimingRecord, StorageError, TemplateStore,
     UpsertExternalAuthLinkInput, UpsertPortShareInput, WorkspaceAgentPortShareRecord,
     WorkspaceAgentStatInput, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
     WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
     WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
     WorkspaceStatsWorkspaceInput, WorkspaceStore,
+};
+pub use template::{
+    CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
+    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
+    TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
+    TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
+    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
 };
