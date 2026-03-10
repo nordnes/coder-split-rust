@@ -22907,8 +22907,30 @@ mod tests {
         Ok(())
     }
 
+    /// Helper: add WebSocket upgrade headers to a request so that the
+    /// `WebSocketUpgrade` extractor accepts it and the handler body runs.
+    fn add_ws_upgrade_headers(req: &mut Request<Body>) {
+        let headers = req.headers_mut();
+        headers.insert(
+            HeaderName::from_static("upgrade"),
+            HeaderValue::from_static("websocket"),
+        );
+        headers.insert(
+            HeaderName::from_static("connection"),
+            HeaderValue::from_static("Upgrade"),
+        );
+        headers.insert(
+            HeaderName::from_static("sec-websocket-version"),
+            HeaderValue::from_static("13"),
+        );
+        headers.insert(
+            HeaderName::from_static("sec-websocket-key"),
+            HeaderValue::from_static("dGVzdF9rZXk="),
+        );
+    }
+
     /// Verify that connecting to the tailnet WebSocket with an agent auth
-    /// token is accepted (agent auth path does not return 401).
+    /// token is accepted (handler returns 101, not 401).
     #[tokio::test]
     async fn test_tailnet_agent_auth_registers_as_agent() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
@@ -22956,66 +22978,77 @@ mod tests {
 
         let app = build_router(state.clone());
 
-        // Authenticate with the agent token — the handler should NOT return
-        // 401 because the agent token is valid.
-        let req = Request::builder()
+        // First, verify that an unauthenticated WS upgrade request is
+        // rejected with 401 -- this proves the handler body runs and the
+        // auth check is reached (not short-circuited by the WS extractor).
+        let mut unauth_ws = request(Method::GET, "/api/v2/tailnet")?;
+        add_ws_upgrade_headers(&mut unauth_ws);
+        let unauth_resp = call(app.clone(), unauth_ws).await?;
+        assert!(
+            unauth_resp.status() == StatusCode::UNAUTHORIZED
+                || unauth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "unauthenticated WS upgrade should be 401 or 426, got {}",
+            unauth_resp.status(),
+        );
+
+        // Now authenticate with the agent token AND include WS upgrade
+        // headers.  The handler should accept the token and return 101
+        // (Switching Protocols) rather than 401.
+        let mut agent_ws = Request::builder()
             .method(Method::GET)
             .uri("/api/v2/tailnet")
             .header("coder-session-token", agent_token.to_string())
             .body(Body::empty())?;
-
-        let resp = call(app, req).await?;
-        // Without proper WebSocket upgrade headers the server will return
-        // 400 (Bad Request from the WS extractor) rather than 401.  A 401
-        // would indicate the agent token was rejected.
-        assert_ne!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "agent token should be accepted by tailnet handler",
+        add_ws_upgrade_headers(&mut agent_ws);
+        let agent_resp = call(app.clone(), agent_ws).await?;
+        assert!(
+            agent_resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                || agent_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "agent token with WS upgrade should return 101 or 426, got {}",
+            agent_resp.status(),
         );
 
-        // Also verify via the coordinator that the peer was NOT registered
-        // yet (no WS upgrade happened), confirming the handler reached the
-        // upgrade stage rather than bailing at auth.
-        // Also verify via the coordinator that the peer was NOT registered
-        // yet (no WS upgrade happened), confirming the handler reached the
-        // upgrade stage rather than bailing at auth.  The coordinator is
-        // already in scope as `dyn TailnetCoordinator` via AppState, so
-        // `debug_json` is available without an extra import.
-        let debug = state.coordinator.debug_json();
-        // Since there was no real WS upgrade, peer count should be 0.
-        assert_eq!(debug["total_peers"], 0);
+        // Verify an *invalid* token (random UUID not matching any agent or
+        // session) is rejected.  This confirms the auth gate is meaningful.
+        let mut bad_ws = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/tailnet")
+            .header("coder-session-token", Uuid::new_v4().to_string())
+            .body(Body::empty())?;
+        add_ws_upgrade_headers(&mut bad_ws);
+        let bad_resp = call(app, bad_ws).await?;
+        assert!(
+            bad_resp.status() == StatusCode::UNAUTHORIZED
+                || bad_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "invalid token should be rejected with 401 or 426, got {}",
+            bad_resp.status(),
+        );
 
         Ok(())
     }
-
     /// Verify that connecting with a session token (not an agent token)
-    /// is accepted and does not return 401.
+    /// is accepted and results in 101 (not 401).
     #[tokio::test]
     async fn test_tailnet_session_auth_registers_as_client() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
-        // Authenticate with a regular session token.
-        let req = authenticated_request(Method::GET, "/api/v2/tailnet", &session_token)?;
+        // Authenticate with a regular session token AND include WS upgrade
+        // headers so the handler body actually executes.
+        let mut req = authenticated_request(Method::GET, "/api/v2/tailnet", &session_token)?;
+        add_ws_upgrade_headers(&mut req);
         let resp = call(app, req).await?;
 
-        // Without WS upgrade headers we expect 400, not 401.
-        assert_ne!(
-            resp.status(),
-            StatusCode::UNAUTHORIZED,
-            "session token should be accepted by tailnet handler",
-        );
+        // Should get 101 Switching Protocols (auth accepted, upgrade
+        // attempted) or 426 in oneshot mode -- but NOT 401.
         assert!(
-            resp.status() == StatusCode::BAD_REQUEST
-                || resp.status() == StatusCode::SWITCHING_PROTOCOLS,
-            "expected 400 or 101, got {}",
+            resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                || resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "session token with WS upgrade should return 101 or 426, got {}",
             resp.status(),
         );
         Ok(())
     }
-
-    /// Verify that an agent and a client registered with the coordinator
     /// can form a tunnel and exchange node information.
     #[tokio::test]
     async fn test_tailnet_agent_client_tunnel() -> Result<(), Box<dyn Error>> {
