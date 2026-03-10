@@ -29011,11 +29011,22 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert!(body.get("roles").and_then(Value::as_array).is_some());
+        let roles = body
+            .get("roles")
+            .and_then(Value::as_array)
+            .ok_or("missing roles")?;
+        let role_names: Vec<&str> = roles.iter().filter_map(Value::as_str).collect();
         assert!(
-            body.get("organization_roles")
-                .and_then(Value::as_object)
-                .is_some()
+            role_names.contains(&"owner"),
+            "expected 'owner' role, got: {role_names:?}"
+        );
+        let org_roles = body
+            .get("organization_roles")
+            .and_then(Value::as_object)
+            .ok_or("missing organization_roles")?;
+        assert!(
+            !org_roles.is_empty(),
+            "expected at least one organization role entry"
         );
         Ok(())
     }
@@ -29111,13 +29122,17 @@ mod tests {
         Ok(())
     }
 
+    // =========================================================================
+    // Error-path integration tests
+    // =========================================================================
+
     #[tokio::test]
-    async fn post_convert_login_returns_response() -> Result<(), Box<dyn Error>> {
+    async fn post_convert_login_returns_bad_request_without_oauth() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
-        // Attempting to convert to Github login should return BAD_REQUEST since
-        // the provider is not enabled, but it exercises the full handler pipeline.
+        // Attempting to convert to GitHub login should return BAD_REQUEST since
+        // the provider is not enabled.
         let response = call(
             app,
             authenticated_json_request(
@@ -29429,7 +29444,12 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert!(body.get("max_token_lifetime").is_some());
+        assert!(
+            body.get("max_token_lifetime")
+                .and_then(Value::as_u64)
+                .is_some(),
+            "expected max_token_lifetime to be a positive integer"
+        );
         Ok(())
     }
 
@@ -29452,7 +29472,10 @@ mod tests {
         let orgs = body.as_array().ok_or("expected array")?;
         assert_eq!(orgs.len(), 1);
         assert!(orgs[0].get("id").and_then(Value::as_str).is_some());
-        assert!(orgs[0].get("name").and_then(Value::as_str).is_some());
+        assert_eq!(
+            orgs[0].get("name").and_then(Value::as_str),
+            Some("first-organization")
+        );
         Ok(())
     }
 
@@ -29473,6 +29496,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert!(body.get("id").and_then(Value::as_str).is_some());
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("first-organization")
+        );
         assert_eq!(body.get("is_default").and_then(Value::as_bool), Some(true));
         Ok(())
     }
@@ -29494,9 +29521,10 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
+        let org_id_str = organization_id.to_string();
         assert_eq!(
             body.get("id").and_then(Value::as_str),
-            Some(organization_id.to_string().as_str())
+            Some(org_id_str.as_str())
         );
         Ok(())
     }
@@ -29519,8 +29547,10 @@ mod tests {
         let body = response_json(response).await?;
         let members = body.as_array().ok_or("expected array")?;
         assert_eq!(members.len(), 1);
-        assert!(
-            members[0].get("user_id").and_then(Value::as_str).is_some()
+        assert!(members[0].get("user_id").and_then(Value::as_str).is_some());
+        assert_eq!(
+            members[0].get("username").and_then(Value::as_str),
+            Some("owner")
         );
         Ok(())
     }
@@ -29553,6 +29583,7 @@ mod tests {
     async fn get_organization_member_returns_member() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
 
         let response = call(
             app,
@@ -29566,11 +29597,12 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert!(body.get("user_id").and_then(Value::as_str).is_some());
-        assert!(body.get("organization_id").and_then(Value::as_str).is_some());
+        let org_id_str = organization_id.to_string();
         assert_eq!(
-            body.get("username").and_then(Value::as_str),
-            Some("owner")
+            body.get("organization_id").and_then(Value::as_str),
+            Some(org_id_str.as_str())
         );
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
         Ok(())
     }
 
@@ -29580,7 +29612,7 @@ mod tests {
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
-        // Create a user NOT in the org initially
+        // Create a second user (added to the org during creation)
         let create_response = call(
             app.clone(),
             authenticated_json_request(
@@ -29768,6 +29800,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert!(body.get("id").and_then(Value::as_str).is_some());
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("first-organization")
+        );
         assert_eq!(body.get("is_default").and_then(Value::as_bool), Some(true));
         Ok(())
     }
@@ -29832,13 +29868,26 @@ mod tests {
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
 
-        // Insert a valid link into the store
+        // Extract the actual user ID from the authenticated session
+        let me_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        let me_body = response_json(me_response).await?;
+        let user_id: Uuid = me_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing user id")?
+            .parse()?;
+
+        // Insert a valid link into the store using the actual user ID
         store
             .external_auth_links
             .lock()
             .map_err(|error| error.to_string())?
             .insert(
-                (Uuid::from_u128(1), "github".to_owned()),
+                (user_id, "github".to_owned()),
                 ExternalAuthLinkRecord {
                     provider_id: "github".to_owned(),
                     created_at: OffsetDateTime::now_utc(),
@@ -29902,13 +29951,26 @@ mod tests {
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
 
-        // Insert a link
+        // Extract the actual user ID from the authenticated session
+        let me_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        let me_body = response_json(me_response).await?;
+        let user_id: Uuid = me_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing user id")?
+            .parse()?;
+
+        // Insert a link using the actual user ID
         store
             .external_auth_links
             .lock()
             .map_err(|error| error.to_string())?
             .insert(
-                (Uuid::from_u128(1), "github".to_owned()),
+                (user_id, "github".to_owned()),
                 ExternalAuthLinkRecord {
                     provider_id: "github".to_owned(),
                     created_at: OffsetDateTime::now_utc(),
@@ -29949,7 +30011,7 @@ mod tests {
                 .external_auth_links
                 .lock()
                 .map_err(|error| error.to_string())?
-                .get(&(Uuid::from_u128(1), "github".to_owned()))
+                .get(&(user_id, "github".to_owned()))
                 .is_none()
         );
         Ok(())
