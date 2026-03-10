@@ -5422,7 +5422,13 @@ async fn post_template_version_dynamic_parameters_evaluate(
 
     let req = match body {
         Ok(Json(r)) => r,
-        Err(_) => DynamicParametersRequest::default(),
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid request body.", e.to_string())),
+            )
+                .into_response());
+        }
     };
 
     // Dynamic parameters are evaluated via the provisioner. Return stub response.
@@ -5504,7 +5510,13 @@ async fn post_archive_template_versions(
 
     let req = match body {
         Ok(Json(r)) => r,
-        Err(_) => ArchiveTemplateVersionsRequest::default(),
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid request body.", e.to_string())),
+            )
+                .into_response());
+        }
     };
 
     let archived_ids = state
