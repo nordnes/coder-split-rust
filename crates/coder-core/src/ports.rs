@@ -4992,6 +4992,21 @@ where
     ) -> Result<bool, StorageError> {
         AppStore::delete_group_member(self, group_id, user_id).await
     }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        AppStore::delete_user_config(self, user_id, key).await
+    }
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        AppStore::list_user_links(self, user_id).await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        AppStore::list_user_status_changes(self, user_id).await
+    }
 }
 
 #[async_trait]
@@ -5198,6 +5213,21 @@ where
         user_id: Uuid,
     ) -> Result<bool, StorageError> {
         (**self).delete_group_member(group_id, user_id).await
+    }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        (**self).delete_user_config(user_id, key).await
+    }
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        (**self).list_user_links(user_id).await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        (**self).list_user_status_changes(user_id).await
     }
 }
 
