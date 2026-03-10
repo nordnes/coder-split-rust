@@ -2339,6 +2339,22 @@ pub struct TaskLogSnapshotEnvelope {
     pub log_snapshot: Value,
 }
 
+/// PauseTaskResponse represents the response from pausing a task.
+#[derive(Clone, Debug, Serialize)]
+pub struct PauseTaskResponse {
+    /// Placeholder for the workspace build that was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_build: Option<Value>,
+}
+
+/// ResumeTaskResponse represents the response from resuming a task.
+#[derive(Clone, Debug, Serialize)]
+pub struct ResumeTaskResponse {
+    /// Placeholder for the workspace build that was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_build: Option<Value>,
+}
+
 // ---------------------------------------------------------------------------
 // Chats
 // ---------------------------------------------------------------------------
@@ -2578,6 +2594,12 @@ pub struct CreateChatMessageApiResponse {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queued_message: Option<ChatQueuedMessageResponse>,
     pub queued: bool,
+}
+
+/// UploadChatFileResponse is the response from uploading a chat file.
+#[derive(Clone, Debug, Serialize)]
+pub struct UploadChatFileResponse {
+    pub id: Uuid,
 }
 
 // ---------------------------------------------------------------------------
