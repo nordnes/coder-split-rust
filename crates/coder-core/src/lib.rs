@@ -66,13 +66,16 @@ pub use password::{
     validate_email, validate_password, validate_real_name, validate_username, verify_password,
 };
 pub use ports::{
-    AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
-    ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertFileInput,
-    InsertFileResult, InsightsStore, OperationalStore, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    StorageError, TemplateStore, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput,
-    WorkspaceBuildStatsInput, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
-    WorkspaceStatsWorkspaceInput,
+    AppStore, AuditLogListFilter, AuthStore, CreateWorkspaceBuildInput, CreateWorkspaceInput,
+    DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord,
+    IdentityStore, InsertFileInput, InsertFileResult, InsightsStore, OperationalStore,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerJobLogRecord, ProvisionerJobStatsInput, ProvisionerJobTimingRecord, StorageError,
+    TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentStatInput, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
+    WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
