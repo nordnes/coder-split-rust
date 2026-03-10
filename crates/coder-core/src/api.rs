@@ -2194,3 +2194,45 @@ pub struct WorkspaceAgentExternalAuthResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub password: Option<String>,
 }
+
+// ---------------------------------------------------------------------------
+// Authorization check (POST /api/v2/authcheck)
+// ---------------------------------------------------------------------------
+
+/// Bulk authorization request body.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuthorizationRequest {
+    /// Map of caller-chosen keys to individual permission checks.
+    pub checks: HashMap<String, AuthorizationCheck>,
+}
+
+/// A single permission check within an authorization request.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuthorizationCheck {
+    /// The object (or set of objects) to check against.
+    pub object: AuthorizationObject,
+    /// The RBAC action to test.
+    pub action: String,
+}
+
+/// Describes the target object (or set of objects) for a permission check.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AuthorizationObject {
+    /// The RBAC resource type name.
+    pub resource_type: String,
+    /// Optional owner user ID (use `"me"` for the authenticated user).
+    #[serde(default)]
+    pub owner_id: String,
+    /// Optional organization ID.
+    #[serde(default)]
+    pub organization_id: String,
+    /// Optional specific resource ID (UUID).
+    #[serde(default)]
+    pub resource_id: String,
+    /// If true, disregard the organization owner constraint.
+    #[serde(default)]
+    pub any_org: bool,
+}
+
+/// Bulk authorization response: maps each request key to a boolean result.
+pub type AuthorizationResponse = HashMap<String, bool>;

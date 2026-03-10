@@ -13,5 +13,6 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 coder-rbac = { path = "../coder-rbac" }
+sqlx.workspace = true
 tracing.workspace = true
 uuid.workspace = true

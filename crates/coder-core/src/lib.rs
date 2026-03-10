@@ -5,15 +5,18 @@
 pub mod api;
 pub mod build_info;
 pub mod config;
+pub mod enums;
 pub mod identity;
 pub mod password;
 pub mod ports;
+pub mod pubsub;
 
 pub use api::{
     AWSInstanceIdentityToken, AccessUrlHealthReport, AgentLogEntry, AgentSubsystem,
     ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse, ApiResponse, AppSharingLevel,
     AssignableRoleResponse, AuditDiff, AuditDiffField, AuditLog, AuditLogAction, AuditLogResponse,
-    AuditResourceType, AuthMethod, AuthMethods, AvailableExperiments, AzureInstanceIdentityToken,
+    AuditResourceType, AuthMethod, AuthMethods, AuthorizationCheck, AuthorizationObject,
+    AuthorizationRequest, AuthorizationResponse, AvailableExperiments, AzureInstanceIdentityToken,
     BaseHealthReport, BuildInfoResponse, ChangePasswordWithOneTimePasscodeRequest, ConfigOption,
     ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse, CreateLogSourceRequest,
     CreateOrganizationRequest, CreateTestAuditLogRequest, CreateTokenRequest,
