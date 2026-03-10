@@ -9814,30 +9814,41 @@ async fn debug_expvar(
 
     // memstats — read RSS and VmSize from /proc/self/status on Linux.
     let memstats = read_proc_memstats();
-    vars.insert("memstats".to_string(), json!(memstats));
+    let mut memstats_map = serde_json::Map::new();
+    if let Some(rss) = memstats.rss_bytes {
+        memstats_map.insert("rss_bytes".to_string(), json!(rss));
+    }
+    if let Some(vm) = memstats.vm_size_bytes {
+        memstats_map.insert("vm_size_bytes".to_string(), json!(vm));
+    }
+    vars.insert("memstats".to_string(), Value::Object(memstats_map));
 
     Ok(Json(Value::Object(vars)).into_response())
 }
 
+/// Basic memory statistics read from `/proc/self/status`.
+struct ProcMemstats {
+    rss_bytes: Option<u64>,
+    vm_size_bytes: Option<u64>,
+}
+
 /// Read basic memory statistics from `/proc/self/status`.
-/// Returns a JSON-friendly map with `rss_bytes` and `vm_size_bytes`.
-/// On non-Linux platforms (or read failure) the map is empty.
-fn read_proc_memstats() -> serde_json::Map<String, Value> {
-    let mut m = serde_json::Map::new();
+/// On non-Linux platforms (or read failure) both fields are `None`.
+fn read_proc_memstats() -> ProcMemstats {
+    let mut stats = ProcMemstats {
+        rss_bytes: None,
+        vm_size_bytes: None,
+    };
     if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
         for line in contents.lines() {
             if let Some(val) = line.strip_prefix("VmRSS:") {
-                if let Some(kb) = parse_proc_kb(val) {
-                    m.insert("rss_bytes".to_string(), json!(kb * 1024));
-                }
+                stats.rss_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
             } else if let Some(val) = line.strip_prefix("VmSize:") {
-                if let Some(kb) = parse_proc_kb(val) {
-                    m.insert("vm_size_bytes".to_string(), json!(kb * 1024));
-                }
+                stats.vm_size_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
             }
         }
     }
-    m
+    stats
 }
 
 /// Parse a `/proc/self/status` value like `"   12345 kB"` into kilobytes.
@@ -9902,22 +9913,31 @@ async fn debug_websocket(
 }
 
 /// Run the WebSocket echo loop: read a message, send it back, repeat.
+///
+/// Each echo operation has a 10-second timeout, matching Go's
+/// `WebsocketEchoServer` which uses `context.WithTimeout(ctx, 10s)`.
 async fn websocket_echo(mut socket: WebSocket) {
-    while let Some(Ok(msg)) = socket.next().await {
-        match msg {
-            Message::Text(text) => {
-                if socket.send(Message::Text(text)).await.is_err() {
-                    return;
-                }
-            }
-            Message::Binary(data) => {
-                if socket.send(Message::Binary(data)).await.is_err() {
-                    return;
-                }
-            }
+    use std::time::Duration;
+    const ECHO_TIMEOUT: Duration = Duration::from_secs(10);
+
+    loop {
+        let msg = match tokio::time::timeout(ECHO_TIMEOUT, socket.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            // Timeout, receive error, or stream ended — close.
+            _ => return,
+        };
+        let reply = match msg {
+            Message::Text(text) => Message::Text(text),
+            Message::Binary(data) => Message::Binary(data),
             Message::Close(_) => return,
             // Ping/Pong are handled automatically by axum.
-            _ => {}
+            _ => continue,
+        };
+        let send_result = tokio::time::timeout(ECHO_TIMEOUT, socket.send(reply)).await;
+        match send_result {
+            Ok(Ok(())) => {}
+            // Timeout or send error — close.
+            _ => return,
         }
     }
 }
@@ -9947,12 +9967,12 @@ async fn debug_metrics(
     // process_resident_memory_bytes and process_virtual_memory_bytes
     // Reuse read_proc_memstats() to stay consistent with the expvar endpoint.
     let memstats = read_proc_memstats();
-    if let Some(rss) = memstats.get("rss_bytes").and_then(|v| v.as_u64()) {
+    if let Some(rss) = memstats.rss_bytes {
         out.push_str("# HELP process_resident_memory_bytes Resident memory size in bytes.\n");
         out.push_str("# TYPE process_resident_memory_bytes gauge\n");
         out.push_str(&format!("process_resident_memory_bytes {rss}\n"));
     }
-    if let Some(vm) = memstats.get("vm_size_bytes").and_then(|v| v.as_u64()) {
+    if let Some(vm) = memstats.vm_size_bytes {
         out.push_str("# HELP process_virtual_memory_bytes Virtual memory size in bytes.\n");
         out.push_str("# TYPE process_virtual_memory_bytes gauge\n");
         out.push_str(&format!("process_virtual_memory_bytes {vm}\n"));
