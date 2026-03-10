@@ -101,9 +101,9 @@ pub use ports::{
     TaskSnapshotRecord, TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput,
     WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
     WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow,
-    WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
-    WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
+    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
     WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
     WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
