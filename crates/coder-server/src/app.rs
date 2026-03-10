@@ -12411,13 +12411,20 @@ async fn post_workspace_agent_recreate_devcontainer(
         return Ok(resource_not_found_response());
     };
 
+    // Look up the workspace for org/owner-scoped RBAC.
+    let Some(workspace) = state.store.find_workspace_by_agent_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
     // RBAC: verify the actor can update workspace agent devcontainers.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::WorkspaceAgentDevcontainers),
+            &Object::new(ResourceType::WorkspaceAgentDevcontainers)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -12477,13 +12484,20 @@ async fn delete_workspace_agent_devcontainer(
         return Ok(resource_not_found_response());
     };
 
+    // Look up the workspace for org/owner-scoped RBAC.
+    let Some(workspace) = state.store.find_workspace_by_agent_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
     // RBAC: verify the actor can delete workspace agent devcontainers.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
             Action::Delete,
-            &Object::new(ResourceType::WorkspaceAgentDevcontainers),
+            &Object::new(ResourceType::WorkspaceAgentDevcontainers)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
