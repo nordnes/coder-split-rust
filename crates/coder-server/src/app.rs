@@ -18745,7 +18745,7 @@ mod tests {
     #[tokio::test]
     async fn list_all_templates_returns_created_template() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
-        let (session_token, _org_id, template) = create_test_template(&app).await?;
+        let (session_token, org_id, template) = create_test_template(&app).await?;
 
         // GET /templates should return a non-empty array containing the template.
         let list_response = call(
@@ -18760,6 +18760,63 @@ mod tests {
         assert_eq!(
             templates[0].get("name").and_then(Value::as_str),
             template.get("name").and_then(Value::as_str),
+        );
+
+        // Create a second template so we can verify multi-template listing.
+        let create_body2 = CreateTemplateRequest {
+            name: "second-template".to_owned(),
+            display_name: "Second Template".to_owned(),
+            description: "Another template".to_owned(),
+            icon: "/icon/docker.png".to_owned(),
+            template_version_id: Uuid::nil(),
+            default_ttl_ms: 3_600_000,
+            activity_bump_ms: 1_800_000,
+            allow_user_cancel_workspace_jobs: true,
+            allow_user_autostart: true,
+            allow_user_autostop: true,
+            require_active_version: false,
+            failure_ttl_ms: 0,
+            time_til_dormant_ms: 0,
+            time_til_dormant_autodelete_ms: 0,
+            disable_everyone_group_access: false,
+            max_port_share_level: "owner".to_owned(),
+        };
+        let create2 = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+                &create_body2,
+            )?,
+        )
+        .await?;
+        assert_eq!(create2.status(), StatusCode::CREATED);
+
+        // Listing all templates should now return both.
+        let list2 = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list2.status(), StatusCode::OK);
+        let list2_body = response_json(list2).await?;
+        let all_templates = list2_body.as_array().ok_or("expected array")?;
+        assert_eq!(all_templates.len(), 2);
+
+        // Filter by q (fuzzy search) — only "second" should match.
+        let search_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates?q=second", &session_token)?,
+        )
+        .await?;
+        assert_eq!(search_response.status(), StatusCode::OK);
+        let search_body = response_json(search_response).await?;
+        let search_results = search_body.as_array().ok_or("expected array")?;
+        assert_eq!(search_results.len(), 1);
+        assert_eq!(
+            search_results[0].get("name").and_then(Value::as_str),
+            Some("second-template"),
         );
 
         // Unauthenticated request returns 401.
