@@ -36,8 +36,9 @@ use coder_core::api::{
 use coder_core::pubsub::PubSub;
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
-    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateListFilter, TemplateRecord,
-    TemplateVersionListFilter, TemplateVersionRecord, UpdateTemplateMetaInput,
+    CreateTemplateVersionInput, ProvisionerJobRecord as TemplateProvisionerJobRecord,
+    TemplateListFilter, TemplateRecord, TemplateVersionListFilter, TemplateVersionRecord,
+    UpdateTemplateMetaInput,
 };
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
@@ -2791,8 +2792,8 @@ fn template_response(rec: &TemplateRecord) -> TemplateResponse {
     }
 }
 
-/// Converts a `ProvisionerJobRecord` into a `ProvisionerJobResponse`.
-fn provisioner_job_response(job: &ProvisionerJobRecord) -> ProvisionerJobResponse {
+/// Converts a `TemplateProvisionerJobRecord` into a `ProvisionerJobResponse`.
+fn provisioner_job_response(job: &TemplateProvisionerJobRecord) -> ProvisionerJobResponse {
     ProvisionerJobResponse {
         id: job.id,
         created_at: job.created_at,
@@ -2809,10 +2810,10 @@ fn provisioner_job_response(job: &ProvisionerJobRecord) -> ProvisionerJobRespons
     }
 }
 
-/// Converts a `TemplateVersionRecord` + `ProvisionerJobRecord` into a `TemplateVersionResponse`.
+/// Converts a `TemplateVersionRecord` + `TemplateProvisionerJobRecord` into a `TemplateVersionResponse`.
 fn template_version_response(
     ver: &TemplateVersionRecord,
-    job: &ProvisionerJobRecord,
+    job: &TemplateProvisionerJobRecord,
 ) -> TemplateVersionResponse {
     TemplateVersionResponse {
         id: ver.id,
@@ -2841,7 +2842,7 @@ async fn build_tv_response(
     state: &AppState,
     ver: &TemplateVersionRecord,
 ) -> Result<TemplateVersionResponse, AppError> {
-    let job = state.store.find_provisioner_job_by_id(ver.job_id).await?;
+    let job = state.store.find_provisioner_job(ver.job_id).await?;
     let job = job.ok_or_else(|| {
         AppError::from(StorageError::invalid_data(format!(
             "provisioner job {} not found for version {}",
@@ -3060,7 +3061,7 @@ async fn post_org_template_version(
     };
     let _job = state
         .store
-        .insert_provisioner_job(CreateProvisionerJobInput {
+        .create_provisioner_job(CreateProvisionerJobInput {
             id: job_id,
             created_at: now,
             updated_at: now,
@@ -3459,7 +3460,10 @@ async fn post_cancel_template_version(
         None => return Ok(not_found_response("Template version not found.")),
     };
 
-    let canceled = state.store.cancel_provisioner_job(ver.job_id).await?;
+    let canceled = state
+        .store
+        .cancel_template_provisioner_job(ver.job_id)
+        .await?;
     if !canceled {
         return Ok((
             StatusCode::PRECONDITION_FAILED,
@@ -3508,7 +3512,7 @@ async fn post_template_version_dry_run(
 
     let job = state
         .store
-        .insert_provisioner_job(CreateProvisionerJobInput {
+        .create_provisioner_job(CreateProvisionerJobInput {
             id: job_id,
             created_at: now,
             updated_at: now,
@@ -3535,7 +3539,7 @@ async fn get_template_version_dry_run(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let job = state.store.find_provisioner_job_by_id(job_id).await?;
+    let job = state.store.find_provisioner_job(job_id).await?;
     match job {
         Some(j) => Ok((StatusCode::OK, Json(provisioner_job_response(&j))).into_response()),
         None => Ok(not_found_response("Dry-run job not found.")),
@@ -3552,7 +3556,7 @@ async fn patch_template_version_dry_run(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let canceled = state.store.cancel_provisioner_job(job_id).await?;
+    let canceled = state.store.cancel_template_provisioner_job(job_id).await?;
     if !canceled {
         return Ok((
             StatusCode::PRECONDITION_FAILED,
@@ -3564,7 +3568,7 @@ async fn patch_template_version_dry_run(
             .into_response());
     }
 
-    let job = state.store.find_provisioner_job_by_id(job_id).await?;
+    let job = state.store.find_provisioner_job(job_id).await?;
     match job {
         Some(j) => Ok((StatusCode::OK, Json(provisioner_job_response(&j))).into_response()),
         None => Ok(not_found_response("Dry-run job not found.")),
@@ -3581,7 +3585,7 @@ async fn get_cancel_template_version_dry_run(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let canceled = state.store.cancel_provisioner_job(job_id).await?;
+    let canceled = state.store.cancel_template_provisioner_job(job_id).await?;
     if !canceled {
         return Ok((
             StatusCode::PRECONDITION_FAILED,
@@ -3610,7 +3614,7 @@ async fn get_template_version_dry_run_logs(
     };
 
     // Verify the job exists.
-    let _job = match state.store.find_provisioner_job_by_id(job_id).await? {
+    let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
     };
@@ -3630,7 +3634,7 @@ async fn get_template_version_dry_run_resources(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _job = match state.store.find_provisioner_job_by_id(job_id).await? {
+    let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
     };
@@ -4597,7 +4601,7 @@ async fn post_workspace_build(
 
     let _job = state
         .store
-        .insert_provisioner_job(CreateProvisionerJobInput {
+        .create_provisioner_job(CreateProvisionerJobInput {
             id: job_id,
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
@@ -5215,7 +5219,10 @@ async fn patch_cancel_workspace_build(
         return Ok(resource_not_found_response());
     };
 
-    let canceled = state.store.cancel_provisioner_job(build.job_id).await?;
+    let canceled = state
+        .store
+        .cancel_template_provisioner_job(build.job_id)
+        .await?;
 
     if !canceled {
         return Ok((
@@ -5573,7 +5580,7 @@ async fn post_user_workspace(
 
     let _job = state
         .store
-        .insert_provisioner_job(CreateProvisionerJobInput {
+        .create_provisioner_job(CreateProvisionerJobInput {
             id: job_id,
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
@@ -7236,21 +7243,30 @@ mod tests {
         OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_TOKEN_HEADER,
         hash_password,
     };
+    use coder_core::provisioner::{
+        ProvisionerJobLogRecord as ProvisionerLogRecord,
+        ProvisionerJobTimingRecord as ProvisionerTimingRecord,
+    };
+    use coder_core::template::ProvisionerJobRecord as TemplateProvisionerJobRecord;
     use coder_core::{
-        ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AppStore, AuditLog,
-        AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
-        ChangePasswordWithOneTimePasscodeRequest, ConvertLoginRequest, CreateApiKeyInput,
+        AcquireProvisionerJobInput, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord,
+        AppStore, AuditLog, AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
+        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest,
+        CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserRequest,
         CreateFirstUserStoreError, CreateProvisionerJobInput, CreateTemplateInput,
         CreateTemplateRequest, CreateTemplateStoreError, CreateTemplateVersionInput,
         CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs,
         CreateUserStoreError, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
         DeploymentStore, DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider,
-        ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, GitSshKeyRecord, HealthSettings,
-        InsertFileInput, InsertFileResult, InsertOrganizationMemberError, LogFormat, LoginType,
+        ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, GetJobsToBeReapedInput,
+        GitSshKeyRecord, HealthSettings, InsertFileInput, InsertFileResult,
+        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, LogFormat, LoginType,
         LoginWithPasswordRequest, OrganizationMemberListFilter, OrganizationMemberRecord,
         OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-        ProvisionerDaemonHealthRecord, ProvisionerJobRecord, ProvisionerJobStatsInput,
+        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
+        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TemplateDAURow, TemplateListFilter,
         TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
@@ -7258,10 +7274,10 @@ mod tests {
         TemplateVersionVariableRecord, TokenConfigRecord, UpdateRolesRequest, UpdateTemplateMeta,
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
-        UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-        ValidateUserPasswordRequest, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput,
-        WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+        UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
+        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentStatInput,
+        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
+        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -7312,7 +7328,7 @@ mod tests {
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
         templates: Mutex<HashMap<Uuid, TemplateRecord>>,
         template_versions: Mutex<HashMap<Uuid, TemplateVersionRecord>>,
-        provisioner_jobs: Mutex<HashMap<Uuid, ProvisionerJobRecord>>,
+        provisioner_jobs: Mutex<HashMap<Uuid, TemplateProvisionerJobRecord>>,
         template_version_parameters: Mutex<HashMap<Uuid, Vec<TemplateVersionParameterRecord>>>,
         template_version_variables: Mutex<HashMap<Uuid, Vec<TemplateVersionVariableRecord>>>,
         template_version_presets: Mutex<HashMap<Uuid, Vec<TemplateVersionPresetRecord>>>,
@@ -7385,6 +7401,161 @@ mod tests {
             Ok(DeploymentMetadata {
                 deployment_id: Uuid::nil(),
             })
+        }
+    }
+
+    #[async_trait]
+    impl ProvisionerStore for FakeStore {
+        async fn acquire_provisioner_job(
+            &self,
+            _input: AcquireProvisionerJobInput,
+        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_job_by_id(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_jobs_by_ids(
+            &self,
+            _ids: &[Uuid],
+        ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job(
+            &self,
+            _input: InsertProvisionerJobInput,
+        ) -> Result<ProvisionerJobRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn update_provisioner_job_by_id(
+            &self,
+            _id: Uuid,
+            _updated_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn update_provisioner_job_with_complete_by_id(
+            &self,
+            _input: CompleteProvisionerJobInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn update_provisioner_job_with_cancel_by_id(
+            &self,
+            _input: CancelProvisionerJobInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn get_provisioner_jobs_to_be_reaped(
+            &self,
+            _input: GetJobsToBeReapedInput,
+        ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job_logs(
+            &self,
+            _input: InsertProvisionerJobLogsInput,
+        ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_provisioner_logs_after_id(
+            &self,
+            _job_id: Uuid,
+            _after_id: i64,
+        ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job_timings(
+            &self,
+            _input: InsertProvisionerJobTimingsInput,
+        ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_provisioner_job_timings_by_job_id(
+            &self,
+            _job_id: Uuid,
+        ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn upsert_provisioner_daemon(
+            &self,
+            _input: UpsertProvisionerDaemonInput,
+        ) -> Result<ProvisionerDaemonRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn update_provisioner_daemon_last_seen_at(
+            &self,
+            _id: Uuid,
+            _last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn get_provisioner_daemons_by_organization(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn insert_provisioner_key(
+            &self,
+            _input: InsertProvisionerKeyInput,
+        ) -> Result<ProvisionerKeyRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in FakeStore"))
+        }
+
+        async fn get_provisioner_key_by_id(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_key_by_hashed_secret(
+            &self,
+            _hashed_secret: &[u8],
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_key_by_name(
+            &self,
+            _organization_id: Uuid,
+            _name: &str,
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn list_provisioner_keys_by_organization(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_provisioner_key(&self, _id: Uuid) -> Result<bool, StorageError> {
+            Ok(false)
         }
     }
 
@@ -9386,15 +9557,15 @@ mod tests {
             Ok(params.get(&preset_id).cloned().unwrap_or_default())
         }
 
-        async fn insert_provisioner_job(
+        async fn create_provisioner_job(
             &self,
             input: CreateProvisionerJobInput,
-        ) -> Result<ProvisionerJobRecord, StorageError> {
+        ) -> Result<TemplateProvisionerJobRecord, StorageError> {
             let mut jobs = self
                 .provisioner_jobs
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let record = ProvisionerJobRecord {
+            let record = TemplateProvisionerJobRecord {
                 id: input.id,
                 created_at: input.created_at,
                 updated_at: input.updated_at,
@@ -9416,10 +9587,10 @@ mod tests {
             Ok(record)
         }
 
-        async fn find_provisioner_job_by_id(
+        async fn find_provisioner_job(
             &self,
             job_id: Uuid,
-        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
             let jobs = self
                 .provisioner_jobs
                 .lock()
@@ -9427,7 +9598,10 @@ mod tests {
             Ok(jobs.get(&job_id).cloned())
         }
 
-        async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        async fn cancel_template_provisioner_job(
+            &self,
+            job_id: Uuid,
+        ) -> Result<bool, StorageError> {
             let mut jobs = self
                 .provisioner_jobs
                 .lock()
