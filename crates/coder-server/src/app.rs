@@ -51,16 +51,17 @@ use coder_core::template::{
     UpdateTemplateMetaInput,
 };
 use coder_core::{
-    ApiResponse, AppHostResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
-    AuthorizationRequest, AvailableExperiments, BuildMetadata,
-    ChangePasswordWithOneTimePasscodeRequest, ChatMessagePart, ChatMessageRecord,
-    ChatMessageResponse, ChatMessageUsage, ChatMessageVisibility, ChatQueuedMessageRecord,
-    ChatQueuedMessageResponse, ChatRecord, ChatResponse, ChatWithMessagesResponse,
-    ConvertLoginRequest, CreateChatMessageApiResponse, CreateChatMessageRequest, CreateChatRequest,
-    CreateFirstUserRequest, CreateFirstUserResponse, CreateLogSourceRequest, CreateTaskRequest,
-    CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
-    CreateWorkspaceBuildInput, CreateWorkspaceInput, DERPMap, DeploymentConfigResponse,
-    ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest, GetUsersResponse, HealthSettings,
+    AWSInstanceIdentityToken, ApiResponse, AppHostResponse, AppStore, AuditLogListFilter,
+    AuthMethods, AuthenticatedUser, AuthorizationRequest, AvailableExperiments,
+    AzureInstanceIdentityToken, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
+    ChatMessagePart, ChatMessageRecord, ChatMessageResponse, ChatMessageUsage,
+    ChatMessageVisibility, ChatQueuedMessageRecord, ChatQueuedMessageResponse, ChatRecord,
+    ChatResponse, ChatWithMessagesResponse, ConvertLoginRequest, CreateChatMessageApiResponse,
+    CreateChatMessageRequest, CreateChatRequest, CreateFirstUserRequest, CreateFirstUserResponse,
+    CreateLogSourceRequest, CreateTaskRequest, CreateTestAuditLogRequest, CreateTokenRequest,
+    CreateUserRequestWithOrgs, CreateWorkspaceBuildInput, CreateWorkspaceInput, DERPMap,
+    DERPMapRegion, DERPNode, DeploymentConfigResponse, ExternalApiKeyScopes,
+    ExternalAuthDeviceExchangeRequest, GCPInstanceIdentityToken, GetUsersResponse, HealthSettings,
     HealthcheckReport, InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertTaskInput,
     LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
     OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
@@ -76,8 +77,9 @@ use coder_core::{
     UploadFileResponse, UpsertPortShareInput, UserAppearanceSettings, UserListFilter,
     UserParameter, UserPreferenceSettings, UserRecord, UserResponse, UserRolesResponse, UserStatus,
     ValidateUserPasswordRequest, ValidationError, WebpushSubscription,
-    WorkspaceAgentConnectionInfo, WorkspaceAgentListContainersResponse,
-    WorkspaceAgentListeningPortsResponse, WorkspaceListFilter,
+    WorkspaceAgentAuthenticateResponse, WorkspaceAgentConnectionInfo,
+    WorkspaceAgentListContainersResponse, WorkspaceAgentListeningPortsResponse,
+    WorkspaceListFilter,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
@@ -9951,18 +9953,6 @@ fn convert_app_status_state(state: &str) -> coder_core::WorkspaceAppStatusState 
     }
 }
 
-/// Build connection info from the deployment configuration.
-fn build_connection_info(state: &AppState) -> WorkspaceAgentConnectionInfo {
-    WorkspaceAgentConnectionInfo {
-        derp_map: DERPMap {
-            regions: HashMap::new(),
-        },
-        derp_force_websockets: false,
-        disable_direct_connections: false,
-        hostname_suffix: state.config.ssh.hostname_suffix.clone(),
-    }
-}
-
 /// Build a full agent response including apps, log sources, scripts.
 async fn build_agent_response(
     state: &AppState,
@@ -10015,7 +10005,7 @@ async fn get_workspace_agent_connection(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let info = build_connection_info(&state);
+    let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
@@ -10317,6 +10307,46 @@ async fn get_workspace_agent_watch_metadata_ws(
 }
 
 /// GET /api/v2/workspaceagents/connection — global agent connection info.
+/// Build the deployment-wide DERP connection info from server config.
+/// Shared by both the per-agent and global connection endpoints.
+fn build_workspace_agent_connection_info(state: &AppState) -> WorkspaceAgentConnectionInfo {
+    let mut regions = HashMap::new();
+    for region in &state.config.derp_regions {
+        let nodes: Vec<DERPNode> = region
+            .nodes
+            .iter()
+            .map(|node| DERPNode {
+                name: node.name.clone(),
+                region_id: i64::from(region.id),
+                host_name: node.url.host_str().unwrap_or_default().to_owned(),
+                ipv4: None,
+                ipv6: None,
+                stun_port: 3478,
+                stun_only: false,
+                derp_port: node.url.port_or_known_default().map_or(443, i32::from),
+                force_http: node.url.scheme() == "http",
+            })
+            .collect();
+        regions.insert(
+            region.id.to_string(),
+            DERPMapRegion {
+                region_id: i64::from(region.id),
+                region_code: region.name.to_lowercase().replace(' ', "-"),
+                region_name: region.name.clone(),
+                avoid: false,
+                nodes,
+            },
+        );
+    }
+
+    WorkspaceAgentConnectionInfo {
+        derp_map: DERPMap { regions },
+        derp_force_websockets: false,
+        disable_direct_connections: false,
+        hostname_suffix: state.config.ssh.hostname_suffix.clone(),
+    }
+}
+
 async fn get_workspace_agents_connection_info(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10325,7 +10355,7 @@ async fn get_workspace_agents_connection_info(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let info = build_connection_info(&state);
+    let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
@@ -10463,43 +10493,279 @@ async fn get_workspace_agent_rpc(
 /// POST /api/v2/workspaceagents/aws-instance-identity — AWS instance identity auth.
 async fn post_workspace_agent_instance_identity_aws(
     State(state): State<AppState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(&state, "aws", body).await
-}
-
-/// POST /api/v2/workspaceagents/azure-instance-identity — Azure instance identity auth.
-async fn post_workspace_agent_instance_identity_azure(
-    State(state): State<AppState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(&state, "azure", body).await
-}
-
-/// POST /api/v2/workspaceagents/google-instance-identity — Google instance identity auth.
-async fn post_workspace_agent_instance_identity_google(
-    State(state): State<AppState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(&state, "google", body).await
-}
-
-async fn post_workspace_agent_instance_identity(
-    state: &AppState,
-    cloud: &str,
-    body: Result<Json<Value>, JsonRejection>,
+    body: Result<Json<AWSInstanceIdentityToken>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let Json(token) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // Instance identity validation requires cloud provider
-    // credential verification, which is not yet implemented.
-    let _ = (state, token);
-    Ok(not_implemented_response(format!(
-        "Instance identity auth for '{cloud}' is not yet implemented.",
-    )))
+    // In the Go implementation, the document is parsed and validated against
+    // AWS certificates to extract the instance ID.  Full cryptographic
+    // verification is not yet implemented; we extract the instance_id from
+    // the identity document JSON directly.
+    let instance_id = match serde_json::from_str::<Value>(&token.document) {
+        Ok(doc) => match doc.get("instanceId").and_then(|v| v.as_str()) {
+            Some(id) => id.to_owned(),
+            None => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(
+                        "Invalid AWS identity document: missing instanceId.",
+                        "",
+                    )),
+                )
+                    .into_response());
+            }
+        },
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Invalid AWS identity document: malformed JSON.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    handle_auth_instance_id(&state, &instance_id).await
+}
+
+/// POST /api/v2/workspaceagents/azure-instance-identity — Azure instance identity auth.
+async fn post_workspace_agent_instance_identity_azure(
+    State(state): State<AppState>,
+    body: Result<Json<AzureInstanceIdentityToken>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(token) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // In the Go implementation, the Azure signature is a PKCS7 JWT that is
+    // validated against Microsoft certificates.  Full cryptographic
+    // verification is not yet implemented; we extract the VM ID from the
+    // JWT payload directly.
+    let instance_id = extract_instance_id_from_jwt(&token.signature);
+    match instance_id {
+        Some(id) => handle_auth_instance_id(&state, &id).await,
+        None => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid Azure identity: could not extract instance ID from signature.",
+                "",
+            )),
+        )
+            .into_response()),
+    }
+}
+
+/// POST /api/v2/workspaceagents/google-instance-identity — Google instance identity auth.
+async fn post_workspace_agent_instance_identity_google(
+    State(state): State<AppState>,
+    body: Result<Json<GCPInstanceIdentityToken>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(token) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // In the Go implementation, the GCP JWT is validated against Google's
+    // token validator and the instance_id is extracted from the claims.
+    // Full cryptographic verification is not yet implemented; we extract
+    // the instance_id from the JWT payload directly.
+    let instance_id = extract_instance_id_from_jwt(&token.json_web_token);
+    match instance_id {
+        Some(id) => handle_auth_instance_id(&state, &id).await,
+        None => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid GCP identity: could not extract instance ID from token.",
+                "",
+            )),
+        )
+            .into_response()),
+    }
+}
+
+/// Extracts an instance_id claim from a JWT payload without cryptographic
+/// verification.  Returns `None` when the token structure is invalid or
+/// the claim is missing.
+fn extract_instance_id_from_jwt(jwt: &str) -> Option<String> {
+    // JWTs are header.payload.signature – we need the payload part.
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let payload_bytes = engine.decode(parts[1]).ok()?;
+    let payload: Value = serde_json::from_slice(&payload_bytes).ok()?;
+
+    // Azure puts vmId at the top level; GCP nests under google.compute_engine.instance_id.
+    if let Some(vm_id) = payload.get("vmId").and_then(|v| v.as_str()) {
+        return Some(vm_id.to_owned());
+    }
+    if let Some(id) = payload
+        .get("google")
+        .and_then(|g| g.get("compute_engine"))
+        .and_then(|ce| ce.get("instance_id"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(id.to_owned());
+    }
+
+    None
+}
+
+/// Shared handler that takes a cloud-provider instance_id and performs the
+/// agent→resource→job→build lookup chain, mirroring the Go
+/// `handleAuthInstanceID` function.
+async fn handle_auth_instance_id(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Response, AppError> {
+    // Step 1: Lookup agent by instance_id.
+    let agent = match state
+        .store
+        .find_workspace_agent_by_instance_id(instance_id)
+        .await?
+    {
+        Some(agent) => agent,
+        None => {
+            return Ok(not_found_response(format!(
+                "Instance with id \"{instance_id}\" not found."
+            )));
+        }
+    };
+
+    // Step 2: Lookup the workspace resource that owns this agent.
+    let resource = match state
+        .store
+        .find_workspace_resource_by_id(agent.resource_id)
+        .await?
+    {
+        Some(resource) => resource,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching provisioner job resource.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 3: Lookup the provisioner job for this resource.
+    let job = match state.store.find_provisioner_job(resource.job_id).await? {
+        Some(job) => job,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching provisioner job.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 4: Validate job type is "workspace_build".
+    if job.job_type != "workspace_build" {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!("\"{}\" jobs cannot be authenticated.", job.job_type),
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    // Step 5: Extract workspace_build_id from job input.
+    let workspace_build_id = match job
+        .input
+        .get("workspace_build_id")
+        .and_then(|v: &Value| v.as_str())
+        .and_then(|s| Uuid::from_str(s).ok())
+    {
+        Some(id) => id,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error extracting job data.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 6: Lookup the workspace build.
+    let build = match state
+        .store
+        .find_workspace_build_by_id(workspace_build_id)
+        .await?
+    {
+        Some(build) => build,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching workspace build.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 7: Verify this is the latest build (replay prevention).
+    let latest_build = match state
+        .store
+        .find_latest_workspace_build(build.workspace_id)
+        .await?
+    {
+        Some(latest) => latest,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching the latest workspace build.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    if latest_build.id != build.id {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!(
+                    "Resource found for id \"{instance_id}\", but isn't registered on the latest history."
+                ),
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    // Step 8: Return the agent auth token.
+    Ok((
+        StatusCode::OK,
+        Json(WorkspaceAgentAuthenticateResponse {
+            session_token: agent.auth_token.to_string(),
+        }),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -14027,6 +14293,20 @@ mod tests {
                 .map(|agents| agents.get(&agent_id).cloned())
         }
 
+        async fn find_workspace_agent_by_instance_id(
+            &self,
+            instance_id: &str,
+        ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(agents
+                .values()
+                .find(|a| a.auth_instance_id.as_deref() == Some(instance_id))
+                .cloned())
+        }
+
         async fn list_workspace_apps_by_agent_id(
             &self,
             agent_id: Uuid,
@@ -14123,14 +14403,45 @@ mod tests {
                 })
         }
 
+        async fn find_workspace_resource_by_id(
+            &self,
+            resource_id: Uuid,
+        ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+            let resources = self
+                .workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(resources
+                .values()
+                .flatten()
+                .find(|r| r.id == resource_id)
+                .cloned())
+        }
+
         async fn find_workspace_build_by_id(
             &self,
             build_id: Uuid,
         ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
-            self.workspace_builds
+            let builds = self
+                .workspace_builds
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))
-                .map(|builds| builds.get(&build_id).cloned())
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(builds.get(&build_id).cloned())
+        }
+
+        async fn find_latest_workspace_build(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(builds
+                .values()
+                .filter(|b| b.workspace_id == workspace_id)
+                .max_by_key(|b| b.build_number)
+                .cloned())
         }
 
         async fn list_workspace_build_parameters(
@@ -20014,6 +20325,441 @@ mod tests {
                 || response.status() == StatusCode::UPGRADE_REQUIRED,
             "expected 101 or 426, got {}",
             response.status()
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Instance identity & connection endpoint tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a base64url-encoded JWT payload for testing.
+    fn make_jwt_payload(claims: &Value) -> String {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = engine.encode(b"{\"alg\":\"none\"}");
+        let payload = engine.encode(serde_json::to_vec(claims).unwrap_or_default());
+        format!("{header}.{payload}.fake-signature")
+    }
+
+    /// Seed the FakeStore with the full agent→resource→job→build chain and
+    /// return the agent auth_token so tests can assert against it.
+    fn seed_instance_identity_chain(
+        store: &FakeStore,
+        instance_id: &str,
+    ) -> Result<Uuid, Box<dyn Error>> {
+        let agent_id = Uuid::from_u128(100);
+        let resource_id = Uuid::from_u128(101);
+        let job_id = Uuid::from_u128(102);
+        let build_id = Uuid::from_u128(103);
+        let workspace_id = Uuid::from_u128(104);
+        let auth_token = Uuid::from_u128(999);
+        let now = OffsetDateTime::now_utc();
+
+        // Agent
+        store
+            .workspace_agents
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                agent_id,
+                WorkspaceAgentRow {
+                    id: agent_id,
+                    parent_id: None,
+                    created_at: now,
+                    updated_at: now,
+                    name: "main".to_owned(),
+                    first_connected_at: None,
+                    last_connected_at: None,
+                    disconnected_at: None,
+                    resource_id,
+                    auth_token,
+                    auth_instance_id: Some(instance_id.to_owned()),
+                    architecture: "amd64".to_owned(),
+                    environment_variables: None,
+                    operating_system: "linux".to_owned(),
+                    directory: String::new(),
+                    expanded_directory: String::new(),
+                    version: String::new(),
+                    api_version: String::new(),
+                    connection_timeout_seconds: 120,
+                    troubleshooting_url: String::new(),
+                    motd_file: String::new(),
+                    lifecycle_state: "created".to_owned(),
+                    logs_length: 0,
+                    logs_overflowed: false,
+                    started_at: None,
+                    ready_at: None,
+                    subsystems: Vec::new(),
+                    display_apps: Vec::new(),
+                    display_order: 0,
+                    api_key_scope: "all".to_owned(),
+                },
+            );
+
+        // Resource (stored as Vec keyed by job_id)
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(WorkspaceResourceRecord {
+                id: resource_id,
+                created_at: now,
+                job_id,
+                transition: "start".to_owned(),
+                resource_type: "aws_instance".to_owned(),
+                name: "dev".to_owned(),
+                hide: false,
+                icon: String::new(),
+                daily_cost: 0,
+            });
+
+        // Provisioner job
+        store
+            .provisioner_jobs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                job_id,
+                TemplateProvisionerJobRecord {
+                    id: job_id,
+                    created_at: now,
+                    updated_at: now,
+                    started_at: None,
+                    canceled_at: None,
+                    completed_at: None,
+                    error: String::new(),
+                    organization_id: Uuid::nil(),
+                    initiator_id: Uuid::nil(),
+                    provisioner: "terraform".to_owned(),
+                    job_status: "succeeded".to_owned(),
+                    file_id: None,
+                    job_type: "workspace_build".to_owned(),
+                    input: json!({ "workspace_build_id": build_id.to_string() }),
+                    worker_id: None,
+                    tags: HashMap::new(),
+                },
+            );
+
+        // Workspace build (latest)
+        store
+            .workspace_builds
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                build_id,
+                WorkspaceBuildRecord {
+                    id: build_id,
+                    created_at: now,
+                    updated_at: now,
+                    workspace_id,
+                    build_number: 1,
+                    transition: "start".to_owned(),
+                    job_id,
+                    template_version_id: Uuid::nil(),
+                    initiator_id: Uuid::nil(),
+                    provisioner_state: None,
+                    deadline: None,
+                    max_deadline: None,
+                    reason: "initiator".to_owned(),
+                    daily_cost: 0,
+                },
+            );
+
+        Ok(auth_token)
+    }
+
+    #[tokio::test]
+    async fn connection_info_returns_derp_map_and_hostname_suffix() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/workspaceagents/connection",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_json(response).await?;
+        // test_config sets hostname_suffix = "example.internal"
+        assert_eq!(
+            body.get("hostname_suffix").and_then(Value::as_str),
+            Some("example.internal")
+        );
+        // derp_map should be present even when no regions configured
+        assert!(body.get("derp_map").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_info_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/workspaceagents/connection")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aws_instance_identity_valid() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let auth_token = seed_instance_identity_chain(&store, "i-abc123")?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-abc123\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("session_token").and_then(Value::as_str),
+            Some(auth_token.to_string()).as_deref()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aws_instance_identity_unknown_instance() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-unknown\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aws_instance_identity_malformed_document() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let payload = json!({
+            "document": "not-json",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn azure_instance_identity_valid() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let auth_token = seed_instance_identity_chain(&store, "vm-azure-001")?;
+        let app = build_router(state);
+
+        let jwt = make_jwt_payload(&json!({ "vmId": "vm-azure-001" }));
+        let payload = json!({ "encoding": "pkcs7", "signature": jwt });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/azure-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("session_token").and_then(Value::as_str),
+            Some(auth_token.to_string()).as_deref()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn azure_instance_identity_bad_jwt() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let payload = json!({ "encoding": "pkcs7", "signature": "not-a-jwt" });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/azure-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gcp_instance_identity_valid() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let auth_token = seed_instance_identity_chain(&store, "gcp-inst-42")?;
+        let app = build_router(state);
+
+        let jwt = make_jwt_payload(&json!({
+            "google": { "compute_engine": { "instance_id": "gcp-inst-42" } }
+        }));
+        let payload = json!({ "json_web_token": jwt });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/google-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("session_token").and_then(Value::as_str),
+            Some(auth_token.to_string()).as_deref()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gcp_instance_identity_bad_jwt() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let payload = json!({ "json_web_token": "bad" });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/google-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn instance_identity_replay_prevention() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let _auth_token = seed_instance_identity_chain(&store, "i-replay")?;
+
+        // Insert a newer build for the same workspace so the original build is
+        // no longer the latest.
+        let workspace_id = Uuid::from_u128(104);
+        let newer_build_id = Uuid::from_u128(200);
+        let now = OffsetDateTime::now_utc();
+        store
+            .workspace_builds
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                newer_build_id,
+                WorkspaceBuildRecord {
+                    id: newer_build_id,
+                    created_at: now,
+                    updated_at: now,
+                    workspace_id,
+                    build_number: 2,
+                    transition: "start".to_owned(),
+                    job_id: Uuid::nil(),
+                    template_version_id: Uuid::nil(),
+                    initiator_id: Uuid::nil(),
+                    provisioner_state: None,
+                    deadline: None,
+                    max_deadline: None,
+                    reason: "initiator".to_owned(),
+                    daily_cost: 0,
+                },
+            );
+
+        let app = build_router(state);
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-replay\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        let msg = body.get("message").and_then(Value::as_str).unwrap_or("");
+        assert!(msg.contains("latest"), "expected replay error, got: {msg}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn instance_identity_wrong_job_type() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let _auth_token = seed_instance_identity_chain(&store, "i-wrongjob")?;
+
+        // Override the job_type to something other than "workspace_build"
+        let job_id = Uuid::from_u128(102);
+        if let Ok(mut jobs) = store.provisioner_jobs.lock() {
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.job_type = "template_version_import".to_owned();
+            }
+        }
+
+        let app = build_router(state);
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-wrongjob\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        let msg = body.get("message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            msg.contains("cannot be authenticated"),
+            "expected job type error, got: {msg}"
         );
         Ok(())
     }
