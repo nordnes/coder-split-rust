@@ -333,6 +333,7 @@ dependencies = [
  "async-trait",
  "coder-rbac",
  "sqlx",
+ "tokio",
  "tracing",
  "uuid",
 ]
