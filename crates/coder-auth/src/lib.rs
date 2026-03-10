@@ -2242,6 +2242,12 @@ where
                 .as_slice()
                 .ct_eq(code_record.hashed_secret.as_slice()),
         ) {
+            // Delete the code on hash mismatch to enforce single-use
+            // (RFC 6749 §10.5: revoke on any failed exchange attempt).
+            let _ = self
+                .store
+                .delete_oauth2_provider_app_code(code_record.id)
+                .await;
             return Err(OAuth2ProviderError::unauthorized(
                 "Invalid authorization code.",
             ));
