@@ -3702,10 +3702,15 @@ impl AppStore for PostgresStore {
     // Notification message dispatch
     // -----------------------------------------------------------------------
 
+    // TODO: Add row leasing (`FOR UPDATE SKIP LOCKED` or a CTE-based lease)
+    // to prevent concurrent dispatch loops from fetching the same messages.
+    // See Go reference: `AcquireNotificationMessages` in
+    // `coder/coderd/database/queries/notifications.sql`.
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn fetch_pending_notification_messages(
         &self,
         limit: u32,
+        max_attempt_count: u32,
     ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredNotificationMessageRow>(
             r#"SELECT id, user_id, notification_template_id,
@@ -3719,10 +3724,12 @@ impl AppStore for PostgresStore {
                FROM notification_messages
                WHERE status IN ('pending', 'temporary_failure')
                  AND (next_retry_after IS NULL OR next_retry_after < NOW())
+                 AND (attempt_count IS NULL OR attempt_count < $2)
                ORDER BY created_at ASC
                LIMIT $1"#,
         )
         .bind(limit as i64)
+        .bind(max_attempt_count as i32)
         .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;

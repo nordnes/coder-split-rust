@@ -1581,11 +1581,15 @@ pub trait IdentityStore: Send + Sync {
     // ----- Notifications -----
 
     /// Fetches pending notification messages for dispatch.
+    ///
+    /// Messages with `attempt_count >= max_attempt_count` are excluded so they
+    /// can be purged separately rather than retried indefinitely.
     async fn fetch_pending_notification_messages(
         &self,
         limit: u32,
+        max_attempt_count: u32,
     ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = limit;
+        let _ = (limit, max_attempt_count);
         Err(StorageError::unavailable(
             "notification messages are not implemented",
         ))
@@ -3846,11 +3850,15 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // ----- Notification message dispatch -----
 
     /// Fetches pending notification messages for dispatch.
+    ///
+    /// Messages with `attempt_count >= max_attempt_count` are excluded so they
+    /// can be purged separately rather than retried indefinitely.
     async fn fetch_pending_notification_messages(
         &self,
         limit: u32,
+        max_attempt_count: u32,
     ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = limit;
+        let _ = (limit, max_attempt_count);
         Err(StorageError::unavailable(
             "notification messages are not implemented",
         ))

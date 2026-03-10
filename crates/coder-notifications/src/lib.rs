@@ -15,7 +15,7 @@ pub const STATUS: &str = "active";
 
 const DISPATCH_POLL_SECS: u64 = 10;
 const DISPATCH_BATCH_SIZE: u32 = 50;
-const MAX_DISPATCH_ATTEMPTS: i32 = 3;
+const MAX_DISPATCH_ATTEMPTS: u32 = 3;
 
 /// Configuration for the notification dispatch pipeline.
 #[derive(Clone, Debug)]
@@ -77,25 +77,16 @@ where
     }
 
     async fn dispatch_once(&self) -> Result<u32, coder_core::StorageError> {
+        // Messages that have already reached MAX_DISPATCH_ATTEMPTS are
+        // excluded by the query itself via the max_attempt_count parameter.
         let messages = self
             .store
-            .fetch_pending_notification_messages(DISPATCH_BATCH_SIZE)
+            .fetch_pending_notification_messages(DISPATCH_BATCH_SIZE, MAX_DISPATCH_ATTEMPTS)
             .await?;
 
         let count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
 
         for message in messages {
-            if message.attempt_count >= MAX_DISPATCH_ATTEMPTS {
-                let _ = self
-                    .store
-                    .update_notification_message_status(
-                        message.id,
-                        NotificationMessageStatus::Failed,
-                    )
-                    .await;
-                continue;
-            }
-
             let result = match message.method {
                 NotificationMethod::Email => self.dispatch_email(&message).await,
                 NotificationMethod::Webhook => self.dispatch_webhook(&message).await,
