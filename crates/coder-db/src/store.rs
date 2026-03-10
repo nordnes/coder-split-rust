@@ -11683,6 +11683,14 @@ mod tests {
             .await?;
         assert!(total >= 3, "should find at least 3 users with tag");
         assert!(users.len() >= 3);
+        // Verify the search filter actually matched our users by checking
+        // that each returned username contains the unique tag.
+        assert!(
+            users
+                .iter()
+                .all(|u| u.username.contains(&tag) || u.email.contains(&tag)),
+            "all returned users should match the search tag"
+        );
 
         // Filter by status=suspended
         let (suspended, _) = store
@@ -12067,6 +12075,10 @@ mod tests {
         assert!(
             by_org.len() >= 2,
             "should find at least 2 tasks for organization"
+        );
+        assert!(
+            by_org.iter().all(|t| t.organization_id == org_id),
+            "all tasks should belong to the queried organization"
         );
 
         Ok(())
