@@ -3080,7 +3080,7 @@ impl ProvisionerStore for PostgresStore {
     async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
         sqlx::query(
             "DELETE FROM provisioner_daemons
-             WHERE last_seen_at IS NULL OR last_seen_at < NOW() - INTERVAL '7 days'",
+             WHERE last_seen_at IS NOT NULL AND last_seen_at < NOW() - INTERVAL '7 days'",
         )
         .execute(&self.pool)
         .await

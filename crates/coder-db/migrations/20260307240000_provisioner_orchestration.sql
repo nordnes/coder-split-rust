@@ -56,7 +56,7 @@ CREATE TABLE IF NOT EXISTS provisioner_job_logs (
     source log_source NOT NULL DEFAULT 'provisioner_daemon',
     level log_level NOT NULL DEFAULT 'info',
     stage VARCHAR(128) NOT NULL DEFAULT '',
-    output VARCHAR(1024) NOT NULL DEFAULT ''
+    output TEXT NOT NULL DEFAULT ''
 );
 
 CREATE INDEX IF NOT EXISTS idx_provisioner_job_logs_job_id
