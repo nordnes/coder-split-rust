@@ -396,6 +396,17 @@ pub struct InsertFileInput {
     pub data: Vec<u8>,
 }
 
+/// Lightweight result from [`OperationalStore::insert_file`].
+///
+/// Only the fields needed by the caller are returned so the DB does not have
+/// to ship the (potentially large) `data` blob back over the wire.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertFileResult {
+    /// Stable file identifier (either the newly-created id or the existing
+    /// duplicate's id).
+    pub id: Uuid,
+}
+
 /// Errors surfaced by storage backends.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum StorageError {
@@ -1286,7 +1297,7 @@ pub trait OperationalStore: Send + Sync {
     }
 
     /// Inserts a new file record.
-    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
         let _ = input;
         Err(StorageError::unavailable("file storage is not implemented"))
     }
@@ -1676,7 +1687,7 @@ pub trait AppStore: DeploymentStore + Send + Sync {
     }
 
     /// Inserts a new file record.
-    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
         let _ = input;
         Err(StorageError::unavailable("file storage is not implemented"))
     }
@@ -3532,7 +3543,7 @@ where
         AppStore::upsert_git_ssh_key(self, user_id, public_key, private_key).await
     }
 
-    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
         AppStore::insert_file(self, input).await
     }
 
@@ -3652,7 +3663,7 @@ where
             .await
     }
 
-    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
         (**self).insert_file(input).await
     }
 

@@ -10,9 +10,9 @@ use coder_core::{
     CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, DatabaseConfig,
     DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
     ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord, GitSshKeyRecord,
-    HealthSettings, InsertFileInput, InsertOrganizationMemberError, LoginType, MinimalOrganization,
-    MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
-    PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    HealthSettings, InsertFileInput, InsertFileResult, InsertOrganizationMemberError, LoginType,
+    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
+    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
     ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, SessionCountDeploymentStatsResponse,
     SlimRoleRecord, StorageError, TokenConfigRecord, UpsertExternalAuthLinkInput,
     UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
@@ -2363,12 +2363,14 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
-    async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
-        let row = sqlx::query_as::<_, StoredFileRow>(
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
+        // Only RETURNING id — avoids shipping the (potentially large) data
+        // blob back from Postgres on every insert/duplicate.
+        let (id,): (Uuid,) = sqlx::query_as(
             "INSERT INTO files (id, hash, created_by, created_at, mimetype, data)
              VALUES ($1, $2, $3, NOW(), $4, $5)
              ON CONFLICT (hash, created_by) DO UPDATE SET id = files.id
-             RETURNING id, hash, created_by, created_at, mimetype, data",
+             RETURNING id",
         )
         .bind(input.id)
         .bind(&input.hash)
@@ -2379,7 +2381,7 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(file_record_from_row(row))
+        Ok(InsertFileResult { id })
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]

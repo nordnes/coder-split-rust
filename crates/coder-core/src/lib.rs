@@ -64,7 +64,7 @@ pub use password::{
 pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
     ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertFileInput,
-    OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    InsertFileResult, OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
     ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, StorageError,
     UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
     WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,

@@ -3471,10 +3471,17 @@ async fn post_file(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let content_type = headers
+    let raw_content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
+
+    // Strip optional parameters (e.g. "; charset=binary") before matching.
+    let content_type = raw_content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
 
     match content_type {
         TAR_MIME_TYPE | ZIP_MIME_TYPE | WINDOWS_ZIP_MIME_TYPE => {}
@@ -3510,17 +3517,17 @@ async fn post_file(
 
     // INSERT … ON CONFLICT handles the race atomically – if a duplicate
     // exists the DB returns the existing row instead of raising an error.
-    let file = state.store.insert_file(input).await?;
+    let result = state.store.insert_file(input).await?;
 
     // If the returned id differs from the one we generated, a duplicate
     // already existed and the DB returned the existing row.
-    let status = if file.id == file_id {
+    let status = if result.id == file_id {
         StatusCode::CREATED
     } else {
         StatusCode::OK
     };
 
-    Ok((status, Json(UploadFileResponse { id: file.id })).into_response())
+    Ok((status, Json(UploadFileResponse { id: result.id })).into_response())
 }
 
 /// GET /api/v2/files/{fileid} – retrieve a file by UUID.
@@ -3607,7 +3614,8 @@ async fn hsts_middleware(request: axum::extract::Request, next: Next) -> Respons
             .headers()
             .get("x-forwarded-proto")
             .and_then(|v| v.to_str().ok())
-            .map(|v| v == "https")
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().eq_ignore_ascii_case("https"))
             .unwrap_or(false);
 
     let mut response = next.run(request).await;
@@ -3654,14 +3662,14 @@ async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Respons
         return next.run(request).await;
     }
 
-    let dominated_method = matches!(
+    let is_mutating_method = matches!(
         *request.method(),
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
     );
 
     let has_cookie = request.headers().contains_key(http::header::COOKIE);
 
-    if dominated_method && has_cookie {
+    if is_mutating_method && has_cookie {
         let has_csrf = request
             .headers()
             .get("x-csrf-token")
@@ -3749,18 +3757,18 @@ mod tests {
         CreateUserRequestWithOrgs, CreateUserStoreError, DatabaseConfig, DeploymentMetadata,
         DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
         ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-        GitSshKeyRecord, HealthSettings, InsertFileInput, InsertOrganizationMemberError, LogFormat,
-        LoginType, LoginWithPasswordRequest, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-        RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
-        SlimRoleRecord, SshConfig, StorageError, TokenConfigRecord, UpdateRolesRequest,
-        UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-        UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
-        UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-        ValidateUserPasswordRequest, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput,
-        WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+        GitSshKeyRecord, HealthSettings, InsertFileInput, InsertFileResult,
+        InsertOrganizationMemberError, LogFormat, LoginType, LoginWithPasswordRequest,
+        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, RequestOneTimePasscodeRequest,
+        ServerConfig, SessionCountDeploymentStatsResponse, SlimRoleRecord, SshConfig, StorageError,
+        TokenConfigRecord, UpdateRolesRequest, UpdateUserAppearanceSettingsRequest,
+        UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
+        UpsertExternalAuthLinkInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
+        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentStatInput,
+        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
+        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -5456,31 +5464,35 @@ mod tests {
             Ok(record)
         }
 
-        async fn insert_file(&self, input: InsertFileInput) -> Result<FileRecord, StorageError> {
+        async fn insert_file(
+            &self,
+            input: InsertFileInput,
+        ) -> Result<InsertFileResult, StorageError> {
             let mut files = self
                 .files
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
 
             // Mimic ON CONFLICT (hash, created_by) DO UPDATE SET id = files.id
-            // – return the existing record when a duplicate exists.
+            // – return the existing record's id when a duplicate exists.
             if let Some(existing) = files
                 .values()
                 .find(|f| f.hash == input.hash && f.created_by == input.created_by)
             {
-                return Ok(existing.clone());
+                return Ok(InsertFileResult { id: existing.id });
             }
 
+            let id = input.id;
             let record = FileRecord {
-                id: input.id,
+                id,
                 hash: input.hash,
                 created_by: input.created_by,
                 created_at: OffsetDateTime::now_utc(),
                 mimetype: input.mimetype,
                 data: input.data,
             };
-            files.insert(record.id, record.clone());
-            Ok(record)
+            files.insert(record.id, record);
+            Ok(InsertFileResult { id })
         }
 
         async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
