@@ -13539,8 +13539,6 @@ mod tests {
 
         async fn get_user_status_counts(
             &self,
-            _start_time: OffsetDateTime,
-            _end_time: OffsetDateTime,
             _timezone: &str,
             _start_time: OffsetDateTime,
             _end_time: OffsetDateTime,
