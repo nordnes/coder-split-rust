@@ -17818,7 +17818,7 @@ mod tests {
         // Notification Messages
         // -----------------------------------------------------------------
 
-        async fn fetch_pending_notification_messages(
+        async fn acquire_pending_notification_messages(
             &self,
             limit: u32,
             max_attempt_count: u32,
