@@ -1976,7 +1976,7 @@ async fn put_user_git_ssh_key(
     if authorizer
         .authorize(
             &context.actor,
-            Action::Update,
+            Action::UpdatePersonal,
             &Object::new(ResourceType::User)
                 .with_id(target_user.id)
                 .with_owner(target_user.id),
@@ -2844,7 +2844,7 @@ async fn create_session_api_key(
         .authorize(
             &context.actor,
             Action::Create,
-            &Object::new(ResourceType::User)
+            &Object::new(ResourceType::ApiKey)
                 .with_id(target_user.id)
                 .with_owner(target_user.id),
         )
@@ -2896,7 +2896,7 @@ async fn create_token_api_key(
         .authorize(
             &context.actor,
             Action::Create,
-            &Object::new(ResourceType::User)
+            &Object::new(ResourceType::ApiKey)
                 .with_id(target_user.id)
                 .with_owner(target_user.id),
         )
@@ -3018,7 +3018,7 @@ async fn delete_api_key(
         .authorize(
             &context.actor,
             Action::Delete,
-            &Object::new(ResourceType::User)
+            &Object::new(ResourceType::ApiKey)
                 .with_id(target_user.id)
                 .with_owner(target_user.id),
         )
@@ -3069,7 +3069,7 @@ async fn expire_api_key(
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::User)
+            &Object::new(ResourceType::ApiKey)
                 .with_id(target_user.id)
                 .with_owner(target_user.id),
         )
