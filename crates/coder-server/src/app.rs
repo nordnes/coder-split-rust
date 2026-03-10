@@ -26800,6 +26800,9 @@ mod tests {
         let agent_token = Uuid::new_v4();
         let agent_id = Uuid::new_v4();
         let workspace_id = Uuid::new_v4();
+        let resource_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let build_id = Uuid::new_v4();
         let owner_id = Uuid::from_u128(100);
         let now = OffsetDateTime::now_utc();
 
@@ -26812,7 +26815,7 @@ mod tests {
             first_connected_at: None,
             last_connected_at: None,
             disconnected_at: None,
-            resource_id: Uuid::new_v4(),
+            resource_id,
             auth_token: agent_token,
             auth_instance_id: None,
             architecture: "amd64".to_owned(),
@@ -26836,6 +26839,49 @@ mod tests {
             api_key_scope: "all".to_owned(),
         };
         store.insert_agent(agent)?;
+
+        // Set up the full join chain: resource -> build -> workspace so that
+        // find_workspace_by_agent_id can traverse agent -> resource -> build -> workspace.
+        let resource = WorkspaceResourceRecord {
+            id: resource_id,
+            created_at: now,
+            job_id,
+            transition: "start".to_owned(),
+            resource_type: "docker_container".to_owned(),
+            name: "main".to_owned(),
+            hide: false,
+            icon: String::new(),
+            daily_cost: 0,
+        };
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .entry(job_id)
+            .or_default()
+            .push(resource);
+
+        let build = WorkspaceBuildRecord {
+            id: build_id,
+            created_at: now,
+            updated_at: now,
+            workspace_id,
+            build_number: 1,
+            transition: "start".to_owned(),
+            job_id,
+            template_version_id: Uuid::new_v4(),
+            initiator_id: owner_id,
+            provisioner_state: None,
+            deadline: None,
+            max_deadline: None,
+            reason: "initiator".to_owned(),
+            daily_cost: 0,
+        };
+        store
+            .workspace_builds
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(build_id, build);
 
         let workspace = WorkspaceRecord {
             id: workspace_id,
