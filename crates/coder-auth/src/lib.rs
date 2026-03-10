@@ -2630,6 +2630,517 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
     }
 }
 
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coder_core::{
+        ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthStore, AuthenticatedUser,
+        CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError,
+        ExternalAuthLinkRecord, FirstUserRecord, LoginType, PasswordUserRecord, StorageError,
+        TokenConfigRecord, UpsertExternalAuthLinkInput, UserRecord, UserStatus,
+        ValidateUserPasswordRequest,
+    };
+    use std::sync::Mutex;
+    use time::OffsetDateTime;
+
+    // -----------------------------------------------------------------------
+    // Minimal in-memory mock store
+    // -----------------------------------------------------------------------
+
+    #[derive(Default)]
+    struct MockStoreInner {
+        first_user_created: bool,
+        users: Vec<UserRecord>,
+        password_users: Vec<PasswordUserRecord>,
+        sessions: Vec<(Vec<u8>, Uuid)>,
+        api_keys: Vec<ApiKeyRecord>,
+    }
+
+    #[derive(Default, Clone)]
+    struct MockStore {
+        inner: std::sync::Arc<Mutex<MockStoreInner>>,
+    }
+
+    fn make_user(id: Uuid, email: &str, username: &str) -> UserRecord {
+        UserRecord {
+            id,
+            email: email.to_owned(),
+            username: username.to_owned(),
+            name: username.to_owned(),
+            avatar_url: String::new(),
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+            last_seen_at: None,
+            organization_ids: vec![],
+            roles: vec![],
+            login_type: LoginType::Password,
+            status: UserStatus::Active,
+            deleted: false,
+            is_system: false,
+        }
+    }
+
+    fn make_authenticated_user(user: &UserRecord) -> AuthenticatedUser {
+        AuthenticatedUser {
+            id: user.id,
+            email: user.email.clone(),
+            username: user.username.clone(),
+            name: user.name.clone(),
+            avatar_url: user.avatar_url.clone(),
+            created_at: user.created_at,
+            updated_at: user.updated_at,
+            last_seen_at: user.last_seen_at,
+            organization_ids: user.organization_ids.clone(),
+            roles: user.roles.clone(),
+            org_roles: vec![],
+            login_type: user.login_type,
+            status: user.status,
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl AuthStore for MockStore {
+        async fn first_user_exists(&self) -> Result<bool, StorageError> {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner.first_user_created)
+        }
+
+        async fn create_first_user(
+            &self,
+            input: CreateFirstUserInput,
+        ) -> Result<FirstUserRecord, CreateFirstUserStoreError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            if inner.first_user_created {
+                return Err(CreateFirstUserStoreError::AlreadyExists);
+            }
+            let user_id = Uuid::new_v4();
+            let org_id = Uuid::new_v4();
+            let user = make_user(user_id, &input.email, &input.username);
+            inner.users.push(user.clone());
+            inner.password_users.push(PasswordUserRecord {
+                user: user,
+                password_hash: input.password_hash,
+                one_time_passcode_hash: None,
+                one_time_passcode_expires_at: None,
+            });
+            inner.first_user_created = true;
+            Ok(FirstUserRecord {
+                user_id,
+                organization_id: org_id,
+            })
+        }
+
+        async fn find_password_user_by_email(
+            &self,
+            email: &str,
+        ) -> Result<Option<PasswordUserRecord>, StorageError> {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner
+                .password_users
+                .iter()
+                .find(|pu| pu.user.email == email)
+                .cloned())
+        }
+
+        async fn find_password_user_by_id(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Option<PasswordUserRecord>, StorageError> {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner
+                .password_users
+                .iter()
+                .find(|pu| pu.user.id == user_id)
+                .cloned())
+        }
+
+        async fn insert_auth_session(
+            &self,
+            token_hash: &[u8],
+            user_id: Uuid,
+        ) -> Result<(), StorageError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            inner.sessions.push((token_hash.to_vec(), user_id));
+            Ok(())
+        }
+
+        async fn find_user_by_session_token_hash(
+            &self,
+            token_hash: &[u8],
+        ) -> Result<Option<AuthenticatedUser>, StorageError> {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            let session = inner.sessions.iter().find(|(h, _)| h == token_hash);
+            if let Some((_, user_id)) = session {
+                let user = inner.users.iter().find(|u| u.id == *user_id);
+                Ok(user.map(make_authenticated_user))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn delete_auth_session(&self, token_hash: &[u8]) -> Result<bool, StorageError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            let before = inner.sessions.len();
+            inner.sessions.retain(|(h, _)| h != token_hash);
+            Ok(inner.sessions.len() < before)
+        }
+
+        async fn find_user_by_id(&self, user_id: Uuid) -> Result<Option<UserRecord>, StorageError> {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner.users.iter().find(|u| u.id == user_id).cloned())
+        }
+
+        async fn find_user_by_username(
+            &self,
+            username: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner.users.iter().find(|u| u.username == username).cloned())
+        }
+
+        async fn store_one_time_passcode_by_email(
+            &self,
+            _email: &str,
+            _passcode_hash: &str,
+            _expires_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn replace_user_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+            _clear_one_time_passcode: bool,
+        ) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+
+        async fn create_api_key(
+            &self,
+            input: CreateApiKeyInput,
+        ) -> Result<ApiKeyRecord, CreateApiKeyStoreError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            let record = ApiKeyRecord {
+                id: input.id,
+                hashed_secret: input.hashed_secret,
+                user_id: input.user_id,
+                last_used: input.last_used,
+                expires_at: input.expires_at,
+                created_at: input.created_at,
+                updated_at: input.updated_at,
+                login_type: input.login_type,
+                scopes: input.scopes,
+                token_name: input.token_name,
+                lifetime_seconds: input.lifetime_seconds,
+                allow_list: input.allow_list,
+            };
+            inner.api_keys.push(record.clone());
+            Ok(record)
+        }
+
+        async fn find_api_key_by_id(&self, id: &str) -> Result<Option<ApiKeyRecord>, StorageError> {
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner.api_keys.iter().find(|k| k.id == id).cloned())
+        }
+
+        async fn find_api_key_by_name(
+            &self,
+            _user_id: Uuid,
+            _token_name: &str,
+        ) -> Result<Option<ApiKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn list_api_keys(
+            &self,
+            _filter: ApiKeyListFilter,
+        ) -> Result<Vec<ApiKeyWithOwnerRecord>, StorageError> {
+            Ok(vec![])
+        }
+
+        async fn delete_api_key(&self, _id: &str) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+
+        async fn expire_api_key(
+            &self,
+            _id: &str,
+            _now: OffsetDateTime,
+        ) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+
+        async fn token_config(&self, _user_id: Uuid) -> Result<TokenConfigRecord, StorageError> {
+            Ok(TokenConfigRecord {
+                max_token_lifetime: std::time::Duration::from_secs(60 * 60 * 24 * 365),
+            })
+        }
+
+        async fn list_external_auth_links(
+            &self,
+            _user_id: Uuid,
+        ) -> Result<Vec<ExternalAuthLinkRecord>, StorageError> {
+            Ok(vec![])
+        }
+
+        async fn find_external_auth_link(
+            &self,
+            _user_id: Uuid,
+            _provider_id: &str,
+        ) -> Result<Option<ExternalAuthLinkRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn delete_external_auth_link(
+            &self,
+            _user_id: Uuid,
+            _provider_id: &str,
+        ) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
+        async fn upsert_external_auth_link(
+            &self,
+            _user_id: Uuid,
+            _link: &UpsertExternalAuthLinkInput,
+        ) -> Result<ExternalAuthLinkRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented"))
+        }
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn test_session_token_from_headers() {
+        let mut headers = HeaderMap::new();
+        // No header → None.
+        assert!(session_token_from_headers(&headers).is_none());
+
+        // With the custom header.
+        headers.insert(
+            SESSION_TOKEN_HEADER,
+            http::HeaderValue::from_static("my-token-123"),
+        );
+        assert_eq!(session_token_from_headers(&headers), Some("my-token-123"));
+    }
+
+    #[test]
+    fn test_cookie_from_headers() {
+        let mut headers = HeaderMap::new();
+        // No cookie header → None.
+        assert!(cookie_from_headers(&headers, SESSION_TOKEN_COOKIE).is_none());
+
+        // With cookies set.
+        headers.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("other=foo; coder_session_token=abc123; extra=bar"),
+        );
+        assert_eq!(
+            cookie_from_headers(&headers, SESSION_TOKEN_COOKIE),
+            Some("abc123".to_owned())
+        );
+        // Non-existent cookie name.
+        assert!(cookie_from_headers(&headers, "nonexistent").is_none());
+    }
+
+    #[test]
+    fn test_validate_password_strong() {
+        // Valid passwords (>= 8 characters) pass.
+        let service = AuthService::new(MockStore::default());
+        let result = service.validate_user_password(&ValidateUserPasswordRequest {
+            password: "strongpassword123".to_owned(),
+        });
+        assert!(result.valid);
+        assert!(result.details.is_empty());
+
+        // Exactly 8 characters.
+        let result = service.validate_user_password(&ValidateUserPasswordRequest {
+            password: "abcdefgh".to_owned(),
+        });
+        assert!(result.valid);
+    }
+
+    #[test]
+    fn test_validate_password_weak_rejected() {
+        let service = AuthService::new(MockStore::default());
+        // Too short (< 8 characters).
+        let result = service.validate_user_password(&ValidateUserPasswordRequest {
+            password: "short".to_owned(),
+        });
+        assert!(!result.valid);
+        assert!(!result.details.is_empty());
+
+        // Empty password.
+        let result = service.validate_user_password(&ValidateUserPasswordRequest {
+            password: String::new(),
+        });
+        assert!(!result.valid);
+    }
+
+    #[test]
+    fn test_supported_auth_methods() {
+        let methods = supported_auth_methods();
+        assert!(methods.password.enabled);
+        assert!(methods.github.enabled);
+        assert!(methods.github.default_provider_configured);
+        assert!(methods.terms_of_service_url.is_empty());
+    }
+
+    #[test]
+    fn test_api_key_generation_format() {
+        // new_session_token should produce a non-empty string.
+        let token = new_session_token();
+        assert!(!token.is_empty());
+        // hash_session_token should produce a non-empty hash.
+        let hash = hash_session_token(&token);
+        assert!(!hash.is_empty());
+        // Two different tokens should hash differently.
+        let token2 = new_session_token();
+        let hash2 = hash_session_token(&token2);
+        assert_ne!(hash, hash2);
+    }
+
+    #[tokio::test]
+    async fn test_auth_service_first_user_flow() {
+        let store = MockStore::default();
+        let service = AuthService::new(store.clone());
+
+        // Initially no first user.
+        let exists = service.first_user_exists().await;
+        assert!(exists.is_ok());
+        assert!(!exists.unwrap_or(true));
+
+        // Create first user.
+        let request = CreateFirstUserRequest {
+            email: "admin@example.com".to_owned(),
+            username: "admin".to_owned(),
+            name: "Admin User".to_owned(),
+            password: "securepassword123".to_owned(),
+        };
+        let result = service.create_first_user(&request).await;
+        assert!(result.is_ok());
+        let response = result.unwrap_or_else(|_| CreateFirstUserResponse {
+            user_id: Uuid::nil(),
+            organization_id: Uuid::nil(),
+        });
+        assert_ne!(response.user_id, Uuid::nil());
+        assert_ne!(response.organization_id, Uuid::nil());
+
+        // Now first user exists.
+        let exists = service.first_user_exists().await;
+        assert!(exists.is_ok());
+        assert!(exists.unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn test_auth_service_login_logout() {
+        let store = MockStore::default();
+        let service = AuthService::new(store.clone());
+
+        // Bootstrap user.
+        let request = CreateFirstUserRequest {
+            email: "testuser@example.com".to_owned(),
+            username: "testuser".to_owned(),
+            name: "Test User".to_owned(),
+            password: "securepassword123".to_owned(),
+        };
+        let create_result = service.create_first_user(&request).await;
+        assert!(create_result.is_ok());
+
+        // Login.
+        let login_request = LoginWithPasswordRequest {
+            email: "testuser@example.com".to_owned(),
+            password: "securepassword123".to_owned(),
+        };
+        let login_result = service.login_with_password(&login_request).await;
+        assert!(login_result.is_ok());
+        let outcome = login_result.unwrap_or_else(|_| LoginOutcome {
+            user: AuthenticatedUser {
+                id: Uuid::nil(),
+                email: String::new(),
+                username: String::new(),
+                name: String::new(),
+                avatar_url: String::new(),
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                last_seen_at: None,
+                organization_ids: vec![],
+                roles: vec![],
+                org_roles: vec![],
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+            },
+            response: LoginWithPasswordResponse {
+                session_token: String::new(),
+            },
+        });
+        let session_token = &outcome.response.session_token;
+        assert!(!session_token.is_empty());
+
+        // Verify session is valid via authenticate.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SESSION_TOKEN_HEADER,
+            http::HeaderValue::from_str(session_token)
+                .unwrap_or_else(|_| http::HeaderValue::from_static("")),
+        );
+        let auth_result = service.authenticate(&headers).await;
+        assert!(auth_result.is_ok());
+        let authenticated = auth_result.unwrap_or(None);
+        assert!(authenticated.is_some());
+
+        // Logout.
+        let logout_result = service.logout(session_token).await;
+        assert!(logout_result.is_ok());
+
+        // Session should now be invalid.
+        let auth_result = service.authenticate(&headers).await;
+        assert!(auth_result.is_ok());
+        let authenticated = auth_result.unwrap_or(None);
+        assert!(authenticated.is_none());
+    }
+}
+
 fn external_auth_installations_from_value(value: &Value) -> Vec<ExternalAuthAppInstallation> {
     let items = value
         .get("installations")
