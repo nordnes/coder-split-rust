@@ -3135,6 +3135,7 @@ async fn cancel_provisioner_job(
 #[derive(Debug, Default, Deserialize)]
 struct ProvisionerJobLogsQuery {
     after: Option<i64>,
+    follow: Option<bool>,
 }
 
 async fn get_provisioner_job_logs(
@@ -3182,6 +3183,8 @@ async fn get_provisioner_job_logs(
     if pj.organization_id != org.id {
         return Ok(resource_not_found_response());
     }
+
+    let _follow = query.follow.unwrap_or(false);
 
     // Fetch the logs.
     let logs = state
@@ -26404,6 +26407,391 @@ mod tests {
         assert_eq!(shares2.len(), 1);
         assert_eq!(shares2[0].get("port").and_then(Value::as_i64), Some(3000));
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Provisioner job handler tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: seed a provisioner job into the FakeStore with a given org_id.
+    fn seed_provisioner_job(store: &FakeStore, job_id: Uuid, organization_id: Uuid) {
+        let now = OffsetDateTime::now_utc();
+        let record = TemplateProvisionerJobRecord {
+            id: job_id,
+            created_at: now,
+            updated_at: now,
+            started_at: None,
+            canceled_at: None,
+            completed_at: None,
+            error: String::new(),
+            organization_id,
+            initiator_id: Uuid::from_u128(1),
+            provisioner: "echo".to_owned(),
+            job_status: "pending".to_owned(),
+            file_id: None,
+            job_type: "template_version_import".to_owned(),
+            input: Value::Object(Default::default()),
+            worker_id: None,
+            tags: HashMap::new(),
+        };
+        if let Ok(mut jobs) = store.provisioner_jobs.lock() {
+            jobs.insert(job_id, record);
+        }
+    }
+
+    // -- cancel_provisioner_job tests --
+
+    #[tokio::test]
+    async fn cancel_provisioner_job_happy_path() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(5000);
+        seed_provisioner_job(&store, job_id, org_id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_provisioner_job_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let job_id = Uuid::from_u128(5000);
+        let org_id = Uuid::nil();
+        let response = call(
+            app,
+            request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/cancel"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_provisioner_job_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let missing_job_id = Uuid::from_u128(9999);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{missing_job_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_provisioner_job_cross_org() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(5001);
+        // Seed job with a different org id.
+        let other_org = Uuid::from_u128(99999);
+        seed_provisioner_job(&store, job_id, other_org);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_provisioner_job_invalid_uuid() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/not-a-uuid/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_provisioner_job_already_completed() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(5002);
+        seed_provisioner_job(&store, job_id, org_id);
+        // Mark as completed.
+        if let Ok(mut jobs) = store.provisioner_jobs.lock() {
+            if let Some(j) = jobs.get_mut(&job_id) {
+                j.completed_at = Some(OffsetDateTime::now_utc());
+                j.job_status = "succeeded".to_owned();
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cancel_provisioner_job_already_canceled() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(5003);
+        seed_provisioner_job(&store, job_id, org_id);
+        // Mark as canceled.
+        if let Ok(mut jobs) = store.provisioner_jobs.lock() {
+            if let Some(j) = jobs.get_mut(&job_id) {
+                j.canceled_at = Some(OffsetDateTime::now_utc());
+                j.job_status = "canceled".to_owned();
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        Ok(())
+    }
+
+    // -- get_provisioner_job_logs tests --
+
+    #[tokio::test]
+    async fn get_provisioner_job_logs_happy_path() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(6000);
+        seed_provisioner_job(&store, job_id, org_id);
+
+        // Seed logs.
+        store
+            .provisioner_job_logs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobLogRecord {
+                id: 1,
+                job_id,
+                created_at: OffsetDateTime::now_utc(),
+                source: "provisioner".to_owned(),
+                level: "info".to_owned(),
+                stage: "init".to_owned(),
+                output: "Setting up...".to_owned(),
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Setting up...")
+        );
+        assert_eq!(
+            logs[0].get("log_source").and_then(Value::as_str),
+            Some("provisioner")
+        );
+        assert_eq!(
+            logs[0].get("log_level").and_then(Value::as_str),
+            Some("info")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_logs_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let job_id = Uuid::from_u128(6000);
+        let org_id = Uuid::nil();
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/logs"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_logs_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let missing_job_id = Uuid::from_u128(9998);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{missing_job_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_logs_cross_org() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(6001);
+        let other_org = Uuid::from_u128(88888);
+        seed_provisioner_job(&store, job_id, other_org);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_logs_invalid_uuid() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/not-a-uuid/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_logs_with_after_param() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(6002);
+        seed_provisioner_job(&store, job_id, org_id);
+
+        // Seed multiple logs.
+        {
+            let mut logs = store
+                .provisioner_job_logs
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            let entry = logs.entry(job_id).or_default();
+            entry.push(PortsJobLogRecord {
+                id: 1,
+                job_id,
+                created_at: OffsetDateTime::now_utc(),
+                source: "provisioner".to_owned(),
+                level: "info".to_owned(),
+                stage: "init".to_owned(),
+                output: "First log".to_owned(),
+            });
+            entry.push(PortsJobLogRecord {
+                id: 2,
+                job_id,
+                created_at: OffsetDateTime::now_utc(),
+                source: "provisioner".to_owned(),
+                level: "info".to_owned(),
+                stage: "build".to_owned(),
+                output: "Second log".to_owned(),
+            });
+        }
+
+        // Call with ?after=0 — the FakeStore ignores the after param so we just
+        // verify the query parameter is accepted and the handler returns logs.
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/logs?after=0"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected array")?;
+        assert_eq!(logs.len(), 2);
         Ok(())
     }
 }
