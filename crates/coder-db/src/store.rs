@@ -1610,7 +1610,7 @@ impl AppStore for PostgresStore {
             "INSERT INTO user_links (
                 user_id, login_type, linked_id,
                 oauth_access_token, oauth_refresh_token, oauth_expiry
-             ) VALUES ($1, $2, $3, $4, $5, $6)
+             ) VALUES ($1, $2::login_type, $3, $4, $5, $6)
              ON CONFLICT (user_id, login_type) DO UPDATE SET
                 linked_id = EXCLUDED.linked_id,
                 oauth_access_token = EXCLUDED.oauth_access_token,
@@ -1643,12 +1643,14 @@ impl AppStore for PostgresStore {
         user_id: Uuid,
         login_type: LoginType,
     ) -> Result<bool, StorageError> {
-        let result = sqlx::query("DELETE FROM user_links WHERE user_id = $1 AND login_type = $2")
-            .bind(user_id)
-            .bind(login_type.as_str())
-            .execute(&self.pool)
-            .await
-            .map_err(storage_error)?;
+        let result = sqlx::query(
+            "DELETE FROM user_links WHERE user_id = $1 AND login_type = $2::login_type",
+        )
+        .bind(user_id)
+        .bind(login_type.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -1753,7 +1755,7 @@ impl AppStore for PostgresStore {
     ) -> Result<UserStatusChangeRecord, StorageError> {
         let row = sqlx::query_as::<_, StoredUserStatusChangeRow>(
             "INSERT INTO user_status_changes (user_id, old_status, new_status, changed_by, reason)
-             VALUES ($1, $2, $3, $4, $5)
+             VALUES ($1, $2::user_status, $3::user_status, $4, $5)
              RETURNING id, user_id, new_status::text AS new_status, old_status::text AS old_status, changed_at, changed_by, reason",
         )
         .bind(user_id)
@@ -3551,7 +3553,7 @@ impl AppStore for PostgresStore {
     ) -> Result<Option<TaskRecord>, StorageError> {
         let row: Option<StoredTaskRow> = sqlx::query_as(
             "SELECT id, organization_id, owner_id, name, display_name, workspace_id, template_version_id, template_parameters, prompt, created_at, deleted_at
-             FROM tasks WHERE owner_id = $1 AND name = $2 AND deleted_at IS NULL LIMIT 1",
+             FROM tasks WHERE owner_id = $1 AND name = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
         )
         .bind(owner_id)
         .bind(name)

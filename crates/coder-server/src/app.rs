@@ -14063,13 +14063,17 @@ mod tests {
             owner_id: Uuid,
             name: &str,
         ) -> Result<Option<TaskRecord>, StorageError> {
-            Ok(self
+            let guard = self
                 .tasks
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut matches: Vec<&TaskRecord> = guard
                 .values()
-                .find(|t| t.deleted_at.is_none() && t.owner_id == owner_id && t.name == name)
-                .cloned())
+                .filter(|t| t.deleted_at.is_none() && t.owner_id == owner_id && t.name == name)
+                .collect();
+            // Match PostgresStore: ORDER BY created_at DESC LIMIT 1
+            matches.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(matches.first().cloned().cloned())
         }
 
         async fn list_tasks(
