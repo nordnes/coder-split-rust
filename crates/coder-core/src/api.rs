@@ -2012,7 +2012,7 @@ pub struct WorkspaceBuildResponse {
     /// Template version name.
     pub template_version_name: String,
     /// Build sequence number.
-    pub build_number: i32,
+    pub build_number: i64,
     /// Transition type.
     pub transition: WorkspaceTransition,
     /// Initiator identifier.

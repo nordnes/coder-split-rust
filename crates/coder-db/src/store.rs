@@ -3077,7 +3077,7 @@ impl AppStore for PostgresStore {
     async fn find_workspace_build_by_number(
         &self,
         workspace_id: Uuid,
-        build_number: i32,
+        build_number: i64,
     ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
         sqlx::query_as::<_, StoredWorkspaceBuildRow>(
             "SELECT id, created_at, updated_at, workspace_id, build_number, transition,
@@ -3168,8 +3168,8 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i32, StorageError> {
-        let max: Option<i32> = sqlx::query_scalar(
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
+        let max: Option<i64> = sqlx::query_scalar(
             "SELECT MAX(build_number) FROM workspace_builds WHERE workspace_id = $1",
         )
         .bind(workspace_id)
@@ -3860,7 +3860,7 @@ struct StoredWorkspaceBuildRow {
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
     workspace_id: Uuid,
-    build_number: i32,
+    build_number: i64,
     transition: String,
     job_id: Uuid,
     template_version_id: Uuid,

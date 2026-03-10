@@ -417,7 +417,7 @@ pub struct WorkspaceBuildRecord {
     /// Parent workspace identifier.
     pub workspace_id: Uuid,
     /// Build sequence number.
-    pub build_number: i32,
+    pub build_number: i64,
     /// Transition: start, stop, delete.
     pub transition: String,
     /// Provisioner job identifier.
@@ -666,7 +666,7 @@ pub struct CreateWorkspaceBuildInput {
     /// Template version identifier.
     pub template_version_id: Uuid,
     /// Build number (auto-increment based on workspace).
-    pub build_number: i32,
+    pub build_number: i64,
     /// Transition: start, stop, delete.
     pub transition: String,
     /// Initiator identifier.
@@ -2286,7 +2286,7 @@ pub trait AppStore: DeploymentStore + Send + Sync {
     async fn find_workspace_build_by_number(
         &self,
         workspace_id: Uuid,
-        build_number: i32,
+        build_number: i64,
     ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
         let _ = (workspace_id, build_number);
         Err(StorageError::unavailable(
@@ -2331,7 +2331,7 @@ pub trait AppStore: DeploymentStore + Send + Sync {
     }
 
     /// Returns the next build number for a workspace.
-    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i32, StorageError> {
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
         let _ = workspace_id;
         Err(StorageError::unavailable(
             "workspace builds are not implemented",
@@ -3029,7 +3029,7 @@ pub trait WorkspaceStore: Send + Sync {
     async fn find_workspace_build_by_number(
         &self,
         workspace_id: Uuid,
-        build_number: i32,
+        build_number: i64,
     ) -> Result<Option<WorkspaceBuildRecord>, StorageError>;
 
     /// Creates a new workspace build.
@@ -3054,7 +3054,7 @@ pub trait WorkspaceStore: Send + Sync {
     ) -> Result<bool, StorageError>;
 
     /// Returns the next build number for a workspace.
-    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i32, StorageError>;
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError>;
 
     /// Lists build parameters for a workspace build.
     async fn list_workspace_build_parameters(
@@ -4167,7 +4167,7 @@ where
     async fn find_workspace_build_by_number(
         &self,
         workspace_id: Uuid,
-        build_number: i32,
+        build_number: i64,
     ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
         AppStore::find_workspace_build_by_number(self, workspace_id, build_number).await
     }
@@ -4196,7 +4196,7 @@ where
         AppStore::update_workspace_build_provisioner_state(self, build_id, state).await
     }
 
-    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i32, StorageError> {
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
         AppStore::next_workspace_build_number(self, workspace_id).await
     }
 
@@ -4449,7 +4449,7 @@ where
     async fn find_workspace_build_by_number(
         &self,
         workspace_id: Uuid,
-        build_number: i32,
+        build_number: i64,
     ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
         (**self)
             .find_workspace_build_by_number(workspace_id, build_number)
@@ -4484,7 +4484,7 @@ where
             .await
     }
 
-    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i32, StorageError> {
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
         (**self).next_workspace_build_number(workspace_id).await
     }
 

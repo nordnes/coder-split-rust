@@ -4068,7 +4068,7 @@ async fn get_user_workspace_by_name(
 async fn get_user_workspace_build_by_number(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((user, name, number)): Path<(String, String, i32)>,
+    Path((user, name, number)): Path<(String, String, i64)>,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
