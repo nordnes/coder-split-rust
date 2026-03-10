@@ -18742,6 +18742,56 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn list_all_templates_returns_created_template() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, _org_id, template) = create_test_template(&app).await?;
+
+        // GET /templates should return a non-empty array containing the template.
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await?;
+        let templates = list_body.as_array().ok_or("expected array")?;
+        assert_eq!(templates.len(), 1);
+        assert_eq!(
+            templates[0].get("name").and_then(Value::as_str),
+            template.get("name").and_then(Value::as_str),
+        );
+
+        // Unauthenticated request returns 401.
+        let unauth_response = call(app, request(Method::GET, "/api/v2/templates")?).await?;
+        assert_eq!(unauth_response.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_all_template_examples_returns_empty_array() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET /templates/examples should return 200 with an empty array.
+        let examples_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates/examples", &session_token)?,
+        )
+        .await?;
+        assert_eq!(examples_response.status(), StatusCode::OK);
+        let examples_body = response_json(examples_response).await?;
+        assert_eq!(examples_body.as_array().map(Vec::len), Some(0));
+
+        // Unauthenticated request returns 401.
+        let unauth_response =
+            call(app, request(Method::GET, "/api/v2/templates/examples")?).await?;
+        assert_eq!(unauth_response.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // AI Tasks handler tests
     // -----------------------------------------------------------------------
