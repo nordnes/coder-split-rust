@@ -37773,29 +37773,6 @@ mod tests {
         assert!(logs.is_empty());
         Ok(())
     }
-}
-
-#[cfg(test)]
-mod tailnet_ws_tests {
-    use std::error::Error;
-    use std::time::Duration;
-
-    use axum::body::to_bytes;
-    use axum::http::{Method, StatusCode};
-    use coder_connectivity::tailnet::{
-        CoordinateRequest, CoordinateResponse, NodeInfo, PeerUpdateKind,
-    };
-    use futures_util::{SinkExt, StreamExt};
-    use serde_json::Value;
-    use tokio_tungstenite::tungstenite;
-    use uuid::Uuid;
-
-    use super::build_router;
-    use super::tests::{
-        authenticated_json_request, authenticated_request, call, create_and_login, json_request,
-        spawn_test_server, test_state,
-    };
-    use coder_core::LoginWithPasswordRequest;
 
     // -----------------------------------------------------------------------
     // Tailnet WebSocket integration tests
