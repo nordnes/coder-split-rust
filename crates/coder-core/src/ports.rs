@@ -4907,6 +4907,33 @@ where
     ) -> Result<Option<OrganizationMemberRecord>, StorageError> {
         AppStore::update_organization_member_roles(self, organization_id, user_id, roles).await
     }
+
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        AppStore::list_groups(self, organization_id).await
+    }
+
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        AppStore::create_group(self, input).await
+    }
+
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        AppStore::find_group_by_id(self, group_id).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_group(self, group_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        AppStore::list_group_members(self, group_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        AppStore::insert_group_member(self, group_id, user_id).await
+    }
 }
 
 #[async_trait]
@@ -5078,6 +5105,33 @@ where
         (**self)
             .update_organization_member_roles(organization_id, user_id, roles)
             .await
+    }
+
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        (**self).list_groups(organization_id).await
+    }
+
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        (**self).create_group(input).await
+    }
+
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        (**self).find_group_by_id(group_id).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_group(group_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        (**self).list_group_members(group_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        (**self).insert_group_member(group_id, user_id).await
     }
 }
 
