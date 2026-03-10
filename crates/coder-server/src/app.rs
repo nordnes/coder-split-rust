@@ -22,10 +22,7 @@ use coder_auth::{
     OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
-use coder_core::api::{
-    DebugCoordinatorResponse, DebugDerpTrafficResponse, DebugExpvarResponse, DebugPprofResponse,
-    DebugTailnetResponse, DebugWebsocketResponse, InsightsReportInterval, TemplateInsightsSection,
-};
+use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
 use coder_core::pubsub::PubSub;
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
@@ -3521,6 +3518,15 @@ async fn insights_daus(
     }
 
     let tz_offset = query.tz_offset.unwrap_or(0);
+    if !(-23..=23).contains(&tz_offset) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok(
+                "Invalid tz_offset: must be between -23 and 23.",
+            )),
+        )
+            .into_response());
+    }
     let response = state.store.get_deployment_daus(tz_offset).await?;
     Ok((StatusCode::OK, Json(response)).into_response())
 }
@@ -3529,8 +3535,9 @@ fn parse_template_ids(raw: &Option<String>) -> Vec<Uuid> {
     raw.as_deref()
         .unwrap_or("")
         .split(',')
+        .map(str::trim)
         .filter(|s| !s.is_empty())
-        .filter_map(|s| Uuid::from_str(s.trim()).ok())
+        .filter_map(|s| Uuid::from_str(s).ok())
         .collect()
 }
 
@@ -3579,7 +3586,16 @@ async fn insights_templates(
     };
     let interval = match query.interval.as_deref() {
         Some("week") => InsightsReportInterval::Week,
-        _ => InsightsReportInterval::Day,
+        None | Some("day") => InsightsReportInterval::Day,
+        Some(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "interval must be 'day', 'week', or omitted.",
+                )),
+            )
+                .into_response());
+        }
     };
     let template_ids = parse_template_ids(&query.template_ids);
 
@@ -3726,6 +3742,13 @@ async fn insights_user_status_counts(
     // Resolve timezone from query params, following Go's Etc/GMT±N convention.
     let timezone = match (&query.timezone, query.tz_offset) {
         (Some(tz), _) if !tz.is_empty() => tz.clone(),
+        (_, Some(offset)) if !(-23..=23).contains(&offset) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("tz_offset must be between -23 and 23.")),
+            )
+                .into_response());
+        }
         (_, Some(offset)) if offset > 0 => format!("Etc/GMT-{offset}"),
         (_, Some(offset)) if offset < 0 => {
             let abs = offset.saturating_neg();
@@ -3755,14 +3778,9 @@ async fn debug_coordinator(
         ));
     }
 
-    Ok((
-        StatusCode::OK,
-        Json(DebugCoordinatorResponse {
-            message: "Coordinator debug endpoint is not yet implemented in the Rust backend."
-                .to_owned(),
-        }),
-    )
-        .into_response())
+    Ok(not_implemented_response(
+        "Coordinator debug endpoint is not yet implemented in the Rust backend.",
+    ))
 }
 
 async fn debug_tailnet(
@@ -3778,14 +3796,9 @@ async fn debug_tailnet(
         ));
     }
 
-    Ok((
-        StatusCode::OK,
-        Json(DebugTailnetResponse {
-            message: "Tailnet debug endpoint is not yet implemented in the Rust backend."
-                .to_owned(),
-        }),
-    )
-        .into_response())
+    Ok(not_implemented_response(
+        "Tailnet debug endpoint is not yet implemented in the Rust backend.",
+    ))
 }
 
 async fn debug_derp_traffic(
@@ -3801,14 +3814,9 @@ async fn debug_derp_traffic(
         ));
     }
 
-    Ok((
-        StatusCode::OK,
-        Json(DebugDerpTrafficResponse {
-            message: "DERP traffic debug endpoint is not yet implemented in the Rust backend."
-                .to_owned(),
-        }),
-    )
-        .into_response())
+    Ok(not_implemented_response(
+        "DERP traffic debug endpoint is not yet implemented in the Rust backend.",
+    ))
 }
 
 async fn debug_expvar(
@@ -3824,13 +3832,9 @@ async fn debug_expvar(
         ));
     }
 
-    Ok((
-        StatusCode::OK,
-        Json(DebugExpvarResponse {
-            vars: HashMap::new(),
-        }),
-    )
-        .into_response())
+    Ok(not_implemented_response(
+        "Expvar debug endpoint is not yet implemented in the Rust backend.",
+    ))
 }
 
 async fn debug_pprof(
@@ -3846,15 +3850,9 @@ async fn debug_pprof(
         ));
     }
 
-    Ok((
-        StatusCode::OK,
-        Json(DebugPprofResponse {
-            message:
-                "Rust does not support Go-style pprof. Use tracing or jemalloc profiling instead."
-                    .to_owned(),
-        }),
-    )
-        .into_response())
+    Ok(not_implemented_response(
+        "Rust does not support Go-style pprof. Use tracing or jemalloc profiling instead.",
+    ))
 }
 
 async fn debug_websocket(
@@ -3871,14 +3869,9 @@ async fn debug_websocket(
     }
 
     // In Go this upgrades to a WebSocket echo. For now return a stub JSON response.
-    Ok((
-        StatusCode::OK,
-        Json(DebugWebsocketResponse {
-            message: "WebSocket echo endpoint is not yet implemented in the Rust backend."
-                .to_owned(),
-        }),
-    )
-        .into_response())
+    Ok(not_implemented_response(
+        "WebSocket echo endpoint is not yet implemented in the Rust backend.",
+    ))
 }
 
 #[cfg(test)]
@@ -8060,14 +8053,12 @@ mod tests {
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
 
         let session_token = create_and_login(&app).await?;
-        let ok = call(
+        let resp = call(
             app,
             authenticated_request(Method::GET, "/api/v2/debug/coordinator", &session_token)?,
         )
         .await?;
-        assert_eq!(ok.status(), StatusCode::OK);
-        let body = response_json(ok).await?;
-        assert!(body.get("message").and_then(Value::as_str).is_some());
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
         Ok(())
     }
 
@@ -8079,14 +8070,12 @@ mod tests {
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
 
         let session_token = create_and_login(&app).await?;
-        let ok = call(
+        let resp = call(
             app,
             authenticated_request(Method::GET, "/api/v2/debug/tailnet", &session_token)?,
         )
         .await?;
-        assert_eq!(ok.status(), StatusCode::OK);
-        let body = response_json(ok).await?;
-        assert!(body.get("message").and_then(Value::as_str).is_some());
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
         Ok(())
     }
 
@@ -8102,14 +8091,12 @@ mod tests {
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
 
         let session_token = create_and_login(&app).await?;
-        let ok = call(
+        let resp = call(
             app,
             authenticated_request(Method::GET, "/api/v2/debug/derp/traffic", &session_token)?,
         )
         .await?;
-        assert_eq!(ok.status(), StatusCode::OK);
-        let body = response_json(ok).await?;
-        assert!(body.get("message").and_then(Value::as_str).is_some());
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
         Ok(())
     }
 
@@ -8121,14 +8108,12 @@ mod tests {
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
 
         let session_token = create_and_login(&app).await?;
-        let ok = call(
+        let resp = call(
             app,
             authenticated_request(Method::GET, "/api/v2/debug/expvar", &session_token)?,
         )
         .await?;
-        assert_eq!(ok.status(), StatusCode::OK);
-        let body = response_json(ok).await?;
-        assert!(body.get("vars").is_some());
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
         Ok(())
     }
 
@@ -8142,18 +8127,16 @@ mod tests {
         let session_token = create_and_login(&app).await?;
 
         // Test main pprof endpoint
-        let ok = call(
+        let resp = call(
             app.clone(),
             authenticated_request(Method::GET, "/api/v2/debug/pprof", &session_token)?,
         )
         .await?;
-        assert_eq!(ok.status(), StatusCode::OK);
-        let body = response_json(ok).await?;
-        assert!(body.get("message").and_then(Value::as_str).is_some());
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
 
         // Test pprof sub-routes (cmdline, profile, symbol, trace)
         for sub in &["cmdline", "profile", "symbol", "trace"] {
-            let sub_ok = call(
+            let sub_resp = call(
                 app.clone(),
                 authenticated_request(
                     Method::GET,
@@ -8163,9 +8146,9 @@ mod tests {
             )
             .await?;
             assert_eq!(
-                sub_ok.status(),
-                StatusCode::OK,
-                "pprof/{sub} should return 200"
+                sub_resp.status(),
+                StatusCode::NOT_IMPLEMENTED,
+                "pprof/{sub} should return 501"
             );
         }
         Ok(())
@@ -8179,14 +8162,124 @@ mod tests {
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
 
         let session_token = create_and_login(&app).await?;
-        let ok = call(
+        let resp = call(
             app,
             authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?,
         )
         .await?;
-        assert_eq!(ok.status(), StatusCode::OK);
-        let body = response_json(ok).await?;
-        assert!(body.get("message").and_then(Value::as_str).is_some());
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    // ── BAD_REQUEST validation tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn insights_templates_returns_400_for_missing_timestamps() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Missing both start_time and end_time
+        let resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/insights/templates", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing end_time
+        let resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Invalid interval
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z&interval=monthly",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_activity_returns_400_for_missing_timestamps()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-activity",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_latency_returns_400_for_missing_timestamps() -> Result<(), Box<dyn Error>>
+    {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/insights/user-latency", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_daus_returns_400_for_invalid_tz_offset() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/daus?tz_offset=99",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_status_counts_returns_400_for_invalid_tz_offset()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-status-counts?tz_offset=-99",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 }
