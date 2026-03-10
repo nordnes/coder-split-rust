@@ -25,7 +25,8 @@ use coder_core::{
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
     ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
     ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
-    CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput, CreateUserInput,
+    CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
+    CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateUserInput,
     CreateUserStoreError, CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord,
     DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse, DeploymentStore,
     ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
@@ -35,24 +36,26 @@ use coder_core::{
     InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
     InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
     MinimalOrganization, MinimalUser, NotificationMessageRecord, NotificationMessageStatus,
-    NotificationMethod, OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
-    PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
-    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
+    NotificationMethod, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
+    OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrganizationMemberListFilter,
+    OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
+    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
+    ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
     ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
     ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
     SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
-    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpsertCustomRoleInput,
-    UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-    UserAppearanceRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
-    UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
-    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
-    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
-    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
-    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
-    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
-    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateOAuth2ProviderAppInput,
+    UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
+    UpsertProvisionerDaemonInput, UserAppearanceRecord, UserLinkRecord, UserListFilter,
+    UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
+    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
+    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
+    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
+    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
+    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
+    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -685,6 +688,62 @@ struct StoredFileRow {
     created_at: OffsetDateTime,
     mimetype: String,
     data: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// OAuth2 provider domain row types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+struct StoredOAuth2ProviderAppRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    name: String,
+    icon: String,
+    callback_url: String,
+    redirect_uris: Vec<String>,
+    created_by: Uuid,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredOAuth2ProviderAppSecretRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    last_used_at: Option<OffsetDateTime>,
+    secret_prefix: Vec<u8>,
+    hashed_secret: Vec<u8>,
+    display_secret: String,
+    app_id: Uuid,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredOAuth2ProviderAppCodeRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
+    secret_prefix: Vec<u8>,
+    hashed_secret: Vec<u8>,
+    app_id: Uuid,
+    user_id: Uuid,
+    resource_uri: String,
+    code_challenge: String,
+    code_challenge_method: String,
+    state_hash: Option<String>,
+    redirect_uri: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredOAuth2ProviderAppTokenRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    expires_at: OffsetDateTime,
+    hash_prefix: Vec<u8>,
+    refresh_hash: Vec<u8>,
+    app_secret_id: Uuid,
+    api_key_id: String,
+    audience: String,
+    user_id: Uuid,
 }
 
 impl PostgresStore {
@@ -5169,6 +5228,446 @@ impl AppStore for PostgresStore {
         ))
     }
 
+    // ----- OAuth2 Provider Apps -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_oauth2_provider_apps(
+        &self,
+    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
+            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by
+             FROM oauth2_provider_apps
+             ORDER BY (name, id) ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows.into_iter().map(oauth2_provider_app_from_row).collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn create_oauth2_provider_app(
+        &self,
+        input: &CreateOAuth2ProviderAppInput,
+    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
+            "INSERT INTO oauth2_provider_apps (name, icon, callback_url, created_by)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by",
+        )
+        .bind(&input.name)
+        .bind(&input.icon)
+        .bind(&input.callback_url)
+        .bind(input.created_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(oauth2_provider_app_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_by_id(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
+            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by
+             FROM oauth2_provider_apps WHERE id = $1",
+        )
+        .bind(app_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_oauth2_provider_app(
+        &self,
+        input: &UpdateOAuth2ProviderAppInput,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
+            "UPDATE oauth2_provider_apps SET
+                updated_at = NOW(),
+                name = $2,
+                icon = $3,
+                callback_url = $4,
+                redirect_uris = $5
+             WHERE id = $1
+             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by",
+        )
+        .bind(input.id)
+        .bind(&input.name)
+        .bind(&input.icon)
+        .bind(&input.callback_url)
+        .bind(&input.redirect_uris)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM oauth2_provider_apps WHERE id = $1")
+            .bind(app_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ----- OAuth2 Provider App Secrets -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_oauth2_provider_app_secrets(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
+            "SELECT id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id
+             FROM oauth2_provider_app_secrets
+             WHERE app_id = $1
+             ORDER BY (created_at, id) ASC",
+        )
+        .bind(app_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(oauth2_provider_app_secret_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self, secret_prefix, hashed_secret), err(level = tracing::Level::WARN))]
+    async fn create_oauth2_provider_app_secret(
+        &self,
+        app_id: Uuid,
+        secret_prefix: &[u8],
+        hashed_secret: &[u8],
+        display_secret: &str,
+    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
+            "INSERT INTO oauth2_provider_app_secrets (secret_prefix, hashed_secret, display_secret, app_id)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id",
+        )
+        .bind(secret_prefix)
+        .bind(hashed_secret)
+        .bind(display_secret)
+        .bind(app_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(oauth2_provider_app_secret_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_secret_by_id(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
+            "SELECT id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id
+             FROM oauth2_provider_app_secrets WHERE id = $1",
+        )
+        .bind(secret_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_secret_from_row))
+    }
+
+    #[instrument(skip(self, secret_prefix), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_secret_by_prefix(
+        &self,
+        secret_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
+            "SELECT id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id
+             FROM oauth2_provider_app_secrets WHERE secret_prefix = $1",
+        )
+        .bind(secret_prefix)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_secret_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_oauth2_provider_app_secret_last_used(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
+            "UPDATE oauth2_provider_app_secrets SET last_used_at = NOW()
+             WHERE id = $1
+             RETURNING id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id",
+        )
+        .bind(secret_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_secret_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_oauth2_provider_app_secret(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM oauth2_provider_app_secrets WHERE id = $1")
+            .bind(secret_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ----- OAuth2 Provider App Codes -----
+
+    #[instrument(skip(self, secret_prefix, hashed_secret), err(level = tracing::Level::WARN))]
+    async fn create_oauth2_provider_app_code(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        secret_prefix: &[u8],
+        hashed_secret: &[u8],
+        expires_at: OffsetDateTime,
+        resource_uri: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        state_hash: Option<&str>,
+        redirect_uri: Option<&str>,
+    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredOAuth2ProviderAppCodeRow>(
+            "INSERT INTO oauth2_provider_app_codes
+                (expires_at, secret_prefix, hashed_secret, app_id, user_id,
+                 resource_uri, code_challenge, code_challenge_method, state_hash, redirect_uri)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             RETURNING id, created_at, expires_at, secret_prefix, hashed_secret,
+                       app_id, user_id, resource_uri, code_challenge, code_challenge_method,
+                       state_hash, redirect_uri",
+        )
+        .bind(expires_at)
+        .bind(secret_prefix)
+        .bind(hashed_secret)
+        .bind(app_id)
+        .bind(user_id)
+        .bind(resource_uri)
+        .bind(code_challenge)
+        .bind(code_challenge_method)
+        .bind(state_hash)
+        .bind(redirect_uri)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(oauth2_provider_app_code_from_row(row))
+    }
+
+    #[instrument(skip(self, secret_prefix), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_code_by_prefix(
+        &self,
+        secret_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppCodeRow>(
+            "SELECT id, created_at, expires_at, secret_prefix, hashed_secret,
+                    app_id, user_id, resource_uri, code_challenge, code_challenge_method,
+                    state_hash, redirect_uri
+             FROM oauth2_provider_app_codes WHERE secret_prefix = $1",
+        )
+        .bind(secret_prefix)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_code_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_code_by_id(
+        &self,
+        code_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppCodeRow>(
+            "SELECT id, created_at, expires_at, secret_prefix, hashed_secret,
+                    app_id, user_id, resource_uri, code_challenge, code_challenge_method,
+                    state_hash, redirect_uri
+             FROM oauth2_provider_app_codes WHERE id = $1",
+        )
+        .bind(code_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_code_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM oauth2_provider_app_codes WHERE id = $1")
+            .bind(code_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_oauth2_provider_app_codes_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        let result =
+            sqlx::query("DELETE FROM oauth2_provider_app_codes WHERE app_id = $1 AND user_id = $2")
+                .bind(app_id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await
+                .map_err(storage_error)?;
+        Ok(result.rows_affected())
+    }
+
+    // ----- OAuth2 Provider App Tokens -----
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn create_oauth2_provider_app_token(
+        &self,
+        input: &CreateOAuth2ProviderAppTokenInput,
+    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredOAuth2ProviderAppTokenRow>(
+            "INSERT INTO oauth2_provider_app_tokens
+                (expires_at, hash_prefix, refresh_hash, app_secret_id, api_key_id, user_id, audience)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, created_at, expires_at, hash_prefix, refresh_hash,
+                       app_secret_id, api_key_id, audience, user_id",
+        )
+        .bind(input.expires_at)
+        .bind(&input.hash_prefix)
+        .bind(&input.refresh_hash)
+        .bind(input.app_secret_id)
+        .bind(&input.api_key_id)
+        .bind(input.user_id)
+        .bind(&input.audience)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(oauth2_provider_app_token_from_row(row))
+    }
+
+    #[instrument(skip(self, hash_prefix), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_token_by_prefix(
+        &self,
+        hash_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppTokenRow>(
+            "SELECT id, created_at, expires_at, hash_prefix, refresh_hash,
+                    app_secret_id, api_key_id, audience, user_id
+             FROM oauth2_provider_app_tokens WHERE hash_prefix = $1",
+        )
+        .bind(hash_prefix)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_token_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_token_by_api_key_id(
+        &self,
+        api_key_id: &str,
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppTokenRow>(
+            "SELECT id, created_at, expires_at, hash_prefix, refresh_hash,
+                    app_secret_id, api_key_id, audience, user_id
+             FROM oauth2_provider_app_tokens WHERE api_key_id = $1",
+        )
+        .bind(api_key_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_token_from_row))
+    }
+
+    #[instrument(skip(self, refresh_hash), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_token_by_refresh_hash(
+        &self,
+        refresh_hash: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppTokenRow>(
+            "SELECT id, created_at, expires_at, hash_prefix, refresh_hash,
+                    app_secret_id, api_key_id, audience, user_id
+             FROM oauth2_provider_app_tokens WHERE refresh_hash = $1",
+        )
+        .bind(refresh_hash)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_token_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM oauth2_provider_app_tokens WHERE id = $1")
+            .bind(token_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredOAuth2ProviderAppTokenRow>(
+            "SELECT t.id, t.created_at, t.expires_at, t.hash_prefix, t.refresh_hash,
+                    t.app_secret_id, t.api_key_id, t.audience, t.user_id
+             FROM oauth2_provider_app_tokens t
+             INNER JOIN oauth2_provider_app_secrets s ON s.id = t.app_secret_id
+             WHERE s.app_id = $1 AND t.user_id = $2",
+        )
+        .bind(app_id)
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(oauth2_provider_app_token_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM oauth2_provider_app_tokens
+             USING oauth2_provider_app_secrets
+             WHERE oauth2_provider_app_secrets.id = oauth2_provider_app_tokens.app_secret_id
+               AND oauth2_provider_app_secrets.app_id = $1
+               AND oauth2_provider_app_tokens.user_id = $2",
+        )
+        .bind(app_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected())
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_workspace_acl(
         &self,
@@ -8261,6 +8760,72 @@ fn escape_like(input: &str) -> String {
 
 fn storage_error(error: sqlx::Error) -> StorageError {
     StorageError::unavailable(error.to_string())
+}
+
+// ---------------------------------------------------------------------------
+// OAuth2 provider row-to-record conversions
+// ---------------------------------------------------------------------------
+
+fn oauth2_provider_app_from_row(row: StoredOAuth2ProviderAppRow) -> OAuth2ProviderAppRecord {
+    OAuth2ProviderAppRecord {
+        id: row.id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        name: row.name,
+        icon: row.icon,
+        callback_url: row.callback_url,
+        redirect_uris: row.redirect_uris,
+        created_by: row.created_by,
+    }
+}
+
+fn oauth2_provider_app_secret_from_row(
+    row: StoredOAuth2ProviderAppSecretRow,
+) -> OAuth2ProviderAppSecretRecord {
+    OAuth2ProviderAppSecretRecord {
+        id: row.id,
+        created_at: row.created_at,
+        last_used_at: row.last_used_at,
+        secret_prefix: row.secret_prefix,
+        hashed_secret: row.hashed_secret,
+        display_secret: row.display_secret,
+        app_id: row.app_id,
+    }
+}
+
+fn oauth2_provider_app_code_from_row(
+    row: StoredOAuth2ProviderAppCodeRow,
+) -> OAuth2ProviderAppCodeRecord {
+    OAuth2ProviderAppCodeRecord {
+        id: row.id,
+        created_at: row.created_at,
+        expires_at: row.expires_at,
+        secret_prefix: row.secret_prefix,
+        hashed_secret: row.hashed_secret,
+        app_id: row.app_id,
+        user_id: row.user_id,
+        resource_uri: row.resource_uri,
+        code_challenge: row.code_challenge,
+        code_challenge_method: row.code_challenge_method,
+        state_hash: row.state_hash,
+        redirect_uri: row.redirect_uri,
+    }
+}
+
+fn oauth2_provider_app_token_from_row(
+    row: StoredOAuth2ProviderAppTokenRow,
+) -> OAuth2ProviderAppTokenRecord {
+    OAuth2ProviderAppTokenRecord {
+        id: row.id,
+        created_at: row.created_at,
+        expires_at: row.expires_at,
+        hash_prefix: row.hash_prefix,
+        refresh_hash: row.refresh_hash,
+        app_secret_id: row.app_secret_id,
+        api_key_id: row.api_key_id,
+        audience: row.audience,
+        user_id: row.user_id,
+    }
 }
 
 fn workspace_agent_row_from_stored(row: StoredWorkspaceAgentRow) -> WorkspaceAgentRow {
