@@ -5,6 +5,7 @@ use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use coder_audit::{AuditEvent, AuditSink};
+use coder_connectivity::agents::InMemoryAgentProvider;
 use coder_core::pubsub::PubSub;
 use coder_core::{
     AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
@@ -201,6 +202,7 @@ async fn run() -> Result<(), MainError> {
             .map_err(|error| MainError::Config(format!("create pubsub: {error}")))?,
     );
 
+    let agent_provider = Arc::new(InMemoryAgentProvider::new());
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -208,6 +210,7 @@ async fn run() -> Result<(), MainError> {
         store.clone(),
         Arc::new(PersistingAuditSink::new(store)),
         pubsub.clone(),
+        agent_provider,
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 

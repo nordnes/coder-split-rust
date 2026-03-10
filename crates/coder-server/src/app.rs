@@ -2,6 +2,7 @@
 
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
+use async_trait::async_trait;
 use axum::{
     Form, Json, Router,
     body::Bytes,
@@ -27,7 +28,11 @@ use coder_auth::{
     ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
     OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
-use coder_connectivity::{HealthService, generate_git_ssh_key};
+use coder_connectivity::{
+    HealthService,
+    agents::{AgentConnection, AgentError, AgentProvider},
+    generate_git_ssh_key,
+};
 use coder_core::StorageError;
 use coder_core::api::{
     ArchiveTemplateVersionsRequest, ArchiveTemplateVersionsResponse, CreateTemplateRequest,
@@ -184,6 +189,8 @@ pub struct AppState {
     pub audit: Arc<dyn AuditSink>,
     /// Pub/sub event system for real-time event broadcasting.
     pub pubsub: Arc<dyn PubSub>,
+    /// Registry of live workspace agent connections.
+    pub agent_provider: Arc<dyn AgentProvider>,
     auth: AuthService<Arc<dyn AppStore>>,
     identity: IdentityService<Arc<dyn AppStore>>,
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
@@ -201,6 +208,7 @@ impl AppState {
         store: Arc<dyn AppStore>,
         audit: Arc<dyn AuditSink>,
         pubsub: Arc<dyn PubSub>,
+        agent_provider: Arc<dyn AgentProvider>,
     ) -> Result<Self, reqwest::Error> {
         let auth = AuthService::new(store.clone());
         let identity = IdentityService::new(store.clone());
@@ -216,6 +224,7 @@ impl AppState {
             store,
             audit,
             pubsub,
+            agent_provider,
             auth,
             identity,
             deployment_stats,
@@ -10785,7 +10794,7 @@ async fn get_workspace_agent_containers(
 async fn post_workspace_agent_recreate_devcontainer(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((agent_id, _dc_id)): Path<(Uuid, Uuid)>,
+    Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -10807,18 +10816,36 @@ async fn post_workspace_agent_recreate_devcontainer(
             .into_response());
     }
 
-    // Devcontainer recreation requires a real-time connection to the agent
-    // which is not yet available in the Rust backend.
-    Ok(not_implemented_response(
-        "Devcontainer recreation requires agent connectivity which is not yet implemented.",
-    ))
+    let Some(conn) = state.agent_provider.get_agent_connection(agent_id).await else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error(
+                "Agent is not connected.",
+                "The workspace agent does not have an active connection to the server.",
+            )),
+        )
+            .into_response());
+    };
+
+    if let Err(err) = conn.recreate_devcontainer(&dc_id.to_string()).await {
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(
+                format!("Failed to recreate devcontainer: {err}"),
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    Ok(StatusCode::OK.into_response())
 }
 
 /// DELETE /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc} — delete devcontainer.
 async fn delete_workspace_agent_devcontainer(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((agent_id, _dc_id)): Path<(Uuid, Uuid)>,
+    Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -10840,11 +10867,29 @@ async fn delete_workspace_agent_devcontainer(
             .into_response());
     }
 
-    // Devcontainer deletion requires a real-time connection to the agent
-    // which is not yet available in the Rust backend.
-    Ok(not_implemented_response(
-        "Devcontainer deletion requires agent connectivity which is not yet implemented.",
-    ))
+    let Some(conn) = state.agent_provider.get_agent_connection(agent_id).await else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error(
+                "Agent is not connected.",
+                "The workspace agent does not have an active connection to the server.",
+            )),
+        )
+            .into_response());
+    };
+
+    if let Err(err) = conn.delete_devcontainer(&dc_id.to_string()).await {
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error(
+                format!("Failed to delete devcontainer: {err}"),
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// GET /api/v2/workspaceagents/{agent}/containers/watch — SSE container watch.
@@ -11304,18 +11349,184 @@ async fn get_workspace_agent_reinit(
 ///
 /// In Go this upgrades to a WebSocket, wraps it with yamux, then serves dRPC
 /// methods for the agent API (manifest, stats, lifecycle, etc.).
-/// The full dRPC/yamux infrastructure is not yet ported.
+///
+/// This implementation upgrades to WebSocket and registers the agent connection
+/// in the [`AgentProvider`] so that devcontainer commands can be delivered.
+/// Full dRPC/yamux message handling is not yet ported; the connection is held
+/// open and cleaned up when the agent disconnects.
 async fn get_workspace_agent_rpc(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
+    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
-    Ok(not_implemented_response(
-        "Agent dRPC/WebSocket endpoint requires yamux and dRPC infrastructure.",
-    ))
+    let agent_id = agent.id;
+    let provider = state.agent_provider.clone();
+    let store = state.store.clone();
+
+    Ok(ws.on_upgrade(move |socket| handle_agent_rpc_socket(socket, agent_id, provider, store)))
+}
+
+/// Runs the WebSocket message loop for one connected agent.
+///
+/// Registers the agent in the provider, processes incoming messages, and
+/// removes the agent on disconnect.
+async fn handle_agent_rpc_socket(
+    mut socket: WebSocket,
+    agent_id: Uuid,
+    provider: Arc<dyn AgentProvider>,
+    store: Arc<dyn AppStore>,
+) {
+    let now = OffsetDateTime::now_utc();
+
+    // Create a WebSocket-backed agent connection and register it.
+    let (cmd_tx, mut cmd_rx) = tokio::sync::mpsc::channel::<AgentRpcCommand>(32);
+    let conn: Arc<dyn AgentConnection> = Arc::new(WebSocketAgentConnection {
+        id: agent_id,
+        connected_at: now,
+        cmd_tx,
+    });
+    provider.register_agent(agent_id, conn).await;
+
+    // Ping interval to keep the connection alive.
+    let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            // Incoming message from the agent.
+            msg = socket.recv() => {
+                match msg {
+                    Some(Ok(Message::Text(text))) => {
+                        handle_agent_message(&store, agent_id, &text).await;
+                    }
+                    Some(Ok(Message::Close(_))) | None => break,
+                    Some(Ok(Message::Ping(data))) => {
+                        let _ = socket.send(Message::Pong(data)).await;
+                    }
+                    Some(Ok(_)) => {} // Binary, Pong — ignore
+                    Some(Err(_)) => break,
+                }
+            }
+            // Outbound command to the agent.
+            cmd = cmd_rx.recv() => {
+                match cmd {
+                    Some(AgentRpcCommand::RecreateDevcontainer { container_id, reply }) => {
+                        let payload = serde_json::json!({
+                            "type": "recreate_devcontainer",
+                            "container_id": container_id,
+                        });
+                        let result = socket.send(Message::Text(payload.to_string().into())).await;
+                        let _ = reply.send(result.map_err(|e| AgentError::SendFailed(e.to_string())));
+                    }
+                    Some(AgentRpcCommand::DeleteDevcontainer { container_id, reply }) => {
+                        let payload = serde_json::json!({
+                            "type": "delete_devcontainer",
+                            "container_id": container_id,
+                        });
+                        let result = socket.send(Message::Text(payload.to_string().into())).await;
+                        let _ = reply.send(result.map_err(|e| AgentError::SendFailed(e.to_string())));
+                    }
+                    None => break,
+                }
+            }
+            // Periodic ping.
+            _ = ping_interval.tick() => {
+                if socket.send(Message::Ping(vec![].into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+    }
+
+    // Clean up: remove agent from the provider.
+    provider.remove_agent(agent_id).await;
+
+    // Graceful close.
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            code: 1000,
+            reason: "agent disconnected".into(),
+        })))
+        .await;
+}
+
+/// Processes a single inbound text message from the agent.
+async fn handle_agent_message(_store: &Arc<dyn AppStore>, agent_id: Uuid, text: &str) {
+    let Ok(msg) = serde_json::from_str::<Value>(text) else {
+        return;
+    };
+    let msg_type = msg.get("type").and_then(Value::as_str).unwrap_or_default();
+    match msg_type {
+        "report_stats" | "report_lifecycle" | "update_metadata" | "push_logs" => {
+            // These message types will be fully handled once the dRPC service
+            // layer is ported.  For now we log the receipt.
+            debug!(agent_id = %agent_id, msg_type = msg_type, "received agent message");
+        }
+        _ => {
+            debug!(agent_id = %agent_id, msg_type = msg_type, "unknown agent message type");
+        }
+    }
+}
+
+/// Commands that can be sent from the server to the agent via the RPC socket.
+enum AgentRpcCommand {
+    RecreateDevcontainer {
+        container_id: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), AgentError>>,
+    },
+    DeleteDevcontainer {
+        container_id: String,
+        reply: tokio::sync::oneshot::Sender<Result<(), AgentError>>,
+    },
+}
+
+/// An [`AgentConnection`] backed by a channel to the WebSocket task.
+#[derive(Debug)]
+struct WebSocketAgentConnection {
+    id: Uuid,
+    connected_at: OffsetDateTime,
+    cmd_tx: tokio::sync::mpsc::Sender<AgentRpcCommand>,
+}
+
+#[async_trait]
+impl AgentConnection for WebSocketAgentConnection {
+    async fn recreate_devcontainer(&self, container_id: &str) -> Result<(), AgentError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(AgentRpcCommand::RecreateDevcontainer {
+                container_id: container_id.to_owned(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| AgentError::SendFailed("agent connection closed".to_owned()))?;
+        rx.await
+            .unwrap_or_else(|_| Err(AgentError::SendFailed("reply channel dropped".to_owned())))
+    }
+
+    async fn delete_devcontainer(&self, container_id: &str) -> Result<(), AgentError> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        self.cmd_tx
+            .send(AgentRpcCommand::DeleteDevcontainer {
+                container_id: container_id.to_owned(),
+                reply: tx,
+            })
+            .await
+            .map_err(|_| AgentError::SendFailed("agent connection closed".to_owned()))?;
+        rx.await
+            .unwrap_or_else(|_| Err(AgentError::SendFailed("reply channel dropped".to_owned())))
+    }
+
+    fn agent_id(&self) -> Uuid {
+        self.id
+    }
+
+    fn connected_at(&self) -> OffsetDateTime {
+        self.connected_at
+    }
 }
 
 /// POST /api/v2/workspaceagents/aws-instance-identity — AWS instance identity auth.
@@ -16441,6 +16652,8 @@ mod tests {
         let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
         let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
             Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
 
         Ok((
             AppState::new(
@@ -16450,6 +16663,7 @@ mod tests {
                 store_trait,
                 audit,
                 pubsub,
+                agent_provider,
             )?,
             store,
         ))
@@ -22479,7 +22693,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn post_recreate_devcontainer_connected_returns_not_implemented()
+    async fn post_recreate_devcontainer_connected_but_no_provider_returns_not_found()
     -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
@@ -22500,7 +22714,9 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        // Agent is in "Connected" state in the store but has no live connection
+        // in the agent provider, so the handler returns 404.
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         Ok(())
     }
 
@@ -22537,7 +22753,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_devcontainer_connected_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+    async fn delete_devcontainer_connected_but_no_provider_returns_not_found()
+    -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
@@ -22555,7 +22772,9 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        // Agent is in "Connected" state in the store but has no live connection
+        // in the agent provider, so the handler returns 404.
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         Ok(())
     }
 
@@ -23343,6 +23562,7 @@ mod tests {
         let app = build_router(state);
 
         // All agent endpoints should return 401 without a valid token.
+        // Note: /rpc requires a WebSocket upgrade and is tested separately.
         let endpoints: Vec<(Method, &str)> = vec![
             (Method::GET, "/api/v2/workspaceagents/me/gitsshkey"),
             (
@@ -23350,7 +23570,6 @@ mod tests {
                 "/api/v2/workspaceagents/me/external-auth?id=github",
             ),
             (Method::GET, "/api/v2/workspaceagents/me/reinit"),
-            (Method::GET, "/api/v2/workspaceagents/me/rpc"),
         ];
 
         for (method, uri) in endpoints {
@@ -23680,14 +23899,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_rpc_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+    async fn agent_rpc_rejects_non_websocket_request() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
         let app = build_router(state);
 
+        // A plain HTTP request (without WebSocket upgrade headers) is rejected.
         let req = agent_request(Method::GET, "/api/v2/workspaceagents/me/rpc", agent_token)?;
         let response = call(app, req).await?;
-        // RPC/WebSocket requires yamux/dRPC infrastructure, returns 501.
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
         Ok(())
     }
