@@ -31929,6 +31929,553 @@ mod tests {
     }
 
     // =======================================================================
+    // Happy-path integration tests — Deployment, Admin, Notifications, Debug
+    // =======================================================================
+
+    #[tokio::test]
+    async fn happy_deployment_config_returns_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/config", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let config = body.get("config").ok_or("missing config")?;
+        assert!(
+            config.get("access_url").is_some(),
+            "config should contain access_url"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_deployment_stats_returns_metrics() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/stats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("session_count").is_some(), "missing session_count");
+        assert!(body.get("workspaces").is_some(), "missing workspaces");
+        assert!(
+            body.get("aggregated_from")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing aggregated_from timestamp"
+        );
+        assert!(
+            body.get("collected_at").and_then(Value::as_str).is_some(),
+            "missing collected_at timestamp"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_deployment_ssh_returns_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/ssh", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("hostname_prefix").is_some(),
+            "missing hostname_prefix"
+        );
+        assert!(
+            body.get("hostname_suffix").is_some(),
+            "missing hostname_suffix"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_update_check_returns_version() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        // update_check does not require authentication
+        let response = call(app, request(Method::GET, "/api/v2/updatecheck")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("current").and_then(Value::as_bool).is_some(),
+            "missing current field"
+        );
+        assert!(
+            body.get("version").and_then(Value::as_str).is_some(),
+            "missing version field"
+        );
+        assert!(
+            body.get("url").and_then(Value::as_str).is_some(),
+            "missing url field"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_set_health_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET — default should have no dismissed healthchecks
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/debug/health/settings", &session_token)?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = response_json(get_resp).await?;
+        assert!(
+            get_body.get("dismissed_healthchecks").is_none(),
+            "dismissed_healthchecks should be absent when empty"
+        );
+
+        // PUT — set some dismissed healthchecks
+        let put_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/debug/health/settings",
+                &session_token,
+                &json!({ "dismissed_healthchecks": ["DERP", "AccessURL"] }),
+            )?,
+        )
+        .await?;
+        assert_eq!(put_resp.status(), StatusCode::OK);
+        let put_body = response_json(put_resp).await?;
+        let dismissed = put_body
+            .get("dismissed_healthchecks")
+            .and_then(Value::as_array)
+            .ok_or("missing dismissed_healthchecks after PUT")?;
+        assert_eq!(dismissed.len(), 2);
+
+        // GET again — verify round-trip
+        let verify_resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/health/settings", &session_token)?,
+        )
+        .await?;
+        assert_eq!(verify_resp.status(), StatusCode::OK);
+        let verify_body = response_json(verify_resp).await?;
+        let roundtrip = verify_body
+            .get("dismissed_healthchecks")
+            .and_then(Value::as_array)
+            .ok_or("missing dismissed_healthchecks on roundtrip GET")?;
+        assert_eq!(roundtrip.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_set_notification_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET — default should have notifier_paused=false
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/settings",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = response_json(get_resp).await?;
+        assert_eq!(
+            get_body.get("notifier_paused").and_then(Value::as_bool),
+            Some(false),
+            "notifier_paused should default to false"
+        );
+
+        // PUT — pause the notifier
+        let put_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/notifications/settings",
+                &session_token,
+                &json!({ "notifier_paused": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(put_resp.status(), StatusCode::OK);
+        let put_body = response_json(put_resp).await?;
+        assert_eq!(
+            put_body.get("notifier_paused").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        // GET again — verify round-trip
+        let verify_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/settings",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(verify_resp.status(), StatusCode::OK);
+        let verify_body = response_json(verify_resp).await?;
+        assert_eq!(
+            verify_body.get("notifier_paused").and_then(Value::as_bool),
+            Some(true),
+            "notifier_paused should persist after PUT"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_notification_templates() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        // Seed one system and one custom template
+        {
+            let mut templates = store
+                .notification_templates
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            templates.push(coder_core::NotificationTemplate {
+                id: Uuid::from_u128(9001),
+                name: "sys-tmpl".to_owned(),
+                title_template: "Title".to_owned(),
+                body_template: "Body".to_owned(),
+                actions: None,
+                group: None,
+                method: None,
+                kind: "system".to_owned(),
+                enabled_by_default: true,
+            });
+            templates.push(coder_core::NotificationTemplate {
+                id: Uuid::from_u128(9002),
+                name: "custom-tmpl".to_owned(),
+                title_template: "Custom Title".to_owned(),
+                body_template: "Custom Body".to_owned(),
+                actions: None,
+                group: None,
+                method: None,
+                kind: "custom".to_owned(),
+                enabled_by_default: false,
+            });
+        }
+
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Verify system templates
+        let sys_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/system",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(sys_resp.status(), StatusCode::OK);
+        let sys_body = response_json(sys_resp).await?;
+        let sys_arr = sys_body
+            .as_array()
+            .ok_or("expected array for system templates")?;
+        assert_eq!(sys_arr.len(), 1);
+        assert_eq!(
+            sys_arr[0].get("name").and_then(Value::as_str),
+            Some("sys-tmpl")
+        );
+
+        // Verify custom templates
+        let cust_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/custom",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(cust_resp.status(), StatusCode::OK);
+        let cust_body = response_json(cust_resp).await?;
+        let cust_arr = cust_body
+            .as_array()
+            .ok_or("expected array for custom templates")?;
+        assert_eq!(cust_arr.len(), 1);
+        assert_eq!(
+            cust_arr[0].get("name").and_then(Value::as_str),
+            Some("custom-tmpl")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_notification_inbox() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let uid = owner_user_id(&store);
+
+        // Seed an inbox notification for the logged-in user
+        {
+            let notif_id = Uuid::from_u128(7001);
+            let mut notifs = store
+                .inbox_notifications
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            notifs.insert(
+                notif_id,
+                coder_core::InboxNotification {
+                    id: notif_id,
+                    user_id: uid,
+                    template_id: Uuid::nil(),
+                    targets: vec![],
+                    title: "Test notification".to_owned(),
+                    content: "Hello world".to_owned(),
+                    icon: String::new(),
+                    actions: vec![],
+                    read_at: None,
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/notifications/inbox", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let notifications = body
+            .get("notifications")
+            .and_then(Value::as_array)
+            .ok_or("missing notifications array")?;
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0].get("title").and_then(Value::as_str),
+            Some("Test notification")
+        );
+        let unread = body
+            .get("unread_count")
+            .and_then(Value::as_i64)
+            .ok_or("missing unread_count")?;
+        assert_eq!(unread, 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_mark_notification_read() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let uid = owner_user_id(&store);
+
+        // Seed an unread inbox notification
+        let notif_id = Uuid::from_u128(7002);
+        {
+            let mut notifs = store
+                .inbox_notifications
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            notifs.insert(
+                notif_id,
+                coder_core::InboxNotification {
+                    id: notif_id,
+                    user_id: uid,
+                    template_id: Uuid::nil(),
+                    targets: vec![],
+                    title: "Unread notification".to_owned(),
+                    content: "Please read me".to_owned(),
+                    icon: String::new(),
+                    actions: vec![],
+                    read_at: None,
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+        }
+
+        // Mark as read
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/notifications/inbox/{notif_id}/read-status"),
+                &session_token,
+                &json!({ "is_read": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let notification = body
+            .get("notification")
+            .ok_or("missing notification in response")?;
+        assert!(
+            notification
+                .get("read_at")
+                .and_then(Value::as_str)
+                .is_some(),
+            "read_at should be a non-null timestamp after marking as read"
+        );
+        let unread = body
+            .get("unread_count")
+            .and_then(Value::as_i64)
+            .ok_or("missing unread_count")?;
+        assert_eq!(unread, 0, "unread count should be 0 after marking as read");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_notification_preferences_roundtrip() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        // Seed a notification template so we can reference its ID in preferences
+        let template_id = Uuid::from_u128(8001);
+        {
+            let mut templates = store
+                .notification_templates
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            templates.push(coder_core::NotificationTemplate {
+                id: template_id,
+                name: "pref-test-tmpl".to_owned(),
+                title_template: "Title".to_owned(),
+                body_template: "Body".to_owned(),
+                actions: None,
+                group: None,
+                method: None,
+                kind: "system".to_owned(),
+                enabled_by_default: true,
+            });
+        }
+
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // GET — initially empty preferences
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = response_json(get_resp).await?;
+        let initial = get_body.as_array().ok_or("expected array")?;
+        assert!(initial.is_empty(), "preferences should start empty");
+
+        // PUT — disable the template
+        let mut template_map = HashMap::new();
+        template_map.insert(template_id.to_string(), true);
+        let put_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+                &json!({ "template_disabled_map": template_map }),
+            )?,
+        )
+        .await?;
+        assert_eq!(put_resp.status(), StatusCode::OK);
+        let put_body = response_json(put_resp).await?;
+        let prefs = put_body.as_array().ok_or("expected array after PUT")?;
+        assert_eq!(prefs.len(), 1);
+        assert_eq!(
+            prefs[0].get("disabled").and_then(Value::as_bool),
+            Some(true)
+        );
+
+        // GET again — verify round-trip
+        let verify_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(verify_resp.status(), StatusCode::OK);
+        let verify_body = response_json(verify_resp).await?;
+        let roundtrip = verify_body
+            .as_array()
+            .ok_or("expected array on roundtrip")?;
+        assert_eq!(roundtrip.len(), 1);
+        assert_eq!(
+            roundtrip[0].get("disabled").and_then(Value::as_bool),
+            Some(true),
+            "preference should persist after PUT"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_debug_health_returns_status() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/health", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("healthy").and_then(Value::as_bool).is_some(),
+            "missing healthy boolean field"
+        );
+        assert!(
+            body.get("time").and_then(Value::as_str).is_some(),
+            "missing time field"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_debug_coordinator_returns_info() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/coordinator", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        // The coordinator debug endpoint returns HTML, not JSON
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.contains("text/html"),
+            "expected text/html content type, got {content_type}"
+        );
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let html = String::from_utf8_lossy(&bytes);
+        assert!(
+            !html.is_empty(),
+            "coordinator debug HTML should not be empty"
+        );
+        Ok(())
+    }
+    // =======================================================================
     // Happy-path integration tests — Templates
     // =======================================================================
 
