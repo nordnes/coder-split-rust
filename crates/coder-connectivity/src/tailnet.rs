@@ -39,6 +39,21 @@ fn html_escape(s: &str) -> String {
 ///
 /// Mirrors the Go `tailnet.Node` struct with the fields needed for
 /// WireGuard peer-to-peer connection establishment.
+///
+/// # Protocol compatibility
+///
+/// The Go reference (`tailnet/proto/tailnet.proto`) uses **protobuf** over
+/// DRPC, not JSON over WebSocket.  The field names here are chosen to be
+/// close to the protobuf definition for documentation purposes, but real
+/// Go clients will send protobuf-encoded `proto.CoordinateRequest` messages
+/// which are **not** compatible with the JSON serde used here.  A future
+/// milestone must add protobuf (or at minimum proto-JSON) support to
+/// achieve true wire-compatibility with Go agents/clients.
+///
+/// TODO(proto): Add `key` (bytes — `key.NodePublic`) and `disco` (string —
+/// `key.DiscoPublic`) fields to match the Go `proto.Node` message.  These
+/// are essential for WireGuard handshake but are omitted here because the
+/// current JSON transport cannot carry them in the same form as protobuf.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NodeInfo {
     /// Unique node identifier.
@@ -149,6 +164,8 @@ impl std::fmt::Display for CoordinationError {
     }
 }
 
+impl std::error::Error for CoordinationError {}
+
 // ---------------------------------------------------------------------------
 // TailnetCoordinator trait
 // ---------------------------------------------------------------------------
@@ -257,18 +274,33 @@ impl TunnelStore {
         self.by_dst.entry(dst).or_default().insert(src);
     }
 
-    /// Remove a specific tunnel from `src` to `dst`.
-    fn remove(&mut self, src: Uuid, dst: Uuid) {
-        if let Some(dsts) = self.by_src.get_mut(&src) {
-            dsts.remove(&dst);
+    /// Remove the tunnel between `a` and `b`, regardless of which peer
+    /// originally created it (i.e. handles both `a→b` and `b→a` directions).
+    fn remove(&mut self, a: Uuid, b: Uuid) {
+        // Try a→b direction.
+        if let Some(dsts) = self.by_src.get_mut(&a) {
+            dsts.remove(&b);
             if dsts.is_empty() {
-                self.by_src.remove(&src);
+                self.by_src.remove(&a);
             }
         }
-        if let Some(srcs) = self.by_dst.get_mut(&dst) {
-            srcs.remove(&src);
+        if let Some(srcs) = self.by_dst.get_mut(&b) {
+            srcs.remove(&a);
             if srcs.is_empty() {
-                self.by_dst.remove(&dst);
+                self.by_dst.remove(&b);
+            }
+        }
+        // Try b→a direction (reverse).
+        if let Some(dsts) = self.by_src.get_mut(&b) {
+            dsts.remove(&a);
+            if dsts.is_empty() {
+                self.by_src.remove(&b);
+            }
+        }
+        if let Some(srcs) = self.by_dst.get_mut(&a) {
+            srcs.remove(&b);
+            if srcs.is_empty() {
+                self.by_dst.remove(&a);
             }
         }
     }
@@ -546,11 +578,21 @@ impl TailnetCoordinator for InMemoryCoordinator {
     }
 
     fn coordinate(&self, peer_id: Uuid, name: String, kind: PeerKind) -> CoordinationHandle {
+        // NOTE: We use an unbounded channel here for simplicity.  The Go
+        // reference also buffers coordinator responses without backpressure.
+        // Under production load a misbehaving peer that stops reading could
+        // accumulate messages indefinitely.  A future optimisation could
+        // switch to a bounded channel (e.g. capacity 128) and disconnect
+        // slow consumers on `SendError`.
         let (tx, rx) = mpsc::unbounded_channel();
         let session_id = Uuid::new_v4();
 
         if let Ok(mut inner) = self.inner.lock() {
             // If there is an existing coordination session, close it.
+            // NOTE: We intentionally do NOT call `inner.tunnels.remove_all`
+            // here — old tunnels are preserved so the reconnecting peer
+            // picks up where it left off (the initial node-info exchange
+            // below delivers the current tunnel peers' nodes).
             if let Some(old) = inner.peers.get(&peer_id) {
                 Self::send_to_peer(
                     old,
@@ -656,6 +698,19 @@ impl TailnetCoordinator for InMemoryCoordinator {
                         CoordinateResponse {
                             peer_updates: Vec::new(),
                             error: Some("cannot add tunnel to self".to_string()),
+                        },
+                    );
+                }
+            } else if !inner.peers.contains_key(&dst_id) {
+                // Reject tunnels to unknown / non-coordinating peers.
+                if let Some(src) = inner.peers.get(&peer_id) {
+                    Self::send_to_peer(
+                        src,
+                        CoordinateResponse {
+                            peer_updates: Vec::new(),
+                            error: Some(format!(
+                                "cannot add tunnel: peer \"{dst_id}\" is not connected"
+                            )),
                         },
                     );
                 }
@@ -1425,4 +1480,166 @@ mod tests {
         assert_eq!(resp.peer_updates.len(), 1);
         assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Lost);
     }
+
+    #[tokio::test]
+    async fn test_add_tunnel_to_self_returns_error() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let peer_id = Uuid::new_v4();
+
+        let mut handle =
+            coordinator.coordinate(peer_id, "self-tunnel".to_string(), PeerKind::Client);
+
+        // Try to create a tunnel to ourselves.
+        coordinator
+            .process_request(
+                peer_id,
+                CoordinateRequest {
+                    add_tunnel: Some(peer_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Should receive an error response.
+        let resp = handle.response_rx.recv().await.unwrap_or_default();
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("cannot add tunnel to self")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_add_tunnel_to_unknown_peer_returns_error() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let peer_id = Uuid::new_v4();
+        let unknown_id = Uuid::new_v4();
+
+        let mut handle = coordinator.coordinate(peer_id, "client".to_string(), PeerKind::Client);
+
+        // Try to create a tunnel to an unknown peer.
+        coordinator
+            .process_request(
+                peer_id,
+                CoordinateRequest {
+                    add_tunnel: Some(unknown_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Should receive an error response.
+        let resp = handle.response_rx.recv().await.unwrap_or_default();
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("not connected")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_nonexistent_tunnel_returns_error() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let peer_id = Uuid::new_v4();
+        let other_id = Uuid::new_v4();
+
+        let mut handle = coordinator.coordinate(peer_id, "client".to_string(), PeerKind::Client);
+        let _other_handle = coordinator.coordinate(other_id, "agent".to_string(), PeerKind::Agent);
+
+        // Try to remove a tunnel that doesn't exist.
+        coordinator
+            .process_request(
+                peer_id,
+                CoordinateRequest {
+                    remove_tunnel: Some(other_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Should receive an error response.
+        let resp = handle.response_rx.recv().await.unwrap_or_default();
+        assert!(resp.error.is_some());
+        assert!(
+            resp.error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("no tunnel exists")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_remove_tunnel_by_destination_peer() {
+        // Regression test: when the *destination* peer of a tunnel calls
+        // remove_tunnel, the tunnel should actually be removed from the
+        // store (not just the src→dst direction).
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let client_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+
+        let mut client_handle =
+            coordinator.coordinate(client_id, "client".to_string(), PeerKind::Client);
+        let mut agent_handle =
+            coordinator.coordinate(agent_id, "agent".to_string(), PeerKind::Agent);
+
+        // Client creates tunnel to agent (stored as client→agent).
+        coordinator
+            .process_request(
+                client_id,
+                CoordinateRequest {
+                    add_tunnel: Some(agent_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Agent removes the tunnel (reverse direction).
+        coordinator
+            .process_request(
+                agent_id,
+                CoordinateRequest {
+                    remove_tunnel: Some(client_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Both sides should receive Disconnected.
+        let resp = agent_handle.response_rx.recv().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates.len(), 1);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Disconnected);
+
+        let resp = client_handle.response_rx.recv().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates.len(), 1);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Disconnected);
+
+        // Verify the tunnel is actually gone — update_self should NOT route.
+        coordinator
+            .process_request(
+                client_id,
+                CoordinateRequest {
+                    update_self: Some(NodeInfo {
+                        id: 42,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Agent should NOT receive a node update (tunnel was removed).
+        // Use try_recv to confirm nothing is pending.
+        assert!(agent_handle.response_rx.try_recv().is_err());
+    }
+
+    // TODO(integration): Add WebSocket-level integration tests that connect
+    // to the actual `tailnet_rpc_conn` handler, send `CoordinateRequest`
+    // messages over the WebSocket, and verify `CoordinateResponse` messages
+    // are received.  The current tests only exercise the coordinator
+    // internals, not the handler's `tokio::select!` multiplexing, JSON
+    // parse error paths, or WebSocket message framing.
 }
