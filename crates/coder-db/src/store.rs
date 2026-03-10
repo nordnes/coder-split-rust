@@ -7761,7 +7761,7 @@ impl AppStore for PostgresStore {
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
         let result = sqlx::query(
-            "UPDATE provisioner_jobs SET canceled_at = NOW(), updated_at = NOW() WHERE id = $1 AND canceled_at IS NULL AND completed_at IS NULL",
+            "UPDATE provisioner_jobs SET canceled_at = NOW(), completed_at = NOW(), updated_at = NOW() WHERE id = $1 AND canceled_at IS NULL AND completed_at IS NULL",
         )
         .bind(job_id)
         .execute(&self.pool)
@@ -11542,5 +11542,145 @@ mod tests {
         );
 
         cleanup(&pool, &[user1]).await;
+    }
+
+    // =========================================================================
+    // find_provisioner_job_by_id / cancel_provisioner_job
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_find_provisioner_job_by_id_returns_some() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let job_id = create_provisioner_job(&pool, org_id, user_id).await?;
+
+        let found = store.find_provisioner_job(job_id).await?;
+        assert!(found.is_some(), "should find the provisioner job");
+        let job = found.unwrap_or_else(|| panic!("just asserted Some"));
+        assert_eq!(job.id, job_id);
+        assert_eq!(job.organization_id, org_id);
+        assert_eq!(job.initiator_id, user_id);
+        assert!(job.canceled_at.is_none());
+        assert!(job.completed_at.is_none());
+        assert_eq!(job.job_status, "pending");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_find_provisioner_job_by_id_returns_none_for_missing() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let missing_id = Uuid::new_v4();
+        let found = store.find_provisioner_job(missing_id).await?;
+        assert!(found.is_none(), "should return None for non-existent job");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_cancel_provisioner_job_happy_path() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let job_id = create_provisioner_job(&pool, org_id, user_id).await?;
+
+        // Cancel should succeed
+        let canceled = store.cancel_template_provisioner_job(job_id).await?;
+        assert!(canceled, "cancel should return true for a pending job");
+
+        // Verify the job now has canceled_at and completed_at set
+        let job = store
+            .find_provisioner_job(job_id)
+            .await?
+            .unwrap_or_else(|| panic!("job should still exist"));
+        assert!(job.canceled_at.is_some(), "canceled_at should be set");
+        assert!(job.completed_at.is_some(), "completed_at should be set");
+        assert_eq!(job.job_status, "canceled");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_cancel_provisioner_job_already_canceled() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let job_id = create_provisioner_job(&pool, org_id, user_id).await?;
+
+        // Cancel once
+        let first = store.cancel_template_provisioner_job(job_id).await?;
+        assert!(first, "first cancel should succeed");
+
+        // Cancel again — should return false (idempotent)
+        let second = store.cancel_template_provisioner_job(job_id).await?;
+        assert!(!second, "second cancel should return false");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_cancel_provisioner_job_nonexistent() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let missing_id = Uuid::new_v4();
+        let canceled = store.cancel_template_provisioner_job(missing_id).await?;
+        assert!(!canceled, "cancel should return false for non-existent job");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_cancel_provisioner_job_already_completed() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let job_id = create_provisioner_job(&pool, org_id, user_id).await?;
+
+        // Manually mark the job as completed (simulating a successful finish)
+        sqlx::query(
+            "UPDATE provisioner_jobs SET completed_at = NOW(), updated_at = NOW() WHERE id = $1",
+        )
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+        // Cancel should fail because completed_at is already set
+        let canceled = store.cancel_template_provisioner_job(job_id).await?;
+        assert!(
+            !canceled,
+            "cancel should return false for an already-completed job"
+        );
+
+        Ok(())
     }
 }
