@@ -16,3 +16,6 @@ coder-core = { path = "../coder-core" }
 coder-rbac = { path = "../coder-rbac" }
 thiserror.workspace = true
 uuid.workspace = true
+
+[dev-dependencies]
+time.workspace = true
