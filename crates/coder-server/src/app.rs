@@ -799,7 +799,7 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/workspaceagents/me/app-status",
-                    axum::routing::patch(patch_workspace_agent_app_status),
+                    patch(patch_workspace_agent_app_status),
                 )
                 .route(
                     "/workspaceagents/me/external-auth",
@@ -819,7 +819,7 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/workspaceagents/me/logs",
-                    axum::routing::patch(patch_workspace_agent_logs),
+                    patch(patch_workspace_agent_logs),
                 )
                 .route(
                     "/workspaceagents/me/reinit",
@@ -3117,17 +3117,41 @@ async fn deprecated_workspace_agent_git_auth(
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
 
-/// GET /workspaceagents/{agent}/startup-logs — deprecated, returns empty array.
+/// GET /workspaceagents/{agent}/startup-logs — deprecated, delegates to the logs endpoint.
+///
+/// The Go implementation redirects this to the main logs endpoint.
+/// We replicate the same behavior by returning the agent logs directly.
 async fn deprecated_workspace_agent_startup_logs(
     State(state): State<AppState>,
-    Path(_agent): Path<String>,
+    Path(agent_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    let empty: Vec<Value> = Vec::new();
-    Ok((StatusCode::OK, Json(empty)).into_response())
+
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Return agent logs with default parameters (no follow, after=0, limit=256).
+    let limit: i64 = 256;
+    let log_rows = state
+        .store
+        .list_workspace_agent_logs(agent_id, 0, limit)
+        .await?;
+    let logs: Vec<coder_core::WorkspaceAgentLog> = log_rows
+        .iter()
+        .map(|r| coder_core::WorkspaceAgentLog {
+            id: r.id,
+            created_at: r.created_at,
+            output: r.output.clone(),
+            level: convert_log_level(&r.level),
+            source_id: r.log_source_id,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(logs)).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -8536,6 +8560,18 @@ fn convert_app_status_state(state: &str) -> coder_core::WorkspaceAppStatusState 
     }
 }
 
+/// Build connection info from the deployment configuration.
+fn build_connection_info(state: &AppState) -> WorkspaceAgentConnectionInfo {
+    WorkspaceAgentConnectionInfo {
+        derp_map: DERPMap {
+            regions: HashMap::new(),
+        },
+        derp_force_websockets: false,
+        disable_direct_connections: false,
+        hostname_suffix: state.config.ssh.hostname_suffix.clone(),
+    }
+}
+
 /// Build a full agent response including apps, log sources, scripts.
 async fn build_agent_response(
     state: &AppState,
@@ -8588,13 +8624,7 @@ async fn get_workspace_agent_connection(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let info = WorkspaceAgentConnectionInfo {
-        derp_map: DERPMap {
-            regions: HashMap::new(),
-        },
-        derp_force_websockets: false,
-        disable_direct_connections: false,
-    };
+    let info = build_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
@@ -8638,18 +8668,36 @@ async fn get_workspace_agent_containers(
         .into_response())
 }
 
-/// POST /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc} — recreate devcontainer.
+/// POST /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc}/recreate — recreate devcontainer.
 async fn post_workspace_agent_recreate_devcontainer(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((_agent_id, _dc_id)): Path<(Uuid, Uuid)>,
+    Path((agent_id, _dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let status = derive_agent_status(&row);
+    if status != coder_core::WorkspaceAgentStatus::Connected {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!("Agent state is \"{status:?}\", it must be in the \"Connected\" state."),
+                "The agent must be connected before a devcontainer can be recreated.",
+            )),
+        )
+            .into_response());
+    }
+
+    // Devcontainer recreation requires a real-time connection to the agent
+    // which is not yet available in the Rust backend.
     Ok(not_implemented_response(
-        "Devcontainer recreation is not yet implemented.",
+        "Devcontainer recreation requires agent connectivity which is not yet implemented.",
     ))
 }
 
@@ -8657,14 +8705,32 @@ async fn post_workspace_agent_recreate_devcontainer(
 async fn delete_workspace_agent_devcontainer(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((_agent_id, _dc_id)): Path<(Uuid, Uuid)>,
+    Path((agent_id, _dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let status = derive_agent_status(&row);
+    if status != coder_core::WorkspaceAgentStatus::Connected {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!("Agent state is \"{status:?}\", it must be in the \"Connected\" state."),
+                "The agent must be connected before a devcontainer can be deleted.",
+            )),
+        )
+            .into_response());
+    }
+
+    // Devcontainer deletion requires a real-time connection to the agent
+    // which is not yet available in the Rust backend.
     Ok(not_implemented_response(
-        "Devcontainer deletion is not yet implemented.",
+        "Devcontainer deletion requires agent connectivity which is not yet implemented.",
     ))
 }
 
@@ -8672,14 +8738,20 @@ async fn delete_workspace_agent_devcontainer(
 async fn get_workspace_agent_containers_watch(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_agent_id): Path<Uuid>,
+    Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Container watch SSE requires a real-time connection to the agent
+    // which is not yet available in the Rust backend.
     Ok(not_implemented_response(
-        "Container watch SSE is not yet implemented.",
+        "Container watch SSE requires agent connectivity which is not yet implemented.",
     ))
 }
 
@@ -8687,14 +8759,20 @@ async fn get_workspace_agent_containers_watch(
 async fn get_workspace_agent_coordinate(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_agent_id): Path<Uuid>,
+    Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Coordinate WebSocket requires tailnet integration which is not yet
+    // available in the Rust backend.
     Ok(not_implemented_response(
-        "Agent coordination WebSocket is not yet implemented.",
+        "Agent coordination WebSocket requires tailnet integration which is not yet implemented.",
     ))
 }
 
@@ -8765,14 +8843,20 @@ async fn get_workspace_agent_logs(
 async fn get_workspace_agent_pty(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_agent_id): Path<Uuid>,
+    Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // PTY WebSocket requires a real-time connection to the agent
+    // which is not yet available in the Rust backend.
     Ok(not_implemented_response(
-        "Agent PTY WebSocket is not yet implemented.",
+        "Agent PTY WebSocket requires agent connectivity which is not yet implemented.",
     ))
 }
 
@@ -8814,14 +8898,21 @@ async fn get_workspace_agent_watch_metadata(
 async fn get_workspace_agent_watch_metadata_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path(_agent_id): Path<Uuid>,
+    Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // WebSocket metadata watch requires real-time pubsub integration which
+    // is not yet available in the Rust backend. Use the SSE endpoint
+    // (watch-metadata) for a snapshot of current metadata.
     Ok(not_implemented_response(
-        "Agent metadata WebSocket watch is not yet implemented.",
+        "Agent metadata WebSocket watch requires pubsub integration which is not yet implemented.",
     ))
 }
 
@@ -8834,13 +8925,7 @@ async fn get_workspace_agents_connection_info(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let info = WorkspaceAgentConnectionInfo {
-        derp_map: DERPMap {
-            regions: HashMap::new(),
-        },
-        derp_force_websockets: false,
-        disable_direct_connections: false,
-    };
+    let info = build_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
@@ -9346,7 +9431,9 @@ mod tests {
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
         UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
-        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentStatInput,
+        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
+        WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentRow,
+        WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow,
         WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
         WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
     };
@@ -9417,6 +9504,13 @@ mod tests {
         template_version_preset_parameters:
             Mutex<HashMap<Uuid, Vec<TemplateVersionPresetParameterRecord>>>,
         files: Mutex<HashMap<Uuid, FileRecord>>,
+        workspace_agents: Mutex<HashMap<Uuid, WorkspaceAgentRow>>,
+        workspace_agent_logs: Mutex<Vec<WorkspaceAgentLogRow>>,
+        workspace_apps: Mutex<Vec<WorkspaceAppRow>>,
+        workspace_agent_scripts: Mutex<Vec<WorkspaceAgentScriptRow>>,
+        workspace_agent_log_sources: Mutex<Vec<WorkspaceAgentLogSourceRow>>,
+        workspace_agent_metadata: Mutex<Vec<WorkspaceAgentMetadataRow>>,
+        workspace_agent_devcontainers: Mutex<Vec<coder_core::WorkspaceAgentDevcontainerRow>>,
     }
 
     impl FakeStore {
@@ -9460,7 +9554,22 @@ mod tests {
                 template_version_presets: Mutex::new(HashMap::new()),
                 template_version_preset_parameters: Mutex::new(HashMap::new()),
                 files: Mutex::new(HashMap::new()),
+                workspace_agents: Mutex::new(HashMap::new()),
+                workspace_agent_logs: Mutex::new(Vec::new()),
+                workspace_apps: Mutex::new(Vec::new()),
+                workspace_agent_scripts: Mutex::new(Vec::new()),
+                workspace_agent_log_sources: Mutex::new(Vec::new()),
+                workspace_agent_metadata: Mutex::new(Vec::new()),
+                workspace_agent_devcontainers: Mutex::new(Vec::new()),
             }
+        }
+
+        fn insert_workspace_agent(&self, row: WorkspaceAgentRow) -> Result<(), StorageError> {
+            self.workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(row.id, row);
+            Ok(())
         }
 
         fn set_one_time_passcode(
@@ -12370,6 +12479,112 @@ mod tests {
                         .cloned()
                 })
         }
+
+        async fn find_workspace_agent_by_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+            self.workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|agents| agents.get(&agent_id).cloned())
+        }
+
+        async fn list_workspace_apps_by_agent_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<WorkspaceAppRow>, StorageError> {
+            self.workspace_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|apps| {
+                    apps.iter()
+                        .filter(|a| a.agent_id == agent_id)
+                        .cloned()
+                        .collect()
+                })
+        }
+
+        async fn list_workspace_agent_scripts(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentScriptRow>, StorageError> {
+            self.workspace_agent_scripts
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|scripts| {
+                    scripts
+                        .iter()
+                        .filter(|s| s.workspace_agent_id == agent_id)
+                        .cloned()
+                        .collect()
+                })
+        }
+
+        async fn list_workspace_agent_log_sources(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError> {
+            self.workspace_agent_log_sources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|sources| {
+                    sources
+                        .iter()
+                        .filter(|s| s.workspace_agent_id == agent_id)
+                        .cloned()
+                        .collect()
+                })
+        }
+
+        async fn list_workspace_agent_logs(
+            &self,
+            agent_id: Uuid,
+            after_id: i64,
+            limit: i64,
+        ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+            self.workspace_agent_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|logs| {
+                    logs.iter()
+                        .filter(|l| l.agent_id == agent_id && l.id > after_id)
+                        .take(limit as usize)
+                        .cloned()
+                        .collect()
+                })
+        }
+
+        async fn list_workspace_agent_metadata(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError> {
+            self.workspace_agent_metadata
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|metadata| {
+                    metadata
+                        .iter()
+                        .filter(|m| m.workspace_agent_id == agent_id)
+                        .cloned()
+                        .collect()
+                })
+        }
+
+        async fn list_workspace_agent_devcontainers(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<coder_core::WorkspaceAgentDevcontainerRow>, StorageError> {
+            self.workspace_agent_devcontainers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|dcs| {
+                    dcs.iter()
+                        .filter(|dc| dc.workspace_agent_id == agent_id)
+                        .cloned()
+                        .collect()
+                })
+        }
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -14743,7 +14958,7 @@ mod tests {
         .await?;
         assert_eq!(gitauth_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /workspaceagents/{agent}/startup-logs with auth returns 200 ---
+        // --- GET /workspaceagents/{agent}/startup-logs with auth returns 404 for non-existent agent ---
         let agent_id = Uuid::new_v4();
         let startup_logs_response = call(
             app.clone(),
@@ -14754,9 +14969,7 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(startup_logs_response.status(), StatusCode::OK);
-        let startup_logs_body = response_json(startup_logs_response).await?;
-        assert_eq!(startup_logs_body.as_array().map(Vec::len), Some(0));
+        assert_eq!(startup_logs_response.status(), StatusCode::NOT_FOUND);
 
         // --- GET /workspaceagents/{agent}/startup-logs without auth returns 401 ---
         let startup_logs_unauth = call(
@@ -16675,6 +16888,778 @@ mod tests {
         let response = call(app, req).await?;
         // CSP reports are exempt from CSRF; should not get 403.
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace Agent endpoint tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: create a connected workspace agent row.
+    fn make_connected_agent(agent_id: Uuid) -> WorkspaceAgentRow {
+        let now = OffsetDateTime::now_utc();
+        WorkspaceAgentRow {
+            id: agent_id,
+            parent_id: None,
+            created_at: now,
+            updated_at: now,
+            name: "test-agent".to_owned(),
+            first_connected_at: Some(now),
+            last_connected_at: Some(now),
+            disconnected_at: None,
+            resource_id: Uuid::new_v4(),
+            auth_token: Uuid::new_v4(),
+            auth_instance_id: None,
+            architecture: "amd64".to_owned(),
+            environment_variables: None,
+            operating_system: "linux".to_owned(),
+            directory: "/home/coder".to_owned(),
+            expanded_directory: "/home/coder".to_owned(),
+            version: "v2.19.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            connection_timeout_seconds: 120,
+            troubleshooting_url: String::new(),
+            motd_file: String::new(),
+            lifecycle_state: "ready".to_owned(),
+            logs_length: 0,
+            logs_overflowed: false,
+            started_at: Some(now),
+            ready_at: Some(now),
+            subsystems: Vec::new(),
+            display_apps: Vec::new(),
+            display_order: 0,
+            api_key_scope: "all".to_owned(),
+        }
+    }
+
+    /// Helper: create a disconnected workspace agent row.
+    fn make_disconnected_agent(agent_id: Uuid) -> WorkspaceAgentRow {
+        let now = OffsetDateTime::now_utc();
+        let earlier = now - Duration::from_secs(300);
+        WorkspaceAgentRow {
+            id: agent_id,
+            parent_id: None,
+            created_at: earlier,
+            updated_at: now,
+            name: "disconnected-agent".to_owned(),
+            first_connected_at: Some(earlier),
+            last_connected_at: Some(earlier),
+            disconnected_at: Some(now),
+            resource_id: Uuid::new_v4(),
+            auth_token: Uuid::new_v4(),
+            auth_instance_id: None,
+            architecture: "amd64".to_owned(),
+            environment_variables: None,
+            operating_system: "linux".to_owned(),
+            directory: "/home/coder".to_owned(),
+            expanded_directory: "/home/coder".to_owned(),
+            version: "v2.19.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            connection_timeout_seconds: 120,
+            troubleshooting_url: String::new(),
+            motd_file: String::new(),
+            lifecycle_state: "ready".to_owned(),
+            logs_length: 0,
+            logs_overflowed: false,
+            started_at: Some(earlier),
+            ready_at: Some(earlier),
+            subsystems: Vec::new(),
+            display_apps: Vec::new(),
+            display_order: 0,
+            api_key_scope: "all".to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_returns_agent() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some(agent_id.to_string()).as_deref()
+        );
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("test-agent"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_unauthorized() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let app = build_router(state);
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            request(Method::GET, &format!("/api/v2/workspaceagents/{agent_id}"))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_connection_returns_info() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/connection"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("hostname_suffix").and_then(Value::as_str),
+            Some("example.internal")
+        );
+        assert_eq!(
+            body.get("derp_force_websockets").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            body.get("disable_direct_connections")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agents_connection_info_returns_global_info() -> Result<(), Box<dyn Error>>
+    {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/workspaceagents/connection", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("hostname_suffix").and_then(Value::as_str),
+            Some("example.internal")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_containers_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        // Add a devcontainer
+        let dc_id = Uuid::new_v4();
+        store
+            .workspace_agent_devcontainers
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(coder_core::WorkspaceAgentDevcontainerRow {
+                id: dc_id,
+                workspace_agent_id: agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                workspace_folder: "/workspaces/myproject".to_owned(),
+                config_path: ".devcontainer/devcontainer.json".to_owned(),
+                name: "myproject".to_owned(),
+                subagent_id: None,
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/containers"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let devcontainers = body.get("devcontainers").and_then(Value::as_array);
+        assert!(devcontainers.is_some());
+        let dcs = devcontainers.ok_or("missing devcontainers")?;
+        assert_eq!(dcs.len(), 1);
+        assert_eq!(
+            dcs[0].get("workspace_folder").and_then(Value::as_str),
+            Some("/workspaces/myproject")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_containers_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/containers"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_recreate_devcontainer_requires_connected_agent() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_disconnected_agent(agent_id))?;
+
+        let dc_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!(
+                    "/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}"
+                ),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        let message = body
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.contains("Connected"),
+            "expected message about Connected state, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_recreate_devcontainer_connected_returns_not_implemented()
+    -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let dc_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!(
+                    "/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}"
+                ),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_devcontainer_requires_connected_agent() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_disconnected_agent(agent_id))?;
+
+        let dc_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        let message = body
+            .get("message")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        assert!(
+            message.contains("Connected"),
+            "expected message about Connected state, got: {message}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_devcontainer_connected_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let dc_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_listening_ports_returns_empty() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/listening-ports"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let ports = body
+            .get("ports")
+            .and_then(Value::as_array)
+            .ok_or("missing ports")?;
+        assert!(ports.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_listening_ports_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/listening-ports"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_logs_returns_logs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let log_source_id = Uuid::new_v4();
+        store
+            .workspace_agent_logs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentLogRow {
+                id: 1,
+                agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                output: "Hello from agent".to_owned(),
+                level: "info".to_owned(),
+                log_source_id,
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/logs"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Hello from agent")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_logs_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/logs"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deprecated_startup_logs_returns_logs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let log_source_id = Uuid::new_v4();
+        store
+            .workspace_agent_logs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentLogRow {
+                id: 1,
+                agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                output: "Startup log line".to_owned(),
+                level: "info".to_owned(),
+                log_source_id,
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/startup-logs"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // The deprecated startup-logs handler returns a flat array of logs.
+        let logs = body.as_array().ok_or("expected array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Startup log line")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_watch_metadata_returns_metadata() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        store
+            .workspace_agent_metadata
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentMetadataRow {
+                workspace_agent_id: agent_id,
+                display_name: "CPU Usage".to_owned(),
+                key: "cpu".to_owned(),
+                script: "cat /proc/loadavg".to_owned(),
+                value: "0.5".to_owned(),
+                error: String::new(),
+                timeout: 5,
+                interval: 10,
+                collected_at: OffsetDateTime::now_utc(),
+                display_order: 0,
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let metadata = body.as_array().ok_or("expected array")?;
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].get("key").and_then(Value::as_str), Some("cpu"));
+        assert_eq!(
+            metadata[0].get("value").and_then(Value::as_str),
+            Some("0.5")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_watch_metadata_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_coordinate_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/coordinate"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_coordinate_returns_not_implemented() -> Result<(), Box<dyn Error>>
+    {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/coordinate"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_pty_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_pty_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_containers_watch_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_containers_watch_returns_not_implemented()
+    -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_watch_metadata_ws_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_watch_metadata_ws_returns_not_implemented()
+    -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
         Ok(())
     }
 }
