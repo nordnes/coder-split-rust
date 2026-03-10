@@ -2531,7 +2531,7 @@ impl AppStore for PostgresStore {
         #[derive(sqlx::FromRow)]
         struct DauRow {
             date: time::Date,
-            user_id: Option<Uuid>,
+            amount: i64,
         }
 
         // Build a proper Etc/GMT timezone string from the integer offset.
@@ -2547,10 +2547,11 @@ impl AppStore for PostgresStore {
         let rows = sqlx::query_as::<_, DauRow>(
             "SELECT
                 (created_at AT TIME ZONE $1)::date AS date,
-                user_id
+                COUNT(DISTINCT user_id) AS amount
              FROM workspace_agent_stats
              WHERE connection_count > 0
-             GROUP BY date, user_id
+               AND user_id IS NOT NULL
+             GROUP BY date
              ORDER BY date ASC",
         )
         .bind(&tz_name)
@@ -2558,20 +2559,11 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        // Aggregate rows: count distinct users per date.
-        let mut date_counts: std::collections::BTreeMap<time::Date, i64> =
-            std::collections::BTreeMap::new();
-        for row in &rows {
-            if row.user_id.is_some() {
-                *date_counts.entry(row.date).or_insert(0) += 1;
-            }
-        }
-
-        let entries = date_counts
+        let entries = rows
             .into_iter()
-            .map(|(date, amount)| DAUEntry {
-                date: date.to_string(),
-                amount,
+            .map(|row| DAUEntry {
+                date: row.date.to_string(),
+                amount: row.amount,
             })
             .collect();
 
@@ -2609,7 +2601,8 @@ impl AppStore for PostgresStore {
             ),
             latest_status_before_range AS (
                 SELECT
-                    DISTINCT usc.user_id,
+                    DISTINCT ON (usc.user_id)
+                    usc.user_id,
                     usc.new_status,
                     usc.changed_at
                 FROM user_status_changes usc
@@ -2672,7 +2665,7 @@ impl AppStore for PostgresStore {
                         AND (
                             NOT EXISTS (SELECT 1 FROM user_deleted WHERE user_id = rscpupd.user_id)
                             OR
-                            rscpupd.date < (SELECT deleted_at FROM user_deleted WHERE user_id = rscpupd.user_id)
+                            rscpupd.date < (SELECT MIN(deleted_at) FROM user_deleted WHERE user_id = rscpupd.user_id)
                         )
                     )
                 ) AS count
