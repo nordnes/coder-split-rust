@@ -8590,14 +8590,7 @@ async fn get_workspace_agent_connection(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let info = WorkspaceAgentConnectionInfo {
-        derp_map: DERPMap {
-            regions: HashMap::new(),
-        },
-        derp_force_websockets: false,
-        disable_direct_connections: false,
-        hostname_suffix: String::new(),
-    };
+    let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
@@ -8829,14 +8822,9 @@ async fn get_workspace_agent_watch_metadata_ws(
 }
 
 /// GET /api/v2/workspaceagents/connection — global agent connection info.
-async fn get_workspace_agents_connection_info(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
+/// Build the deployment-wide DERP connection info from server config.
+/// Shared by both the per-agent and global connection endpoints.
+fn build_workspace_agent_connection_info(state: &AppState) -> WorkspaceAgentConnectionInfo {
     let mut regions = HashMap::new();
     for region in &state.config.derp_regions {
         let nodes: Vec<DERPNode> = region
@@ -8866,12 +8854,23 @@ async fn get_workspace_agents_connection_info(
         );
     }
 
-    let info = WorkspaceAgentConnectionInfo {
+    WorkspaceAgentConnectionInfo {
         derp_map: DERPMap { regions },
         derp_force_websockets: false,
         disable_direct_connections: false,
         hostname_suffix: state.config.ssh.hostname_suffix.clone(),
+    }
+}
+
+async fn get_workspace_agents_connection_info(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
