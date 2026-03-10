@@ -13054,7 +13054,7 @@ mod tests {
     };
     use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
     use coder_core::provisioner::{
-        ProvisionerJobLogRecord as ProvisionerLogRecord,
+        ProvisionerJobLogRecord as ProvisionerLogRecord, ProvisionerJobStatus,
         ProvisionerJobTimingRecord as ProvisionerTimingRecord,
     };
     use coder_core::template::ProvisionerJobRecord as TemplateProvisionerJobRecord;
@@ -13193,6 +13193,12 @@ mod tests {
         provisioner_job_timings: Mutex<HashMap<Uuid, Vec<PortsJobTimingRecord>>>,
         workspace_port_shares: Mutex<Vec<WorkspaceAgentPortShareRecord>>,
         workspace_acls: Mutex<HashMap<Uuid, WorkspaceACLRecord>>,
+        // ProvisionerStore fields
+        prov_jobs: Mutex<HashMap<Uuid, ProvisionerJobRecord>>,
+        prov_job_logs: Mutex<Vec<ProvisionerLogRecord>>,
+        prov_job_log_next_id: Mutex<i64>,
+        prov_job_timings: Mutex<Vec<ProvisionerTimingRecord>>,
+        prov_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonRecord>>,
         // Provisioner keys
         provisioner_keys: Mutex<HashMap<Uuid, ProvisionerKeyRecord>>,
         // Custom roles
@@ -13269,6 +13275,11 @@ mod tests {
                 provisioner_job_timings: Mutex::new(HashMap::new()),
                 workspace_port_shares: Mutex::new(Vec::new()),
                 workspace_acls: Mutex::new(HashMap::new()),
+                prov_jobs: Mutex::new(HashMap::new()),
+                prov_job_logs: Mutex::new(Vec::new()),
+                prov_job_log_next_id: Mutex::new(1),
+                prov_job_timings: Mutex::new(Vec::new()),
+                prov_daemons: Mutex::new(HashMap::new()),
                 provisioner_keys: Mutex::new(HashMap::new()),
                 custom_roles: Mutex::new(HashMap::new()),
                 user_links: Mutex::new(HashMap::new()),
@@ -13371,114 +13382,346 @@ mod tests {
     impl ProvisionerStore for FakeStore {
         async fn acquire_provisioner_job(
             &self,
-            _input: AcquireProvisionerJobInput,
+            input: AcquireProvisionerJobInput,
         ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-            Ok(None)
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let found = jobs
+                .values_mut()
+                .find(|j| j.job_status == ProvisionerJobStatus::Pending);
+            if let Some(job) = found {
+                job.job_status = ProvisionerJobStatus::Running;
+                job.started_at = Some(input.started_at);
+                job.updated_at = input.started_at;
+                job.worker_id = Some(input.worker_id);
+                Ok(Some(job.clone()))
+            } else {
+                Ok(None)
+            }
         }
 
         async fn get_provisioner_job_by_id(
             &self,
-            _id: Uuid,
+            id: Uuid,
         ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-            Ok(None)
+            Ok(self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&id)
+                .cloned())
         }
 
         async fn get_provisioner_jobs_by_ids(
             &self,
-            _ids: &[Uuid],
+            ids: &[Uuid],
         ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
-            Ok(Vec::new())
+            let jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(ids.iter().filter_map(|id| jobs.get(id).cloned()).collect())
         }
 
         async fn insert_provisioner_job(
             &self,
-            _input: InsertProvisionerJobInput,
+            input: InsertProvisionerJobInput,
         ) -> Result<ProvisionerJobRecord, StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let record = ProvisionerJobRecord {
+                id: input.id,
+                created_at: input.created_at,
+                updated_at: input.created_at,
+                started_at: None,
+                canceled_at: None,
+                completed_at: None,
+                error: String::new(),
+                error_code: String::new(),
+                organization_id: Some(input.organization_id),
+                initiator_id: Some(input.initiator_id),
+                provisioner: input.provisioner,
+                storage_method: input.storage_method,
+                file_id: Some(input.file_id),
+                job_type: input.job_type,
+                input: input.input,
+                tags: input.tags,
+                trace_metadata: input.trace_metadata,
+                worker_id: None,
+                job_status: ProvisionerJobStatus::Pending,
+                logs_overflowed: false,
+                logs_length: 0,
+            };
+            self.prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
         }
 
         async fn update_provisioner_job_by_id(
             &self,
-            _id: Uuid,
-            _updated_at: OffsetDateTime,
+            id: Uuid,
+            updated_at: OffsetDateTime,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let job = jobs
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::invalid_data(format!("job {id} not found")))?;
+            job.updated_at = updated_at;
+            Ok(())
         }
 
         async fn update_provisioner_job_with_complete_by_id(
             &self,
-            _input: CompleteProvisionerJobInput,
+            input: CompleteProvisionerJobInput,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let job = jobs
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::invalid_data(format!("job {} not found", input.id)))?;
+            job.updated_at = input.updated_at;
+            job.completed_at = Some(input.completed_at);
+            job.error = input.error.clone();
+            job.error_code = input.error_code.clone();
+            job.job_status = if input.error.is_empty() {
+                ProvisionerJobStatus::Succeeded
+            } else {
+                ProvisionerJobStatus::Failed
+            };
+            Ok(())
         }
 
         async fn update_provisioner_job_with_cancel_by_id(
             &self,
-            _input: CancelProvisionerJobInput,
+            input: CancelProvisionerJobInput,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let job = jobs
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::invalid_data(format!("job {} not found", input.id)))?;
+            job.canceled_at = Some(input.canceled_at);
+            if let Some(completed_at) = input.completed_at {
+                job.completed_at = Some(completed_at);
+                job.job_status = ProvisionerJobStatus::Canceled;
+            } else {
+                job.job_status = ProvisionerJobStatus::Canceling;
+            }
+            Ok(())
         }
 
         async fn get_provisioner_jobs_to_be_reaped(
             &self,
-            _input: GetJobsToBeReapedInput,
+            input: GetJobsToBeReapedInput,
         ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
-            Ok(Vec::new())
+            let jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<ProvisionerJobRecord> = jobs
+                .values()
+                .filter(|j| {
+                    let stale_pending = j.job_status == ProvisionerJobStatus::Pending
+                        && j.created_at < input.pending_since;
+                    let hung_running = j.job_status == ProvisionerJobStatus::Running
+                        && j.updated_at < input.hung_since;
+                    stale_pending || hung_running
+                })
+                .cloned()
+                .collect();
+            result.truncate(
+                i64::try_from(result.len())
+                    .ok()
+                    .and_then(|len| {
+                        if len > input.max_jobs {
+                            Some(input.max_jobs as usize)
+                        } else {
+                            None
+                        }
+                    })
+                    .unwrap_or(result.len()),
+            );
+            Ok(result)
         }
 
         async fn insert_provisioner_job_logs(
             &self,
-            _input: InsertProvisionerJobLogsInput,
+            input: InsertProvisionerJobLogsInput,
         ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
-            Ok(Vec::new())
+            let mut logs = self
+                .prov_job_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut next_id = self
+                .prov_job_log_next_id
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let count = input.created_at.len();
+            let mut inserted = Vec::with_capacity(count);
+            for i in 0..count {
+                let record = ProvisionerLogRecord {
+                    id: *next_id,
+                    job_id: input.job_id,
+                    created_at: input.created_at[i],
+                    source: input.source[i],
+                    level: input.level[i],
+                    stage: input.stage[i].clone(),
+                    output: input.output[i].clone(),
+                };
+                *next_id += 1;
+                logs.push(record.clone());
+                inserted.push(record);
+            }
+            Ok(inserted)
         }
 
         async fn get_provisioner_logs_after_id(
             &self,
-            _job_id: Uuid,
-            _after_id: i64,
+            job_id: Uuid,
+            after_id: i64,
         ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
-            Ok(Vec::new())
+            let logs = self
+                .prov_job_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(logs
+                .iter()
+                .filter(|l| l.job_id == job_id && l.id > after_id)
+                .cloned()
+                .collect())
         }
 
         async fn insert_provisioner_job_timings(
             &self,
-            _input: InsertProvisionerJobTimingsInput,
+            input: InsertProvisionerJobTimingsInput,
         ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
-            Ok(Vec::new())
+            let mut timings = self
+                .prov_job_timings
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let count = input.started_at.len();
+            let mut inserted = Vec::with_capacity(count);
+            for i in 0..count {
+                let record = ProvisionerTimingRecord {
+                    job_id: input.job_id,
+                    started_at: input.started_at[i],
+                    ended_at: input.ended_at[i],
+                    stage: input.stage[i],
+                    source: input.source[i].clone(),
+                    action: input.action[i].clone(),
+                    resource: input.resource[i].clone(),
+                };
+                timings.push(record.clone());
+                inserted.push(record);
+            }
+            Ok(inserted)
         }
 
         async fn get_provisioner_job_timings_by_job_id(
             &self,
-            _job_id: Uuid,
+            job_id: Uuid,
         ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
-            Ok(Vec::new())
+            let timings = self
+                .prov_job_timings
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(timings
+                .iter()
+                .filter(|t| t.job_id == job_id)
+                .cloned()
+                .collect())
         }
 
         async fn upsert_provisioner_daemon(
             &self,
-            _input: UpsertProvisionerDaemonInput,
+            input: UpsertProvisionerDaemonInput,
         ) -> Result<ProvisionerDaemonRecord, StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Look for existing daemon with same name and organization.
+            let existing_id = daemons
+                .values()
+                .find(|d| d.name == input.name && d.organization_id == input.organization_id)
+                .map(|d| d.id);
+            if let Some(id) = existing_id {
+                let daemon = daemons
+                    .get_mut(&id)
+                    .ok_or_else(|| StorageError::unavailable("concurrent modification"))?;
+                daemon.last_seen_at = Some(input.last_seen_at);
+                daemon.version = input.version.clone();
+                daemon.api_version = input.api_version.clone();
+                daemon.provisioners = input.provisioners.clone();
+                daemon.tags = input.tags.clone();
+                daemon.key_id = input.key_id;
+                Ok(daemon.clone())
+            } else {
+                let record = ProvisionerDaemonRecord {
+                    id: Uuid::new_v4(),
+                    organization_id: input.organization_id,
+                    created_at: input.last_seen_at,
+                    last_seen_at: Some(input.last_seen_at),
+                    name: input.name,
+                    version: input.version,
+                    api_version: input.api_version,
+                    provisioners: input.provisioners,
+                    tags: input.tags,
+                    key_id: input.key_id,
+                };
+                daemons.insert(record.id, record.clone());
+                Ok(record)
+            }
         }
 
         async fn update_provisioner_daemon_last_seen_at(
             &self,
-            _id: Uuid,
-            _last_seen_at: OffsetDateTime,
+            id: Uuid,
+            last_seen_at: OffsetDateTime,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let daemon = daemons
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::invalid_data(format!("daemon {id} not found")))?;
+            daemon.last_seen_at = Some(last_seen_at);
+            Ok(())
         }
 
         async fn get_provisioner_daemons_by_organization(
             &self,
-            _organization_id: Uuid,
+            organization_id: Uuid,
         ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
-            Ok(Vec::new())
+            let daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(daemons
+                .values()
+                .filter(|d| d.organization_id == organization_id)
+                .cloned()
+                .collect())
         }
 
         async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let cutoff = OffsetDateTime::now_utc() - time::Duration::days(7);
+            daemons.retain(|_, d| d.last_seen_at.is_none_or(|last_seen| last_seen >= cutoff));
+            Ok(())
         }
 
         async fn insert_provisioner_key(
