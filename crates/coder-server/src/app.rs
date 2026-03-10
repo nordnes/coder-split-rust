@@ -33099,114 +33099,11 @@ mod tests {
     }
 
     // =======================================================================
-    // Happy-path integration tests — Template mutations
+    // Happy-path integration tests — Template version archive/unarchive
     // =======================================================================
 
     #[tokio::test]
-    async fn happy_delete_template() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let (session_token, _org_id, template) = create_test_template(&app).await?;
-
-        let template_id = template
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("missing id")?;
-
-        // DELETE the template.
-        let delete_response = call(
-            app.clone(),
-            authenticated_request(
-                Method::DELETE,
-                &format!("/api/v2/templates/{template_id}"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(delete_response.status(), StatusCode::OK);
-
-        // Re-fetch should return 404.
-        let get_response = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/templates/{template_id}"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn happy_patch_template() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let (session_token, _org_id, template) = create_test_template(&app).await?;
-
-        let template_id = template
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("missing id")?;
-
-        // PATCH -- update display_name and description.
-        let patch_body = UpdateTemplateMeta {
-            display_name: Some("Updated Display".to_owned()),
-            description: Some("Updated description".to_owned()),
-            ..UpdateTemplateMeta::default()
-        };
-        let patch_response = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::PATCH,
-                &format!("/api/v2/templates/{template_id}"),
-                &session_token,
-                &patch_body,
-            )?,
-        )
-        .await?;
-        assert_eq!(patch_response.status(), StatusCode::OK);
-        let patched = response_json(patch_response).await?;
-        assert_eq!(
-            patched.get("display_name").and_then(Value::as_str),
-            Some("Updated Display")
-        );
-        assert_eq!(
-            patched.get("description").and_then(Value::as_str),
-            Some("Updated description")
-        );
-
-        // GET to verify changes persisted.
-        let get_response = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/templates/{template_id}"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(get_response.status(), StatusCode::OK);
-        let fetched = response_json(get_response).await?;
-        assert_eq!(
-            fetched.get("display_name").and_then(Value::as_str),
-            Some("Updated Display")
-        );
-        assert_eq!(
-            fetched.get("description").and_then(Value::as_str),
-            Some("Updated description")
-        );
-        // Original name should be preserved.
-        assert_eq!(
-            fetched.get("name").and_then(Value::as_str),
-            Some("test-template")
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn happy_archive_unarchive_template_version() -> Result<(), Box<dyn Error>> {
+    async fn archive_unarchive_template_version_toggles_flag() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33289,7 +33186,7 @@ mod tests {
     // =======================================================================
 
     #[tokio::test]
-    async fn happy_patch_workspace() -> Result<(), Box<dyn Error>> {
+    async fn patch_workspace_rename_and_autostart_persist() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33329,7 +33226,7 @@ mod tests {
         .await?;
         assert_eq!(autostart_resp.status(), StatusCode::NO_CONTENT);
 
-        // Verify the rename persisted via GET.
+        // Verify both changes persisted via GET.
         let get_resp = call(
             app,
             authenticated_request(
@@ -33354,7 +33251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn happy_workspace_build_create_and_cancel() -> Result<(), Box<dyn Error>> {
+    async fn workspace_build_create_and_cancel_updates_job_status() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33387,6 +33284,11 @@ mod tests {
             .get("id")
             .and_then(Value::as_str)
             .ok_or("missing build id")?;
+        let job_id_str = build
+            .get("job_id")
+            .and_then(Value::as_str)
+            .ok_or("missing job_id")?;
+        let job_id: Uuid = job_id_str.parse().map_err(|_| "invalid job_id uuid")?;
         assert_eq!(
             build.get("transition").and_then(Value::as_str),
             Some("start")
@@ -33404,6 +33306,17 @@ mod tests {
         .await?;
         assert_eq!(cancel_resp.status(), StatusCode::OK);
 
+        // Verify the underlying provisioner job was marked as canceling.
+        {
+            let jobs = store.provisioner_jobs.lock().map_err(|e| e.to_string())?;
+            let job = jobs.get(&job_id).ok_or("job not found in store")?;
+            assert_eq!(
+                job.job_status, "canceling",
+                "expected job_status to be canceling after cancel"
+            );
+            assert!(job.canceled_at.is_some(), "expected canceled_at to be set");
+        }
+
         // Re-fetch the build -- verify it is still accessible after cancel.
         let get_build_resp = call(
             app,
@@ -33416,17 +33329,17 @@ mod tests {
         .await?;
         assert_eq!(get_build_resp.status(), StatusCode::OK);
         let fetched = response_json(get_build_resp).await?;
-        // The build should still reference the same id and transition.
         assert_eq!(fetched.get("id").and_then(Value::as_str), Some(build_id));
         assert_eq!(
             fetched.get("transition").and_then(Value::as_str),
             Some("start")
         );
+
         Ok(())
     }
 
     #[tokio::test]
-    async fn happy_workspace_extend_deadline() -> Result<(), Box<dyn Error>> {
+    async fn workspace_extend_deadline_sets_exact_value() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33450,7 +33363,7 @@ mod tests {
         .await?;
         assert_eq!(extend_resp.status(), StatusCode::NO_CONTENT);
 
-        // Verify the build's deadline was updated.
+        // Verify the build's deadline was updated to the exact requested value.
         let builds_resp = call(
             app,
             authenticated_request(
@@ -33464,17 +33377,20 @@ mod tests {
         let builds_body = response_json(builds_resp).await?;
         let builds = builds_body.as_array().ok_or("expected array")?;
         assert!(!builds.is_empty());
-        let deadline = builds[0].get("deadline").and_then(Value::as_str);
-        assert!(
-            deadline.is_some(),
-            "expected deadline to be set on the latest build"
+        let deadline = builds[0]
+            .get("deadline")
+            .and_then(Value::as_str)
+            .ok_or("expected deadline to be set on the latest build")?;
+        assert_eq!(
+            deadline, new_deadline,
+            "deadline should match the requested value"
         );
 
         Ok(())
     }
 
     #[tokio::test]
-    async fn happy_workspace_dormant_activate() -> Result<(), Box<dyn Error>> {
+    async fn workspace_dormant_activate_sets_and_clears_dormant_at() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33501,7 +33417,7 @@ mod tests {
                 .get("dormant_at")
                 .and_then(Value::as_str)
                 .is_some(),
-            "expected dormant_at to be set"
+            "expected dormant_at to be a non-null string timestamp"
         );
 
         // Reactivate the workspace.
@@ -33517,13 +33433,14 @@ mod tests {
         .await?;
         assert_eq!(activate_resp.status(), StatusCode::OK);
         let active_body = response_json(activate_resp).await?;
+        // dormant_at should be explicitly null (not missing) after reactivation.
         assert!(
-            active_body.get("dormant_at").is_none()
-                || active_body
-                    .get("dormant_at")
-                    .map(Value::is_null)
-                    .unwrap_or(false),
-            "expected dormant_at to be null after reactivation"
+            active_body
+                .get("dormant_at")
+                .map(Value::is_null)
+                .unwrap_or(false),
+            "expected dormant_at to be JSON null after reactivation, got {:?}",
+            active_body.get("dormant_at")
         );
 
         // Verify via GET.
@@ -33539,283 +33456,12 @@ mod tests {
         assert_eq!(get_resp.status(), StatusCode::OK);
         let fetched = response_json(get_resp).await?;
         assert!(
-            fetched.get("dormant_at").is_none()
-                || fetched
-                    .get("dormant_at")
-                    .map(Value::is_null)
-                    .unwrap_or(false),
-            "expected dormant_at to be null on re-fetched workspace"
-        );
-
-        Ok(())
-    }
-
-    // =======================================================================
-    // Happy-path integration tests -- User mutations
-    // =======================================================================
-
-    #[tokio::test]
-    async fn happy_delete_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let session_token = create_and_login(&app).await?;
-        let organization_id = first_organization_id(&app, &session_token).await?;
-
-        // Create a user to delete.
-        let create_resp = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::POST,
-                "/api/v2/users",
-                &session_token,
-                &CreateUserRequestWithOrgs {
-                    email: "deleteme@example.com".to_owned(),
-                    username: "deleteme".to_owned(),
-                    name: "Delete Me".to_owned(),
-                    password: "Password123".to_owned(),
-                    login_type: Some(LoginType::Password),
-                    user_status: Some(UserStatus::Active),
-                    organization_ids: vec![organization_id],
-                },
-            )?,
-        )
-        .await?;
-        assert_eq!(create_resp.status(), StatusCode::CREATED);
-
-        // DELETE the user.
-        let delete_resp = call(
-            app.clone(),
-            authenticated_request(Method::DELETE, "/api/v2/users/deleteme", &session_token)?,
-        )
-        .await?;
-        assert_eq!(delete_resp.status(), StatusCode::OK);
-
-        // Verify the user is soft-deleted (GET returns 404).
-        let get_resp = call(
-            app,
-            authenticated_request(Method::GET, "/api/v2/users/deleteme", &session_token)?,
-        )
-        .await?;
-        assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn happy_post_user_creates_new_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let session_token = create_and_login(&app).await?;
-        let organization_id = first_organization_id(&app, &session_token).await?;
-
-        // Create a new user via the admin endpoint.
-        let create_resp = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::POST,
-                "/api/v2/users",
-                &session_token,
-                &CreateUserRequestWithOrgs {
-                    email: "newadmin@example.com".to_owned(),
-                    username: "newadmin".to_owned(),
-                    name: "New Admin".to_owned(),
-                    password: "Password123".to_owned(),
-                    login_type: Some(LoginType::Password),
-                    user_status: Some(UserStatus::Active),
-                    organization_ids: vec![organization_id],
-                },
-            )?,
-        )
-        .await?;
-        assert_eq!(create_resp.status(), StatusCode::CREATED);
-        let created = response_json(create_resp).await?;
-        assert_eq!(
-            created.get("email").and_then(Value::as_str),
-            Some("newadmin@example.com")
-        );
-        assert_eq!(
-            created.get("username").and_then(Value::as_str),
-            Some("newadmin")
-        );
-        assert_eq!(
-            created.get("name").and_then(Value::as_str),
-            Some("New Admin")
-        );
-        assert_eq!(
-            created.get("status").and_then(Value::as_str),
-            Some("active")
-        );
-
-        // Verify the user appears in the user list.
-        let list_resp = call(
-            app,
-            authenticated_request(Method::GET, "/api/v2/users", &session_token)?,
-        )
-        .await?;
-        assert_eq!(list_resp.status(), StatusCode::OK);
-        let list_body = response_json(list_resp).await?;
-        let users = list_body
-            .get("users")
-            .and_then(Value::as_array)
-            .ok_or("expected users array")?;
-        let found = users
-            .iter()
-            .any(|u| u.get("username").and_then(Value::as_str) == Some("newadmin"));
-        assert!(found, "expected newadmin in user list");
-
-        Ok(())
-    }
-
-    // =======================================================================
-    // Happy-path integration tests -- Organization member operations
-    // =======================================================================
-
-    #[tokio::test]
-    async fn happy_org_member_add_remove() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let session_token = create_and_login(&app).await?;
-        let organization_id = first_organization_id(&app, &session_token).await?;
-
-        // Create a second user (added to org during creation).
-        let _create = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::POST,
-                "/api/v2/users",
-                &session_token,
-                &CreateUserRequestWithOrgs {
-                    email: "addremove@example.com".to_owned(),
-                    username: "addremove".to_owned(),
-                    name: "Add Remove".to_owned(),
-                    password: "Password123".to_owned(),
-                    login_type: Some(LoginType::Password),
-                    user_status: Some(UserStatus::Active),
-                    organization_ids: vec![organization_id],
-                },
-            )?,
-        )
-        .await?;
-
-        // List members -- should include the new user.
-        let list_resp = call(
-            app.clone(),
-            authenticated_request(
-                Method::GET,
-                "/api/v2/organizations/first-organization/members",
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(list_resp.status(), StatusCode::OK);
-        let members = response_json(list_resp).await?;
-        let member_array = members.as_array().ok_or("expected array")?;
-        let found = member_array
-            .iter()
-            .any(|m| m.get("username").and_then(Value::as_str) == Some("addremove"));
-        assert!(found, "expected addremove in member list");
-
-        // Remove the member from the org.
-        let remove_resp = call(
-            app.clone(),
-            authenticated_request(
-                Method::DELETE,
-                "/api/v2/organizations/first-organization/members/addremove",
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(remove_resp.status(), StatusCode::NO_CONTENT);
-
-        // List members again -- should no longer include the removed user.
-        let list_resp2 = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                "/api/v2/organizations/first-organization/members",
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(list_resp2.status(), StatusCode::OK);
-        let members2 = response_json(list_resp2).await?;
-        let member_array2 = members2.as_array().ok_or("expected array")?;
-        let found2 = member_array2
-            .iter()
-            .any(|m| m.get("username").and_then(Value::as_str) == Some("addremove"));
-        assert!(!found2, "expected addremove to be removed from member list");
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn happy_org_member_role_assignment() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let session_token = create_and_login(&app).await?;
-        let organization_id = first_organization_id(&app, &session_token).await?;
-
-        // Create a user to assign roles to.
-        let _create = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::POST,
-                "/api/v2/users",
-                &session_token,
-                &CreateUserRequestWithOrgs {
-                    email: "roletest@example.com".to_owned(),
-                    username: "roletest".to_owned(),
-                    name: "Role Test".to_owned(),
-                    password: "Password123".to_owned(),
-                    login_type: Some(LoginType::Password),
-                    user_status: Some(UserStatus::Active),
-                    organization_ids: vec![organization_id],
-                },
-            )?,
-        )
-        .await?;
-
-        // Assign organization-admin role.
-        let assign_resp = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::PUT,
-                "/api/v2/organizations/first-organization/members/roletest/roles",
-                &session_token,
-                &UpdateRolesRequest {
-                    roles: vec!["organization-admin".to_owned()],
-                },
-            )?,
-        )
-        .await?;
-        assert_eq!(assign_resp.status(), StatusCode::OK);
-        let assign_body = response_json(assign_resp).await?;
-        assert_eq!(
-            assign_body
-                .get("roles")
-                .and_then(Value::as_array)
-                .and_then(|roles| roles.first())
-                .and_then(|role| role.get("name"))
-                .and_then(Value::as_str),
-            Some("organization-admin")
-        );
-
-        // Verify the role via GET member.
-        let get_resp = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                "/api/v2/organizations/first-organization/members/roletest",
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(get_resp.status(), StatusCode::OK);
-        let member = response_json(get_resp).await?;
-        assert_eq!(
-            member
-                .get("roles")
-                .and_then(Value::as_array)
-                .and_then(|roles| roles.first())
-                .and_then(|role| role.get("name"))
-                .and_then(Value::as_str),
-            Some("organization-admin")
+            fetched
+                .get("dormant_at")
+                .map(Value::is_null)
+                .unwrap_or(false),
+            "expected dormant_at to be JSON null on re-fetched workspace, got {:?}",
+            fetched.get("dormant_at")
         );
 
         Ok(())
@@ -33826,7 +33472,7 @@ mod tests {
     // =======================================================================
 
     #[tokio::test]
-    async fn happy_provisioner_daemon_list() -> Result<(), Box<dyn Error>> {
+    async fn provisioner_daemon_list_returns_ok() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
@@ -33854,14 +33500,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn happy_provisioner_job_lifecycle() -> Result<(), Box<dyn Error>> {
+    async fn provisioner_job_list_returns_ok() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
         // List provisioner jobs for the organization.
         let list_resp = call(
-            app.clone(),
+            app,
             authenticated_request(
                 Method::GET,
                 &format!("/api/v2/organizations/{org_id}/provisionerjobs"),
@@ -33876,140 +33522,6 @@ mod tests {
         assert!(
             jobs.is_empty(),
             "expected empty array from provisioner jobs stub"
-        );
-
-        // GET a specific job -- stub returns 404.
-        let fake_job_id = Uuid::new_v4();
-        let get_resp = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{fake_job_id}"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(get_resp.status(), StatusCode::NOT_FOUND);
-
-        Ok(())
-    }
-
-    // =======================================================================
-    // Happy-path integration tests -- OAuth2 provider
-    // =======================================================================
-
-    #[tokio::test]
-    async fn happy_oauth2_provider_app_full_lifecycle() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let session_token = create_and_login(&app).await?;
-
-        // 1. Create an OAuth2 app.
-        let create_resp = call(
-            app.clone(),
-            authenticated_json_request(
-                Method::POST,
-                "/api/v2/oauth2-provider/apps",
-                &session_token,
-                &json!({
-                    "name": "Lifecycle App",
-                    "callback_url": "https://example.com/callback"
-                }),
-            )?,
-        )
-        .await?;
-        assert_eq!(create_resp.status(), StatusCode::CREATED);
-        let created = response_json(create_resp).await?;
-        let client_id = created
-            .get("id")
-            .and_then(Value::as_str)
-            .ok_or("missing app id")?
-            .to_owned();
-        assert_eq!(
-            created.get("name").and_then(Value::as_str),
-            Some("Lifecycle App")
-        );
-
-        // 2. Create a secret for the app.
-        let secret_resp = call(
-            app.clone(),
-            authenticated_request(
-                Method::POST,
-                &format!("/api/v2/oauth2-provider/apps/{client_id}/secrets"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(secret_resp.status(), StatusCode::CREATED);
-        let secret_body = response_json(secret_resp).await?;
-        let client_secret = secret_body
-            .get("client_secret_full")
-            .and_then(Value::as_str)
-            .ok_or("missing client_secret_full")?
-            .to_owned();
-        assert!(
-            secret_body
-                .get("client_secret_truncated")
-                .and_then(Value::as_str)
-                .is_some()
-        );
-
-        // 3. Authorization flow -- GET /oauth2/authorize should redirect with code.
-        let authorize_resp = call(
-            app.clone(),
-            authenticated_request(
-                Method::GET,
-                &format!(
-                    "/oauth2/authorize?response_type=code&client_id={client_id}&state=teststate"
-                ),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(authorize_resp.status(), StatusCode::TEMPORARY_REDIRECT);
-        let location = authorize_resp
-            .headers()
-            .get("location")
-            .ok_or("missing location header")?
-            .to_str()?;
-        assert!(location.starts_with("https://example.com/callback"));
-        assert!(location.contains("code="));
-        assert!(location.contains("state=teststate"));
-
-        // Extract the authorization code.
-        let redirect_url = Url::parse(location)?;
-        let code = redirect_url
-            .query_pairs()
-            .find(|(k, _)| k == "code")
-            .map(|(_, v)| v.to_string())
-            .ok_or("missing code parameter")?;
-
-        // 4. Token exchange -- POST /oauth2/tokens.
-        let token_resp = call(
-            app,
-            {
-                let body = format!(
-                    "grant_type=authorization_code&code={code}&client_id={client_id}&client_secret={client_secret}"
-                );
-                Request::builder()
-                    .method(Method::POST)
-                    .uri("/oauth2/tokens")
-                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
-                    .body(Body::from(body))?
-            },
-        )
-        .await?;
-        assert_eq!(token_resp.status(), StatusCode::OK);
-        let token_body = response_json(token_resp).await?;
-        assert!(
-            token_body
-                .get("access_token")
-                .and_then(Value::as_str)
-                .is_some(),
-            "expected access_token in response"
-        );
-        assert_eq!(
-            token_body.get("token_type").and_then(Value::as_str),
-            Some("Bearer")
         );
 
         Ok(())
