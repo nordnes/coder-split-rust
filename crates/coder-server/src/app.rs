@@ -12203,10 +12203,14 @@ mod tests {
                 .templates
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let template_id = templates
+            let template_id = match templates
                 .values()
                 .find(|t| t.organization_id == organization_id && t.name == template_name)
-                .map(|t| t.id);
+                .map(|t| t.id)
+            {
+                Some(id) => id,
+                None => return Ok(None),
+            };
             drop(templates);
 
             let versions = self
@@ -12217,7 +12221,7 @@ mod tests {
             // Find the target version to get its created_at timestamp.
             let target = versions.values().find(|v| {
                 v.organization_id == organization_id
-                    && v.template_id == template_id
+                    && v.template_id == Some(template_id)
                     && v.name == version_name
             });
             let target_created_at = match target {
@@ -12230,7 +12234,7 @@ mod tests {
                 .values()
                 .filter(|v| {
                     v.organization_id == organization_id
-                        && v.template_id == template_id
+                        && v.template_id == Some(template_id)
                         && v.created_at < target_created_at
                 })
                 .collect();
