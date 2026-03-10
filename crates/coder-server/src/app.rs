@@ -28553,9 +28553,10 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
-            if let Some(task) = tasks.get_mut(&task_id) {
-                task.status = TaskStatus::Active;
-            }
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or("task not found in FakeStore after creation")?;
+            task.status = TaskStatus::Active;
         }
 
         let response = call(
@@ -28605,9 +28606,10 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
-            if let Some(task) = tasks.get_mut(&task_id) {
-                task.workspace_id = Some(Uuid::from_u128(7777));
-            }
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or("task not found in FakeStore after creation")?;
+            task.workspace_id = Some(Uuid::from_u128(7777));
         }
 
         let response = call(
@@ -28658,9 +28660,10 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
-            if let Some(task) = tasks.get_mut(&task_id) {
-                task.workspace_id = Some(Uuid::from_u128(7778));
-            }
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or("task not found in FakeStore after creation")?;
+            task.workspace_id = Some(Uuid::from_u128(7778));
         }
 
         let response = call(
@@ -28711,9 +28714,10 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
-            if let Some(task) = tasks.get_mut(&task_id) {
-                task.status = TaskStatus::Paused;
-            }
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or("task not found in FakeStore after creation")?;
+            task.status = TaskStatus::Paused;
         }
 
         let response = call(
@@ -29022,9 +29026,10 @@ mod tests {
                 .chats
                 .lock()
                 .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
-            if let Some(chat) = chats.get_mut(&chat_id) {
-                chat.archived = true;
-            }
+            let chat = chats
+                .get_mut(&chat_id)
+                .ok_or("chat not found in FakeStore after creation")?;
+            chat.archived = true;
         }
 
         let response = call(
