@@ -58,6 +58,8 @@ pub use api::{
     WorkspaceAppStatusState, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceProxyHealthReport,
 };
+// Insights / Analytics & Debug types are accessed via `coder_core::api::*` in
+// downstream crates that need them (e.g. coder-server).
 pub use api::{
     DeleteWebpushSubscription, GetInboxNotificationResponse, InboxNotification,
     InboxNotificationAction, ListInboxNotificationsResponse, NotificationMethodsResponse,
@@ -91,17 +93,18 @@ pub use ports::{
     ChatRecord, CreateWorkspaceBuildInput, CreateWorkspaceInput, DeploymentMetadata,
     DeploymentStore, ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore,
     InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
-    InsertFileResult, InsertTaskInput, InsertWorkspaceAppStatusInput, OperationalStore,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerJobLogRecord, ProvisionerJobStatsInput, ProvisionerJobTimingRecord,
-    ProvisionerStore, StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TemplateStore,
-    UpsertExternalAuthLinkInput, UpsertPortShareInput, WebpushSubscriptionRecord,
-    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
-    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
-    WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
-    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
-    WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
-    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput, WorkspaceStore,
+    InsertFileResult, InsertTaskInput, InsertWorkspaceAppStatusInput, InsightsStore,
+    OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord, ProvisionerJobStatsInput,
+    ProvisionerJobTimingRecord, ProvisionerStore, StorageError, TaskListFilter, TaskRecord,
+    TaskSnapshotRecord, TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput,
+    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
+    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
+    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow,
+    WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
+    WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
+    WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
 pub use provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,

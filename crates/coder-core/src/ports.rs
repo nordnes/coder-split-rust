@@ -9,9 +9,11 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::api::{
-    AuditLogResponse, ChatMessageVisibility, ChatStatus, ExternalAuthAppInstallation,
-    ExternalAuthUser, HealthSettings, InboxNotification, NotificationPreference,
-    NotificationTemplate, NotificationsSettings, TaskStatus,
+    AuditLogResponse, ChatMessageVisibility, ChatStatus, DAUsResponse, ExternalAuthAppInstallation,
+    ExternalAuthUser, GetUserStatusCountsResponse, HealthSettings, InboxNotification,
+    InsightsReportInterval, NotificationPreference, NotificationTemplate, NotificationsSettings,
+    TaskStatus, TemplateInsightsIntervalReport, TemplateInsightsResponse,
+    UserActivityInsightsResponse, UserLatencyInsightsResponse,
 };
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
@@ -1711,6 +1713,83 @@ pub trait OperationalStore: Send + Sync {
     }
 }
 
+/// Narrow storage contract for insights and analytics queries.
+#[async_trait]
+pub trait InsightsStore: Send + Sync {
+    /// Returns DAU (daily active user) entries for the deployment.
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
+        let _ = tz_offset;
+        Err(StorageError::unavailable(
+            "deployment DAUs are not implemented",
+        ))
+    }
+
+    /// Returns template-level insights for a time range.
+    async fn get_template_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<TemplateInsightsResponse, StorageError> {
+        let _ = (start_time, end_time, interval, template_ids);
+        Err(StorageError::unavailable(
+            "template insights are not implemented",
+        ))
+    }
+
+    /// Returns template insights broken down by interval.
+    async fn get_template_insights_by_interval(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
+        let _ = (start_time, end_time, interval, template_ids);
+        Err(StorageError::unavailable(
+            "template insights by interval are not implemented",
+        ))
+    }
+
+    /// Returns per-user activity insights for a time range.
+    async fn get_user_activity_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserActivityInsightsResponse, StorageError> {
+        let _ = (start_time, end_time, template_ids);
+        Err(StorageError::unavailable(
+            "user activity insights are not implemented",
+        ))
+    }
+
+    /// Returns per-user latency insights for a time range.
+    async fn get_user_latency_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserLatencyInsightsResponse, StorageError> {
+        let _ = (start_time, end_time, template_ids);
+        Err(StorageError::unavailable(
+            "user latency insights are not implemented",
+        ))
+    }
+
+    /// Returns user status counts over time for the deployment.
+    async fn get_user_status_counts(
+        &self,
+        timezone: &str,
+    ) -> Result<GetUserStatusCountsResponse, StorageError> {
+        let _ = timezone;
+        Err(StorageError::unavailable(
+            "user status counts are not implemented",
+        ))
+    }
+}
+
 /// Storage contract for provisioner job lifecycle, daemons, keys, logs, and timings.
 #[async_trait]
 pub trait ProvisionerStore: Send + Sync {
@@ -2424,6 +2503,81 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = (user_id, link);
         Err(StorageError::unavailable(
             "external auth links are not implemented",
+        ))
+    }
+
+    // ── InsightsStore delegate methods ──────────────────────────────
+
+    /// Returns DAU entries for the deployment.
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
+        let _ = tz_offset;
+        Err(StorageError::unavailable(
+            "deployment DAUs are not implemented",
+        ))
+    }
+
+    /// Returns template-level insights for a time range.
+    async fn get_template_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<TemplateInsightsResponse, StorageError> {
+        let _ = (start_time, end_time, interval, template_ids);
+        Err(StorageError::unavailable(
+            "template insights are not implemented",
+        ))
+    }
+
+    /// Returns template insights broken down by interval.
+    async fn get_template_insights_by_interval(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
+        let _ = (start_time, end_time, interval, template_ids);
+        Err(StorageError::unavailable(
+            "template insights by interval are not implemented",
+        ))
+    }
+
+    /// Returns per-user activity insights for a time range.
+    async fn get_user_activity_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserActivityInsightsResponse, StorageError> {
+        let _ = (start_time, end_time, template_ids);
+        Err(StorageError::unavailable(
+            "user activity insights are not implemented",
+        ))
+    }
+
+    /// Returns per-user latency insights for a time range.
+    async fn get_user_latency_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserLatencyInsightsResponse, StorageError> {
+        let _ = (start_time, end_time, template_ids);
+        Err(StorageError::unavailable(
+            "user latency insights are not implemented",
+        ))
+    }
+
+    /// Returns user status counts over time.
+    async fn get_user_status_counts(
+        &self,
+        timezone: &str,
+    ) -> Result<GetUserStatusCountsResponse, StorageError> {
+        let _ = timezone;
+        Err(StorageError::unavailable(
+            "user status counts are not implemented",
         ))
     }
 
@@ -5370,6 +5524,131 @@ where
         (**self)
             .delete_workspace_port_share(workspace_id, agent_name, port)
             .await
+    }
+}
+
+#[async_trait]
+impl<T> InsightsStore for T
+where
+    T: AppStore + ?Sized,
+{
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
+        AppStore::get_deployment_daus(self, tz_offset).await
+    }
+
+    async fn get_template_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<TemplateInsightsResponse, StorageError> {
+        AppStore::get_template_insights(self, start_time, end_time, interval, template_ids).await
+    }
+
+    async fn get_template_insights_by_interval(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
+        AppStore::get_template_insights_by_interval(
+            self,
+            start_time,
+            end_time,
+            interval,
+            template_ids,
+        )
+        .await
+    }
+
+    async fn get_user_activity_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserActivityInsightsResponse, StorageError> {
+        AppStore::get_user_activity_insights(self, start_time, end_time, template_ids).await
+    }
+
+    async fn get_user_latency_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserLatencyInsightsResponse, StorageError> {
+        AppStore::get_user_latency_insights(self, start_time, end_time, template_ids).await
+    }
+
+    async fn get_user_status_counts(
+        &self,
+        timezone: &str,
+    ) -> Result<GetUserStatusCountsResponse, StorageError> {
+        AppStore::get_user_status_counts(self, timezone).await
+    }
+}
+
+#[async_trait]
+impl<T> InsightsStore for Arc<T>
+where
+    T: InsightsStore + ?Sized,
+{
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
+        (**self).get_deployment_daus(tz_offset).await
+    }
+
+    async fn get_template_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<TemplateInsightsResponse, StorageError> {
+        (**self)
+            .get_template_insights(start_time, end_time, interval, template_ids)
+            .await
+    }
+
+    async fn get_template_insights_by_interval(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        interval: InsightsReportInterval,
+        template_ids: Vec<Uuid>,
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
+        (**self)
+            .get_template_insights_by_interval(start_time, end_time, interval, template_ids)
+            .await
+    }
+
+    async fn get_user_activity_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserActivityInsightsResponse, StorageError> {
+        (**self)
+            .get_user_activity_insights(start_time, end_time, template_ids)
+            .await
+    }
+
+    async fn get_user_latency_insights(
+        &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+        template_ids: Vec<Uuid>,
+    ) -> Result<UserLatencyInsightsResponse, StorageError> {
+        (**self)
+            .get_user_latency_insights(start_time, end_time, template_ids)
+            .await
+    }
+
+    async fn get_user_status_counts(
+        &self,
+        timezone: &str,
+    ) -> Result<GetUserStatusCountsResponse, StorageError> {
+        (**self).get_user_status_counts(timezone).await
     }
 }
 

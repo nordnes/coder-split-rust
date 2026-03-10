@@ -33,6 +33,7 @@ use coder_core::api::{
     TemplateVersionPresetParameter, TemplateVersionResponse, TemplateVersionVariable,
     UpdateTemplateMeta, WorkspaceResource,
 };
+use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
 use coder_core::pubsub::PubSub;
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
@@ -263,6 +264,48 @@ struct CspViolationReport {
     report: HashMap<String, Value>,
 }
 
+#[derive(Debug, Deserialize)]
+struct InsightsDausQuery {
+    #[serde(default)]
+    tz_offset: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsTemplatesQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    interval: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+    #[serde(default)]
+    sections: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsUserActivityQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsUserLatencyQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InsightsUserStatusCountsQuery {
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    tz_offset: Option<i32>,
+}
+
 /// Query parameters for listing template versions.
 #[derive(Clone, Debug, Default, Deserialize)]
 struct TemplateVersionsQuery {
@@ -306,6 +349,24 @@ pub fn build_router(state: AppState) -> Router {
                 .route(
                     "/debug/health/settings",
                     get(get_health_settings).put(put_health_settings),
+                )
+                .route("/debug/coordinator", get(debug_coordinator))
+                .route("/debug/tailnet", get(debug_tailnet))
+                .route("/debug/derp/traffic", get(debug_derp_traffic))
+                .route("/debug/expvar", get(debug_expvar))
+                .route("/debug/pprof", get(debug_pprof))
+                .route("/debug/pprof/cmdline", get(debug_pprof))
+                .route("/debug/pprof/profile", get(debug_pprof))
+                .route("/debug/pprof/symbol", get(debug_pprof))
+                .route("/debug/pprof/trace", get(debug_pprof))
+                .route("/debug/ws", get(debug_websocket))
+                .route("/insights/daus", get(insights_daus))
+                .route("/insights/templates", get(insights_templates))
+                .route("/insights/user-activity", get(insights_user_activity))
+                .route("/insights/user-latency", get(insights_user_latency))
+                .route(
+                    "/insights/user-status-counts",
+                    get(insights_user_status_counts),
                 )
                 .route("/experiments", get(get_enabled_experiments))
                 .route("/experiments/available", get(get_available_experiments))
@@ -4645,7 +4706,7 @@ async fn get_template_daus(
         .iter()
         .map(|r| DAUEntry {
             date: r.date.clone(),
-            amount: r.amount,
+            amount: r.amount as i64,
         })
         .collect();
     let resp = DAUsResponse {
@@ -7611,6 +7672,381 @@ fn oauth2_secret_response(
 }
 
 // ---------------------------------------------------------------------------
+// Insights / Analytics handlers
+// ---------------------------------------------------------------------------
+
+async fn insights_daus(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsDausQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view deployment DAUs.",
+        ));
+    }
+
+    let tz_offset = query.tz_offset.unwrap_or(0);
+    if !(-23..=23).contains(&tz_offset) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok(
+                "Invalid tz_offset: must be between -23 and 23.",
+            )),
+        )
+            .into_response());
+    }
+    let response = state.store.get_deployment_daus(tz_offset).await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+fn parse_template_ids(raw: &Option<String>) -> Vec<Uuid> {
+    raw.as_deref()
+        .unwrap_or("")
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| Uuid::from_str(s).ok())
+        .collect()
+}
+
+fn parse_rfc3339(raw: &Option<String>) -> Option<OffsetDateTime> {
+    raw.as_deref()
+        .and_then(|s| OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok())
+}
+
+async fn insights_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsTemplatesQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view template insights.",
+        ));
+    }
+
+    let start_time = match parse_rfc3339(&query.start_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "start_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let end_time = match parse_rfc3339(&query.end_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "end_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let interval = match query.interval.as_deref() {
+        Some("week") => InsightsReportInterval::Week,
+        None | Some("day") => InsightsReportInterval::Day,
+        Some(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "interval must be 'day', 'week', or omitted.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let template_ids = parse_template_ids(&query.template_ids);
+
+    let sections: Vec<TemplateInsightsSection> = query
+        .sections
+        .as_deref()
+        .unwrap_or("")
+        .split(',')
+        .filter(|s| !s.is_empty())
+        .filter_map(|s| match s.trim() {
+            "interval_reports" => Some(TemplateInsightsSection::IntervalReports),
+            "report" => Some(TemplateInsightsSection::Report),
+            _ => None,
+        })
+        .collect();
+
+    let mut response = state
+        .store
+        .get_template_insights(start_time, end_time, interval, template_ids)
+        .await?;
+
+    // When the client specifies explicit sections, strip the parts they did
+    // not ask for.  An empty `sections` vec means "return everything".
+    if !sections.is_empty() {
+        if !sections.contains(&TemplateInsightsSection::Report) {
+            response.report = None;
+        }
+        if !sections.contains(&TemplateInsightsSection::IntervalReports) {
+            response.interval_reports = Vec::new();
+        }
+    }
+
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn insights_user_activity(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsUserActivityQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view user activity insights.",
+        ));
+    }
+
+    let start_time = match parse_rfc3339(&query.start_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "start_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let end_time = match parse_rfc3339(&query.end_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "end_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let template_ids = parse_template_ids(&query.template_ids);
+
+    let response = state
+        .store
+        .get_user_activity_insights(start_time, end_time, template_ids)
+        .await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn insights_user_latency(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsUserLatencyQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view user latency insights.",
+        ));
+    }
+
+    let start_time = match parse_rfc3339(&query.start_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "start_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let end_time = match parse_rfc3339(&query.end_time) {
+        Some(t) => t,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(
+                    "end_time is required and must be RFC 3339.",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let template_ids = parse_template_ids(&query.template_ids);
+
+    let response = state
+        .store
+        .get_user_latency_insights(start_time, end_time, template_ids)
+        .await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn insights_user_status_counts(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<InsightsUserStatusCountsQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view user status counts.",
+        ));
+    }
+
+    // Resolve timezone from query params, following Go's Etc/GMT±N convention.
+    let timezone = match (&query.timezone, query.tz_offset) {
+        (Some(tz), _) if !tz.is_empty() => tz.clone(),
+        (_, Some(offset)) if !(-23..=23).contains(&offset) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("tz_offset must be between -23 and 23.")),
+            )
+                .into_response());
+        }
+        (_, Some(offset)) if offset > 0 => format!("Etc/GMT-{offset}"),
+        (_, Some(offset)) if offset < 0 => {
+            let abs = offset.saturating_neg();
+            format!("Etc/GMT+{abs}")
+        }
+        _ => "UTC".to_owned(),
+    };
+
+    let response = state.store.get_user_status_counts(&timezone).await?;
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Debug / Observability handlers
+// ---------------------------------------------------------------------------
+
+async fn debug_coordinator(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view coordinator debug information.",
+        ));
+    }
+
+    Ok(not_implemented_response(
+        "Coordinator debug endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+async fn debug_tailnet(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view tailnet debug information.",
+        ));
+    }
+
+    Ok(not_implemented_response(
+        "Tailnet debug endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+async fn debug_derp_traffic(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view DERP traffic debug information.",
+        ));
+    }
+
+    Ok(not_implemented_response(
+        "DERP traffic debug endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+async fn debug_expvar(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view expvar debug information.",
+        ));
+    }
+
+    Ok(not_implemented_response(
+        "Expvar debug endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+async fn debug_pprof(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view pprof debug information.",
+        ));
+    }
+
+    Ok(not_implemented_response(
+        "Rust does not support Go-style pprof. Use tracing or jemalloc profiling instead.",
+    ))
+}
+
+async fn debug_websocket(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to use the debug websocket.",
+        ));
+    }
+
+    // In Go this upgrades to a WebSocket echo. For now return a stub JSON response.
+    Ok(not_implemented_response(
+        "WebSocket echo endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+// ---------------------------------------------------------------------------
 // Workspace Agent query parameters
 // ---------------------------------------------------------------------------
 
@@ -10531,6 +10967,93 @@ mod tests {
             };
             links.insert((user_id, link.provider_id.clone()), record.clone());
             Ok(record)
+        }
+
+        async fn get_deployment_daus(
+            &self,
+            tz_offset: i32,
+        ) -> Result<coder_core::api::DAUsResponse, StorageError> {
+            Ok(coder_core::api::DAUsResponse {
+                tz_hour_offset: tz_offset,
+                entries: Vec::new(),
+            })
+        }
+
+        async fn get_template_insights(
+            &self,
+            start_time: OffsetDateTime,
+            end_time: OffsetDateTime,
+            _interval: coder_core::api::InsightsReportInterval,
+            template_ids: Vec<Uuid>,
+        ) -> Result<coder_core::api::TemplateInsightsResponse, StorageError> {
+            Ok(coder_core::api::TemplateInsightsResponse {
+                report: Some(coder_core::api::TemplateInsightsReport {
+                    start_time,
+                    end_time,
+                    template_ids: template_ids.clone(),
+                    active_users: 0,
+                    apps_usage: Vec::new(),
+                    parameters_usage: Vec::new(),
+                }),
+                interval_reports: vec![coder_core::api::TemplateInsightsIntervalReport {
+                    start_time,
+                    end_time,
+                    template_ids,
+                    interval: coder_core::api::InsightsReportInterval::Day,
+                    active_users: 0,
+                }],
+            })
+        }
+
+        async fn get_template_insights_by_interval(
+            &self,
+            _start_time: OffsetDateTime,
+            _end_time: OffsetDateTime,
+            _interval: coder_core::api::InsightsReportInterval,
+            _template_ids: Vec<Uuid>,
+        ) -> Result<Vec<coder_core::api::TemplateInsightsIntervalReport>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_user_activity_insights(
+            &self,
+            start_time: OffsetDateTime,
+            end_time: OffsetDateTime,
+            template_ids: Vec<Uuid>,
+        ) -> Result<coder_core::api::UserActivityInsightsResponse, StorageError> {
+            Ok(coder_core::api::UserActivityInsightsResponse {
+                report: coder_core::api::UserActivityInsightsReport {
+                    start_time,
+                    end_time,
+                    template_ids,
+                    users: Vec::new(),
+                },
+            })
+        }
+
+        async fn get_user_latency_insights(
+            &self,
+            start_time: OffsetDateTime,
+            end_time: OffsetDateTime,
+            template_ids: Vec<Uuid>,
+        ) -> Result<coder_core::api::UserLatencyInsightsResponse, StorageError> {
+            Ok(coder_core::api::UserLatencyInsightsResponse {
+                report: coder_core::api::UserLatencyInsightsReport {
+                    start_time,
+                    end_time,
+                    template_ids,
+                    users: Vec::new(),
+                },
+            })
+        }
+
+        async fn get_user_status_counts(
+            &self,
+            _timezone: &str,
+        ) -> Result<coder_core::api::GetUserStatusCountsResponse, StorageError> {
+            Ok(coder_core::api::GetUserStatusCountsResponse {
+                status_counts: HashMap::new(),
+            })
         }
 
         // -----------------------------------------------------------------
@@ -13711,6 +14234,460 @@ mod tests {
         )
         .await?;
         assert_eq!(convert_login_response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ── Insights route tests ──────────────────────────────────────────
+
+    #[tokio::test]
+    async fn insights_daus_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        // 401 – unauthenticated
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/insights/daus")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // 200 – happy path (owner role has operational data access)
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/insights/daus", &session_token)?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert_eq!(body.get("tz_hour_offset").and_then(Value::as_i64), Some(0));
+        assert_eq!(
+            body.get("entries").and_then(Value::as_array).map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_templates_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            )?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("report").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_templates_sections_filter_strips_unrequested_fields()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Request only "report" section – interval_reports should be stripped
+        let report_only = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z&sections=report",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(report_only.status(), StatusCode::OK);
+        let body = response_json(report_only).await?;
+        assert!(body.get("report").is_some());
+        // interval_reports should be absent or empty (skip_serializing_if = "Vec::is_empty")
+        assert!(
+            body.get("interval_reports").is_none()
+                || body
+                    .get("interval_reports")
+                    .and_then(Value::as_array)
+                    .map(Vec::is_empty)
+                    .unwrap_or(false)
+        );
+
+        // Request only "interval_reports" section – report should be stripped
+        let interval_only = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z&sections=interval_reports",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(interval_only.status(), StatusCode::OK);
+        let body = response_json(interval_only).await?;
+        // report should be absent (skip_serializing_if = "Option::is_none")
+        assert!(body.get("report").is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_activity_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                "/api/v2/insights/user-activity?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            )?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-activity?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("report").is_some());
+        assert_eq!(
+            body.get("report")
+                .and_then(|r| r.get("users"))
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_latency_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                "/api/v2/insights/user-latency?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            )?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-latency?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("report").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_status_counts_requires_auth_and_returns_stub()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/insights/user-status-counts")?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let ok = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-status-counts",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(ok.status(), StatusCode::OK);
+        let body = response_json(ok).await?;
+        assert!(body.get("status_counts").is_some());
+
+        // Test timezone offset logic: tz_offset=5 → Etc/GMT-5
+        let tz_ok = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-status-counts?tz_offset=5",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(tz_ok.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // ── Debug route tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn debug_coordinator_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/debug/coordinator")?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/coordinator", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_tailnet_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/tailnet")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/tailnet", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_derp_traffic_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/debug/derp/traffic")?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/derp/traffic", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_expvar_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/expvar")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/expvar", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_pprof_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/pprof")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+
+        // Test main pprof endpoint
+        let resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/debug/pprof", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+
+        // Test pprof sub-routes (cmdline, profile, symbol, trace)
+        for sub in &["cmdline", "profile", "symbol", "trace"] {
+            let sub_resp = call(
+                app.clone(),
+                authenticated_request(
+                    Method::GET,
+                    &format!("/api/v2/debug/pprof/{sub}"),
+                    &session_token,
+                )?,
+            )
+            .await?;
+            assert_eq!(
+                sub_resp.status(),
+                StatusCode::NOT_IMPLEMENTED,
+                "pprof/{sub} should return 501"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_websocket_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/ws")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    // ── BAD_REQUEST validation tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn insights_templates_returns_400_for_missing_timestamps() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Missing both start_time and end_time
+        let resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/insights/templates", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Missing end_time
+        let resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Invalid interval
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z&interval=monthly",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_activity_returns_400_for_missing_timestamps()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-activity",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_latency_returns_400_for_missing_timestamps() -> Result<(), Box<dyn Error>>
+    {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/insights/user-latency", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_daus_returns_400_for_invalid_tz_offset() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/daus?tz_offset=99",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn insights_user_status_counts_returns_400_for_invalid_tz_offset()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-status-counts?tz_offset=-99",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 
