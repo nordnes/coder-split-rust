@@ -19333,7 +19333,12 @@ mod tests {
         assert_eq!(task["name"], "lifecycle-full");
         assert_eq!(task["status"], "pending");
 
-        // 2. Assign workspace and set active
+        // 2. Assign workspace and set active.
+        // NOTE: The pause/resume handlers are stubs that return 202 without
+        // mutating store state. We therefore manually set status via the
+        // FakeStore helpers throughout this test. Once the handlers are fully
+        // implemented (with real workspace stop/start logic), these manual
+        // calls should be removed and the handlers should drive the transitions.
         let workspace_id = Uuid::new_v4();
         store.set_task_workspace_id(task_id, workspace_id)?;
         store.set_task_status(task_id, TaskStatus::Active)?;
@@ -19365,7 +19370,8 @@ mod tests {
         .await?;
         assert_eq!(pause_response.status(), StatusCode::ACCEPTED);
 
-        // 5. Update status to paused in store and patch input
+        // 5. Manually transition to paused in store (stub handler doesn't
+        //    persist the state change), then patch input.
         store.set_task_status(task_id, TaskStatus::Paused)?;
         let patch_response = call(
             app.clone(),
@@ -19591,7 +19597,7 @@ mod tests {
         assert_eq!(msg_response.status(), StatusCode::OK);
         let body = to_bytes(msg_response.into_body(), 1_000_000).await?;
         let msg: Value = serde_json::from_slice(&body)?;
-        assert!(!msg["queued"].as_bool().unwrap_or(true));
+        assert_eq!(msg["queued"], false);
         Ok(())
     }
 
