@@ -2534,16 +2534,26 @@ impl AppStore for PostgresStore {
             user_id: Option<Uuid>,
         }
 
+        // Build a proper Etc/GMT timezone string from the integer offset.
+        // Etc/GMT sign convention is inverted: positive tz_offset → Etc/GMT-N.
+        let tz_name = if tz_offset == 0 {
+            "UTC".to_string()
+        } else if tz_offset > 0 {
+            format!("Etc/GMT-{tz_offset}")
+        } else {
+            format!("Etc/GMT+{}", tz_offset.abs())
+        };
+
         let rows = sqlx::query_as::<_, DauRow>(
             "SELECT
-                (created_at AT TIME ZONE CAST($1::integer AS text))::date AS date,
+                (created_at AT TIME ZONE $1)::date AS date,
                 user_id
              FROM workspace_agent_stats
              WHERE connection_count > 0
              GROUP BY date, user_id
              ORDER BY date ASC",
         )
-        .bind(tz_offset)
+        .bind(&tz_name)
         .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;
