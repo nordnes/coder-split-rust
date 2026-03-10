@@ -22,33 +22,33 @@ use coder_core::{
     AcquireProvisionerJobInput, ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord,
     ApiKeyWithOwnerRecord, AppStore, AuditDiff, AuditLog, AuditLogAction, AuditLogListFilter,
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
-    ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
-    CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
-    CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
-    CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
-    DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser,
-    FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupRecord,
-    HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
-    InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
-    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
-    InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
-    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
-    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
-    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
-    ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
-    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
-    UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-    UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
-    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
-    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
-    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
-    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
-    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
+    ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
+    CreateFirstUserInput, CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError,
+    CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
+    DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord,
+    ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord,
+    GroupRecord, HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
+    InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+    InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+    InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
+    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
+    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
+    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
+    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
+    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
+    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
+    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpsertExternalAuthLinkInput,
+    UpsertPortShareInput, UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter,
+    UserPreferenceRecord, UserRecord, UserStatus, WebpushSubscriptionRecord,
+    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
+    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
+    WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput,
+    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
+    WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
+    WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -405,6 +405,17 @@ struct StoredChatQueuedMessageRow {
     chat_id: Uuid,
     content: Value,
     created_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatFileRow {
+    id: Uuid,
+    owner_id: Uuid,
+    organization_id: Uuid,
+    created_at: OffsetDateTime,
+    name: String,
+    mimetype: String,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, FromRow)]
@@ -3250,6 +3261,76 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chats SET archived = false, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Files
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_chat_file(
+        &self,
+        input: InsertChatFileInput,
+    ) -> Result<ChatFileRecord, StorageError> {
+        let row: StoredChatFileRow = sqlx::query_as(
+            "INSERT INTO chat_files (owner_id, organization_id, name, mimetype, data)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, owner_id, organization_id, created_at, name, mimetype, data",
+        )
+        .bind(input.owner_id)
+        .bind(input.organization_id)
+        .bind(&input.name)
+        .bind(&input.mimetype)
+        .bind(&input.data)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(ChatFileRecord {
+            id: row.id,
+            owner_id: row.owner_id,
+            organization_id: row.organization_id,
+            created_at: row.created_at,
+            name: row.name,
+            mimetype: row.mimetype,
+            data: row.data,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_chat_file_by_id(&self, id: Uuid) -> Result<Option<ChatFileRecord>, StorageError> {
+        let row: Option<StoredChatFileRow> = sqlx::query_as(
+            "SELECT id, owner_id, organization_id, created_at, name, mimetype, data
+             FROM chat_files WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| ChatFileRecord {
+            id: r.id,
+            owner_id: r.owner_id,
+            organization_id: r.organization_id,
+            created_at: r.created_at,
+            name: r.name,
+            mimetype: r.mimetype,
+            data: r.data,
+        }))
+    }
+
     // -----------------------------------------------------------------------
     // Notifications domain
     // -----------------------------------------------------------------------
@@ -3696,7 +3777,7 @@ impl AppStore for PostgresStore {
              JOIN workspace_builds wb ON wb.workspace_id = w.id
              JOIN workspace_resources wr ON wr.job_id = wb.job_id
              JOIN workspace_agents wa ON wa.resource_id = wr.id
-             WHERE wa.id = $1 AND w.deleted = false
+             WHERE wa.id = $1 AND wa.deleted = false AND w.deleted = false
              ORDER BY wb.build_number DESC
              LIMIT 1",
         )

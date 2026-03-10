@@ -2596,6 +2596,12 @@ pub struct CreateChatMessageApiResponse {
     pub queued: bool,
 }
 
+/// UploadChatFileResponse is the response from uploading a chat file.
+#[derive(Clone, Debug, Serialize)]
+pub struct UploadChatFileResponse {
+    pub id: Uuid,
+}
+
 // ---------------------------------------------------------------------------
 // Workspace Agent types
 // ---------------------------------------------------------------------------
@@ -2975,6 +2981,9 @@ pub struct WorkspaceAgentConnectionInfo {
     pub derp_force_websockets: bool,
     /// Whether direct connections are disabled.
     pub disable_direct_connections: bool,
+    /// Hostname suffix used for workspace SSH hostnames.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub hostname_suffix: String,
 }
 
 /// Log level for workspace agent logs.

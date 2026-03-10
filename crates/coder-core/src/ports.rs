@@ -163,6 +163,28 @@ pub struct ChatQueuedMessageRecord {
     pub created_at: OffsetDateTime,
 }
 
+/// A chat file record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct ChatFileRecord {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub organization_id: Uuid,
+    pub created_at: OffsetDateTime,
+    pub name: String,
+    pub mimetype: String,
+    pub data: Vec<u8>,
+}
+
+/// Input for inserting a new chat file.
+#[derive(Clone, Debug)]
+pub struct InsertChatFileInput {
+    pub owner_id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub mimetype: String,
+    pub data: Vec<u8>,
+}
+
 /// Deployment metadata required by the HTTP layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeploymentMetadata {
@@ -2778,6 +2800,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("chats are not implemented"))
     }
 
+    /// Unarchives a chat by ID (sets archived = false for the single chat).
+    async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Files
+    // -----------------------------------------------------------------------
+
+    /// Inserts a new chat file.
+    async fn insert_chat_file(
+        &self,
+        input: InsertChatFileInput,
+    ) -> Result<ChatFileRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("chat files are not implemented"))
+    }
+
+    /// Fetches a chat file by ID.
+    async fn find_chat_file_by_id(&self, id: Uuid) -> Result<Option<ChatFileRecord>, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chat files are not implemented"))
+    }
+
     // -----------------------------------------------------------------------
     // Workspace Agent storage methods
     // -----------------------------------------------------------------------
@@ -3257,6 +3304,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = job_id;
         Err(StorageError::unavailable(
             "provisioner job timings are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace resource by stable identifier.
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        let _ = resource_id;
+        Err(StorageError::unavailable(
+            "workspace resources are not implemented",
         ))
     }
 
@@ -4224,6 +4282,12 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
+
+    /// Looks up a workspace resource by stable identifier.
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError>;
 
     /// Lists workspace agent script timings for a build.
     async fn list_workspace_agent_script_timings_by_build_id(
@@ -5407,6 +5471,13 @@ where
         AppStore::list_provisioner_job_timings(self, job_id).await
     }
 
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        AppStore::find_workspace_resource_by_id(self, resource_id).await
+    }
+
     async fn list_workspace_agent_script_timings_by_build_id(
         &self,
         build_id: Uuid,
@@ -5728,6 +5799,13 @@ where
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
         (**self).list_provisioner_job_timings(job_id).await
+    }
+
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        (**self).find_workspace_resource_by_id(resource_id).await
     }
 
     async fn list_workspace_agent_script_timings_by_build_id(

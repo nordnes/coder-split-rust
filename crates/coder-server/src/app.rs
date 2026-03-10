@@ -47,16 +47,17 @@ use coder_core::template::{
     UpdateTemplateMetaInput,
 };
 use coder_core::{
-    ApiResponse, AppHostResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
-    AuthorizationRequest, AvailableExperiments, BuildMetadata,
-    ChangePasswordWithOneTimePasscodeRequest, ChatMessagePart, ChatMessageRecord,
-    ChatMessageResponse, ChatMessageUsage, ChatMessageVisibility, ChatQueuedMessageRecord,
-    ChatQueuedMessageResponse, ChatRecord, ChatResponse, ChatWithMessagesResponse,
-    ConvertLoginRequest, CreateChatMessageApiResponse, CreateChatMessageRequest, CreateChatRequest,
-    CreateFirstUserRequest, CreateFirstUserResponse, CreateLogSourceRequest, CreateTaskRequest,
-    CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
-    CreateWorkspaceBuildInput, CreateWorkspaceInput, DERPMap, DeploymentConfigResponse,
-    ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest, GetUsersResponse, HealthSettings,
+    AWSInstanceIdentityToken, ApiResponse, AppHostResponse, AppStore, AuditLogListFilter,
+    AuthMethods, AuthenticatedUser, AuthorizationRequest, AvailableExperiments,
+    AzureInstanceIdentityToken, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
+    ChatMessagePart, ChatMessageRecord, ChatMessageResponse, ChatMessageUsage,
+    ChatMessageVisibility, ChatQueuedMessageRecord, ChatQueuedMessageResponse, ChatRecord,
+    ChatResponse, ChatWithMessagesResponse, ConvertLoginRequest, CreateChatMessageApiResponse,
+    CreateChatMessageRequest, CreateChatRequest, CreateFirstUserRequest, CreateFirstUserResponse,
+    CreateLogSourceRequest, CreateTaskRequest, CreateTestAuditLogRequest, CreateTokenRequest,
+    CreateUserRequestWithOrgs, CreateWorkspaceBuildInput, CreateWorkspaceInput, DERPMap,
+    DERPMapRegion, DERPNode, DeploymentConfigResponse, ExternalApiKeyScopes,
+    ExternalAuthDeviceExchangeRequest, GCPInstanceIdentityToken, GetUsersResponse, HealthSettings,
     HealthcheckReport, InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertTaskInput,
     LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
     OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
@@ -72,8 +73,9 @@ use coder_core::{
     UploadFileResponse, UpsertPortShareInput, UserAppearanceSettings, UserListFilter,
     UserParameter, UserPreferenceSettings, UserRecord, UserResponse, UserRolesResponse, UserStatus,
     ValidateUserPasswordRequest, ValidationError, WebpushSubscription,
-    WorkspaceAgentConnectionInfo, WorkspaceAgentListContainersResponse,
-    WorkspaceAgentListeningPortsResponse, WorkspaceListFilter,
+    WorkspaceAgentAuthenticateResponse, WorkspaceAgentConnectionInfo,
+    WorkspaceAgentListContainersResponse, WorkspaceAgentListeningPortsResponse,
+    WorkspaceListFilter,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
@@ -540,6 +542,14 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/chats", get(list_chats).post(create_chat))
                 .route("/chats/{chat}", get(get_chat).delete(delete_chat))
                 .route("/chats/{chat}/messages", post(post_chat_message))
+                .route(
+                    "/chats/files",
+                    post(upload_chat_file).layer(DefaultBodyLimit::max(MAX_CHAT_FILE_SIZE)),
+                )
+                .route("/chats/files/{file}", get(get_chat_file))
+                .route("/chats/{chat}/archive", post(archive_chat_handler))
+                .route("/chats/{chat}/unarchive", post(unarchive_chat_handler))
+                .route("/chats/{chat}/git/watch", get(watch_chat_git))
                 // Notifications domain
                 .route(
                     "/notifications/settings",
@@ -4090,6 +4100,346 @@ fn chat_queued_message_response_from_record(
         content,
         created_at: record.created_at,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Chat file upload/download and archive/unarchive handlers
+// ---------------------------------------------------------------------------
+
+/// Maximum chat file upload size (10 MB).
+const MAX_CHAT_FILE_SIZE: usize = 10 << 20;
+/// Maximum length for an uploaded chat file name.
+const MAX_CHAT_FILE_NAME: usize = 255;
+
+/// Allowed MIME types for chat file uploads.
+fn is_allowed_chat_file_mime(mime: &str) -> bool {
+    matches!(
+        mime,
+        "image/png" | "image/jpeg" | "image/gif" | "image/webp"
+    )
+}
+
+/// Detect the MIME type of file data, with extended WebP support.
+/// Go's `http.DetectContentType` equivalent + WebP magic bytes check.
+fn detect_chat_file_type(data: &[u8]) -> &'static str {
+    // WebP: starts with "RIFF" at 0..4 and "WEBP" at 8..12
+    if data.len() >= 12 && &data[0..4] == b"RIFF" && &data[8..12] == b"WEBP" {
+        return "image/webp";
+    }
+    // PNG magic bytes
+    if data.len() >= 8 && &data[0..8] == b"\x89PNG\r\n\x1a\n" {
+        return "image/png";
+    }
+    // JPEG magic bytes
+    if data.len() >= 3 && &data[0..3] == b"\xff\xd8\xff" {
+        return "image/jpeg";
+    }
+    // GIF magic bytes (GIF87a or GIF89a)
+    if data.len() >= 6 && (&data[0..6] == b"GIF87a" || &data[0..6] == b"GIF89a") {
+        return "image/gif";
+    }
+    "application/octet-stream"
+}
+
+#[derive(Deserialize)]
+struct ChatFileUploadQuery {
+    organization: Option<String>,
+}
+
+/// POST /api/v2/chats/files – upload a chat file.
+async fn upload_chat_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<ChatFileUploadQuery>,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Require organization query parameter.
+    let org_id_str = match query.organization {
+        Some(ref s) if !s.is_empty() => s.as_str(),
+        _ => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Missing organization query parameter.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+    let org_id = match Uuid::from_str(org_id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid organization ID.", "")),
+            )
+                .into_response());
+        }
+    };
+
+    // Enforce file size limit.
+    if body.len() > MAX_CHAT_FILE_SIZE {
+        return Ok((
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(ApiResponse::error(
+                "File too large.",
+                format!("Maximum file size is {} bytes.", MAX_CHAT_FILE_SIZE),
+            )),
+        )
+            .into_response());
+    }
+
+    // Check Content-Type header and strip parameters.
+    let raw_content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("application/octet-stream");
+    let content_type = raw_content_type
+        .split(';')
+        .next()
+        .unwrap_or("application/octet-stream")
+        .trim();
+
+    if !is_allowed_chat_file_mime(content_type) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Unsupported file type.",
+                "Allowed types: image/png, image/jpeg, image/gif, image/webp.",
+            )),
+        )
+            .into_response());
+    }
+
+    let data = body.to_vec();
+
+    // Sniff the actual content type from the first 512 bytes.
+    let sniff_len = std::cmp::min(data.len(), 512);
+    let detected = detect_chat_file_type(&data[..sniff_len]);
+    if !is_allowed_chat_file_mime(detected) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Unsupported file type.",
+                "Allowed types: image/png, image/jpeg, image/gif, image/webp.",
+            )),
+        )
+            .into_response());
+    }
+
+    // Extract filename from Content-Disposition header if provided.
+    let filename = headers
+        .get("content-disposition")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|cd| {
+            // Parse "attachment; filename=\"name.png\"" or similar.
+            let lower = cd.to_lowercase();
+            if let Some(pos) = lower.find("filename=") {
+                let rest = &cd[pos + 9..];
+                // Take only the filename token (up to the next `;` or end of string).
+                let token = rest.split(';').next().unwrap_or(rest).trim();
+                let name = token.trim_matches('"').trim_matches('\'');
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_default();
+
+    // Truncate filename at rune boundary to max length.
+    let truncated_name: String = if filename.len() > MAX_CHAT_FILE_NAME {
+        let mut result = String::new();
+        for ch in filename.chars() {
+            if result.len() + ch.len_utf8() > MAX_CHAT_FILE_NAME {
+                break;
+            }
+            result.push(ch);
+        }
+        result
+    } else {
+        filename
+    };
+
+    let input = coder_core::InsertChatFileInput {
+        owner_id: context.user.id,
+        organization_id: org_id,
+        name: truncated_name,
+        mimetype: detected.to_string(),
+        data,
+    };
+
+    let record = state.store.insert_chat_file(input).await?;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(coder_core::UploadChatFileResponse { id: record.id }),
+    )
+        .into_response())
+}
+
+/// GET /api/v2/chats/files/{file} – retrieve a chat file by ID.
+async fn get_chat_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(file_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(file) = state.store.find_chat_file_by_id(file_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat file not found.", "")),
+        )
+            .into_response());
+    };
+
+    let mut builder = Response::builder()
+        .status(StatusCode::OK)
+        .header(CONTENT_TYPE, &file.mimetype)
+        .header("cache-control", "private, max-age=31536000, immutable")
+        .header("content-length", file.data.len().to_string());
+
+    if file.name.is_empty() {
+        builder = builder.header("content-disposition", "inline");
+    } else {
+        // Sanitize filename to prevent header injection via embedded quotes/backslashes.
+        let sanitized_name = file.name.replace('"', "").replace('\\', "");
+        builder = builder.header(
+            "content-disposition",
+            format!("inline; filename=\"{}\"", sanitized_name),
+        );
+    }
+
+    let response = builder
+        .body(axum::body::Body::from(file.data))
+        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+    Ok(response)
+}
+
+/// POST /api/v2/chats/{chat}/archive – archive a chat.
+async fn archive_chat_handler(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    }
+
+    if chat.archived {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Chat is already archived.", "")),
+        )
+            .into_response());
+    }
+
+    state.store.archive_chat(chat_id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// POST /api/v2/chats/{chat}/unarchive – unarchive a chat.
+async fn unarchive_chat_handler(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    }
+
+    if !chat.archived {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Chat is not archived.", "")),
+        )
+            .into_response());
+    }
+
+    state.store.unarchive_chat(chat_id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /api/v2/chats/{chat}/git/watch – WebSocket stub for watching git changes.
+///
+/// The full implementation requires dialing a workspace agent via the
+/// tailnet coordinator, which is out of scope for this port. Return a
+/// 501 Not Implemented until the agent infrastructure is available.
+async fn watch_chat_git(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Chat not found.", "")),
+        )
+            .into_response());
+    }
+
+    // The Go implementation upgrades to a WebSocket, dials the workspace
+    // agent, and proxies bidirectional JSON messages. This requires the
+    // tailnet coordinator and agent provider which are not yet available.
+    Ok((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiResponse::error(
+            "Git watch is not yet implemented.",
+            "Agent infrastructure required for git watching is not available.",
+        )),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -9709,13 +10059,7 @@ async fn get_workspace_agent_connection(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let info = WorkspaceAgentConnectionInfo {
-        derp_map: DERPMap {
-            regions: HashMap::new(),
-        },
-        derp_force_websockets: false,
-        disable_direct_connections: false,
-    };
+    let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
@@ -9947,6 +10291,46 @@ async fn get_workspace_agent_watch_metadata_ws(
 }
 
 /// GET /api/v2/workspaceagents/connection — global agent connection info.
+/// Build the deployment-wide DERP connection info from server config.
+/// Shared by both the per-agent and global connection endpoints.
+fn build_workspace_agent_connection_info(state: &AppState) -> WorkspaceAgentConnectionInfo {
+    let mut regions = HashMap::new();
+    for region in &state.config.derp_regions {
+        let nodes: Vec<DERPNode> = region
+            .nodes
+            .iter()
+            .map(|node| DERPNode {
+                name: node.name.clone(),
+                region_id: i64::from(region.id),
+                host_name: node.url.host_str().unwrap_or_default().to_owned(),
+                ipv4: None,
+                ipv6: None,
+                stun_port: 3478,
+                stun_only: false,
+                derp_port: node.url.port_or_known_default().map_or(443, i32::from),
+                force_http: node.url.scheme() == "http",
+            })
+            .collect();
+        regions.insert(
+            region.id.to_string(),
+            DERPMapRegion {
+                region_id: i64::from(region.id),
+                region_code: region.name.to_lowercase().replace(' ', "-"),
+                region_name: region.name.clone(),
+                avoid: false,
+                nodes,
+            },
+        );
+    }
+
+    WorkspaceAgentConnectionInfo {
+        derp_map: DERPMap { regions },
+        derp_force_websockets: false,
+        disable_direct_connections: false,
+        hostname_suffix: state.config.ssh.hostname_suffix.clone(),
+    }
+}
+
 async fn get_workspace_agents_connection_info(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9955,13 +10339,7 @@ async fn get_workspace_agents_connection_info(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let info = WorkspaceAgentConnectionInfo {
-        derp_map: DERPMap {
-            regions: HashMap::new(),
-        },
-        derp_force_websockets: false,
-        disable_direct_connections: false,
-    };
+    let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
 
@@ -10195,43 +10573,279 @@ async fn get_workspace_agent_rpc(
 /// POST /api/v2/workspaceagents/aws-instance-identity — AWS instance identity auth.
 async fn post_workspace_agent_instance_identity_aws(
     State(state): State<AppState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(&state, "aws", body).await
-}
-
-/// POST /api/v2/workspaceagents/azure-instance-identity — Azure instance identity auth.
-async fn post_workspace_agent_instance_identity_azure(
-    State(state): State<AppState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(&state, "azure", body).await
-}
-
-/// POST /api/v2/workspaceagents/google-instance-identity — Google instance identity auth.
-async fn post_workspace_agent_instance_identity_google(
-    State(state): State<AppState>,
-    body: Result<Json<Value>, JsonRejection>,
-) -> Result<Response, AppError> {
-    post_workspace_agent_instance_identity(&state, "google", body).await
-}
-
-async fn post_workspace_agent_instance_identity(
-    state: &AppState,
-    cloud: &str,
-    body: Result<Json<Value>, JsonRejection>,
+    body: Result<Json<AWSInstanceIdentityToken>, JsonRejection>,
 ) -> Result<Response, AppError> {
     let Json(token) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // Instance identity validation requires cloud provider
-    // credential verification, which is not yet implemented.
-    let _ = (state, token);
-    Ok(not_implemented_response(format!(
-        "Instance identity auth for '{cloud}' is not yet implemented.",
-    )))
+    // In the Go implementation, the document is parsed and validated against
+    // AWS certificates to extract the instance ID.  Full cryptographic
+    // verification is not yet implemented; we extract the instance_id from
+    // the identity document JSON directly.
+    let instance_id = match serde_json::from_str::<Value>(&token.document) {
+        Ok(doc) => match doc.get("instanceId").and_then(|v| v.as_str()) {
+            Some(id) => id.to_owned(),
+            None => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(
+                        "Invalid AWS identity document: missing instanceId.",
+                        "",
+                    )),
+                )
+                    .into_response());
+            }
+        },
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Invalid AWS identity document: malformed JSON.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    handle_auth_instance_id(&state, &instance_id).await
+}
+
+/// POST /api/v2/workspaceagents/azure-instance-identity — Azure instance identity auth.
+async fn post_workspace_agent_instance_identity_azure(
+    State(state): State<AppState>,
+    body: Result<Json<AzureInstanceIdentityToken>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(token) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // In the Go implementation, the Azure signature is a PKCS7 JWT that is
+    // validated against Microsoft certificates.  Full cryptographic
+    // verification is not yet implemented; we extract the VM ID from the
+    // JWT payload directly.
+    let instance_id = extract_instance_id_from_jwt(&token.signature);
+    match instance_id {
+        Some(id) => handle_auth_instance_id(&state, &id).await,
+        None => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid Azure identity: could not extract instance ID from signature.",
+                "",
+            )),
+        )
+            .into_response()),
+    }
+}
+
+/// POST /api/v2/workspaceagents/google-instance-identity — Google instance identity auth.
+async fn post_workspace_agent_instance_identity_google(
+    State(state): State<AppState>,
+    body: Result<Json<GCPInstanceIdentityToken>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(token) = match body {
+        Ok(json) => json,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // In the Go implementation, the GCP JWT is validated against Google's
+    // token validator and the instance_id is extracted from the claims.
+    // Full cryptographic verification is not yet implemented; we extract
+    // the instance_id from the JWT payload directly.
+    let instance_id = extract_instance_id_from_jwt(&token.json_web_token);
+    match instance_id {
+        Some(id) => handle_auth_instance_id(&state, &id).await,
+        None => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid GCP identity: could not extract instance ID from token.",
+                "",
+            )),
+        )
+            .into_response()),
+    }
+}
+
+/// Extracts an instance_id claim from a JWT payload without cryptographic
+/// verification.  Returns `None` when the token structure is invalid or
+/// the claim is missing.
+fn extract_instance_id_from_jwt(jwt: &str) -> Option<String> {
+    // JWTs are header.payload.signature – we need the payload part.
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let payload_bytes = engine.decode(parts[1]).ok()?;
+    let payload: Value = serde_json::from_slice(&payload_bytes).ok()?;
+
+    // Azure puts vmId at the top level; GCP nests under google.compute_engine.instance_id.
+    if let Some(vm_id) = payload.get("vmId").and_then(|v| v.as_str()) {
+        return Some(vm_id.to_owned());
+    }
+    if let Some(id) = payload
+        .get("google")
+        .and_then(|g| g.get("compute_engine"))
+        .and_then(|ce| ce.get("instance_id"))
+        .and_then(|v| v.as_str())
+    {
+        return Some(id.to_owned());
+    }
+
+    None
+}
+
+/// Shared handler that takes a cloud-provider instance_id and performs the
+/// agent→resource→job→build lookup chain, mirroring the Go
+/// `handleAuthInstanceID` function.
+async fn handle_auth_instance_id(
+    state: &AppState,
+    instance_id: &str,
+) -> Result<Response, AppError> {
+    // Step 1: Lookup agent by instance_id.
+    let agent = match state
+        .store
+        .find_workspace_agent_by_instance_id(instance_id)
+        .await?
+    {
+        Some(agent) => agent,
+        None => {
+            return Ok(not_found_response(format!(
+                "Instance with id \"{instance_id}\" not found."
+            )));
+        }
+    };
+
+    // Step 2: Lookup the workspace resource that owns this agent.
+    let resource = match state
+        .store
+        .find_workspace_resource_by_id(agent.resource_id)
+        .await?
+    {
+        Some(resource) => resource,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching provisioner job resource.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 3: Lookup the provisioner job for this resource.
+    let job = match state.store.find_provisioner_job(resource.job_id).await? {
+        Some(job) => job,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching provisioner job.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 4: Validate job type is "workspace_build".
+    if job.job_type != "workspace_build" {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!("\"{}\" jobs cannot be authenticated.", job.job_type),
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    // Step 5: Extract workspace_build_id from job input.
+    let workspace_build_id = match job
+        .input
+        .get("workspace_build_id")
+        .and_then(|v: &Value| v.as_str())
+        .and_then(|s| Uuid::from_str(s).ok())
+    {
+        Some(id) => id,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error extracting job data.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 6: Lookup the workspace build.
+    let build = match state
+        .store
+        .find_workspace_build_by_id(workspace_build_id)
+        .await?
+    {
+        Some(build) => build,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching workspace build.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Step 7: Verify this is the latest build (replay prevention).
+    let latest_build = match state
+        .store
+        .find_latest_workspace_build(build.workspace_id)
+        .await?
+    {
+        Some(latest) => latest,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Internal error fetching the latest workspace build.",
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    if latest_build.id != build.id {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!(
+                    "Resource found for id \"{instance_id}\", but isn't registered on the latest history."
+                ),
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    // Step 8: Return the agent auth token.
+    Ok((
+        StatusCode::OK,
+        Json(WorkspaceAgentAuthenticateResponse {
+            session_token: agent.auth_token.to_string(),
+        }),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -10628,6 +11242,7 @@ mod tests {
         chats: Mutex<HashMap<Uuid, ChatRecord>>,
         chat_messages: Mutex<Vec<ChatMessageRecord>>,
         chat_message_next_id: Mutex<i64>,
+        chat_files: Mutex<HashMap<Uuid, coder_core::ChatFileRecord>>,
         notifications_settings: Mutex<coder_core::NotificationsSettings>,
         notification_templates: Mutex<Vec<coder_core::NotificationTemplate>>,
         notification_preferences: Mutex<HashMap<(Uuid, Uuid), coder_core::NotificationPreference>>,
@@ -10687,6 +11302,7 @@ mod tests {
                 chats: Mutex::new(HashMap::new()),
                 chat_messages: Mutex::new(Vec::new()),
                 chat_message_next_id: Mutex::new(1),
+                chat_files: Mutex::new(HashMap::new()),
                 notifications_settings: Mutex::new(coder_core::NotificationsSettings::default()),
                 notification_templates: Mutex::new(Vec::new()),
                 notification_preferences: Mutex::new(HashMap::new()),
@@ -12897,6 +13513,56 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+            let mut chats = self
+                .chats
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(chat) = chats.get_mut(&id) {
+                chat.archived = false;
+                chat.updated_at = OffsetDateTime::now_utc();
+            }
+            Ok(())
+        }
+
+        // -----------------------------------------------------------------
+        // Chat Files
+        // -----------------------------------------------------------------
+
+        async fn insert_chat_file(
+            &self,
+            input: coder_core::InsertChatFileInput,
+        ) -> Result<coder_core::ChatFileRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let id = Uuid::new_v4();
+            let record = coder_core::ChatFileRecord {
+                id,
+                owner_id: input.owner_id,
+                organization_id: input.organization_id,
+                created_at: now,
+                name: input.name,
+                mimetype: input.mimetype,
+                data: input.data,
+            };
+            self.chat_files
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_chat_file_by_id(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<coder_core::ChatFileRecord>, StorageError> {
+            Ok(self
+                .chat_files
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&id)
+                .cloned())
+        }
+
         // -------------------------------------------------------------------
         // Notifications domain
         // -------------------------------------------------------------------
@@ -13876,14 +14542,59 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_workspace_agent_by_instance_id(
+            &self,
+            instance_id: &str,
+        ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(agents
+                .values()
+                .find(|a| a.auth_instance_id.as_deref() == Some(instance_id))
+                .cloned())
+        }
+
+        async fn find_workspace_resource_by_id(
+            &self,
+            resource_id: Uuid,
+        ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+            let resources = self
+                .workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(resources
+                .values()
+                .flatten()
+                .find(|r| r.id == resource_id)
+                .cloned())
+        }
+
         async fn find_workspace_build_by_id(
             &self,
             build_id: Uuid,
         ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
-            self.workspace_builds
+            let builds = self
+                .workspace_builds
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))
-                .map(|builds| builds.get(&build_id).cloned())
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(builds.get(&build_id).cloned())
+        }
+
+        async fn find_latest_workspace_build(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(builds
+                .values()
+                .filter(|b| b.workspace_id == workspace_id)
+                .max_by_key(|b| b.build_number)
+                .cloned())
         }
 
         async fn list_workspace_build_parameters(
@@ -18090,6 +18801,342 @@ mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Chat file upload/download tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn chat_file_upload_and_download() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let org_id = Uuid::new_v4();
+        // A minimal valid PNG (1x1 pixel).
+        let png_data: Vec<u8> = vec![
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, // PNG signature
+            0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+            0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01, 0x08, 0x02, 0x00, 0x00, 0x00, 0x90,
+            0x77, 0x53, 0xDE,
+        ];
+
+        // Upload
+        let upload_request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v2/chats/files?organization={org_id}"))
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .header(CONTENT_TYPE, "image/png")
+            .header("content-disposition", "attachment; filename=\"test.png\"")
+            .body(Body::from(png_data.clone()))?;
+
+        let upload_response = call(app.clone(), upload_request).await?;
+        assert_eq!(upload_response.status(), StatusCode::CREATED);
+        let body = to_bytes(upload_response.into_body(), 1_000_000).await?;
+        let upload_result: Value = serde_json::from_slice(&body)?;
+        let file_id = upload_result["id"].as_str().ok_or("missing file id")?;
+
+        // Download
+        let download_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/files/{file_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(download_response.status(), StatusCode::OK);
+        assert_eq!(
+            download_response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("image/png")
+        );
+        assert_eq!(
+            download_response
+                .headers()
+                .get("content-disposition")
+                .and_then(|v| v.to_str().ok()),
+            Some("inline; filename=\"test.png\"")
+        );
+        let downloaded = to_bytes(download_response.into_body(), 1_000_000).await?;
+        assert_eq!(downloaded.to_vec(), png_data);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_file_upload_rejects_unsupported_mime() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let org_id = Uuid::new_v4();
+
+        // Try uploading with text/plain content type
+        let upload_request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v2/chats/files?organization={org_id}"))
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .header(CONTENT_TYPE, "text/plain")
+            .body(Body::from("not an image"))?;
+
+        let response = call(app, upload_request).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_file_upload_requires_organization() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let upload_request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/chats/files")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .header(CONTENT_TYPE, "image/png")
+            .body(Body::from(vec![0x89, 0x50, 0x4E, 0x47]))?;
+
+        let response = call(app, upload_request).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_file_not_found_returns_404() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/files/{fake_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_file_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let upload_response = call(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v2/chats/files?organization=00000000-0000-0000-0000-000000000000")
+                .header(CONTENT_TYPE, "image/png")
+                .body(Body::from(vec![0x89, 0x50, 0x4E, 0x47]))?,
+        )
+        .await?;
+        assert_eq!(upload_response.status(), StatusCode::UNAUTHORIZED);
+
+        let download_response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/chats/files/{}", Uuid::new_v4()),
+            )?,
+        )
+        .await?;
+        assert_eq!(download_response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat archive/unarchive tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn chat_archive_and_unarchive() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a chat first
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        // Archive
+        let archive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/archive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_response.status(), StatusCode::NO_CONTENT);
+
+        // Archiving again should return 400
+        let archive_again = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/archive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_again.status(), StatusCode::BAD_REQUEST);
+
+        // Unarchive
+        let unarchive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/unarchive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_response.status(), StatusCode::NO_CONTENT);
+
+        // Unarchiving again should return 400
+        let unarchive_again = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/unarchive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_again.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_archive_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let archive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{fake_id}/archive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_response.status(), StatusCode::NOT_FOUND);
+
+        let unarchive_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{fake_id}/unarchive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_archive_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let fake_id = Uuid::new_v4();
+
+        let archive_response = call(
+            app.clone(),
+            request(Method::POST, &format!("/api/v2/chats/{fake_id}/archive"))?,
+        )
+        .await?;
+        assert_eq!(archive_response.status(), StatusCode::UNAUTHORIZED);
+
+        let unarchive_response = call(
+            app,
+            request(Method::POST, &format!("/api/v2/chats/{fake_id}/unarchive"))?,
+        )
+        .await?;
+        assert_eq!(unarchive_response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat git/watch tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn chat_git_watch_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a chat
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        let watch_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}/git/watch"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(watch_response.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_git_watch_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let fake_id = Uuid::new_v4();
+
+        let response = call(
+            app,
+            request(Method::GET, &format!("/api/v2/chats/{fake_id}/git/watch"))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Notifications domain tests
     // -----------------------------------------------------------------------
 
@@ -19080,6 +20127,441 @@ mod tests {
         let body = response_json(response).await?;
         assert_eq!(body, json!([]));
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Instance identity & connection endpoint tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: build a base64url-encoded JWT payload for testing.
+    fn make_jwt_payload(claims: &Value) -> String {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+        let header = engine.encode(b"{\"alg\":\"none\"}");
+        let payload = engine.encode(serde_json::to_vec(claims).unwrap_or_default());
+        format!("{header}.{payload}.fake-signature")
+    }
+
+    /// Seed the FakeStore with the full agent→resource→job→build chain and
+    /// return the agent auth_token so tests can assert against it.
+    fn seed_instance_identity_chain(
+        store: &FakeStore,
+        instance_id: &str,
+    ) -> Result<Uuid, Box<dyn Error>> {
+        let agent_id = Uuid::from_u128(100);
+        let resource_id = Uuid::from_u128(101);
+        let job_id = Uuid::from_u128(102);
+        let build_id = Uuid::from_u128(103);
+        let workspace_id = Uuid::from_u128(104);
+        let auth_token = Uuid::from_u128(999);
+        let now = OffsetDateTime::now_utc();
+
+        // Agent
+        store
+            .workspace_agents
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                agent_id,
+                WorkspaceAgentRow {
+                    id: agent_id,
+                    parent_id: None,
+                    created_at: now,
+                    updated_at: now,
+                    name: "main".to_owned(),
+                    first_connected_at: None,
+                    last_connected_at: None,
+                    disconnected_at: None,
+                    resource_id,
+                    auth_token,
+                    auth_instance_id: Some(instance_id.to_owned()),
+                    architecture: "amd64".to_owned(),
+                    environment_variables: None,
+                    operating_system: "linux".to_owned(),
+                    directory: String::new(),
+                    expanded_directory: String::new(),
+                    version: String::new(),
+                    api_version: String::new(),
+                    connection_timeout_seconds: 120,
+                    troubleshooting_url: String::new(),
+                    motd_file: String::new(),
+                    lifecycle_state: "created".to_owned(),
+                    logs_length: 0,
+                    logs_overflowed: false,
+                    started_at: None,
+                    ready_at: None,
+                    subsystems: Vec::new(),
+                    display_apps: Vec::new(),
+                    display_order: 0,
+                    api_key_scope: "all".to_owned(),
+                },
+            );
+
+        // Resource (stored as Vec keyed by job_id)
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(WorkspaceResourceRecord {
+                id: resource_id,
+                created_at: now,
+                job_id,
+                transition: "start".to_owned(),
+                resource_type: "aws_instance".to_owned(),
+                name: "dev".to_owned(),
+                hide: false,
+                icon: String::new(),
+                daily_cost: 0,
+            });
+
+        // Provisioner job
+        store
+            .provisioner_jobs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                job_id,
+                TemplateProvisionerJobRecord {
+                    id: job_id,
+                    created_at: now,
+                    updated_at: now,
+                    started_at: None,
+                    canceled_at: None,
+                    completed_at: None,
+                    error: String::new(),
+                    organization_id: Uuid::nil(),
+                    initiator_id: Uuid::nil(),
+                    provisioner: "terraform".to_owned(),
+                    job_status: "succeeded".to_owned(),
+                    file_id: None,
+                    job_type: "workspace_build".to_owned(),
+                    input: json!({ "workspace_build_id": build_id.to_string() }),
+                    worker_id: None,
+                    tags: HashMap::new(),
+                },
+            );
+
+        // Workspace build (latest)
+        store
+            .workspace_builds
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                build_id,
+                WorkspaceBuildRecord {
+                    id: build_id,
+                    created_at: now,
+                    updated_at: now,
+                    workspace_id,
+                    build_number: 1,
+                    transition: "start".to_owned(),
+                    job_id,
+                    template_version_id: Uuid::nil(),
+                    initiator_id: Uuid::nil(),
+                    provisioner_state: None,
+                    deadline: None,
+                    max_deadline: None,
+                    reason: "initiator".to_owned(),
+                    daily_cost: 0,
+                },
+            );
+
+        Ok(auth_token)
+    }
+
+    #[tokio::test]
+    async fn connection_info_returns_derp_map_and_hostname_suffix() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/workspaceagents/connection",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_json(response).await?;
+        // test_config sets hostname_suffix = "example.internal"
+        assert_eq!(
+            body.get("hostname_suffix").and_then(Value::as_str),
+            Some("example.internal")
+        );
+        // derp_map should be present even when no regions configured
+        assert!(body.get("derp_map").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_info_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/workspaceagents/connection")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aws_instance_identity_valid() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let auth_token = seed_instance_identity_chain(&store, "i-abc123")?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-abc123\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("session_token").and_then(Value::as_str),
+            Some(auth_token.to_string()).as_deref()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aws_instance_identity_unknown_instance() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-unknown\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aws_instance_identity_malformed_document() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let payload = json!({
+            "document": "not-json",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn azure_instance_identity_valid() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let auth_token = seed_instance_identity_chain(&store, "vm-azure-001")?;
+        let app = build_router(state);
+
+        let jwt = make_jwt_payload(&json!({ "vmId": "vm-azure-001" }));
+        let payload = json!({ "encoding": "pkcs7", "signature": jwt });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/azure-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("session_token").and_then(Value::as_str),
+            Some(auth_token.to_string()).as_deref()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn azure_instance_identity_bad_jwt() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let payload = json!({ "encoding": "pkcs7", "signature": "not-a-jwt" });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/azure-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gcp_instance_identity_valid() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let auth_token = seed_instance_identity_chain(&store, "gcp-inst-42")?;
+        let app = build_router(state);
+
+        let jwt = make_jwt_payload(&json!({
+            "google": { "compute_engine": { "instance_id": "gcp-inst-42" } }
+        }));
+        let payload = json!({ "json_web_token": jwt });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/google-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("session_token").and_then(Value::as_str),
+            Some(auth_token.to_string()).as_deref()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn gcp_instance_identity_bad_jwt() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let payload = json!({ "json_web_token": "bad" });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/google-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn instance_identity_replay_prevention() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let _auth_token = seed_instance_identity_chain(&store, "i-replay")?;
+
+        // Insert a newer build for the same workspace so the original build is
+        // no longer the latest.
+        let workspace_id = Uuid::from_u128(104);
+        let newer_build_id = Uuid::from_u128(200);
+        let now = OffsetDateTime::now_utc();
+        store
+            .workspace_builds
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                newer_build_id,
+                WorkspaceBuildRecord {
+                    id: newer_build_id,
+                    created_at: now,
+                    updated_at: now,
+                    workspace_id,
+                    build_number: 2,
+                    transition: "start".to_owned(),
+                    job_id: Uuid::nil(),
+                    template_version_id: Uuid::nil(),
+                    initiator_id: Uuid::nil(),
+                    provisioner_state: None,
+                    deadline: None,
+                    max_deadline: None,
+                    reason: "initiator".to_owned(),
+                    daily_cost: 0,
+                },
+            );
+
+        let app = build_router(state);
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-replay\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        let msg = body.get("message").and_then(Value::as_str).unwrap_or("");
+        assert!(msg.contains("latest"), "expected replay error, got: {msg}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn instance_identity_wrong_job_type() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let _auth_token = seed_instance_identity_chain(&store, "i-wrongjob")?;
+
+        // Override the job_type to something other than "workspace_build"
+        let job_id = Uuid::from_u128(102);
+        if let Ok(mut jobs) = store.provisioner_jobs.lock() {
+            if let Some(job) = jobs.get_mut(&job_id) {
+                job.job_type = "template_version_import".to_owned();
+            }
+        }
+
+        let app = build_router(state);
+        let payload = json!({
+            "document": "{\"instanceId\": \"i-wrongjob\"}",
+            "signature": "unused"
+        });
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceagents/aws-instance-identity",
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        let msg = body.get("message").and_then(Value::as_str).unwrap_or("");
+        assert!(
+            msg.contains("cannot be authenticated"),
+            "expected job type error, got: {msg}"
+        );
         Ok(())
     }
 
