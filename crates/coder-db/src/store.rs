@@ -4653,6 +4653,21 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
         let row: Option<(
             Uuid,

@@ -3187,6 +3187,18 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
+    /// Removes a user from a group.
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = (group_id, user_id);
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
     /// Looks up a group by identifier.
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
         let _ = group_id;
@@ -4257,6 +4269,13 @@ pub trait WorkspaceStore: Send + Sync {
         group_id: Uuid,
     ) -> Result<Vec<GroupMemberRecord>, StorageError>;
 
+    /// Removes a user from a group.
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError>;
+
     /// Looks up a group by identifier.
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
 
@@ -4934,6 +4953,14 @@ where
     async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
         AppStore::insert_group_member(self, group_id, user_id).await
     }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_group_member(self, group_id, user_id).await
+    }
 }
 
 #[async_trait]
@@ -5509,6 +5536,14 @@ where
         AppStore::list_group_members(self, group_id).await
     }
 
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_group_member(self, group_id, user_id).await
+    }
+
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
         AppStore::find_group_by_id(self, group_id).await
     }
@@ -5848,6 +5883,14 @@ where
         group_id: Uuid,
     ) -> Result<Vec<GroupMemberRecord>, StorageError> {
         (**self).list_group_members(group_id).await
+    }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_group_member(group_id, user_id).await
     }
 
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
