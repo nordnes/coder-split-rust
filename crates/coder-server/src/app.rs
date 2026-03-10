@@ -23421,11 +23421,7 @@ mod tests {
             )?,
         )
         .await?;
-        // Archive endpoint returns OK or NOT_FOUND if the route exists.
-        assert!(
-            archive_resp.status() == StatusCode::OK
-                || archive_resp.status() == StatusCode::NO_CONTENT
-        );
+        assert_eq!(archive_resp.status(), StatusCode::OK);
 
         // 4. Unarchive template version.
         let unarchive_resp = call(
@@ -23438,10 +23434,7 @@ mod tests {
             )?,
         )
         .await?;
-        assert!(
-            unarchive_resp.status() == StatusCode::OK
-                || unarchive_resp.status() == StatusCode::NO_CONTENT
-        );
+        assert_eq!(unarchive_resp.status(), StatusCode::OK);
 
         Ok(())
     }
@@ -23474,8 +23467,7 @@ mod tests {
             .ok_or("missing owner_id")?;
 
         // 1. Set ACL (PATCH).
-        let mut user_roles = HashMap::new();
-        user_roles.insert(owner_id.to_owned(), "admin".to_owned());
+        let user_roles = HashMap::from([(owner_id.to_owned(), "admin".to_owned())]);
         let set_resp = call(
             app.clone(),
             authenticated_json_request(
@@ -23511,6 +23503,14 @@ mod tests {
         assert_eq!(
             acl_users[0].get("role").and_then(Value::as_str),
             Some("admin")
+        );
+        // Verify user details were resolved (handler calls find_user_by_id).
+        assert!(acl_users[0].get("id").and_then(Value::as_str).is_some());
+        assert!(
+            acl_users[0]
+                .get("username")
+                .and_then(Value::as_str)
+                .is_some()
         );
 
         // 3. Delete ACL.
