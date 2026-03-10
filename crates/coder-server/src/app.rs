@@ -11389,7 +11389,7 @@ async fn handle_agent_rpc_socket(
         connected_at: now,
         cmd_tx,
     });
-    provider.register_agent(agent_id, conn).await;
+    provider.register_agent(agent_id, conn.clone()).await;
 
     // Ping interval to keep the connection alive.
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
@@ -11442,8 +11442,9 @@ async fn handle_agent_rpc_socket(
         }
     }
 
-    // Clean up: remove agent from the provider.
-    provider.remove_agent(agent_id).await;
+    // Clean up: only remove if this is still the registered connection
+    // (prevents a disconnecting task from removing a newer reconnection).
+    provider.remove_agent(agent_id, &conn).await;
 
     // Graceful close.
     let _ = socket

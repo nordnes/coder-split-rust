@@ -74,8 +74,11 @@ pub trait AgentProvider: Send + Sync {
     /// the same agent.
     async fn register_agent(&self, agent_id: Uuid, conn: Arc<dyn AgentConnection>);
 
-    /// Removes the connection for `agent_id`.
-    async fn remove_agent(&self, agent_id: Uuid);
+    /// Removes the connection for `agent_id`, but only if `conn` is still the
+    /// currently registered connection (compared by `Arc` pointer equality).
+    /// This prevents a disconnecting task from removing a newer connection
+    /// that was registered by a reconnecting agent.
+    async fn remove_agent(&self, agent_id: Uuid, conn: &Arc<dyn AgentConnection>);
 
     /// Returns debug info about all currently connected agents.
     async fn debug_info(&self) -> Vec<AgentConnectionInfo>;
@@ -114,8 +117,13 @@ impl AgentProvider for InMemoryAgentProvider {
         self.agents.lock().await.insert(agent_id, conn);
     }
 
-    async fn remove_agent(&self, agent_id: Uuid) {
-        self.agents.lock().await.remove(&agent_id);
+    async fn remove_agent(&self, agent_id: Uuid, conn: &Arc<dyn AgentConnection>) {
+        let mut agents = self.agents.lock().await;
+        if let Some(current) = agents.get(&agent_id) {
+            if Arc::ptr_eq(current, conn) {
+                agents.remove(&agent_id);
+            }
+        }
     }
 
     async fn debug_info(&self) -> Vec<AgentConnectionInfo> {
@@ -187,11 +195,38 @@ mod tests {
             connected: OffsetDateTime::now_utc(),
         });
 
-        provider.register_agent(agent_id, conn).await;
+        provider.register_agent(agent_id, conn.clone()).await;
         assert!(provider.get_agent_connection(agent_id).await.is_some());
 
-        provider.remove_agent(agent_id).await;
+        provider.remove_agent(agent_id, &conn).await;
         assert!(provider.get_agent_connection(agent_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn remove_agent_skips_newer_connection() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+
+        // Simulate first connection.
+        let conn_old: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        provider.register_agent(agent_id, conn_old.clone()).await;
+
+        // Simulate reconnection — replaces old connection.
+        let conn_new: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        provider.register_agent(agent_id, conn_new).await;
+
+        // Old task tries to clean up — should NOT remove the new connection.
+        provider.remove_agent(agent_id, &conn_old).await;
+        assert!(
+            provider.get_agent_connection(agent_id).await.is_some(),
+            "new connection should survive old task cleanup"
+        );
     }
 
     #[tokio::test]
