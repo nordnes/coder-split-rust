@@ -429,10 +429,12 @@ dependencies = [
 name = "coder-notifications"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "coder-core",
  "reqwest",
  "serde_json",
  "thiserror",
+ "time",
  "tokio",
  "tracing",
  "uuid",
