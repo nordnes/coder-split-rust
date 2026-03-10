@@ -507,16 +507,17 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/users/{user}/convert-login", post(post_convert_login))
                 .route("/users/{user}", get(get_user).delete(delete_user))
                 // AI Tasks
-                .route("/tasks", get(list_tasks).post(create_task))
+                .route("/tasks", get(list_tasks))
+                .route("/tasks/{user}", post(create_task))
                 .route(
-                    "/tasks/{task}",
-                    get(get_task).patch(patch_task).delete(delete_task),
+                    "/tasks/{user}/{task}",
+                    get(get_task).delete(delete_task),
                 )
-                .route("/tasks/{task}/input", get(get_task_input))
-                .route("/tasks/{task}/logs", get(get_task_logs))
-                .route("/tasks/{task}/send", post(post_task_send))
-                .route("/tasks/{task}/pause", post(post_task_pause))
-                .route("/tasks/{task}/resume", post(post_task_resume))
+                .route("/tasks/{user}/{task}/input", patch(patch_task_input))
+                .route("/tasks/{user}/{task}/logs", get(get_task_logs))
+                .route("/tasks/{user}/{task}/send", post(post_task_send))
+                .route("/tasks/{user}/{task}/pause", post(post_task_pause))
+                .route("/tasks/{user}/{task}/resume", post(post_task_resume))
                 .route(
                     "/workspaceagents/me/tasks/{task}/log-snapshot",
                     post(post_task_log_snapshot),
@@ -3140,6 +3141,7 @@ struct TasksQuery {
     organization_id: Option<Uuid>,
 }
 
+/// GET /tasks — list tasks for the authenticated user.
 async fn list_tasks(
     State(state): State<AppState>,
     Query(query): Query<TasksQuery>,
@@ -3153,6 +3155,7 @@ async fn list_tasks(
     let filter = TaskListFilter {
         owner_id: Some(context.user.id),
         organization_id: query.organization_id,
+        ..Default::default()
     };
     let tasks = state.store.list_tasks(filter).await?;
     let count = tasks.len();
@@ -3166,14 +3169,34 @@ async fn list_tasks(
     .into_response())
 }
 
+/// POST /tasks/{user} — create a new task.
 async fn create_task(
     State(state): State<AppState>,
+    Path(user_param): Path<String>,
     headers: HeaderMap,
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // Resolve the user from the path parameter.
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("User not found.", "")),
+        )
+            .into_response());
+    };
+
+    // Only allow creating tasks for oneself.
+    if target_user.id != context.user.id {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("User not found.", "")),
+        )
+            .into_response());
+    }
 
     let now = OffsetDateTime::now_utc();
     let task_id = Uuid::new_v4();
@@ -3207,16 +3230,39 @@ async fn create_task(
     Ok((StatusCode::CREATED, Json(task_response_from_record(record))).into_response())
 }
 
+/// Helper: resolve a task from the `{task}` path segment — accepts UUID or
+/// task name (scoped to owner).
+async fn resolve_task(
+    state: &AppState,
+    task_param: &str,
+    owner_id: Uuid,
+) -> Result<Option<TaskRecord>, AppError> {
+    // Try parsing as UUID first.
+    if let Ok(task_id) = Uuid::parse_str(task_param) {
+        let record = state.store.find_task_by_id(task_id).await?;
+        // Ensure the task belongs to the expected owner.
+        return Ok(record.filter(|r| r.owner_id == owner_id));
+    }
+
+    // Fall back to name-based lookup.
+    state
+        .store
+        .find_task_by_owner_and_name(owner_id, task_param)
+        .await
+        .map_err(AppError::from)
+}
+
+/// GET /tasks/{user}/{task} — get a single task by ID or name.
 async fn get_task(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3224,27 +3270,38 @@ async fn get_task(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    // Only allow viewing own tasks.
+    if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
     }
+
+    let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
 
     Ok(Json(task_response_from_record(record)).into_response())
 }
 
-async fn get_task_input(
+/// PATCH /tasks/{user}/{task}/input — update a task's input (prompt).
+async fn patch_task_input(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
+    Json(request): Json<coder_core::UpdateTaskInputRequest>,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3252,7 +3309,7 @@ async fn get_task_input(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3260,28 +3317,7 @@ async fn get_task_input(
             .into_response());
     }
 
-    Ok(Json(json!({ "input": record.prompt })).into_response())
-}
-
-#[derive(Deserialize)]
-struct PatchTaskRequest {
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(default)]
-    input: Option<String>,
-}
-
-async fn patch_task(
-    State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
-    headers: HeaderMap,
-    Json(request): Json<PatchTaskRequest>,
-) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
-    let Some(mut record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3289,41 +3325,47 @@ async fn patch_task(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    // Validate non-empty input.
+    if request.input.trim().is_empty() {
         return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Task input is required.", "")),
         )
             .into_response());
     }
 
-    if let Some(input) = &request.input {
-        if let Some(updated) = state.store.update_task_prompt(task_id, input).await? {
-            record = updated;
-        }
+    // In the Go implementation, the task must be paused to update input.
+    if record.status != coder_core::TaskStatus::Paused {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(ApiResponse::error(
+                "Unable to update task input, task must be paused.",
+                "Please stop the task's workspace before updating the input.",
+            )),
+        )
+            .into_response());
     }
 
-    // Status transitions are validated here but not persisted to DB directly
-    // since task status is derived from workspace state in the full implementation.
-    if let Some(_status) = &request.status {
-        // In the full implementation, status transitions would trigger workspace
-        // provisioning actions. For now we acknowledge the request.
-    }
+    let _updated = state
+        .store
+        .update_task_prompt(record.id, &request.input)
+        .await?;
 
-    Ok(Json(task_response_from_record(record)).into_response())
+    // Go returns 204 No Content on success.
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// DELETE /tasks/{user}/{task} — soft-delete a task.
 async fn delete_task(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Verify ownership before deleting.
-    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3331,7 +3373,7 @@ async fn delete_task(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3339,8 +3381,16 @@ async fn delete_task(
             .into_response());
     }
 
+    let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
     let now = OffsetDateTime::now_utc();
-    let deleted = state.store.delete_task(task_id, now).await?;
+    let deleted = state.store.delete_task(record.id, now).await?;
     if !deleted {
         return Ok((
             StatusCode::NOT_FOUND,
@@ -3349,20 +3399,21 @@ async fn delete_task(
             .into_response());
     }
 
-    Ok((StatusCode::OK, Json(ApiResponse::ok("Task deleted."))).into_response())
+    // Go returns 202 Accepted (workspace deletion is async).
+    Ok(StatusCode::ACCEPTED.into_response())
 }
 
+/// GET /tasks/{user}/{task}/logs — get task logs (snapshot-based).
 async fn get_task_logs(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Verify the task exists and user owns it
-    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3370,7 +3421,7 @@ async fn get_task_logs(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3378,8 +3429,34 @@ async fn get_task_logs(
             .into_response());
     }
 
-    // Check for a snapshot
-    let snapshot = state.store.find_task_snapshot(task_id).await?;
+    let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // In the Go implementation, error/unknown status tasks cannot fetch logs.
+    match record.status {
+        coder_core::TaskStatus::Error | coder_core::TaskStatus::Unknown => {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(ApiResponse::error(
+                    "Cannot fetch logs for task in current state.",
+                    format!("Task status is {:?}.", record.status),
+                )),
+            )
+                .into_response());
+        }
+        // Active tasks would normally fetch live logs from the agent; for the
+        // Rust port we fall through to the snapshot path since we don't yet
+        // have the agent-dial infrastructure.
+        _ => {}
+    }
+
+    // Check for a stored snapshot.
+    let snapshot = state.store.find_task_snapshot(record.id).await?;
     let response = match snapshot {
         Some(snap) => TaskLogsResponse {
             logs: Vec::new(),
@@ -3396,17 +3473,18 @@ async fn get_task_logs(
     Ok(Json(response).into_response())
 }
 
+/// POST /tasks/{user}/{task}/send — send input to a task.
 async fn post_task_send(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(_request): Json<TaskSendRequest>,
+    Json(request): Json<TaskSendRequest>,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3414,7 +3492,7 @@ async fn post_task_send(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3422,21 +3500,78 @@ async fn post_task_send(
             .into_response());
     }
 
-    // In the full implementation this sends input to the workspace sidebar app.
-    // For now we acknowledge the request.
-    Ok((StatusCode::OK, Json(ApiResponse::ok("Message sent."))).into_response())
+    let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // Validate non-empty input.
+    if request.input.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Task input is required.", "")),
+        )
+            .into_response());
+    }
+
+    // Task must be active to accept input (matches Go status check).
+    match record.status {
+        coder_core::TaskStatus::Active => { /* ok */ }
+        coder_core::TaskStatus::Pending | coder_core::TaskStatus::Initializing => {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(ApiResponse::error(
+                    format!("Task is {}.", record.status),
+                    "The task is resuming. Wait for the task to become active before sending messages.",
+                )),
+            )
+                .into_response());
+        }
+        coder_core::TaskStatus::Paused => {
+            return Ok((
+                StatusCode::CONFLICT,
+                Json(ApiResponse::error(
+                    "Task is paused.",
+                    "Resume the task to send messages.",
+                )),
+            )
+                .into_response());
+        }
+        _ => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Task must be active.",
+                    format!(
+                        "Task status is {:?}, it must be \"active\" to interact with the task.",
+                        record.status
+                    ),
+                )),
+            )
+                .into_response());
+        }
+    }
+
+    // In the full implementation this dials the agent and sends input to the
+    // workspace sidebar app via AgentAPI. For now we acknowledge the request.
+    // Go returns 204 No Content.
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// POST /tasks/{user}/{task}/pause — pause a task.
 async fn post_task_pause(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3444,7 +3579,7 @@ async fn post_task_pause(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3452,20 +3587,45 @@ async fn post_task_pause(
             .into_response());
     }
 
-    // In the full implementation this would stop the workspace.
-    Ok(Json(json!({ "task": task_response_from_record(record) })).into_response())
+    let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // Task must have a workspace to pause.
+    if record.workspace_id.is_none() {
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error("Task does not have a workspace.", "")),
+        )
+            .into_response());
+    }
+
+    // In the full implementation this would stop the workspace (transition =
+    // stop) and enqueue a notification. Go returns 202 Accepted.
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(coder_core::PauseTaskResponse {
+            workspace_build: None,
+        }),
+    )
+        .into_response())
 }
 
+/// POST /tasks/{user}/{task}/resume — resume a task.
 async fn post_task_resume(
     State(state): State<AppState>,
-    Path(task_id): Path<Uuid>,
+    Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(record) = state.store.find_task_by_id(task_id).await? else {
+    let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3473,7 +3633,7 @@ async fn post_task_resume(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -3481,8 +3641,32 @@ async fn post_task_resume(
             .into_response());
     }
 
-    // In the full implementation this would start the workspace.
-    Ok(Json(json!({ "task": task_response_from_record(record) })).into_response())
+    let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
+        return Ok((
+            StatusCode::NOT_FOUND,
+            Json(ApiResponse::error("Task not found.", "")),
+        )
+            .into_response());
+    };
+
+    // Task must have a workspace to resume.
+    if record.workspace_id.is_none() {
+        return Ok((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error("Task does not have a workspace.", "")),
+        )
+            .into_response());
+    }
+
+    // In the full implementation this would start the workspace (transition =
+    // start) and enqueue a notification. Go returns 202 Accepted.
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(coder_core::ResumeTaskResponse {
+            workspace_build: None,
+        }),
+    )
+        .into_response())
 }
 
 async fn post_task_log_snapshot(
@@ -11359,6 +11543,20 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_task_by_owner_and_name(
+            &self,
+            owner_id: Uuid,
+            name: &str,
+        ) -> Result<Option<TaskRecord>, StorageError> {
+            Ok(self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .find(|t| t.deleted_at.is_none() && t.owner_id == owner_id && t.name == name)
+                .cloned())
+        }
+
         async fn list_tasks(
             &self,
             filter: TaskListFilter,
@@ -11375,6 +11573,7 @@ mod tests {
                     filter.organization_id.is_none()
                         || filter.organization_id == Some(t.organization_id)
                 })
+                .filter(|t| filter.status.is_none() || filter.status.as_ref() == Some(&t.status))
                 .cloned()
                 .collect();
             result.sort_by(|a, b| b.created_at.cmp(&a.created_at));
@@ -15592,7 +15791,7 @@ mod tests {
             app.clone(),
             authenticated_json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &session_token,
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
@@ -15628,7 +15827,7 @@ mod tests {
             app.clone(),
             authenticated_request(
                 Method::GET,
-                &format!("/api/v2/tasks/{task_id}"),
+                &format!("/api/v2/tasks/me/{task_id}"),
                 &session_token,
             )?,
         )
@@ -15643,12 +15842,12 @@ mod tests {
             app.clone(),
             authenticated_request(
                 Method::DELETE,
-                &format!("/api/v2/tasks/{task_id}"),
+                &format!("/api/v2/tasks/me/{task_id}"),
                 &session_token,
             )?,
         )
         .await?;
-        assert_eq!(delete_response.status(), StatusCode::OK);
+        assert_eq!(delete_response.status(), StatusCode::ACCEPTED);
 
         // Verify deleted task no longer appears in list
         let list_response2 = call(
@@ -15664,7 +15863,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_get_input_returns_prompt() -> Result<(), Box<dyn Error>> {
+    async fn task_get_by_name() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
@@ -15672,39 +15871,42 @@ mod tests {
             app.clone(),
             authenticated_json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &session_token,
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
                     input: "Write a test".to_string(),
-                    name: None,
+                    name: Some("lookup-by-name".to_string()),
                     display_name: None,
                 },
             )?,
         )
         .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
         let body = to_bytes(create_response.into_body(), 1_000_000).await?;
         let task: Value = serde_json::from_slice(&body)?;
         let task_id = task["id"].as_str().ok_or("missing task id")?;
 
-        let input_response = call(
+        // Look up by name instead of UUID
+        let get_response = call(
             app,
             authenticated_request(
                 Method::GET,
-                &format!("/api/v2/tasks/{task_id}/input"),
+                "/api/v2/tasks/me/lookup-by-name",
                 &session_token,
             )?,
         )
         .await?;
-        assert_eq!(input_response.status(), StatusCode::OK);
-        let body = to_bytes(input_response.into_body(), 1_000_000).await?;
-        let input: Value = serde_json::from_slice(&body)?;
-        assert_eq!(input["input"], "Write a test");
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(fetched["id"], task_id);
+        assert_eq!(fetched["name"], "lookup-by-name");
         Ok(())
     }
 
     #[tokio::test]
-    async fn task_patch_updates_prompt() -> Result<(), Box<dyn Error>> {
+    async fn task_patch_input_requires_paused() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
@@ -15712,7 +15914,7 @@ mod tests {
             app.clone(),
             authenticated_json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &session_token,
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
@@ -15727,20 +15929,18 @@ mod tests {
         let task: Value = serde_json::from_slice(&body)?;
         let task_id = task["id"].as_str().ok_or("missing task id")?;
 
+        // Task starts as pending, so patch should return 409 Conflict.
         let patch_response = call(
             app,
             authenticated_json_request(
                 Method::PATCH,
-                &format!("/api/v2/tasks/{task_id}"),
+                &format!("/api/v2/tasks/me/{task_id}/input"),
                 &session_token,
                 &json!({ "input": "Updated prompt" }),
             )?,
         )
         .await?;
-        assert_eq!(patch_response.status(), StatusCode::OK);
-        let body = to_bytes(patch_response.into_body(), 1_000_000).await?;
-        let patched: Value = serde_json::from_slice(&body)?;
-        assert_eq!(patched["initial_prompt"], "Updated prompt");
+        assert_eq!(patch_response.status(), StatusCode::CONFLICT);
         Ok(())
     }
 
@@ -15753,7 +15953,7 @@ mod tests {
             app.clone(),
             authenticated_json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &session_token,
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
@@ -15772,7 +15972,7 @@ mod tests {
             app,
             authenticated_request(
                 Method::GET,
-                &format!("/api/v2/tasks/{task_id}/logs"),
+                &format!("/api/v2/tasks/me/{task_id}/logs"),
                 &session_token,
             )?,
         )
@@ -15785,7 +15985,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn task_send_returns_ok() -> Result<(), Box<dyn Error>> {
+    async fn task_send_requires_active() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
@@ -15793,7 +15993,7 @@ mod tests {
             app.clone(),
             authenticated_json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &session_token,
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
@@ -15808,11 +16008,12 @@ mod tests {
         let task: Value = serde_json::from_slice(&body)?;
         let task_id = task["id"].as_str().ok_or("missing task id")?;
 
+        // Task starts as pending, so send should return 409 Conflict.
         let send_response = call(
             app,
             authenticated_json_request(
                 Method::POST,
-                &format!("/api/v2/tasks/{task_id}/send"),
+                &format!("/api/v2/tasks/me/{task_id}/send"),
                 &session_token,
                 &TaskSendRequest {
                     input: "follow-up".to_string(),
@@ -15820,12 +16021,12 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(send_response.status(), StatusCode::OK);
+        assert_eq!(send_response.status(), StatusCode::CONFLICT);
         Ok(())
     }
 
     #[tokio::test]
-    async fn task_pause_resume() -> Result<(), Box<dyn Error>> {
+    async fn task_pause_resume_requires_workspace() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
@@ -15833,7 +16034,7 @@ mod tests {
             app.clone(),
             authenticated_json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &session_token,
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
@@ -15848,27 +16049,29 @@ mod tests {
         let task: Value = serde_json::from_slice(&body)?;
         let task_id = task["id"].as_str().ok_or("missing task id")?;
 
+        // Task has no workspace, so pause should return 500.
         let pause_response = call(
             app.clone(),
             authenticated_request(
                 Method::POST,
-                &format!("/api/v2/tasks/{task_id}/pause"),
+                &format!("/api/v2/tasks/me/{task_id}/pause"),
                 &session_token,
             )?,
         )
         .await?;
-        assert_eq!(pause_response.status(), StatusCode::OK);
+        assert_eq!(pause_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
 
+        // Task has no workspace, so resume should also return 500.
         let resume_response = call(
             app,
             authenticated_request(
                 Method::POST,
-                &format!("/api/v2/tasks/{task_id}/resume"),
+                &format!("/api/v2/tasks/me/{task_id}/resume"),
                 &session_token,
             )?,
         )
         .await?;
-        assert_eq!(resume_response.status(), StatusCode::OK);
+        assert_eq!(resume_response.status(), StatusCode::INTERNAL_SERVER_ERROR);
         Ok(())
     }
 
@@ -15881,7 +16084,7 @@ mod tests {
             app.clone(),
             authenticated_json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &session_token,
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
@@ -15914,7 +16117,7 @@ mod tests {
             app,
             authenticated_request(
                 Method::GET,
-                &format!("/api/v2/tasks/{task_id}/logs"),
+                &format!("/api/v2/tasks/me/{task_id}/logs"),
                 &session_token,
             )?,
         )
@@ -15937,7 +16140,7 @@ mod tests {
             app.clone(),
             authenticated_request(
                 Method::GET,
-                &format!("/api/v2/tasks/{fake_id}"),
+                &format!("/api/v2/tasks/me/{fake_id}"),
                 &session_token,
             )?,
         )
@@ -15948,7 +16151,7 @@ mod tests {
             app,
             authenticated_request(
                 Method::DELETE,
-                &format!("/api/v2/tasks/{fake_id}"),
+                &format!("/api/v2/tasks/me/{fake_id}"),
                 &session_token,
             )?,
         )
@@ -15969,7 +16172,7 @@ mod tests {
             app,
             json_request(
                 Method::POST,
-                "/api/v2/tasks",
+                "/api/v2/tasks/me",
                 &CreateTaskRequest {
                     template_version_id: Uuid::new_v4(),
                     input: "test".to_string(),

@@ -84,6 +84,7 @@ pub struct InsertTaskInput {
 pub struct TaskListFilter {
     pub owner_id: Option<Uuid>,
     pub organization_id: Option<Uuid>,
+    pub status: Option<TaskStatus>,
 }
 
 /// A task log snapshot record.
@@ -2594,6 +2595,16 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Fetches a task by ID.
     async fn find_task_by_id(&self, id: Uuid) -> Result<Option<TaskRecord>, StorageError> {
         let _ = id;
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    /// Fetches a task by owner ID and name.
+    async fn find_task_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TaskRecord>, StorageError> {
+        let _ = (owner_id, name);
         Err(StorageError::unavailable("tasks are not implemented"))
     }
 
