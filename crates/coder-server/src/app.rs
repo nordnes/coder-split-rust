@@ -716,6 +716,8 @@ pub fn build_router(state: AppState) -> Router {
                     "/organizations/{organization}/templateversions",
                     post(post_org_template_version),
                 )
+                .route("/templates", get(list_all_templates))
+                .route("/templates/examples", get(get_all_template_examples))
                 .route(
                     "/templates/{template}",
                     get(get_template).delete(delete_template).patch(patch_template),
@@ -5534,6 +5536,43 @@ async fn post_org_template_version(
 
     let resp = build_tv_response(&state, &ver).await?;
     Ok((StatusCode::CREATED, Json(resp)).into_response())
+}
+
+/// GET /templates
+async fn list_all_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TemplateFilter>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let templates = state
+        .store
+        .list_templates(TemplateListFilter {
+            organization_id: query.organization_id,
+            exact_name: query.exact_name,
+            search: query.search,
+            deleted: query.deleted.unwrap_or(false),
+        })
+        .await?;
+
+    let body: Vec<TemplateResponse> = templates.iter().map(template_response).collect();
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// GET /templates/examples
+async fn get_all_template_examples(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    // Template examples are static / built-in. Return empty list for now.
+    let examples: Vec<TemplateExample> = Vec::new();
+    Ok((StatusCode::OK, Json(examples)).into_response())
 }
 
 /// GET /templates/{template}
