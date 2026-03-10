@@ -9899,10 +9899,10 @@ mod tests {
         CreateTemplateInput, CreateTemplateVersionInput, TemplateVersionListFilter,
     };
     use coder_core::{
-        AppStore, CreateGroupInput, CreateOAuth2ProviderAppInput,
+        AcquireProvisionerJobInput, AppStore, CreateGroupInput, CreateOAuth2ProviderAppInput,
         CreateOAuth2ProviderAppTokenInput, CreateUserInput, CreateWorkspaceBuildInput,
-        CreateWorkspaceInput, DatabaseConfig, LoginType, ProvisionerStore, UserStatus,
-        WorkspaceListFilter,
+        CreateWorkspaceInput, DatabaseConfig, GetJobsToBeReapedInput, LoginType, ProvisionerStore,
+        ProvisionerType, UserListFilter, UserStatus, WorkspaceListFilter,
     };
     use sqlx::PgPool;
     use time::OffsetDateTime;
@@ -9910,6 +9910,7 @@ mod tests {
 
     use super::PostgresStore;
     use coder_core::api::InsightsReportInterval;
+    use serde_json::json;
     use time::macros::datetime;
 
     type TestResult = Result<(), Box<dyn Error>>;
@@ -11546,6 +11547,1033 @@ mod tests {
     }
 
     // =========================================================================
+    // Edge-Case & Complex Filter Integration Tests
+    // =========================================================================
+
+    // ---- Workspace listing complex filters ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_workspace_list_by_owner_and_status() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user1 = create_test_user(&store, org_id, &uniq()).await?;
+        let user2 = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user1,
+            &format!("tmpl-own-{}", uniq()),
+        )
+        .await?;
+
+        // Create workspace for user1
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: user1,
+                organization_id: org_id,
+                template_id: tmpl,
+                name: format!("ws-u1-{}", uniq()),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Create workspace for user2
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: user2,
+                organization_id: org_id,
+                template_id: tmpl,
+                name: format!("ws-u2-{}", uniq()),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Filter by owner_id = user1
+        let (by_owner, count) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user1),
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(count, 1, "user1 owns exactly 1 workspace");
+        assert_eq!(by_owner.len(), 1);
+        assert_eq!(by_owner[0].owner_id, user1);
+
+        // Also filter by dormant (an actually-wired SQL filter path)
+        let (with_dormant, _) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user1),
+                dormant: Some(false),
+                ..default_ws_filter()
+            })
+            .await?;
+        // Non-dormant filter should still return user1's workspace
+        assert_eq!(
+            with_dormant.len(),
+            1,
+            "non-dormant filter should return 1 workspace for user1"
+        );
+
+        cleanup(&pool, &[user1, user2]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_workspace_list_with_search() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user_id,
+            &format!("tmpl-srch-{}", uniq()),
+        )
+        .await?;
+
+        let needle = format!("findme-{}", uniq());
+        let noise_name = format!("noise-{}", uniq());
+
+        // Create workspace with searchable name
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: user_id,
+                organization_id: org_id,
+                template_id: tmpl,
+                name: needle.clone(),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Create a noise workspace
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: user_id,
+                organization_id: org_id,
+                template_id: tmpl,
+                name: noise_name,
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Search by name substring
+        let (results, count) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                name: Some(needle.clone()),
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(count, 1, "search should match exactly 1 workspace");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].name, needle);
+
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_workspace_list_pagination() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user_id,
+            &format!("tmpl-page-{}", uniq()),
+        )
+        .await?;
+
+        // Create 5 workspaces with distinct last_used_at for stable ordering
+        let mut ws_ids = Vec::new();
+        for i in 0..5 {
+            let ws_id = Uuid::new_v4();
+            store
+                .insert_workspace(CreateWorkspaceInput {
+                    id: ws_id,
+                    owner_id: user_id,
+                    organization_id: org_id,
+                    template_id: tmpl,
+                    name: format!("ws-page-{}-{}", i, uniq()),
+                    autostart_schedule: None,
+                    ttl_ns: None,
+                    automatic_updates: "never".to_string(),
+                })
+                .await?;
+            ws_ids.push(ws_id);
+        }
+
+        // Set distinct last_used_at so ORDER BY last_used_at DESC is deterministic
+        for (idx, ws_id) in ws_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE workspaces SET last_used_at = NOW() + ($1 || ' seconds')::interval WHERE id = $2",
+            )
+            .bind(format!("{}", idx * 10))
+            .bind(ws_id)
+            .execute(&pool)
+            .await?;
+        }
+
+        // Page 1: limit=2, offset=0
+        let (page1, total) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                limit: 2,
+                offset: 0,
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(total, 5, "total count should be 5");
+        assert_eq!(page1.len(), 2, "page 1 should have 2 items");
+
+        // Page 2: limit=2, offset=2
+        let (page2, total2) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                limit: 2,
+                offset: 2,
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(total2, 5, "total count should still be 5");
+        assert_eq!(page2.len(), 2, "page 2 should have 2 items");
+
+        // Pages should not overlap
+        let page1_ids: Vec<_> = page1.iter().map(|w| w.id).collect();
+        let page2_ids: Vec<_> = page2.iter().map(|w| w.id).collect();
+        for id in &page2_ids {
+            assert!(
+                !page1_ids.contains(id),
+                "page 2 should not overlap with page 1"
+            );
+        }
+
+        // Page 3: limit=2, offset=4
+        let (page3, _) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                limit: 2,
+                offset: 4,
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(page3.len(), 1, "page 3 should have 1 remaining item");
+
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    // ---- Template operations ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_template_version_promote_and_archive() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let template_name = format!("tmpl-promote-{}", uniq());
+
+        let template_id =
+            create_test_template(&store, &pool, org_id, user_id, &template_name).await?;
+
+        // Get the initial active version (v1)
+        let tmpl = store
+            .find_template_by_id(template_id)
+            .await?
+            .ok_or("template not found")?;
+        let v1_id = tmpl.active_version_id;
+
+        // Create v2
+        let job_id2 = create_provisioner_job(&pool, org_id, user_id).await?;
+        let v2_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        store
+            .insert_template_version(CreateTemplateVersionInput {
+                id: v2_id,
+                template_id: Some(template_id),
+                organization_id: org_id,
+                created_at: now + time::Duration::seconds(1),
+                updated_at: now + time::Duration::seconds(1),
+                name: format!("{template_name}-v2"),
+                message: "promoted version".to_string(),
+                readme: "".to_string(),
+                job_id: job_id2,
+                created_by: user_id,
+                source_example_id: None,
+            })
+            .await?;
+
+        // Promote v2 to active via store API
+        store
+            .update_template_active_version(template_id, v2_id)
+            .await?;
+
+        // Archive old v1
+        let archived = store.archive_template_version(v1_id).await?;
+        assert!(archived, "v1 should be archived");
+
+        // List non-archived versions
+        let versions = store
+            .list_template_versions(TemplateVersionListFilter {
+                template_id,
+                include_archived: false,
+                limit: 100,
+                offset: 0,
+            })
+            .await?;
+        let version_ids: Vec<_> = versions.iter().map(|v| v.id).collect();
+        assert!(version_ids.contains(&v2_id), "promoted v2 should be listed");
+        assert!(
+            !version_ids.contains(&v1_id),
+            "archived v1 should not be listed"
+        );
+
+        // Verify the template's active_version_id was updated
+        let tmpl_after = store
+            .find_template_by_id(template_id)
+            .await?
+            .ok_or("template not found after promote")?;
+        assert_eq!(tmpl_after.active_version_id, v2_id);
+
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_template_with_multiple_versions() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let template_name = format!("tmpl-multi-{}", uniq());
+
+        let template_id =
+            create_test_template(&store, &pool, org_id, user_id, &template_name).await?;
+
+        // Template already has v1. Add v2 and v3.
+        let now = OffsetDateTime::now_utc();
+
+        let job_id2 = create_provisioner_job(&pool, org_id, user_id).await?;
+        store
+            .insert_template_version(CreateTemplateVersionInput {
+                id: Uuid::new_v4(),
+                template_id: Some(template_id),
+                organization_id: org_id,
+                created_at: now + time::Duration::seconds(1),
+                updated_at: now + time::Duration::seconds(1),
+                name: format!("{template_name}-v2"),
+                message: "version 2".to_string(),
+                readme: "".to_string(),
+                job_id: job_id2,
+                created_by: user_id,
+                source_example_id: None,
+            })
+            .await?;
+
+        let job_id3 = create_provisioner_job(&pool, org_id, user_id).await?;
+        store
+            .insert_template_version(CreateTemplateVersionInput {
+                id: Uuid::new_v4(),
+                template_id: Some(template_id),
+                organization_id: org_id,
+                created_at: now + time::Duration::seconds(2),
+                updated_at: now + time::Duration::seconds(2),
+                name: format!("{template_name}-v3"),
+                message: "version 3".to_string(),
+                readme: "".to_string(),
+                job_id: job_id3,
+                created_by: user_id,
+                source_example_id: None,
+            })
+            .await?;
+
+        // List all versions (including archived, though none are archived)
+        let versions = store
+            .list_template_versions(TemplateVersionListFilter {
+                template_id,
+                include_archived: true,
+                limit: 100,
+                offset: 0,
+            })
+            .await?;
+
+        assert_eq!(versions.len(), 3, "should have 3 versions");
+
+        // Verify ordering: list_template_versions orders by created_at DESC
+        for pair in versions.windows(2) {
+            assert!(
+                pair[0].created_at >= pair[1].created_at,
+                "versions should be ordered by created_at DESC"
+            );
+        }
+
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    // ---- Provisioner job lifecycle ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_job_acquire_returns_oldest_pending() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Each test run creates a unique org_id via ensure_default_org, so
+        // acquire_provisioner_job is scoped to only jobs created in this test.
+        let mut job_ids = Vec::new();
+        for i in 0..3i32 {
+            let job_id = Uuid::new_v4();
+            sqlx::query(
+                r#"INSERT INTO provisioner_jobs (
+                    id, created_at, updated_at, organization_id, initiator_id,
+                    provisioner, file_id, "type", input, tags
+                 ) VALUES (
+                    $1, NOW() - ($2 || ' seconds')::interval, NOW(), $3, $4,
+                    'echo'::provisioner_type, NULL,
+                    'template_version_import'::provisioner_job_type,
+                    '{}'::jsonb, '{}'::jsonb
+                 )"#,
+            )
+            .bind(job_id)
+            .bind(format!("{}", (3 - i) * 10)) // oldest first: 30s ago, 20s ago, 10s ago
+            .bind(org_id)
+            .bind(user_id)
+            .execute(&pool)
+            .await?;
+            job_ids.push(job_id);
+        }
+
+        // Acquire -- should return the oldest job (job_ids[0], created 30s ago)
+        let acquired = store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id: Uuid::new_v4(),
+                started_at: OffsetDateTime::now_utc(),
+                organization_id: org_id,
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: json!({}),
+            })
+            .await?;
+
+        let acquired = acquired.ok_or("expected a job to be acquired")?;
+        assert_eq!(
+            acquired.id, job_ids[0],
+            "should acquire oldest pending job first (FIFO)"
+        );
+
+        // Clean up provisioner jobs created by this test
+        for jid in &job_ids {
+            let _ = sqlx::query("DELETE FROM provisioner_jobs WHERE id = $1")
+                .bind(jid)
+                .execute(&pool)
+                .await;
+        }
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_job_reap_stale_jobs() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // NOTE: This test assumes the Rust process clock and Postgres clock are
+        // roughly synchronized (same host). The 30-minute margin provides ample
+        // buffer against minor clock skew.
+        let stale_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO provisioner_jobs (
+                id, created_at, updated_at, organization_id, initiator_id,
+                provisioner, file_id, "type", input, tags
+             ) VALUES (
+                $1, NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', $2, $3,
+                'echo'::provisioner_type, NULL,
+                'template_version_import'::provisioner_job_type,
+                '{}'::jsonb, '{}'::jsonb
+             )"#,
+        )
+        .bind(stale_id)
+        .bind(org_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+
+        // Create a fresh pending job (just now)
+        let fresh_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO provisioner_jobs (
+                id, created_at, updated_at, organization_id, initiator_id,
+                provisioner, file_id, "type", input, tags
+             ) VALUES (
+                $1, NOW(), NOW(), $2, $3,
+                'echo'::provisioner_type, NULL,
+                'template_version_import'::provisioner_job_type,
+                '{}'::jsonb, '{}'::jsonb
+             )"#,
+        )
+        .bind(fresh_id)
+        .bind(org_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+
+        // Reap jobs pending for > 30 minutes
+        let reaped = store
+            .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+                pending_since: OffsetDateTime::now_utc() - time::Duration::minutes(30),
+                hung_since: OffsetDateTime::now_utc() - time::Duration::minutes(30),
+                max_jobs: 10_000,
+            })
+            .await?;
+
+        let reaped_ids: Vec<_> = reaped.iter().map(|j| j.id).collect();
+        assert!(reaped_ids.contains(&stale_id), "stale job should be reaped");
+        assert!(
+            !reaped_ids.contains(&fresh_id),
+            "fresh job should not be reaped"
+        );
+
+        // Clean up provisioner jobs created by this test
+        for jid in &[stale_id, fresh_id] {
+            let _ = sqlx::query("DELETE FROM provisioner_jobs WHERE id = $1")
+                .bind(jid)
+                .execute(&pool)
+                .await;
+        }
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    // ---- Notification filtering ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_notification_inbox_read_unread_filter() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Seed notification template
+        let template_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO notification_templates (id, name, title_template, body_template, "group", actions, kind)
+               VALUES ($1, $2, 'Title', 'Body', NULL, '[]', 'system')
+               ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(template_id)
+        .bind(format!("test-rw-{}", uniq()))
+        .execute(&pool)
+        .await?;
+
+        // Insert 3 unread notifications
+        let mut notif_ids = Vec::new();
+        for _ in 0..3 {
+            let nid = Uuid::new_v4();
+            sqlx::query(
+                "INSERT INTO inbox_notifications (id, user_id, template_id, targets, title, content, icon, actions, read_at, created_at)
+                 VALUES ($1, $2, $3, ARRAY[]::uuid[], 'Test', 'Content', '', '[]', NULL, NOW())",
+            )
+            .bind(nid)
+            .bind(user_id)
+            .bind(template_id)
+            .execute(&pool)
+            .await?;
+            notif_ids.push(nid);
+        }
+
+        // All should be unread initially
+        let unread = store
+            .get_filtered_inbox_notifications(user_id, None, None, "unread", None)
+            .await?;
+        assert!(
+            unread.len() >= 3,
+            "should have at least 3 unread notifications"
+        );
+
+        // Mark first 2 as read
+        for nid in &notif_ids[..2] {
+            sqlx::query("UPDATE inbox_notifications SET read_at = NOW() WHERE id = $1")
+                .bind(nid)
+                .execute(&pool)
+                .await?;
+        }
+
+        // Filter unread -- the third notification should still be unread
+        let unread_after = store
+            .get_filtered_inbox_notifications(user_id, None, None, "unread", None)
+            .await?;
+        assert!(
+            unread_after.iter().any(|n| n.id == notif_ids[2]),
+            "third notification should still be unread"
+        );
+
+        // Filter read -- should include the 2 we marked
+        let read_after = store
+            .get_filtered_inbox_notifications(user_id, None, None, "read", None)
+            .await?;
+        assert!(
+            read_after.iter().any(|n| n.id == notif_ids[0]),
+            "first notification should be read"
+        );
+        assert!(
+            read_after.iter().any(|n| n.id == notif_ids[1]),
+            "second notification should be read"
+        );
+
+        // Clean up inbox notifications and notification template
+        for nid in &notif_ids {
+            let _ = sqlx::query("DELETE FROM inbox_notifications WHERE id = $1")
+                .bind(nid)
+                .execute(&pool)
+                .await;
+        }
+        let _ = sqlx::query("DELETE FROM notification_templates WHERE id = $1")
+            .bind(template_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_notification_message_lease_expiry() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Seed notification template
+        let template_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO notification_templates (id, name, title_template, body_template, "group", actions, kind)
+               VALUES ($1, $2, 'Title', 'Body', NULL, '[]', 'system')
+               ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(template_id)
+        .bind(format!("test-lease-{}", uniq()))
+        .execute(&pool)
+        .await?;
+
+        // Insert a pending notification message with old created_at so it sorts first
+        // (acquire_pending_notification_messages orders by created_at ASC with a LIMIT)
+        let msg_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO notification_messages
+               (id, notification_template_id, user_id, method, status, payload, created_at, updated_at)
+               VALUES ($1, $2, $3, 'smtp'::notification_method, 'pending'::notification_message_status,
+                       '{}'::jsonb, NOW() - INTERVAL '1 year', NOW())"#,
+        )
+        .bind(msg_id)
+        .bind(template_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+
+        // acquire_pending_notification_messages is global (not user-scoped),
+        // so we check our message is among the acquired batch, not that it's the only one.
+        let acquired = store.acquire_pending_notification_messages(10, 5).await?;
+        assert!(
+            acquired.iter().any(|m| m.id == msg_id),
+            "our message should be acquired"
+        );
+
+        // Now the message is leased. Force-expire the lease via raw SQL.
+        sqlx::query(
+            "UPDATE notification_messages SET leased_until = NOW() - INTERVAL '1 minute' WHERE id = $1",
+        )
+        .bind(msg_id)
+        .execute(&pool)
+        .await?;
+
+        // Re-acquire -- the expired lease should make it available again
+        let reacquired = store.acquire_pending_notification_messages(10, 5).await?;
+        assert!(
+            reacquired.iter().any(|m| m.id == msg_id),
+            "message with expired lease should be re-acquired"
+        );
+
+        // Clean up notification message and template
+        let _ = sqlx::query("DELETE FROM notification_messages WHERE id = $1")
+            .bind(msg_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM notification_templates WHERE id = $1")
+            .bind(template_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    // ---- OAuth2 complex flows ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_oauth2_token_refresh_flow() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Create app + secret
+        let app = store
+            .create_oauth2_provider_app(&CreateOAuth2ProviderAppInput {
+                name: format!("refresh-app-{}", uniq()),
+                icon: "".to_string(),
+                callback_url: "https://example.com/cb".to_string(),
+                created_by: user_id,
+            })
+            .await?;
+
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, b"rfshpfx1", b"rfshhash1", "rf****")
+            .await?;
+
+        // Insert a minimal api_keys row (FK requirement)
+        let api_key_id = format!("ak-{}", &uniq());
+        sqlx::query(
+            "INSERT INTO api_keys (id, hashed_secret, user_id, last_used, expires_at, created_at,
+             updated_at, login_type, lifetime_seconds, scopes, token_name)
+             VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '1 hour', NOW(), NOW(),
+             'password'::login_type, 3600, ARRAY['all']::text[], '')",
+        )
+        .bind(&api_key_id)
+        .bind(b"fakehashedsecret".to_vec())
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+
+        // Create initial token
+        let refresh_hash_v1 = b"refreshhashv1xxx";
+        let token = store
+            .create_oauth2_provider_app_token(&CreateOAuth2ProviderAppTokenInput {
+                expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+                hash_prefix: b"tokpfx001".to_vec(),
+                refresh_hash: refresh_hash_v1.to_vec(),
+                app_secret_id: secret.id,
+                api_key_id: api_key_id.clone(),
+                audience: "https://example.com".to_string(),
+                user_id,
+            })
+            .await?;
+
+        // Simulate refresh: find token by refresh hash
+        let found = store
+            .find_oauth2_provider_app_token_by_refresh_hash(refresh_hash_v1)
+            .await?;
+        assert!(found.is_some(), "should find token by refresh hash");
+        assert_eq!(found.as_ref().map(|t| t.id), Some(token.id));
+
+        // Delete old token (token rotation)
+        let deleted = store.delete_oauth2_provider_app_token(token.id).await?;
+        assert!(deleted, "old token should be deleted");
+
+        // Create a new api_keys row for the new token
+        let api_key_id2 = format!("ak-{}", &uniq());
+        sqlx::query(
+            "INSERT INTO api_keys (id, hashed_secret, user_id, last_used, expires_at, created_at,
+             updated_at, login_type, lifetime_seconds, scopes, token_name)
+             VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '1 hour', NOW(), NOW(),
+             'password'::login_type, 3600, ARRAY['all']::text[], '')",
+        )
+        .bind(&api_key_id2)
+        .bind(b"fakehashedsecret2".to_vec())
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+
+        // Issue new token with new refresh hash
+        let refresh_hash_v2 = b"refreshhashv2xxx";
+        let new_token = store
+            .create_oauth2_provider_app_token(&CreateOAuth2ProviderAppTokenInput {
+                expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+                hash_prefix: b"tokpfx002".to_vec(),
+                refresh_hash: refresh_hash_v2.to_vec(),
+                app_secret_id: secret.id,
+                api_key_id: api_key_id2.clone(),
+                audience: "https://example.com".to_string(),
+                user_id,
+            })
+            .await?;
+
+        // Old refresh hash should no longer find anything
+        let old_gone = store
+            .find_oauth2_provider_app_token_by_refresh_hash(refresh_hash_v1)
+            .await?;
+        assert!(
+            old_gone.is_none(),
+            "old refresh hash should not find a token"
+        );
+
+        // New refresh hash should find the new token
+        let new_found = store
+            .find_oauth2_provider_app_token_by_refresh_hash(refresh_hash_v2)
+            .await?;
+        assert!(new_found.is_some(), "new refresh hash should find token");
+        assert_eq!(new_found.as_ref().map(|t| t.id), Some(new_token.id));
+
+        // Clean up: delete app (cascades to secrets/tokens), api_keys, then user
+        let _ = store.delete_oauth2_provider_app(app.id).await;
+        let _ = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+            .bind(&api_key_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+            .bind(&api_key_id2)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_oauth2_cascading_delete() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let app = store
+            .create_oauth2_provider_app(&CreateOAuth2ProviderAppInput {
+                name: format!("casc-full-{}", uniq()),
+                icon: "".to_string(),
+                callback_url: "https://example.com/cb".to_string(),
+                created_by: user_id,
+            })
+            .await?;
+
+        // Create secret
+        let secret_prefix = b"cascfpfx1";
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, secret_prefix, b"casfhash1", "cf****")
+            .await?;
+
+        // Create code
+        let code_prefix = b"cascfcpfx";
+        let _code = store
+            .create_oauth2_provider_app_code(
+                app.id,
+                user_id,
+                code_prefix,
+                b"cascfcodehs",
+                OffsetDateTime::now_utc() + time::Duration::hours(1),
+                "",
+                "",
+                "plain",
+                None,
+                None,
+            )
+            .await?;
+
+        // Create token (requires api_key FK)
+        let api_key_id = format!("ak-{}", &uniq());
+        sqlx::query(
+            "INSERT INTO api_keys (id, hashed_secret, user_id, last_used, expires_at, created_at,
+             updated_at, login_type, lifetime_seconds, scopes, token_name)
+             VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '1 hour', NOW(), NOW(),
+             'password'::login_type, 3600, ARRAY['all']::text[], '')",
+        )
+        .bind(&api_key_id)
+        .bind(b"fakehashed".to_vec())
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+
+        let token_prefix = b"cascftpfx";
+        let refresh_hash = b"cascfrefrs";
+        let _token = store
+            .create_oauth2_provider_app_token(&CreateOAuth2ProviderAppTokenInput {
+                expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+                hash_prefix: token_prefix.to_vec(),
+                refresh_hash: refresh_hash.to_vec(),
+                app_secret_id: secret.id,
+                api_key_id: api_key_id.clone(),
+                audience: "https://example.com".to_string(),
+                user_id,
+            })
+            .await?;
+
+        // Delete the app -- everything should cascade
+        let deleted = store.delete_oauth2_provider_app(app.id).await?;
+        assert!(deleted, "app should be deleted");
+
+        // Verify secret is gone
+        let secret_gone = store
+            .find_oauth2_provider_app_secret_by_prefix(secret_prefix)
+            .await?;
+        assert!(secret_gone.is_none(), "secret should be cascade deleted");
+
+        // Verify code is gone
+        let code_gone = store
+            .find_oauth2_provider_app_code_by_prefix(code_prefix)
+            .await?;
+        assert!(code_gone.is_none(), "code should be cascade deleted");
+
+        // Verify token is gone
+        let token_gone = store
+            .find_oauth2_provider_app_token_by_prefix(token_prefix)
+            .await?;
+        assert!(token_gone.is_none(), "token should be cascade deleted");
+
+        // Verify app is gone
+        let app_gone = store.find_oauth2_provider_app_by_id(app.id).await?;
+        assert!(app_gone.is_none(), "app should be deleted");
+
+        // Clean up api_keys and user (app already deleted by the test)
+        let _ = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+            .bind(&api_key_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    // ---- User edge cases ----
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_soft_delete_excluded_from_list() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let u_active = uniq();
+        let u_deleted = uniq();
+        let active_id = create_test_user(&store, org_id, &u_active).await?;
+        let deleted_id = create_test_user(&store, org_id, &u_deleted).await?;
+
+        // Soft-delete one user
+        store.soft_delete_user(deleted_id).await?;
+
+        // list_users with NO status filter should still exclude the soft-deleted user
+        // (this exercises the deleted=true exclusion, not just status filtering)
+        let (users, _) = store
+            .list_users(UserListFilter {
+                search: String::new(),
+                status: None,
+                limit: 1000,
+                offset: 0,
+            })
+            .await?;
+        let user_ids: Vec<_> = users.iter().map(|u| u.id).collect();
+        assert!(
+            user_ids.contains(&active_id),
+            "active user should appear in list"
+        );
+        assert!(
+            !user_ids.contains(&deleted_id),
+            "soft-deleted user should NOT appear even without status filter"
+        );
+
+        cleanup(&pool, &[active_id, deleted_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_memberships_multiple_orgs() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org1 = ensure_default_org(&pool).await?;
+        let org2 = ensure_default_org(&pool).await?;
+
+        // Create user in both orgs
+        let suffix = uniq();
+        let input = CreateUserInput {
+            email: format!("test-{suffix}@example.com"),
+            username: format!("testuser-{suffix}"),
+            name: format!("Test User {suffix}"),
+            password_hash: Some("hashed".to_string()),
+            login_type: LoginType::Password,
+            status: UserStatus::Active,
+            organization_ids: vec![org1, org2],
+        };
+        let user = store.create_user(input).await?;
+
+        let memberships = store.list_user_memberships(user.id).await?;
+        let org_ids: Vec<_> = memberships.iter().map(|m| m.organization_id).collect();
+        assert!(org_ids.contains(&org1), "user should be member of org1");
+        assert!(org_ids.contains(&org2), "user should be member of org2");
+        assert!(
+            memberships.len() >= 2,
+            "user should have at least 2 memberships"
+        );
+
+        cleanup(&pool, &[user.id]).await;
+        Ok(())
+    }
+
+    // =========================================================================
     // 8. User CRUD
     // =========================================================================
 
@@ -11595,7 +12623,10 @@ mod tests {
         let updated = store
             .update_user_profile(user.id, &new_username, "Updated Name")
             .await?;
-        assert!(updated.is_some(), "update_user_profile should return updated user");
+        assert!(
+            updated.is_some(),
+            "update_user_profile should return updated user"
+        );
         assert_eq!(
             updated.as_ref().map(|u| u.username.as_str()),
             Some(new_username.as_str())
@@ -11609,7 +12640,10 @@ mod tests {
         let suspended = store
             .update_user_status(user.id, UserStatus::Suspended)
             .await?;
-        assert!(suspended.is_some(), "update_user_status should return updated user");
+        assert!(
+            suspended.is_some(),
+            "update_user_status should return updated user"
+        );
         assert_eq!(
             suspended.as_ref().map(|u| u.status),
             Some(UserStatus::Suspended)
@@ -11685,25 +12719,14 @@ mod tests {
         assert!(users.len() >= 3);
         // Verify the created users are present in the result set.
         let returned_ids: Vec<_> = users.iter().map(|u| u.id).collect();
-        assert!(
-            returned_ids.contains(&u1.id),
-            "u1 should be in results"
-        );
-        assert!(
-            returned_ids.contains(&u2.id),
-            "u2 should be in results"
-        );
-        assert!(
-            returned_ids.contains(&u3.id),
-            "u3 should be in results"
-        );
+        assert!(returned_ids.contains(&u1.id), "u1 should be in results");
+        assert!(returned_ids.contains(&u2.id), "u2 should be in results");
+        assert!(returned_ids.contains(&u3.id), "u3 should be in results");
         // Verify the search filter actually matched: every returned user
         // must contain the unique tag in username, email, or name.
         assert!(
             users.iter().all(|u| {
-                u.username.contains(&tag)
-                    || u.email.contains(&tag)
-                    || u.name.contains(&tag)
+                u.username.contains(&tag) || u.email.contains(&tag) || u.name.contains(&tag)
             }),
             "all returned users should match the search tag"
         );
@@ -11763,7 +12786,10 @@ mod tests {
         let updated = store
             .update_user_appearance(user_id, "dark", "JetBrains Mono")
             .await?;
-        assert!(updated.is_some(), "update_user_appearance should return result");
+        assert!(
+            updated.is_some(),
+            "update_user_appearance should return result"
+        );
         let upd = updated.as_ref().unwrap_or_else(|| panic!("no appearance"));
         assert_eq!(upd.theme_preference, "dark");
         assert_eq!(upd.terminal_font, "JetBrains Mono");
@@ -11779,7 +12805,8 @@ mod tests {
 
         // Update preferences
         let updated_prefs = store.update_user_preferences(user_id, true).await?;
-        let updated_prefs = updated_prefs.unwrap_or_else(|| panic!("update_user_preferences should return result"));
+        let updated_prefs =
+            updated_prefs.unwrap_or_else(|| panic!("update_user_preferences should return result"));
         assert!(
             updated_prefs.task_notification_alert_dismissed,
             "preference should be dismissed after update"
@@ -11812,7 +12839,8 @@ mod tests {
         let updated = store
             .update_user_roles(user_id, vec!["owner".to_string()])
             .await?;
-        let updated = updated.unwrap_or_else(|| panic!("update_user_roles should return updated user"));
+        let updated =
+            updated.unwrap_or_else(|| panic!("update_user_roles should return updated user"));
         assert_eq!(updated.roles.len(), 1);
         assert_eq!(updated.roles[0].name, "owner");
 
@@ -11992,7 +13020,10 @@ mod tests {
 
         // Update prompt
         let updated = store.update_task_prompt(task_id, "updated prompt").await?;
-        assert!(updated.is_some(), "update_task_prompt should return updated task");
+        assert!(
+            updated.is_some(),
+            "update_task_prompt should return updated task"
+        );
         assert_eq!(
             updated.as_ref().map(|t| t.prompt.as_str()),
             Some("updated prompt")
@@ -12129,7 +13160,8 @@ mod tests {
 
         // Verify archived
         let after_archive = store.find_chat_by_id(chat.id).await?;
-        let after_archive = after_archive.unwrap_or_else(|| panic!("chat should exist after archive"));
+        let after_archive =
+            after_archive.unwrap_or_else(|| panic!("chat should exist after archive"));
         assert!(after_archive.archived, "chat should be archived");
 
         // Should not appear in non-archived list
@@ -12144,7 +13176,8 @@ mod tests {
 
         // Verify unarchived
         let after_unarchive = store.find_chat_by_id(chat.id).await?;
-        let after_unarchive = after_unarchive.unwrap_or_else(|| panic!("chat should exist after unarchive"));
+        let after_unarchive =
+            after_unarchive.unwrap_or_else(|| panic!("chat should exist after unarchive"));
         assert!(!after_unarchive.archived, "chat should be unarchived");
 
         Ok(())
