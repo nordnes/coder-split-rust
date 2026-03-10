@@ -11394,6 +11394,8 @@ async fn handle_agent_rpc_socket(
     // Ping interval to keep the connection alive.
     let mut ping_interval = tokio::time::interval(std::time::Duration::from_secs(30));
     ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Consume the first immediate tick so we don't send a spurious ping on connect.
+    ping_interval.tick().await;
 
     loop {
         tokio::select! {
