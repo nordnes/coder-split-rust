@@ -11005,15 +11005,28 @@ async fn get_workspace_agent_logs(
         // window).
         let last_sent_id = existing_logs.last().map(|l| l.id);
 
-        // Send each existing log as its own SSE event so the format is
-        // consistent with the per-log pubsub messages that follow.
-        for log in &existing_logs {
-            let data = serde_json::to_string(log).unwrap_or_default();
-            let _ = tx.send(format!("data: {data}\n\n")).await;
-        }
+        // Pre-serialize existing logs so they can be moved into the
+        // spawned task.  We must NOT send them on `tx` here because the
+        // receiver (`rx`) hasn't been returned to the client yet — doing
+        // so would deadlock once the 64-slot channel buffer fills up.
+        let initial_events: Vec<String> = existing_logs
+            .iter()
+            .map(|log| {
+                let data = serde_json::to_string(log).unwrap_or_default();
+                format!("data: {data}\n\n")
+            })
+            .collect();
 
-        // Spawn a task that listens for new log events on pubsub.
+        // Spawn a task that first drains the initial batch, then listens
+        // for new log events on pubsub.
         tokio::spawn(async move {
+            // Send existing logs first.
+            for sse in initial_events {
+                if tx.send(sse).await.is_err() {
+                    return;
+                }
+            }
+
             loop {
                 tokio::select! {
                     msg = subscription.recv() => {
