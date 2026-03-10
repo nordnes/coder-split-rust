@@ -1148,7 +1148,17 @@ async fn post_generate_test_audit_log(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can create audit log entries.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::AuditLog),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to generate audit logs.",
         ));
@@ -1304,7 +1314,17 @@ async fn put_health_settings(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can update deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to update health settings.",
         ));
@@ -4794,6 +4814,23 @@ async fn upload_chat_file(
         }
     };
 
+    // RBAC: verify the actor can create chat resources.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::File)
+                .with_owner(context.user.id)
+                .in_org(org_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to upload chat files.",
+        ));
+    }
+
     // Enforce file size limit.
     if body.len() > MAX_CHAT_FILE_SIZE {
         return Ok((
@@ -5122,7 +5159,17 @@ async fn put_notifications_settings(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can update deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to update notification settings.",
         ));
@@ -5172,9 +5219,24 @@ async fn post_test_notification(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to send test notifications.",
+        ));
+    }
 
     // The test notification endpoint just returns 200 OK to confirm it's reachable.
     // Full dispatch integration is not implemented yet.
@@ -5195,7 +5257,17 @@ async fn put_notification_template_method(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can update notification templates.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::NotificationTemplate),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to update notification template methods.",
         ));
@@ -6812,7 +6884,7 @@ async fn post_archive_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6829,7 +6901,7 @@ async fn post_archive_template_version(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -6854,7 +6926,7 @@ async fn patch_cancel_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6870,7 +6942,7 @@ async fn patch_cancel_template_version(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -6917,6 +6989,24 @@ async fn post_template_version_dry_run(
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
+
+    // RBAC: verify the actor can create workspaces in this org (dry runs simulate workspace builds).
+    // Mirrors Go: policy.ActionCreate on rbac.ResourceWorkspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace)
+                .with_owner(context.user.id)
+                .in_org(ver.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create template version dry runs.",
+        ));
+    }
 
     let now = OffsetDateTime::now_utc();
     let job_id = Uuid::new_v4();
@@ -6970,7 +7060,7 @@ async fn patch_template_version_dry_run(
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6986,7 +7076,7 @@ async fn patch_template_version_dry_run(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7019,7 +7109,7 @@ async fn patch_cancel_template_version_dry_run(
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -7035,7 +7125,7 @@ async fn patch_cancel_template_version_dry_run(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7153,14 +7243,29 @@ async fn post_template_version_dynamic_parameters_evaluate(
     headers: HeaderMap,
     body: Result<Json<DynamicParametersRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
+
+    // RBAC: verify the actor can read this template (parameter evaluation requires template read access).
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Read, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to evaluate template version parameters.",
+        ));
+    }
 
     let req = match body {
         Ok(Json(r)) => r,
@@ -7189,7 +7294,7 @@ async fn patch_active_template_version(
     headers: HeaderMap,
     body: Result<Json<UpdateActiveTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -7197,6 +7302,23 @@ async fn patch_active_template_version(
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
     };
+
+    // RBAC: verify the actor can update this template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template.id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update the active template version.",
+        ));
+    }
 
     let req = match body {
         Ok(Json(r)) => r,
@@ -7244,14 +7366,31 @@ async fn post_archive_template_versions(
     headers: HeaderMap,
     body: Result<Json<ArchiveTemplateVersionsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _template = match state.store.find_template_by_id(template_id).await? {
+    let template = match state.store.find_template_by_id(template_id).await? {
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
     };
+
+    // RBAC: verify the actor can update this template (archiving versions is a template mutation).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template.id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to archive template versions.",
+        ));
+    }
 
     let req = match body {
         Ok(Json(r)) => r,
@@ -7484,9 +7623,29 @@ async fn post_unarchive_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // Look up the template version for org-scoped RBAC.
+    let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
+        return Ok(not_found_response("Template version not found."));
+    };
+
+    // RBAC: verify the actor can update templates (unarchiving is a template mutation).
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to unarchive template versions.",
+        ));
+    }
 
     let unarchived = state.store.unarchive_template_version(version_id).await?;
     if !unarchived {
@@ -8509,6 +8668,32 @@ async fn put_workspace_dormant(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // RBAC: verify the actor can update workspace dormancy.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::WorkspaceDormant)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update workspace dormancy.",
+        ));
+    }
+
     let dormant = body
         .get("dormant")
         .and_then(|v| v.as_bool())
@@ -8632,13 +8817,31 @@ async fn put_workspace_autoupdates(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let automatic_updates = body
         .get("automatic_updates")
@@ -8663,13 +8866,31 @@ async fn put_workspace_favorite(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     state
         .store
@@ -8689,13 +8910,31 @@ async fn delete_workspace_favorite(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     state
         .store
@@ -8755,13 +8994,31 @@ async fn post_workspace_port_share(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let agent_name = body
         .get("agent_name")
@@ -8819,13 +9076,31 @@ async fn delete_workspace_port_share(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let agent_name = body
         .get("agent_name")
@@ -9345,7 +9620,7 @@ async fn patch_cancel_workspace_build(
     headers: HeaderMap,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -9366,7 +9641,7 @@ async fn patch_cancel_workspace_build(
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
-            &_context.actor,
+            &context.actor,
             Action::Update,
             &Object::new(ResourceType::Workspace)
                 .with_id(build.workspace_id)
@@ -9557,7 +9832,7 @@ async fn put_workspace_build_state(
     Path(build_id): Path<Uuid>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -9578,7 +9853,7 @@ async fn put_workspace_build_state(
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
-            &_context.actor,
+            &context.actor,
             Action::Update,
             &Object::new(ResourceType::Workspace)
                 .with_id(build.workspace_id)
@@ -9878,6 +10153,23 @@ async fn post_org_member_workspace(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can create workspaces for this user in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace)
+                .with_owner(target_user.id)
+                .in_org(org_record.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create workspaces in this organization.",
+        ));
+    }
 
     // From here, the workspace creation logic is identical to post_user_workspace.
     let template_id = match body.get("template_id").and_then(|v| v.as_str()) {
@@ -11701,6 +11993,25 @@ async fn post_custom_notification(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // RBAC: verify the actor can create notification messages.
+    // In Go, postCustomNotification checks policy.ActionCreate on
+    // rbac.ResourceNotificationMessage at site level. Only the owner role
+    // has NotificationMessage:Create at site scope, so this is intentionally
+    // restricted to site owners. No org scoping needed.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::NotificationMessage),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to send custom notifications.",
+        ));
+    }
+
     let Json(req) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -12099,13 +12410,32 @@ async fn post_workspace_agent_recreate_devcontainer(
     headers: HeaderMap,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update workspace agent devcontainers.
+    // Look up the workspace for org/owner-scoped RBAC when available.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
+    let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::WorkspaceAgentDevcontainers)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::WorkspaceAgentDevcontainers),
+    };
+    if authorizer
+        .authorize(&context.actor, Action::Update, &rbac_obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to recreate devcontainers.",
+        ));
+    }
 
     let status = derive_agent_status(&row);
     if status != coder_core::WorkspaceAgentStatus::Connected {
@@ -12150,13 +12480,32 @@ async fn delete_workspace_agent_devcontainer(
     headers: HeaderMap,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can delete workspace agent devcontainers.
+    // Look up the workspace for org/owner-scoped RBAC when available.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
+    let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::WorkspaceAgentDevcontainers)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::WorkspaceAgentDevcontainers),
+    };
+    if authorizer
+        .authorize(&context.actor, Action::Delete, &rbac_obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete devcontainers.",
+        ));
+    }
 
     let status = derive_agent_status(&row);
     if status != coder_core::WorkspaceAgentStatus::Connected {
@@ -13296,6 +13645,26 @@ async fn post_file(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can upload files.
+    // In Go, postFile checks rbac.ActionCreate on rbac.ResourceFile at the
+    // site level (no org/owner scoping). This intentionally differs from
+    // upload_chat_file which uses .with_owner().in_org() because chat file
+    // uploads are organization-scoped, while general file uploads (used for
+    // template archives) are a site-level operation.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::File),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to upload files.",
+        ));
+    }
 
     let raw_content_type = headers
         .get(CONTENT_TYPE)
