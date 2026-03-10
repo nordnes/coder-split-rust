@@ -12196,18 +12196,30 @@ mod tests {
         async fn find_previous_template_version(
             &self,
             organization_id: Uuid,
-            _template_name: &str,
+            template_name: &str,
             version_name: &str,
         ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let template_id = templates
+                .values()
+                .find(|t| t.organization_id == organization_id && t.name == template_name)
+                .map(|t| t.id);
+            drop(templates);
+
             let versions = self
                 .template_versions
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
 
             // Find the target version to get its created_at timestamp.
-            let target = versions
-                .values()
-                .find(|v| v.organization_id == organization_id && v.name == version_name);
+            let target = versions.values().find(|v| {
+                v.organization_id == organization_id
+                    && v.template_id == template_id
+                    && v.name == version_name
+            });
             let target_created_at = match target {
                 Some(t) => t.created_at,
                 None => return Ok(None),
@@ -12217,7 +12229,9 @@ mod tests {
             let mut candidates: Vec<&TemplateVersionRecord> = versions
                 .values()
                 .filter(|v| {
-                    v.organization_id == organization_id && v.created_at < target_created_at
+                    v.organization_id == organization_id
+                        && v.template_id == template_id
+                        && v.created_at < target_created_at
                 })
                 .collect();
             candidates.sort_by(|a, b| b.created_at.cmp(&a.created_at));

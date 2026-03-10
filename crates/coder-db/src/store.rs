@@ -5181,6 +5181,7 @@ impl AppStore for PostgresStore {
                   FROM template_versions tv2
                   JOIN templates t2 ON t2.id = tv2.template_id
                   WHERE t2.organization_id = $1 AND t2.name = $2 AND tv2.name = $3
+                  LIMIT 1
               )
             ORDER BY tv.created_at DESC
             LIMIT 1
