@@ -74,15 +74,19 @@ pub use password::{
     validate_email, validate_password, validate_real_name, validate_username, verify_password,
 };
 pub use ports::{
-    AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
-    ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertAgentLogInput,
-    InsertFileInput, InsertFileResult, InsertWorkspaceAppStatusInput, OperationalStore,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerJobStatsInput, StorageError, TemplateStore, UpsertExternalAuthLinkInput,
-    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
-    WorkspaceAgentMetadataRow, WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentStatInput,
-    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildStatsInput, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    AppStore, AuditLogListFilter, AuthStore, CreateWorkspaceBuildInput, CreateWorkspaceInput,
+    DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord,
+    IdentityStore, InsertAgentLogInput, InsertFileInput, InsertFileResult,
+    InsertWorkspaceAppStatusInput, OperationalStore, PersistAuditLogInput,
+    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord,
+    ProvisionerJobStatsInput, ProvisionerJobTimingRecord, StorageError, TemplateStore,
+    UpsertExternalAuthLinkInput, UpsertPortShareInput, WorkspaceAgentDevcontainerRow,
+    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
+    WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
