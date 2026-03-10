@@ -11612,19 +11612,22 @@ mod tests {
         assert_eq!(by_owner.len(), 1);
         assert_eq!(by_owner[0].owner_id, user1);
 
-        // Also pass status filter to verify the query path doesn't error
-        let (with_status, _) = store
+        // Also filter by dormant (an actually-wired SQL filter path)
+        let (with_dormant, _) = store
             .list_workspaces(WorkspaceListFilter {
                 owner_id: Some(user1),
-                status: Some("running".to_string()),
+                dormant: Some(false),
                 ..default_ws_filter()
             })
             .await?;
-        // Status filter is not yet wired in the SQL; the key assertion is no error.
-        assert!(
-            with_status.len() <= 1,
-            "should return at most 1 workspace for user1"
+        // Non-dormant filter should still return user1's workspace
+        assert_eq!(
+            with_dormant.len(),
+            1,
+            "non-dormant filter should return 1 workspace for user1"
         );
+
+        cleanup(&pool, &[user1, user2]).await;
         Ok(())
     }
 
@@ -11689,6 +11692,8 @@ mod tests {
         assert_eq!(count, 1, "search should match exactly 1 workspace");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].name, needle);
+
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -11785,6 +11790,8 @@ mod tests {
             })
             .await?;
         assert_eq!(page3.len(), 1, "page 3 should have 1 remaining item");
+
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -11832,14 +11839,10 @@ mod tests {
             })
             .await?;
 
-        // Promote v2 to active
-        sqlx::query(
-            "UPDATE templates SET active_version_id = $1, updated_at = NOW() WHERE id = $2",
-        )
-        .bind(v2_id)
-        .bind(template_id)
-        .execute(&pool)
-        .await?;
+        // Promote v2 to active via store API
+        store
+            .update_template_active_version(template_id, v2_id)
+            .await?;
 
         // Archive old v1
         let archived = store.archive_template_version(v1_id).await?;
@@ -11867,6 +11870,8 @@ mod tests {
             .await?
             .ok_or("template not found after promote")?;
         assert_eq!(tmpl_after.active_version_id, v2_id);
+
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -11941,6 +11946,8 @@ mod tests {
                 "versions should be ordered by created_at DESC"
             );
         }
+
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -11957,7 +11964,8 @@ mod tests {
         let org_id = ensure_default_org(&pool).await?;
         let user_id = create_test_user(&store, org_id, &uniq()).await?;
 
-        // Create 3 jobs with different created_at times via raw SQL
+        // Each test run creates a unique org_id via ensure_default_org, so
+        // acquire_provisioner_job is scoped to only jobs created in this test.
         let mut job_ids = Vec::new();
         for i in 0..3i32 {
             let job_id = Uuid::new_v4();
@@ -11997,6 +12005,15 @@ mod tests {
             acquired.id, job_ids[0],
             "should acquire oldest pending job first (FIFO)"
         );
+
+        // Clean up provisioner jobs created by this test
+        for jid in &job_ids {
+            let _ = sqlx::query("DELETE FROM provisioner_jobs WHERE id = $1")
+                .bind(jid)
+                .execute(&pool)
+                .await;
+        }
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -12011,7 +12028,9 @@ mod tests {
         let org_id = ensure_default_org(&pool).await?;
         let user_id = create_test_user(&store, org_id, &uniq()).await?;
 
-        // Create a stale pending job (created 1 hour ago)
+        // NOTE: This test assumes the Rust process clock and Postgres clock are
+        // roughly synchronized (same host). The 30-minute margin provides ample
+        // buffer against minor clock skew.
         let stale_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO provisioner_jobs (
@@ -12064,6 +12083,15 @@ mod tests {
             !reaped_ids.contains(&fresh_id),
             "fresh job should not be reaped"
         );
+
+        // Clean up provisioner jobs created by this test
+        for jid in &[stale_id, fresh_id] {
+            let _ = sqlx::query("DELETE FROM provisioner_jobs WHERE id = $1")
+                .bind(jid)
+                .execute(&pool)
+                .await;
+        }
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -12146,6 +12174,19 @@ mod tests {
             read_after.iter().any(|n| n.id == notif_ids[1]),
             "second notification should be read"
         );
+
+        // Clean up inbox notifications and notification template
+        for nid in &notif_ids {
+            let _ = sqlx::query("DELETE FROM inbox_notifications WHERE id = $1")
+                .bind(nid)
+                .execute(&pool)
+                .await;
+        }
+        let _ = sqlx::query("DELETE FROM notification_templates WHERE id = $1")
+            .bind(template_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -12172,13 +12213,14 @@ mod tests {
         .execute(&pool)
         .await?;
 
-        // Insert a pending notification message
+        // Insert a pending notification message with old created_at so it sorts first
+        // (acquire_pending_notification_messages orders by created_at ASC with a LIMIT)
         let msg_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO notification_messages
                (id, notification_template_id, user_id, method, status, payload, created_at, updated_at)
                VALUES ($1, $2, $3, 'smtp'::notification_method, 'pending'::notification_message_status,
-                       '{}'::jsonb, NOW(), NOW())"#,
+                       '{}'::jsonb, NOW() - INTERVAL '1 year', NOW())"#,
         )
         .bind(msg_id)
         .bind(template_id)
@@ -12186,7 +12228,8 @@ mod tests {
         .execute(&pool)
         .await?;
 
-        // Acquire it
+        // acquire_pending_notification_messages is global (not user-scoped),
+        // so we check our message is among the acquired batch, not that it's the only one.
         let acquired = store.acquire_pending_notification_messages(10, 5).await?;
         assert!(
             acquired.iter().any(|m| m.id == msg_id),
@@ -12207,6 +12250,17 @@ mod tests {
             reacquired.iter().any(|m| m.id == msg_id),
             "message with expired lease should be re-acquired"
         );
+
+        // Clean up notification message and template
+        let _ = sqlx::query("DELETE FROM notification_messages WHERE id = $1")
+            .bind(msg_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM notification_templates WHERE id = $1")
+            .bind(template_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -12298,7 +12352,7 @@ mod tests {
                 hash_prefix: b"tokpfx002".to_vec(),
                 refresh_hash: refresh_hash_v2.to_vec(),
                 app_secret_id: secret.id,
-                api_key_id: api_key_id2,
+                api_key_id: api_key_id2.clone(),
                 audience: "https://example.com".to_string(),
                 user_id,
             })
@@ -12319,6 +12373,18 @@ mod tests {
             .await?;
         assert!(new_found.is_some(), "new refresh hash should find token");
         assert_eq!(new_found.as_ref().map(|t| t.id), Some(new_token.id));
+
+        // Clean up: delete app (cascades to secrets/tokens), api_keys, then user
+        let _ = store.delete_oauth2_provider_app(app.id).await;
+        let _ = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+            .bind(&api_key_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+            .bind(&api_key_id2)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -12387,7 +12453,7 @@ mod tests {
                 hash_prefix: token_prefix.to_vec(),
                 refresh_hash: refresh_hash.to_vec(),
                 app_secret_id: secret.id,
-                api_key_id,
+                api_key_id: api_key_id.clone(),
                 audience: "https://example.com".to_string(),
                 user_id,
             })
@@ -12418,6 +12484,13 @@ mod tests {
         // Verify app is gone
         let app_gone = store.find_oauth2_provider_app_by_id(app.id).await?;
         assert!(app_gone.is_none(), "app should be deleted");
+
+        // Clean up api_keys and user (app already deleted by the test)
+        let _ = sqlx::query("DELETE FROM api_keys WHERE id = $1")
+            .bind(&api_key_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -12440,11 +12513,12 @@ mod tests {
         // Soft-delete one user
         store.soft_delete_user(deleted_id).await?;
 
-        // list_users with Active status filter should not include the deleted user
+        // list_users with NO status filter should still exclude the soft-deleted user
+        // (this exercises the deleted=true exclusion, not just status filtering)
         let (users, _) = store
             .list_users(UserListFilter {
                 search: String::new(),
-                status: Some(UserStatus::Active),
+                status: None,
                 limit: 1000,
                 offset: 0,
             })
@@ -12456,8 +12530,10 @@ mod tests {
         );
         assert!(
             !user_ids.contains(&deleted_id),
-            "soft-deleted user should NOT appear in active list"
+            "soft-deleted user should NOT appear even without status filter"
         );
+
+        cleanup(&pool, &[active_id, deleted_id]).await;
         Ok(())
     }
 
@@ -12493,6 +12569,8 @@ mod tests {
             memberships.len() >= 2,
             "user should have at least 2 memberships"
         );
+
+        cleanup(&pool, &[user.id]).await;
         Ok(())
     }
 }
