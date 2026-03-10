@@ -2665,12 +2665,12 @@ mod tests {
         inner: std::sync::Arc<Mutex<MockStoreInner>>,
     }
 
-    fn make_user(id: Uuid, email: &str, username: &str) -> UserRecord {
+    fn make_user(id: Uuid, email: &str, username: &str, name: &str) -> UserRecord {
         UserRecord {
             id,
             email: email.to_owned(),
             username: username.to_owned(),
-            name: username.to_owned(),
+            name: name.to_owned(),
             avatar_url: String::new(),
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
@@ -2725,7 +2725,7 @@ mod tests {
             }
             let user_id = Uuid::new_v4();
             let org_id = Uuid::new_v4();
-            let user = make_user(user_id, &input.email, &input.username);
+            let user = make_user(user_id, &input.email, &input.username, &input.name);
             inner.users.push(user.clone());
             inner.password_users.push(PasswordUserRecord {
                 user: user,

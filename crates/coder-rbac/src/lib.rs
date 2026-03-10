@@ -2157,6 +2157,10 @@ mod tests {
         let org_id = Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap_or_default();
         let resource_id =
             Uuid::parse_str("00000000-0000-0000-0000-000000000042").unwrap_or_default();
+        // Guard against silent nil fallback from malformed UUID literals.
+        assert_ne!(owner_id, Uuid::nil());
+        assert_ne!(org_id, Uuid::nil());
+        assert_ne!(resource_id, Uuid::nil());
 
         let object = Object::new(ResourceType::Workspace)
             .with_owner(owner_id)
