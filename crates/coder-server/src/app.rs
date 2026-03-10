@@ -9904,22 +9904,10 @@ async fn delete_oauth2_provider_app_tokens(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: verify the actor can delete OAuth2 provider app tokens.
-    // This intentionally replaces the prior is_owner() gate to support future
-    // custom roles that may grant OAuth2 app management without full ownership.
-    let authorizer = Authorizer::new();
-    if authorizer
-        .authorize(
-            &context.actor,
-            Action::Delete,
-            &Object::new(ResourceType::Oauth2AppCodeToken),
-        )
-        .is_err()
-    {
-        return Ok(forbidden_response(
-            "You are not authorized to revoke OAuth2 provider app tokens.",
-        ));
-    }
+    // No RBAC check here: this is a self-service endpoint where any
+    // authenticated user can revoke their own OAuth2 app authorizations.
+    // The downstream revoke_tokens() call is scoped to context.user.id,
+    // so users can only revoke their own tokens.
 
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
