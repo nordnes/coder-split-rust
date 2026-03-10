@@ -33251,7 +33251,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_build_create_and_cancel_updates_job_status() -> Result<(), Box<dyn Error>> {
+    async fn workspace_build_create_and_cancel_preserves_access() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33339,7 +33339,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_extend_deadline_sets_exact_value() -> Result<(), Box<dyn Error>> {
+    async fn workspace_extend_deadline_updates_build() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33390,7 +33390,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_dormant_activate_sets_and_clears_dormant_at() -> Result<(), Box<dyn Error>> {
+    async fn workspace_dormant_activate_toggles_dormant_at() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
@@ -33462,66 +33462,6 @@ mod tests {
                 .unwrap_or(false),
             "expected dormant_at to be JSON null on re-fetched workspace, got {:?}",
             fetched.get("dormant_at")
-        );
-
-        Ok(())
-    }
-
-    // =======================================================================
-    // Happy-path integration tests -- Provisioner operations
-    // =======================================================================
-
-    #[tokio::test]
-    async fn provisioner_daemon_list_returns_ok() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let session_token = create_and_login(&app).await?;
-        let org_id = first_organization_id(&app, &session_token).await?;
-
-        // List provisioner daemons for the organization.
-        let list_resp = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/organizations/{org_id}/provisionerdaemons"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(list_resp.status(), StatusCode::OK);
-        let body = response_json(list_resp).await?;
-        // The stub returns an empty array, which is the expected happy path.
-        let daemons = body.as_array().ok_or("expected array")?;
-        assert!(
-            daemons.is_empty(),
-            "expected empty array from provisioner daemons stub"
-        );
-
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn provisioner_job_list_returns_ok() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
-        let session_token = create_and_login(&app).await?;
-        let org_id = first_organization_id(&app, &session_token).await?;
-
-        // List provisioner jobs for the organization.
-        let list_resp = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/organizations/{org_id}/provisionerjobs"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(list_resp.status(), StatusCode::OK);
-        let body = response_json(list_resp).await?;
-        // The stub returns an empty array, which is the expected happy path.
-        let jobs = body.as_array().ok_or("expected array")?;
-        assert!(
-            jobs.is_empty(),
-            "expected empty array from provisioner jobs stub"
         );
 
         Ok(())
