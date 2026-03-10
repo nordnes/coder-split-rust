@@ -15565,6 +15565,7 @@ mod tests {
                 app.name = input.name.clone();
                 app.icon = input.icon.clone();
                 app.callback_url = input.callback_url.clone();
+                app.redirect_uris = input.redirect_uris.clone();
                 app.updated_at = OffsetDateTime::now_utc();
                 Ok(Some(app.clone()))
             } else {
