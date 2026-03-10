@@ -17605,6 +17605,9 @@ mod tests {
             let Some(ws) = workspaces.get_mut(&workspace_id) else {
                 return Ok(false);
             };
+            if ws.deleted {
+                return Ok(false);
+            }
             ws.autostart_schedule = schedule.map(String::from);
             ws.updated_at = OffsetDateTime::now_utc();
             Ok(true)
@@ -17622,6 +17625,9 @@ mod tests {
             let Some(ws) = workspaces.get_mut(&workspace_id) else {
                 return Ok(false);
             };
+            if ws.deleted {
+                return Ok(false);
+            }
             ws.ttl_ns = ttl_ns;
             ws.updated_at = OffsetDateTime::now_utc();
             Ok(true)
@@ -17640,6 +17646,9 @@ mod tests {
             let Some(ws) = workspaces.get_mut(&workspace_id) else {
                 return Ok(None);
             };
+            if ws.deleted {
+                return Ok(None);
+            }
             ws.dormant_at = dormant_at;
             ws.updated_at = OffsetDateTime::now_utc();
             Ok(Some(ws.clone()))
@@ -17657,6 +17666,9 @@ mod tests {
             let Some(ws) = workspaces.get_mut(&workspace_id) else {
                 return Ok(false);
             };
+            if ws.deleted {
+                return Ok(false);
+            }
             ws.automatic_updates = automatic_updates.to_owned();
             ws.updated_at = OffsetDateTime::now_utc();
             Ok(true)
@@ -17674,6 +17686,9 @@ mod tests {
             let Some(ws) = workspaces.get_mut(&workspace_id) else {
                 return Ok(false);
             };
+            if ws.deleted {
+                return Ok(false);
+            }
             ws.last_used_at = last_used_at;
             ws.updated_at = OffsetDateTime::now_utc();
             Ok(true)
@@ -17692,6 +17707,9 @@ mod tests {
             let Some(ws) = workspaces.get_mut(&workspace_id) else {
                 return Ok(false);
             };
+            if ws.deleted {
+                return Ok(false);
+            }
             ws.favorite = favorite;
             ws.updated_at = OffsetDateTime::now_utc();
             Ok(true)
