@@ -105,8 +105,8 @@ pub use ports::{
     WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
     WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
     WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
-    WorkspaceStatsWorkspaceInput, WorkspaceStore,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
+    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
 pub use provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,

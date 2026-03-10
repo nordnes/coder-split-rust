@@ -47,8 +47,8 @@ use coder_core::{
     WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
     WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
     WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
-    WorkspaceStatsWorkspaceInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
+    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -605,6 +605,14 @@ struct StoredFullProvisionerDaemonRow {
     provisioners: Vec<String>,
     tags_json: String,
     key_id: Option<Uuid>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceResourceMetadataRow {
+    workspace_resource_id: Uuid,
+    key: String,
+    value: String,
+    sensitive: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -4655,7 +4663,7 @@ impl AppStore for PostgresStore {
         .fetch_one(&self.pool)
         .await
         .map_err(storage_error)?;
-        Ok(max.unwrap_or(0) + 1)
+        Ok(max.unwrap_or(0) + 1) // sqlx query_scalar returns Option for MAX
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -4827,6 +4835,35 @@ impl AppStore for PostgresStore {
         Ok(rows
             .into_iter()
             .map(workspace_resource_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        if resource_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, StoredWorkspaceResourceMetadataRow>(
+            "SELECT workspace_resource_id, key, value, sensitive
+             FROM workspace_resource_metadata
+             WHERE workspace_resource_id = ANY($1)
+             ORDER BY workspace_resource_id, key",
+        )
+        .bind(resource_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkspaceResourceMetadataRecord {
+                workspace_resource_id: row.workspace_resource_id,
+                key: row.key,
+                value: row.value,
+                sensitive: row.sensitive,
+            })
             .collect())
     }
 
