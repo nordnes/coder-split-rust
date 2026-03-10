@@ -9,6 +9,7 @@ pub mod enums;
 pub mod identity;
 pub mod password;
 pub mod ports;
+pub mod provisioner;
 pub mod pubsub;
 pub mod template;
 
@@ -75,17 +76,25 @@ pub use ports::{
     DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord,
     IdentityStore, InsertFileInput, InsertFileResult, OperationalStore, PersistAuditLogInput,
     ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord,
-    ProvisionerJobStatsInput, ProvisionerJobTimingRecord, StorageError, TemplateStore,
-    UpsertExternalAuthLinkInput, UpsertPortShareInput, WebpushSubscriptionRecord,
+    ProvisionerJobStatsInput, ProvisionerJobTimingRecord, ProvisionerStore, StorageError,
+    TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput, WebpushSubscriptionRecord,
     WorkspaceAgentPortShareRecord, WorkspaceAgentStatInput, WorkspaceBuildParameterRecord,
     WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
     WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
     WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
+pub use provisioner::{
+    AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
+    GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+    InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, LogLevel, LogSource,
+    ProvisionerDaemonRecord, ProvisionerJobRecord, ProvisionerJobStatus, ProvisionerJobTimingStage,
+    ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType,
+    UpsertProvisionerDaemonInput,
+};
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
-    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
-    TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
+    CreateTemplateVersionInput, TemplateDAURow, TemplateListFilter, TemplateRecord,
+    TemplateVersionListFilter, TemplateVersionParameterRecord,
     TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
     TemplateVersionVariableRecord, UpdateTemplateMetaInput,
 };
