@@ -7890,7 +7890,7 @@ async fn post_workspace_build(
             workspace_id,
             template_version_id: tv_id,
             build_number: 0,
-            transition,
+            transition: transition.clone(),
             initiator_id: context.user.id,
             job_id,
             reason: "initiator".to_owned(),
@@ -7898,6 +7898,43 @@ async fn post_workspace_build(
             max_deadline: None,
         })
         .await?;
+
+    // Best-effort: publish reinit events to agents of the previous build so
+    // they know a new build has started and can re-initialise.
+    // Fetch builds for this workspace; the second entry (index 1) is the
+    // previous build since the list is ordered newest-first and we just
+    // inserted a new one.
+    if let Ok(builds) = state.store.list_workspace_builds(workspace_id, 2, 0).await {
+        // The second build in the list (if it exists) is the previous one.
+        if let Some(prev_build) = builds.get(1) {
+            if let Ok(resources) = state
+                .store
+                .list_workspace_resources_by_job(prev_build.job_id)
+                .await
+            {
+                let resource_ids: Vec<Uuid> = resources.iter().map(|r| r.id).collect();
+                if !resource_ids.is_empty() {
+                    if let Ok(agents) = state
+                        .store
+                        .list_workspace_agents_by_resource_ids(&resource_ids)
+                        .await
+                    {
+                        let payload = serde_json::to_vec(&json!({
+                            "workspace_id": workspace_id,
+                            "build_id": build_id,
+                            "transition": transition,
+                        }))
+                        .unwrap_or_default();
+                        for agent in &agents {
+                            let channel =
+                                coder_core::pubsub::workspace_agent_reinit_channel(agent.id);
+                            let _ = state.pubsub.publish(&channel, &payload).await;
+                        }
+                    }
+                }
+            }
+        }
+    }
 
     Ok((StatusCode::CREATED, Json(build_to_json(&build))).into_response())
 }
@@ -11675,10 +11712,114 @@ async fn get_workspace_agent_logs(
     };
 
     if query.follow {
-        // Streaming follow is not yet implemented; return current logs.
-        return Ok(not_implemented_response(
-            "Log streaming follow is not yet implemented.",
+        use axum::body::Body;
+        use coder_core::pubsub::workspace_agent_logs_channel;
+
+        let channel = workspace_agent_logs_channel(agent_id);
+        let mut subscription = state.pubsub.subscribe(&channel).await.map_err(|e| {
+            AppError::Storage(StorageError::Unavailable {
+                message: e.to_string(),
+            })
+        })?;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+        // Fetch existing logs and send them first.
+        let limit = query.limit.unwrap_or(256).clamp(1, 10000);
+        let existing_rows = state
+            .store
+            .list_workspace_agent_logs(agent_id, query.after, limit)
+            .await?;
+        let existing_logs: Vec<coder_core::WorkspaceAgentLog> = existing_rows
+            .iter()
+            .map(|r| coder_core::WorkspaceAgentLog {
+                id: r.id,
+                created_at: r.created_at,
+                output: r.output.clone(),
+                level: convert_log_level(&r.level),
+                source_id: r.log_source_id,
+            })
+            .collect();
+
+        // Track the highest log ID from the initial batch so that the
+        // spawned task can skip any pubsub messages that were already
+        // included (avoids duplicates from the subscribe-before-query race
+        // window).
+        let last_sent_id = existing_logs.last().map(|l| l.id);
+
+        // Pre-serialize existing logs so they can be moved into the
+        // spawned task.  We must NOT send them on `tx` here because the
+        // receiver (`rx`) hasn't been returned to the client yet — doing
+        // so would deadlock once the 64-slot channel buffer fills up.
+        let initial_events: Vec<String> = existing_logs
+            .iter()
+            .map(|log| {
+                let data = serde_json::to_string(log).unwrap_or_default();
+                format!("data: {data}\n\n")
+            })
+            .collect();
+
+        // Spawn a task that first drains the initial batch, then listens
+        // for new log events on pubsub.
+        tokio::spawn(async move {
+            // Send existing logs first.
+            for sse in initial_events {
+                if tx.send(sse).await.is_err() {
+                    return;
+                }
+            }
+
+            loop {
+                tokio::select! {
+                    msg = subscription.recv() => {
+                        match msg {
+                            Ok(bytes) => {
+                                // Each message is a JSON-serialised WorkspaceAgentLog.
+                                // Deduplicate: skip messages with an ID that was
+                                // already sent in the initial batch.
+                                if let Some(max_id) = last_sent_id {
+                                    if let Ok(log) = serde_json::from_slice::<Value>(&bytes) {
+                                        if let Some(id_val) = log.get("id").and_then(|v| v.as_i64()) {
+                                            if id_val <= max_id {
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
+                                let data = String::from_utf8_lossy(&bytes);
+                                let sse = format!("data: {data}\n\n");
+                                if tx.send(sse).await.is_err() {
+                                    break;
+                                }
+                            }
+                            Err(_) => break,
+                        }
+                    }
+                    _ = tx.closed() => {
+                        break;
+                    }
+                }
+            }
+        });
+
+        let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        let body = Body::from_stream(tokio_stream::StreamExt::map(
+            stream,
+            Ok::<_, std::convert::Infallible>,
         ));
+
+        return Ok((
+            StatusCode::OK,
+            [
+                (CONTENT_TYPE, HeaderValue::from_static("text/event-stream")),
+                (
+                    HeaderName::from_static("cache-control"),
+                    HeaderValue::from_static("no-cache"),
+                ),
+            ],
+            body,
+        )
+            .into_response());
     }
 
     let limit = query.limit.unwrap_or(256).clamp(1, 10000);
@@ -12012,10 +12153,25 @@ async fn patch_workspace_agent_logs(
         })
         .collect();
 
-    state
+    let new_logs = state
         .store
         .insert_workspace_agent_logs(agent.id, request.log_source_id, &log_inputs)
         .await?;
+
+    // Publish each new log entry to the pubsub channel so follow-mode
+    // subscribers receive real-time updates.
+    let channel = coder_core::pubsub::workspace_agent_logs_channel(agent.id);
+    for log_row in &new_logs {
+        let api_log = coder_core::WorkspaceAgentLog {
+            id: log_row.id,
+            created_at: log_row.created_at,
+            output: log_row.output.clone(),
+            level: convert_log_level(&log_row.level),
+            source_id: log_row.log_source_id,
+        };
+        let payload = serde_json::to_vec(&api_log).unwrap_or_default();
+        let _ = state.pubsub.publish(&channel, &payload).await;
+    }
 
     Ok(StatusCode::OK.into_response())
 }
@@ -12023,23 +12179,70 @@ async fn patch_workspace_agent_logs(
 /// GET /api/v2/workspaceagents/me/reinit — long-poll for agent reinit (SSE).
 ///
 /// In Go this uses Server-Sent Events to stream reinitialization events
-/// (e.g. when a prebuilt workspace is claimed). For now, the Rust implementation
-/// authenticates the agent and returns a 200 with no events since the pubsub
-/// infrastructure for prebuild claims is not yet ported.
+/// (e.g. when a prebuilt workspace is claimed). The Rust implementation
+/// subscribes to the pubsub reinit channel for the authenticated agent and
+/// streams events as they arrive.
 async fn get_workspace_agent_reinit(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
+    use axum::body::Body;
+    use coder_core::pubsub::workspace_agent_reinit_channel;
+
+    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
-    // The full SSE-based reinit watcher requires pubsub subscription to
-    // prebuild_claimed channels. For now, return not_implemented to signal
-    // the endpoint is recognized but the streaming behaviour is pending.
-    Ok(not_implemented_response(
-        "Agent reinit long-poll requires pubsub infrastructure.",
-    ))
+    let channel = workspace_agent_reinit_channel(agent.id);
+    let mut subscription = state.pubsub.subscribe(&channel).await.map_err(|e| {
+        AppError::Storage(StorageError::Unavailable {
+            message: e.to_string(),
+        })
+    })?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    // Spawn a task that listens for reinit events on pubsub.
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                msg = subscription.recv() => {
+                    match msg {
+                        Ok(bytes) => {
+                            let data = String::from_utf8_lossy(&bytes);
+                            let sse = format!("data: {data}\n\n");
+                            if tx.send(sse).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                _ = tx.closed() => {
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = Body::from_stream(tokio_stream::StreamExt::map(
+        stream,
+        Ok::<_, std::convert::Infallible>,
+    ));
+
+    Ok((
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("text/event-stream")),
+            (
+                HeaderName::from_static("cache-control"),
+                HeaderValue::from_static("no-cache"),
+            ),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /// GET /api/v2/workspaceagents/me/rpc — dRPC over WebSocket.
@@ -24535,7 +24738,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn agent_reinit_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+    async fn agent_reinit_returns_sse_stream() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
         let app = build_router(state);
 
@@ -24545,8 +24748,15 @@ mod tests {
             agent_token,
         )?;
         let response = call(app, req).await?;
-        // Reinit SSE requires pubsub infrastructure, returns 501.
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        // Reinit endpoint now returns an SSE stream (200 OK).
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream"),
+        );
 
         Ok(())
     }
