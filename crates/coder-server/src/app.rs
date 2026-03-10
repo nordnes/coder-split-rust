@@ -1956,14 +1956,10 @@ async fn get_user_git_ssh_key(
         None => match store_new_git_ssh_key(&state, &target_user).await {
             Ok(key) => key,
             Err(error) => {
-                return Ok((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::error(
-                        "Internal error generating a new SSH keypair.",
-                        error,
-                    )),
-                )
-                    .into_response());
+                return Ok(internal_server_error_detail_response(
+                    "Internal error generating a new SSH keypair.",
+                    error,
+                ));
             }
         },
     };
@@ -2011,14 +2007,10 @@ async fn put_user_git_ssh_key(
     let key = match store_new_git_ssh_key(&state, &target_user).await {
         Ok(key) => key,
         Err(error) => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(
-                    "Internal error generating a new SSH keypair.",
-                    error,
-                )),
-            )
-                .into_response());
+            return Ok(internal_server_error_detail_response(
+                "Internal error generating a new SSH keypair.",
+                error,
+            ));
         }
     };
 
@@ -3354,14 +3346,10 @@ async fn get_provisioner_job(
             "You are not authorized to view provisioner jobs.",
         ));
     }
-    Ok((
-        StatusCode::NOT_FOUND,
-        Json(ApiResponse::error(
-            "Resource not found or you do not have access to this resource",
-            "The provisioner domain is not yet implemented in this backend slice.",
-        )),
-    )
-        .into_response())
+    Ok(not_found_detail_response(
+        "Resource not found or you do not have access to this resource",
+        "The provisioner domain is not yet implemented in this backend slice.",
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -3625,11 +3613,9 @@ async fn workspace_agent_git_ssh_key(
     let owner_id = match workspace {
         Some(ref ws) => ws.owner_id,
         None => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error("Failed to get workspace for agent.", "")),
-            )
-                .into_response());
+            return Ok(internal_server_error_response(
+                "Failed to get workspace for agent.",
+            ));
         }
     };
 
@@ -3760,20 +3746,12 @@ async fn create_task(
 
     // Resolve the user from the path parameter.
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     // Only allow creating tasks for oneself.
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     // RBAC: verify the actor can create a task.
@@ -3856,28 +3834,16 @@ async fn get_task(
     };
 
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     // Only allow viewing own tasks.
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     Ok(Json(task_response_from_record(record)).into_response())
@@ -3895,19 +3861,11 @@ async fn patch_task_input(
     };
 
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     // RBAC: verify the actor can update a task.
@@ -3926,11 +3884,7 @@ async fn patch_task_input(
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     // Validate non-empty input.
@@ -3974,19 +3928,11 @@ async fn delete_task(
     };
 
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     // RBAC: verify the actor can delete a task.
@@ -4005,21 +3951,13 @@ async fn delete_task(
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     let now = OffsetDateTime::now_utc();
     let deleted = state.store.delete_task(record.id, now).await?;
     if !deleted {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     // Go returns 202 Accepted (workspace deletion is async).
@@ -4037,27 +3975,15 @@ async fn get_task_logs(
     };
 
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     // In the Go implementation, error/unknown status tasks cannot fetch logs.
@@ -4108,19 +4034,11 @@ async fn post_task_send(
     };
 
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     // RBAC: verify the actor can update a task (send is a form of update).
@@ -4139,11 +4057,7 @@ async fn post_task_send(
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     // Validate non-empty input.
@@ -4210,19 +4124,11 @@ async fn post_task_pause(
     };
 
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     // RBAC: verify the actor can update a task (pause is a form of update).
@@ -4241,20 +4147,14 @@ async fn post_task_pause(
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     // Task must have a workspace to pause.
     if record.workspace_id.is_none() {
-        return Ok((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error("Task does not have a workspace.", "")),
-        )
-            .into_response());
+        return Ok(internal_server_error_response(
+            "Task does not have a workspace.",
+        ));
     }
 
     // In the full implementation this would stop the workspace (transition =
@@ -4279,19 +4179,11 @@ async fn post_task_resume(
     };
 
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     if target_user.id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     // RBAC: verify the actor can update a task (resume is a form of update).
@@ -4310,20 +4202,14 @@ async fn post_task_resume(
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     // Task must have a workspace to resume.
     if record.workspace_id.is_none() {
-        return Ok((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error("Task does not have a workspace.", "")),
-        )
-            .into_response());
+        return Ok(internal_server_error_response(
+            "Task does not have a workspace.",
+        ));
     }
 
     // In the full implementation this would start the workspace (transition =
@@ -4352,14 +4238,9 @@ async fn post_task_log_snapshot(
         match workspace {
             Some(ws) => ws.owner_id,
             None => {
-                return Ok((
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(ApiResponse::error(
-                        "Failed to resolve workspace for agent.",
-                        "",
-                    )),
-                )
-                    .into_response());
+                return Ok(internal_server_error_response(
+                    "Failed to resolve workspace for agent.",
+                ));
             }
         }
     } else {
@@ -4371,19 +4252,11 @@ async fn post_task_log_snapshot(
     };
 
     let Some(record) = state.store.find_task_by_id(task_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     };
 
     if record.owner_id != owner_id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Task not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Task not found."));
     }
 
     let now = OffsetDateTime::now_utc();
@@ -4515,19 +4388,11 @@ async fn get_chat(
     };
 
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     };
 
     if chat.owner_id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     }
 
     let messages = state.store.list_chat_messages(chat_id, 0).await?;
@@ -4560,19 +4425,11 @@ async fn delete_chat(
     };
 
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     };
 
     if chat.owner_id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     }
 
     // RBAC: verify the actor can delete this chat.
@@ -4607,19 +4464,11 @@ async fn post_chat_message(
     };
 
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     };
 
     if chat.owner_id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     }
 
     // RBAC: verify the actor can create messages in this chat.
@@ -4942,11 +4791,7 @@ async fn get_chat_file(
     };
 
     let Some(file) = state.store.find_chat_file_by_id(file_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat file not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat file not found."));
     };
 
     let mut builder = Response::builder()
@@ -4983,19 +4828,11 @@ async fn archive_chat_handler(
     };
 
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     };
 
     if chat.owner_id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     }
 
     // RBAC: verify the actor can update (archive) this chat.
@@ -5038,19 +4875,11 @@ async fn unarchive_chat_handler(
     };
 
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     };
 
     if chat.owner_id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     }
 
     // RBAC: verify the actor can update (unarchive) this chat.
@@ -5097,32 +4926,20 @@ async fn watch_chat_git(
     };
 
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     };
 
     if chat.owner_id != context.user.id {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Chat not found.", "")),
-        )
-            .into_response());
+        return Ok(not_found_response("Chat not found."));
     }
 
     // The Go implementation upgrades to a WebSocket, dials the workspace
     // agent, and proxies bidirectional JSON messages. This requires the
     // tailnet coordinator and agent provider which are not yet available.
-    Ok((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::error(
-            "Git watch is not yet implemented.",
-            "Agent infrastructure required for git watching is not available.",
-        )),
-    )
-        .into_response())
+    Ok(not_implemented_detail_response(
+        "Git watch is not yet implemented.",
+        "Agent infrastructure required for git watching is not available.",
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -5301,11 +5118,7 @@ async fn put_notification_template_method(
 
     match template {
         Some(t) => Ok((StatusCode::OK, Json(t)).into_response()),
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Notification template not found.", "")),
-        )
-            .into_response()),
+        None => Ok(not_found_response("Notification template not found.")),
     }
 }
 
@@ -5337,11 +5150,7 @@ async fn get_user_notification_preferences(
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("User not found.", "")),
-            )
-                .into_response());
+            return Ok(not_found_response("User not found."));
         }
     };
 
@@ -5371,11 +5180,7 @@ async fn put_user_notification_preferences(
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("User not found.", "")),
-            )
-                .into_response());
+            return Ok(not_found_response("User not found."));
         }
     };
 
@@ -5639,11 +5444,7 @@ async fn put_inbox_notification_read_status(
     let notification = match state.store.get_inbox_notification_by_id(id).await? {
         Some(n) => n,
         None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("Inbox notification not found.", "")),
-            )
-                .into_response());
+            return Ok(not_found_response("Inbox notification not found."));
         }
     };
 
@@ -5679,14 +5480,9 @@ async fn put_inbox_notification_read_status(
             }),
         )
             .into_response()),
-        None => Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error(
-                "Inbox notification not found after update.",
-                "",
-            )),
-        )
-            .into_response()),
+        None => Ok(not_found_response(
+            "Inbox notification not found after update.",
+        )),
     }
 }
 
@@ -5703,11 +5499,7 @@ async fn post_user_webpush_subscription(
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("User not found.", "")),
-            )
-                .into_response());
+            return Ok(not_found_response("User not found."));
         }
     };
 
@@ -5748,11 +5540,7 @@ async fn delete_user_webpush_subscription(
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("User not found.", "")),
-            )
-                .into_response());
+            return Ok(not_found_response("User not found."));
         }
     };
 
@@ -5775,11 +5563,7 @@ async fn delete_user_webpush_subscription(
     if deleted {
         Ok(StatusCode::NO_CONTENT.into_response())
     } else {
-        Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("Webpush subscription not found.", "")),
-        )
-            .into_response())
+        Ok(not_found_response("Webpush subscription not found."))
     }
 }
 
@@ -5795,11 +5579,7 @@ async fn post_user_webpush_test(
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error("User not found.", "")),
-            )
-                .into_response());
+            return Ok(not_found_response("User not found."));
         }
     };
 
@@ -8059,11 +7839,9 @@ fn handle_external_auth_error(
         )
             .into_response()),
         ExternalAuthServiceError::Storage(error) => Err(AppError::from(error)),
-        ExternalAuthServiceError::Internal(detail) => Ok((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(message, detail)),
-        )
-            .into_response()),
+        ExternalAuthServiceError::Internal(detail) => {
+            Ok(internal_server_error_detail_response(message, detail))
+        }
     }
 }
 
@@ -8164,6 +7942,17 @@ fn not_implemented_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
+fn not_implemented_detail_response(
+    message: impl Into<String>,
+    detail: impl Into<String>,
+) -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiResponse::error(message.into(), detail.into())),
+    )
+        .into_response()
+}
+
 /// Accept a WebSocket upgrade then immediately close with a "not implemented" reason.
 /// Used for endpoints that require tailnet/pubsub integration not yet available.
 async fn ws_close_not_implemented(mut socket: WebSocket, reason: &str) {
@@ -8180,6 +7969,33 @@ async fn ws_close_not_implemented(mut socket: WebSocket, reason: &str) {
 
 fn not_found_response(message: impl Into<String>) -> Response {
     (StatusCode::NOT_FOUND, Json(ApiResponse::ok(message.into()))).into_response()
+}
+
+fn not_found_detail_response(message: impl Into<String>, detail: impl Into<String>) -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiResponse::error(message.into(), detail.into())),
+    )
+        .into_response()
+}
+
+fn internal_server_error_response(message: impl Into<String>) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiResponse::error(message.into(), "")),
+    )
+        .into_response()
+}
+
+fn internal_server_error_detail_response(
+    message: impl Into<String>,
+    detail: impl Into<String>,
+) -> Response {
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Json(ApiResponse::error(message.into(), detail.into())),
+    )
+        .into_response()
 }
 
 fn resource_not_found_response() -> Response {
@@ -12518,25 +12334,16 @@ async fn post_workspace_agent_recreate_devcontainer(
     }
 
     let Some(conn) = state.agent_provider.get_agent_connection(agent_id).await else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error(
-                "Agent is not connected.",
-                "The workspace agent does not have an active connection to the server.",
-            )),
-        )
-            .into_response());
+        return Ok(not_found_detail_response(
+            "Agent is not connected.",
+            "The workspace agent does not have an active connection to the server.",
+        ));
     };
 
     if let Err(err) = conn.recreate_devcontainer(&dc_id.to_string()).await {
-        return Ok((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(
-                format!("Failed to recreate devcontainer: {err}"),
-                "",
-            )),
-        )
-            .into_response());
+        return Ok(internal_server_error_response(format!(
+            "Failed to recreate devcontainer: {err}"
+        )));
     }
 
     Ok(StatusCode::OK.into_response())
@@ -12588,25 +12395,16 @@ async fn delete_workspace_agent_devcontainer(
     }
 
     let Some(conn) = state.agent_provider.get_agent_connection(agent_id).await else {
-        return Ok((
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error(
-                "Agent is not connected.",
-                "The workspace agent does not have an active connection to the server.",
-            )),
-        )
-            .into_response());
+        return Ok(not_found_detail_response(
+            "Agent is not connected.",
+            "The workspace agent does not have an active connection to the server.",
+        ));
     };
 
     if let Err(err) = conn.delete_devcontainer(&dc_id.to_string()).await {
-        return Ok((
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(ApiResponse::error(
-                format!("Failed to delete devcontainer: {err}"),
-                "",
-            )),
-        )
-            .into_response());
+        return Ok(internal_server_error_response(format!(
+            "Failed to delete devcontainer: {err}"
+        )));
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -13003,14 +12801,10 @@ async fn patch_workspace_agent_app_status(
     let app = match app {
         Some(a) => a,
         None => {
-            return Ok((
-                StatusCode::NOT_FOUND,
-                Json(ApiResponse::error(
-                    "App not found.",
-                    format!("no app with slug {}", request.app_slug),
-                )),
-            )
-                .into_response());
+            return Ok(not_found_detail_response(
+                "App not found.",
+                format!("no app with slug {}", request.app_slug),
+            ));
         }
     };
 
@@ -13055,14 +12849,10 @@ async fn get_workspace_agent_external_auth(
 
     // External auth configuration lookup is not yet available in the Rust
     // backend. Return a stub response indicating the provider was not found.
-    Ok((
-        StatusCode::NOT_FOUND,
-        Json(ApiResponse::error(
-            "External auth provider not found.",
-            "External auth configuration is not yet supported.",
-        )),
-    )
-        .into_response())
+    Ok(not_found_detail_response(
+        "External auth provider not found.",
+        "External auth configuration is not yet supported.",
+    ))
 }
 
 /// POST /api/v2/workspaceagents/me/log-source — create agent log source.
@@ -13577,14 +13367,9 @@ async fn handle_auth_instance_id(
     {
         Some(resource) => resource,
         None => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(
-                    "Internal error fetching provisioner job resource.",
-                    "",
-                )),
-            )
-                .into_response());
+            return Ok(internal_server_error_response(
+                "Internal error fetching provisioner job resource.",
+            ));
         }
     };
 
@@ -13592,14 +13377,9 @@ async fn handle_auth_instance_id(
     let job = match state.store.find_provisioner_job(resource.job_id).await? {
         Some(job) => job,
         None => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(
-                    "Internal error fetching provisioner job.",
-                    "",
-                )),
-            )
-                .into_response());
+            return Ok(internal_server_error_response(
+                "Internal error fetching provisioner job.",
+            ));
         }
     };
 
@@ -13624,14 +13404,9 @@ async fn handle_auth_instance_id(
     {
         Some(id) => id,
         None => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(
-                    "Internal error extracting job data.",
-                    "",
-                )),
-            )
-                .into_response());
+            return Ok(internal_server_error_response(
+                "Internal error extracting job data.",
+            ));
         }
     };
 
@@ -13643,14 +13418,9 @@ async fn handle_auth_instance_id(
     {
         Some(build) => build,
         None => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(
-                    "Internal error fetching workspace build.",
-                    "",
-                )),
-            )
-                .into_response());
+            return Ok(internal_server_error_response(
+                "Internal error fetching workspace build.",
+            ));
         }
     };
 
@@ -13662,14 +13432,9 @@ async fn handle_auth_instance_id(
     {
         Some(latest) => latest,
         None => {
-            return Ok((
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error(
-                    "Internal error fetching the latest workspace build.",
-                    "",
-                )),
-            )
-                .into_response());
+            return Ok(internal_server_error_response(
+                "Internal error fetching the latest workspace build.",
+            ));
         }
     };
 
@@ -13941,13 +13706,9 @@ async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Respons
             .unwrap_or(false);
 
         if !has_csrf {
-            return (
-                StatusCode::FORBIDDEN,
-                Json(ApiResponse::ok(
-                    "CSRF token required for cookie-authenticated mutating requests.",
-                )),
-            )
-                .into_response();
+            return forbidden_response(
+                "CSRF token required for cookie-authenticated mutating requests.",
+            );
         }
     }
 
