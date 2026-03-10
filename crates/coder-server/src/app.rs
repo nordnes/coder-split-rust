@@ -11679,9 +11679,10 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            if let Some(task) = tasks.get_mut(&task_id) {
-                task.status = status;
-            }
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or_else(|| StorageError::invalid_data(format!("task {task_id} not found")))?;
+            task.status = status;
             Ok(())
         }
 
@@ -11695,9 +11696,10 @@ mod tests {
                 .tasks
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            if let Some(task) = tasks.get_mut(&task_id) {
-                task.workspace_id = Some(workspace_id);
-            }
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or_else(|| StorageError::invalid_data(format!("task {task_id} not found")))?;
+            task.workspace_id = Some(workspace_id);
             Ok(())
         }
 
@@ -19160,9 +19162,10 @@ mod tests {
         let task_id_str = task["id"].as_str().ok_or("missing task id")?;
         let task_id: Uuid = task_id_str.parse()?;
 
-        // Assign a workspace so the pause check passes.
+        // Assign a workspace and set active so pause is semantically correct.
         let workspace_id = Uuid::new_v4();
         store.set_task_workspace_id(task_id, workspace_id)?;
+        store.set_task_status(task_id, TaskStatus::Active)?;
 
         // Pause the task — should return 202 Accepted.
         let pause_response = call(
@@ -19178,8 +19181,8 @@ mod tests {
         let body = to_bytes(pause_response.into_body(), 1_000_000).await?;
         let pause_body: Value = serde_json::from_slice(&body)?;
         // workspace_build is None and skipped during serialisation,
-        // so the response body is an empty JSON object.
-        assert!(pause_body.is_object());
+        // so the response body must be exactly an empty JSON object.
+        assert_eq!(pause_body, json!({}));
         Ok(())
     }
 
@@ -19211,9 +19214,10 @@ mod tests {
         let task_id_str = task["id"].as_str().ok_or("missing task id")?;
         let task_id: Uuid = task_id_str.parse()?;
 
-        // Assign a workspace so the resume check passes.
+        // Assign a workspace and set paused so resume is semantically correct.
         let workspace_id = Uuid::new_v4();
         store.set_task_workspace_id(task_id, workspace_id)?;
+        store.set_task_status(task_id, TaskStatus::Paused)?;
 
         // Resume the task — should return 202 Accepted.
         let resume_response = call(
@@ -19229,8 +19233,8 @@ mod tests {
         let body = to_bytes(resume_response.into_body(), 1_000_000).await?;
         let resume_body: Value = serde_json::from_slice(&body)?;
         // workspace_build is None and skipped during serialisation,
-        // so the response body is an empty JSON object.
-        assert!(resume_body.is_object());
+        // so the response body must be exactly an empty JSON object.
+        assert_eq!(resume_body, json!({}));
         Ok(())
     }
 
@@ -19389,7 +19393,7 @@ mod tests {
 
         // 7. Delete
         let delete_response = call(
-            app,
+            app.clone(),
             authenticated_request(
                 Method::DELETE,
                 &format!("/api/v2/tasks/me/{task_id}"),
@@ -19398,6 +19402,18 @@ mod tests {
         )
         .await?;
         assert_eq!(delete_response.status(), StatusCode::ACCEPTED);
+
+        // 8. Verify the task is gone (soft-deleted → 404 on GET)
+        let get_after_delete = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_after_delete.status(), StatusCode::NOT_FOUND);
 
         Ok(())
     }
@@ -19623,9 +19639,13 @@ mod tests {
         assert_eq!(messages.len(), 1);
         assert_eq!(messages[0]["role"], "user");
 
-        // Verify content is present in the message
-        let msg_content = &messages[0]["content"];
-        assert!(msg_content.is_array() || msg_content.is_string() || msg_content.is_object());
+        // Verify content is an array with the text we sent
+        let msg_content = messages[0]["content"]
+            .as_array()
+            .ok_or("expected content to be an array")?;
+        assert_eq!(msg_content.len(), 1);
+        assert_eq!(msg_content[0]["type"], "text");
+        assert_eq!(msg_content[0]["text"], "Hello, I need help with my project");
 
         // Verify we can retrieve the chat and its messages
         let chat_id = chat["id"].as_str().ok_or("missing chat id")?;
@@ -19709,7 +19729,14 @@ mod tests {
         assert_eq!(msg_response.status(), StatusCode::OK);
         let body = to_bytes(msg_response.into_body(), 1_000_000).await?;
         let msg: Value = serde_json::from_slice(&body)?;
-        assert!(!msg["queued"].as_bool().unwrap_or(true));
+        assert_eq!(msg["queued"], false);
+        // Validate the returned message has the content we sent
+        let returned_content = msg["message"]["content"]
+            .as_array()
+            .ok_or("expected message content array")?;
+        assert_eq!(returned_content.len(), 1);
+        assert_eq!(returned_content[0]["type"], "text");
+        assert_eq!(returned_content[0]["text"], "Can you elaborate on step 2?");
 
         // Verify message was persisted by getting the chat again
         let get_response = call(
@@ -19834,6 +19861,21 @@ mod tests {
         .await?;
         assert_eq!(archive_response.status(), StatusCode::NO_CONTENT);
 
+        // Verify the chat is archived
+        let get_archived = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_archived.status(), StatusCode::OK);
+        let body = to_bytes(get_archived.into_body(), 1_000_000).await?;
+        let archived_chat: Value = serde_json::from_slice(&body)?;
+        assert_eq!(archived_chat["chat"]["archived"], true);
+
         // 6. Unarchive the chat
         let unarchive_response = call(
             app.clone(),
@@ -19846,9 +19888,24 @@ mod tests {
         .await?;
         assert_eq!(unarchive_response.status(), StatusCode::NO_CONTENT);
 
-        // 7. Delete the chat
+        // Verify the chat is unarchived
+        let get_unarchived = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_unarchived.status(), StatusCode::OK);
+        let body = to_bytes(get_unarchived.into_body(), 1_000_000).await?;
+        let unarchived_chat: Value = serde_json::from_slice(&body)?;
+        assert_eq!(unarchived_chat["chat"]["archived"], false);
+
+        // 7. Delete the chat (which archives it)
         let delete_response = call(
-            app,
+            app.clone(),
             authenticated_request(
                 Method::DELETE,
                 &format!("/api/v2/chats/{chat_id}"),
@@ -19857,6 +19914,21 @@ mod tests {
         )
         .await?;
         assert_eq!(delete_response.status(), StatusCode::OK);
+
+        // Verify the chat is archived after delete
+        let get_after_delete = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_after_delete.status(), StatusCode::OK);
+        let body = to_bytes(get_after_delete.into_body(), 1_000_000).await?;
+        let deleted_chat: Value = serde_json::from_slice(&body)?;
+        assert_eq!(deleted_chat["chat"]["archived"], true);
         Ok(())
     }
 
