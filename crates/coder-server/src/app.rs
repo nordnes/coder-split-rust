@@ -11931,13 +11931,13 @@ async fn tailnet_rpc_conn(
         // Start a coordination session — this returns a handle with a
         // channel that receives responses pushed by the coordinator when
         // tunnel peers update their node info.
-        // TODO(peer-kind): All peers are currently registered as Client.
-        // The Go reference distinguishes agents from clients — agents use
-        // authenticate_agent_request() with an agent auth token, whereas
-        // clients use authenticate_request() with a session token (as we
-        // do here).  When agent coordination is routed through this same
-        // handler (or a dedicated one), the PeerKind should be determined
-        // from the authentication context.
+        // NOTE: All peers are currently registered as PeerKind::Client.
+        // The Go reference distinguishes agents from clients — agents
+        // authenticate via authenticate_agent_request() with an agent
+        // auth token, whereas clients use authenticate_request() with a
+        // session token (as we do here).  Agent coordination will use a
+        // separate auth path (or a dedicated handler) where PeerKind is
+        // determined from the authentication context.
         let mut handle =
             coordinator.coordinate(peer_id, peer_name, PeerKind::Client);
 
