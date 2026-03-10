@@ -7443,12 +7443,17 @@ async fn build_timings_response(
         .list_provisioner_job_timings(build.job_id)
         .await?;
 
+    // Go's time.Time.IsZero() checks for year 0001-01-01T00:00:00Z, not Unix epoch.
+    let go_zero = time::Date::from_calendar_date(1, time::Month::January, 1)
+        .unwrap_or(time::Date::MIN)
+        .midnight()
+        .assume_utc();
+
     let provisioner_items: Vec<Value> = provisioner_timings
         .into_iter()
         .filter(|t| {
             // Ref: #15432: timings must not have a zero start or end time.
-            t.started_at != OffsetDateTime::UNIX_EPOCH
-                && t.ended_at != OffsetDateTime::UNIX_EPOCH
+            t.started_at != go_zero && t.ended_at != go_zero
         })
         .map(|t| {
             json!({
@@ -7472,10 +7477,7 @@ async fn build_timings_response(
 
     let agent_script_items: Vec<Value> = agent_script_timings
         .into_iter()
-        .filter(|t| {
-            t.started_at != OffsetDateTime::UNIX_EPOCH
-                && t.ended_at != OffsetDateTime::UNIX_EPOCH
-        })
+        .filter(|t| t.started_at != go_zero && t.ended_at != go_zero)
         .map(|t| {
             json!({
                 "started_at": t.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
