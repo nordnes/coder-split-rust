@@ -9,6 +9,7 @@ pub mod enums;
 pub mod identity;
 pub mod password;
 pub mod ports;
+pub mod pubsub;
 
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,

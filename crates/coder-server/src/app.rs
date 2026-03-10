@@ -22,6 +22,7 @@ use coder_auth::{
     supported_auth_methods,
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
+use coder_core::pubsub::PubSub;
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
     AuthorizationRequest, AvailableExperiments, BuildMetadata,
@@ -133,6 +134,8 @@ pub struct AppState {
     pub store: Arc<dyn AppStore>,
     /// Structured audit sink for mutating and auth-related routes.
     pub audit: Arc<dyn AuditSink>,
+    /// Pub/sub event system for real-time event broadcasting.
+    pub pubsub: Arc<dyn PubSub>,
     auth: AuthService<Arc<dyn AppStore>>,
     identity: IdentityService<Arc<dyn AppStore>>,
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
@@ -148,6 +151,7 @@ impl AppState {
         deployment_id: Uuid,
         store: Arc<dyn AppStore>,
         audit: Arc<dyn AuditSink>,
+        pubsub: Arc<dyn PubSub>,
     ) -> Result<Self, reqwest::Error> {
         let auth = AuthService::new(store.clone());
         let identity = IdentityService::new(store.clone());
@@ -161,6 +165,7 @@ impl AppState {
             deployment_id,
             store,
             audit,
+            pubsub,
             auth,
             identity,
             deployment_stats,
@@ -4593,6 +4598,8 @@ mod tests {
         let store = Arc::new(FakeStore::new(health_ok));
         let store_trait: Arc<dyn AppStore> = store.clone();
         let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
 
         Ok((
             AppState::new(
@@ -4601,6 +4608,7 @@ mod tests {
                 Uuid::nil(),
                 store_trait,
                 audit,
+                pubsub,
             )?,
             store,
         ))
