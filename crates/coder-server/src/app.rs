@@ -11724,7 +11724,7 @@ async fn tailnet_rpc_conn(
             }
         }
 
-        coordinator.close_coordination(peer_id);
+        coordinator.close_coordination(peer_id, handle.session_id);
     }))
 }
 

@@ -126,6 +126,9 @@ pub struct CoordinateResponse {
 pub struct CoordinationHandle {
     /// Receiver for coordination responses.
     pub response_rx: mpsc::UnboundedReceiver<CoordinateResponse>,
+    /// Unique session identifier.  Used by [`TailnetCoordinator::close_coordination`]
+    /// to avoid removing a peer entry that was already replaced by a newer session.
+    pub session_id: Uuid,
 }
 
 /// Errors that can occur when processing a coordination request.
@@ -197,7 +200,11 @@ pub trait TailnetCoordinator: Send + Sync {
 
     /// Close a coordination session, notifying tunnel peers that this peer
     /// was lost and cleaning up all associated state.
-    fn close_coordination(&self, peer_id: Uuid);
+    ///
+    /// The `session_id` must match the value returned by [`coordinate`] so
+    /// that an old (overwritten) session does not accidentally remove a
+    /// newer session's state.
+    fn close_coordination(&self, peer_id: Uuid, session_id: Uuid);
 }
 
 /// The kind of peer connected to the coordinator.
@@ -322,6 +329,8 @@ struct CoordinatorPeer {
     /// Channel to push coordination responses to this peer.
     /// `None` for peers registered via `add_peer` (non-coordinating).
     response_tx: Option<mpsc::UnboundedSender<CoordinateResponse>>,
+    /// Unique session identifier for this coordination session.
+    session_id: Uuid,
 }
 
 /// Aggregated coordinator state protected by a single mutex.
@@ -523,6 +532,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
                     },
                     node: None,
                     response_tx: None,
+                    session_id: Uuid::new_v4(),
                 },
             );
         }
@@ -537,6 +547,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
 
     fn coordinate(&self, peer_id: Uuid, name: String, kind: PeerKind) -> CoordinationHandle {
         let (tx, rx) = mpsc::unbounded_channel();
+        let session_id = Uuid::new_v4();
 
         if let Ok(mut inner) = self.inner.lock() {
             // If there is an existing coordination session, close it.
@@ -561,6 +572,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
                     },
                     node: None,
                     response_tx: Some(tx),
+                    session_id,
                 },
             );
 
@@ -591,7 +603,10 @@ impl TailnetCoordinator for InMemoryCoordinator {
             }
         }
 
-        CoordinationHandle { response_rx: rx }
+        CoordinationHandle {
+            response_rx: rx,
+            session_id,
+        }
     }
 
     fn process_request(
@@ -762,8 +777,19 @@ impl TailnetCoordinator for InMemoryCoordinator {
         Ok(())
     }
 
-    fn close_coordination(&self, peer_id: Uuid) {
+    fn close_coordination(&self, peer_id: Uuid, session_id: Uuid) {
         if let Ok(mut inner) = self.inner.lock() {
+            // Only remove the peer if the session_id matches the current
+            // session.  This prevents an old (overwritten) connection from
+            // accidentally destroying a newer session's state.
+            if let Some(peer) = inner.peers.get(&peer_id) {
+                if peer.session_id != session_id {
+                    return;
+                }
+            } else {
+                return;
+            }
+
             // Notify tunnel peers that this peer was lost.
             let tunnel_peers = inner.tunnels.find_tunnel_peers(peer_id);
             for tp_id in tunnel_peers {
@@ -1226,7 +1252,7 @@ mod tests {
             .ok();
 
         // Client disconnects abruptly.
-        coordinator.close_coordination(client_id);
+        coordinator.close_coordination(client_id, _client_handle.session_id);
 
         // Agent should receive Lost update.
         let resp = agent_handle.response_rx.recv().await.unwrap_or_default();
@@ -1316,5 +1342,64 @@ mod tests {
                 .unwrap_or_default()
                 .contains("overwritten")
         );
+    }
+
+    #[tokio::test]
+    async fn test_close_coordination_with_stale_session_id_is_noop() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let peer_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+
+        // First session.
+        let first_handle = coordinator.coordinate(peer_id, "peer-v1".to_string(), PeerKind::Client);
+        let first_session_id = first_handle.session_id;
+
+        // Second session overwrites the first.
+        let second_handle =
+            coordinator.coordinate(peer_id, "peer-v2".to_string(), PeerKind::Client);
+
+        // Set up a tunnel on the new session.
+        let mut agent_handle =
+            coordinator.coordinate(agent_id, "agent".to_string(), PeerKind::Agent);
+        coordinator
+            .process_request(
+                peer_id,
+                CoordinateRequest {
+                    add_tunnel: Some(agent_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Old session tries to close — should be a no-op because session_id
+        // doesn't match.
+        coordinator.close_coordination(peer_id, first_session_id);
+
+        // The new session should still be functional.
+        let node = NodeInfo {
+            id: 99,
+            ..Default::default()
+        };
+        coordinator
+            .process_request(
+                peer_id,
+                CoordinateRequest {
+                    update_self: Some(node),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Agent should still receive the update (new session is alive).
+        let resp = agent_handle.response_rx.recv().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates.len(), 1);
+        assert_eq!(resp.peer_updates[0].id, peer_id);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Node);
+
+        // Now close with the correct session_id — should work.
+        coordinator.close_coordination(peer_id, second_handle.session_id);
+        let resp = agent_handle.response_rx.recv().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates.len(), 1);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Lost);
     }
 }
