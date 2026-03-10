@@ -6,3 +6,6 @@ mod store;
 
 pub use pubsub::PostgresPubSub;
 pub use store::{DatabaseInitError, PostgresStore};
+
+#[cfg(test)]
+mod tests;
