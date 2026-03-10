@@ -10,6 +10,9 @@ use coder_core::IdentityStore;
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
 use tracing::{info, warn};
 
+/// Current milestone for the notifications crate.
+pub const STATUS: &str = "active";
+
 const DISPATCH_POLL_SECS: u64 = 10;
 const DISPATCH_BATCH_SIZE: u32 = 50;
 const MAX_DISPATCH_ATTEMPTS: i32 = 3;

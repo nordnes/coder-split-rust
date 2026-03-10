@@ -8,7 +8,10 @@ use thiserror::Error;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
-use crate::api::{AuditLogResponse, ExternalAuthAppInstallation, ExternalAuthUser, HealthSettings};
+use crate::api::{
+    AuditLogResponse, ExternalAuthAppInstallation, ExternalAuthUser, HealthSettings,
+    InboxNotification, NotificationPreference, NotificationTemplate, NotificationsSettings,
+};
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
     CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
@@ -3025,443 +3028,180 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
-    // ----- User identity supplements (forwarded from IdentityStore) -----
+    // -----------------------------------------------------------------------
+    // Notifications domain
+    // -----------------------------------------------------------------------
 
-    /// Lists user links for a user.
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
-
-    /// Upserts a user link.
-    async fn upsert_user_link(
-        &self,
-        user_id: Uuid,
-        input: &UpsertUserLinkInput,
-    ) -> Result<UserLinkRecord, StorageError> {
-        let _ = (user_id, input);
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
-
-    /// Deletes a user link.
-    async fn delete_user_link(
-        &self,
-        user_id: Uuid,
-        login_type: crate::identity::LoginType,
-    ) -> Result<bool, StorageError> {
-        let _ = (user_id, login_type);
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
-
-    /// Returns a user configuration value.
-    async fn get_user_config(
-        &self,
-        user_id: Uuid,
-        key: &str,
-    ) -> Result<Option<UserConfigRecord>, StorageError> {
-        let _ = (user_id, key);
+    /// Returns the current global notification settings JSON.
+    async fn get_notifications_settings(&self) -> Result<NotificationsSettings, StorageError> {
         Err(StorageError::unavailable(
-            "user configs are not implemented",
+            "notifications settings are not implemented",
         ))
     }
 
-    /// Sets a user configuration value.
-    async fn upsert_user_config(
+    /// Replaces the global notification settings.
+    async fn upsert_notifications_settings(
         &self,
-        user_id: Uuid,
-        key: &str,
-        value: &str,
-    ) -> Result<UserConfigRecord, StorageError> {
-        let _ = (user_id, key, value);
+        settings: &NotificationsSettings,
+    ) -> Result<(), StorageError> {
+        let _ = settings;
         Err(StorageError::unavailable(
-            "user configs are not implemented",
+            "notifications settings are not implemented",
         ))
     }
 
-    /// Deletes a user configuration value.
-    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
-        let _ = (user_id, key);
+    /// Returns notification templates filtered by kind.
+    async fn get_notification_templates_by_kind(
+        &self,
+        kind: &str,
+    ) -> Result<Vec<NotificationTemplate>, StorageError> {
+        let _ = kind;
         Err(StorageError::unavailable(
-            "user configs are not implemented",
+            "notification templates are not implemented",
         ))
     }
 
-    /// Records a soft-delete tracking entry.
-    async fn insert_user_deleted(
+    /// Updates the delivery method for a notification template.
+    async fn update_notification_template_method(
         &self,
-        user_id: Uuid,
-        deleted_by: Option<Uuid>,
-        reason: &str,
-    ) -> Result<UserDeletedRecord, StorageError> {
-        let _ = (user_id, deleted_by, reason);
+        template_id: Uuid,
+        method: Option<&str>,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        let _ = (template_id, method);
         Err(StorageError::unavailable(
-            "user deletion tracking is not implemented",
+            "notification templates are not implemented",
         ))
     }
 
-    /// Records a user status change.
-    async fn insert_user_status_change(
+    /// Returns notification preferences for a user.
+    async fn get_user_notification_preferences(
         &self,
         user_id: Uuid,
-        old_status: UserStatus,
-        new_status: UserStatus,
-        changed_by: Option<Uuid>,
-        reason: &str,
-    ) -> Result<UserStatusChangeRecord, StorageError> {
-        let _ = (user_id, old_status, new_status, changed_by, reason);
-        Err(StorageError::unavailable(
-            "user status changes are not implemented",
-        ))
-    }
-
-    /// Lists status changes for a user.
-    async fn list_user_status_changes(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+    ) -> Result<Vec<NotificationPreference>, StorageError> {
         let _ = user_id;
         Err(StorageError::unavailable(
-            "user status changes are not implemented",
+            "notification preferences are not implemented",
         ))
     }
 
-    // ----- Custom roles -----
-
-    /// Lists custom roles, optionally filtered by organization.
-    async fn list_custom_roles(
+    /// Updates notification preferences for a user.
+    async fn update_user_notification_preferences(
         &self,
-        organization_id: Option<Uuid>,
-    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
-        let _ = organization_id;
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
-
-    /// Upserts a custom role.
-    async fn upsert_custom_role(
-        &self,
-        input: &UpsertCustomRoleInput,
-    ) -> Result<CustomRoleRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
-
-    /// Deletes a custom role.
-    async fn delete_custom_role(
-        &self,
-        name: &str,
-        organization_id: Option<Uuid>,
-    ) -> Result<bool, StorageError> {
-        let _ = (name, organization_id);
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
-
-    // ----- Groups -----
-
-    /// Lists groups for an organization.
-    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
-        let _ = organization_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
-
-    /// Creates a new group.
-    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
-
-    /// Looks up a group by identifier.
-    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
-
-    /// Deletes a group.
-    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
-
-    /// Lists members of a group.
-    async fn list_group_members(
-        &self,
-        group_id: Uuid,
-    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
-
-    /// Adds a user to a group.
-    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
-        let _ = (group_id, user_id);
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
-
-    /// Removes a user from a group.
-    async fn delete_group_member(
-        &self,
-        group_id: Uuid,
         user_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = (group_id, user_id);
+        template_ids: &[Uuid],
+        disableds: &[bool],
+    ) -> Result<(), StorageError> {
+        let _ = (user_id, template_ids, disableds);
         Err(StorageError::unavailable(
-            "group members are not implemented",
+            "notification preferences are not implemented",
         ))
     }
 
-    // ----- OAuth2 Provider -----
-
-    /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
+    /// Lists inbox notifications for a user with optional filtering.
+    async fn get_filtered_inbox_notifications(
         &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
-
-    /// Creates an OAuth2 provider app.
-    async fn create_oauth2_provider_app(
-        &self,
-        input: &CreateOAuth2ProviderAppInput,
-    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
-
-    /// Looks up an OAuth2 provider app by identifier.
-    async fn find_oauth2_provider_app_by_id(
-        &self,
-        app_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
-
-    /// Updates an OAuth2 provider app.
-    async fn update_oauth2_provider_app(
-        &self,
-        input: &UpdateOAuth2ProviderAppInput,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
-
-    /// Deletes an OAuth2 provider app.
-    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
-
-    /// Lists secrets for an OAuth2 provider app.
-    async fn list_oauth2_provider_app_secrets(
-        &self,
-        app_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
-
-    /// Creates a secret for an OAuth2 provider app.
-    async fn create_oauth2_provider_app_secret(
-        &self,
-        app_id: Uuid,
-        hashed_secret: &[u8],
-        display_secret: &str,
-    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
-        let _ = (app_id, hashed_secret, display_secret);
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
-
-    /// Deletes a secret for an OAuth2 provider app.
-    async fn delete_oauth2_provider_app_secret(
-        &self,
-        secret_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
-
-    /// Finds an OAuth2 provider app secret by identifier.
-    async fn find_oauth2_provider_app_secret_by_id(
-        &self,
-        secret_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
-
-    /// Creates an authorization code for the OAuth2 flow.
-    async fn create_oauth2_provider_app_code(
-        &self,
-        app_id: Uuid,
         user_id: Uuid,
-        secret_prefix: &[u8],
-        hashed_secret: &[u8],
-        expires_at: OffsetDateTime,
-        resource_uri: &str,
-        code_challenge: &str,
-        code_challenge_method: &str,
-    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
-        let _ = (
-            app_id,
-            user_id,
-            secret_prefix,
-            hashed_secret,
-            expires_at,
-            resource_uri,
-            code_challenge,
-            code_challenge_method,
-        );
+        templates: Option<&[Uuid]>,
+        targets: Option<&[Uuid]>,
+        read_status: &str,
+        created_before: Option<OffsetDateTime>,
+    ) -> Result<Vec<InboxNotification>, StorageError> {
+        let _ = (user_id, templates, targets, read_status, created_before);
         Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
+            "inbox notifications are not implemented",
         ))
     }
 
-    /// Finds an authorization code by secret prefix.
-    async fn find_oauth2_provider_app_code_by_prefix(
+    /// Counts unread inbox notifications for a user.
+    async fn count_unread_inbox_notifications(&self, user_id: Uuid) -> Result<i64, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "inbox notifications are not implemented",
+        ))
+    }
+
+    /// Finds an inbox notification by ID.
+    async fn get_inbox_notification_by_id(
         &self,
-        secret_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
-        let _ = secret_prefix;
+        id: Uuid,
+    ) -> Result<Option<InboxNotification>, StorageError> {
+        let _ = id;
         Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
+            "inbox notifications are not implemented",
         ))
     }
 
-    /// Deletes an authorization code.
-    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
-        let _ = code_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
-
-    /// Creates an OAuth2 provider app token.
-    async fn create_oauth2_provider_app_token(
+    /// Updates the read status of an inbox notification.
+    async fn update_inbox_notification_read_status(
         &self,
-        input: &CreateOAuth2ProviderAppTokenInput,
-    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
-        let _ = input;
+        id: Uuid,
+        read_at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        let _ = (id, read_at);
         Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
+            "inbox notifications are not implemented",
         ))
     }
 
-    /// Finds an OAuth2 token by hash prefix.
-    async fn find_oauth2_provider_app_token_by_prefix(
+    /// Marks all unread inbox notifications as read for a user.
+    async fn mark_all_inbox_notifications_as_read(
         &self,
-        hash_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = hash_prefix;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
-
-    /// Finds an OAuth2 token by refresh hash.
-    async fn find_oauth2_provider_app_token_by_refresh_hash(
-        &self,
-        refresh_hash: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = refresh_hash;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
-
-    /// Deletes an OAuth2 provider app token.
-    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
-        let _ = token_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
-
-    /// Lists all OAuth2 tokens for a given user and app.
-    async fn list_oauth2_provider_app_tokens_by_app_and_user(
-        &self,
-        app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = (app_id, user_id);
+        read_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let _ = (user_id, read_at);
         Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
+            "inbox notifications are not implemented",
         ))
     }
 
-    /// Deletes all OAuth2 tokens for a given user and app.
-    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+    /// Lists webpush subscriptions for a user.
+    async fn get_webpush_subscriptions_by_user_id(
         &self,
-        app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<u64, StorageError> {
-        let _ = (app_id, user_id);
+    ) -> Result<Vec<WebpushSubscriptionRecord>, StorageError> {
+        let _ = user_id;
         Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
+            "webpush subscriptions are not implemented",
         ))
     }
 
-    // ----- Notifications -----
-
-    /// Fetches pending notification messages for dispatch.
-    async fn fetch_pending_notification_messages(
+    /// Inserts a webpush subscription.
+    async fn insert_webpush_subscription(
         &self,
-        limit: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = limit;
+        user_id: Uuid,
+        endpoint: &str,
+        p256dh_key: &str,
+        auth_key: &str,
+    ) -> Result<(), StorageError> {
+        let _ = (user_id, endpoint, p256dh_key, auth_key);
         Err(StorageError::unavailable(
-            "notification messages are not implemented",
+            "webpush subscriptions are not implemented",
         ))
     }
 
-    /// Updates the status of a notification message after dispatch.
-    async fn update_notification_message_status(
+    /// Deletes a webpush subscription by user ID and endpoint.
+    async fn delete_webpush_subscription_by_user_and_endpoint(
         &self,
-        message_id: Uuid,
-        status: crate::identity::NotificationMessageStatus,
+        user_id: Uuid,
+        endpoint: &str,
     ) -> Result<bool, StorageError> {
-        let _ = (message_id, status);
+        let _ = (user_id, endpoint);
         Err(StorageError::unavailable(
-            "notification messages are not implemented",
+            "webpush subscriptions are not implemented",
         ))
     }
+}
 
-    /// Increments the attempt count for a notification message.
-    async fn increment_notification_message_attempt_count(
-        &self,
-        message_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = message_id;
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+/// Stored webpush subscription record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WebpushSubscriptionRecord {
+    pub id: Uuid,
+    pub user_id: Uuid,
+    pub created_at: OffsetDateTime,
+    pub endpoint: String,
+    pub endpoint_p256dh_key: String,
+    pub endpoint_auth_key: String,
 }
 
 /// Stored workspace agent row.

@@ -53,6 +53,13 @@ pub use api::{
     WorkspaceAppStatusState, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceProxyHealthReport,
 };
+pub use api::{
+    DeleteWebpushSubscription, GetInboxNotificationResponse, InboxNotification,
+    InboxNotificationAction, ListInboxNotificationsResponse, NotificationMethodsResponse,
+    NotificationPreference, NotificationTemplate, NotificationsSettings,
+    UpdateInboxNotificationReadStatusRequest, UpdateInboxNotificationReadStatusResponse,
+    UpdateNotificationTemplateMethod, UpdateUserNotificationPreferences, WebpushSubscription,
+};
 pub use build_info::BuildMetadata;
 pub use config::{
     DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, PublicDatabaseConfig,
@@ -81,7 +88,7 @@ pub use ports::{
     InsertWorkspaceAppStatusInput, OperationalStore, PersistAuditLogInput,
     ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord,
     ProvisionerJobStatsInput, ProvisionerJobTimingRecord, ProvisionerStore, StorageError,
-    TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput,
+    TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput, WebpushSubscriptionRecord,
     WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
     WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
     WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
