@@ -37,10 +37,10 @@ pub use api::{
     SlimRole, SshConfigResponse, TokenConfig, UpdateCheckResponse, UpdateOrganizationRequest,
     UpdateRolesRequest, UpdateTemplateMeta, UpdateUserAppearanceSettingsRequest,
     UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
-    UserAppearanceSettings, UserLoginType, UserParameter, UserPreferenceSettings, UserResponse,
-    UserRolesResponse, ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
-    WebsocketHealthReport, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceProxyHealthReport,
+    UploadFileResponse, UserAppearanceSettings, UserLoginType, UserParameter,
+    UserPreferenceSettings, UserResponse, UserRolesResponse, ValidateUserPasswordRequest,
+    ValidateUserPasswordResponse, ValidationError, WebsocketHealthReport,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthReport,
 };
 pub use build_info::BuildMetadata;
 pub use config::{
@@ -65,11 +65,11 @@ pub use password::{
 };
 pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
-    ExternalAuthLinkRecord, GitSshKeyRecord, IdentityStore, OperationalStore, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    StorageError, TemplateStore, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput,
-    WorkspaceBuildStatsInput, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
-    WorkspaceStatsWorkspaceInput,
+    ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertFileInput,
+    InsertFileResult, OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, StorageError, TemplateStore,
+    UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,

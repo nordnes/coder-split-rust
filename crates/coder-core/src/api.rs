@@ -1485,6 +1485,14 @@ impl From<SlimRoleRecord> for SlimRole {
     }
 }
 
+/// Response returned by `POST /api/v2/files` after uploading a file.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct UploadFileResponse {
+    /// The file identifier (returned as "hash" for Go SDK compatibility).
+    #[serde(rename = "hash")]
+    pub id: Uuid,
+}
+
 // ---------------------------------------------------------------------------
 // OAuth2 Provider API types
 // ---------------------------------------------------------------------------
