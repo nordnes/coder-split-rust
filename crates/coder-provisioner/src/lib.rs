@@ -729,4 +729,299 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap_or_default().is_empty());
     }
+
+    // ── Additional init script tests ─────────────────────────
+
+    #[test]
+    fn renders_darwin_script() -> Result<(), InitScriptError> {
+        let script = render_init_script("darwin", "arm64", "https://coder.example")?;
+        assert!(!script.body.is_empty(), "darwin script should not be empty");
+        assert!(script.body.contains("coder-darwin-arm64"));
+        assert!(script.content_digest.starts_with("sha256:"));
+        Ok(())
+    }
+
+    #[test]
+    fn renders_windows_script() -> Result<(), InitScriptError> {
+        let script = render_init_script("windows", "amd64", "https://coder.example")?;
+        assert!(
+            !script.body.is_empty(),
+            "windows script should not be empty"
+        );
+        assert!(script.body.contains("coder-windows-amd64"));
+        assert!(script.content_digest.starts_with("sha256:"));
+        Ok(())
+    }
+
+    #[test]
+    fn renders_linux_arm64_script() -> Result<(), InitScriptError> {
+        let script = render_init_script("linux", "arm64", "https://coder.example")?;
+        assert!(script.body.contains("coder-linux-arm64"));
+        Ok(())
+    }
+
+    #[test]
+    fn renders_linux_armv7_script() -> Result<(), InitScriptError> {
+        let script = render_init_script("linux", "armv7", "https://coder.example")?;
+        assert!(script.body.contains("coder-linux-armv7"));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_unknown_arch() {
+        let result = render_init_script("linux", "mips", "https://coder.example");
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn init_script_case_insensitive_os() -> Result<(), InitScriptError> {
+        let script = render_init_script("Linux", "amd64", "https://coder.example")?;
+        assert!(script.body.contains("coder-linux-amd64"));
+        Ok(())
+    }
+
+    #[test]
+    fn init_script_deterministic_digest() -> Result<(), InitScriptError> {
+        let s1 = render_init_script("linux", "amd64", "https://coder.example")?;
+        let s2 = render_init_script("linux", "amd64", "https://coder.example")?;
+        assert_eq!(
+            s1.content_digest, s2.content_digest,
+            "same input should produce same digest"
+        );
+        assert_eq!(s1.body, s2.body, "same input should produce same body");
+        Ok(())
+    }
+
+    #[test]
+    fn init_script_normalizes_access_url_trailing_slash() -> Result<(), InitScriptError> {
+        let without_slash = render_init_script("linux", "amd64", "https://coder.example")?;
+        let with_slash = render_init_script("linux", "amd64", "https://coder.example/")?;
+        assert_eq!(
+            without_slash.body, with_slash.body,
+            "trailing slash should be normalized"
+        );
+        Ok(())
+    }
+
+    // ── Provisioner key hashing test ─────────────────────────
+
+    #[test]
+    fn provisioner_key_sha256_hash_is_deterministic() {
+        use sha2::{Digest, Sha256};
+        let secret = b"my-secret-key-value";
+        let hash1 = Sha256::digest(secret);
+        let hash2 = Sha256::digest(secret);
+        assert_eq!(hash1, hash2, "SHA-256 hash should be deterministic");
+        assert_eq!(hash1.len(), 32, "SHA-256 should produce 32 bytes");
+    }
+
+    // ── Additional service method tests ──────────────────────
+
+    #[tokio::test]
+    async fn complete_job_succeeds_on_healthy_store() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+        let now = OffsetDateTime::now_utc();
+
+        let result = svc
+            .complete_job(CompleteProvisionerJobInput {
+                id: Uuid::new_v4(),
+                updated_at: now,
+                completed_at: now,
+                error: String::new(),
+                error_code: String::new(),
+            })
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn complete_job_propagates_error() {
+        let store = MockStore::new().with_error("disk full");
+        let svc = ProvisionerService::new(Arc::new(store));
+        let now = OffsetDateTime::now_utc();
+
+        let result = svc
+            .complete_job(CompleteProvisionerJobInput {
+                id: Uuid::new_v4(),
+                updated_at: now,
+                completed_at: now,
+                error: String::new(),
+                error_code: String::new(),
+            })
+            .await;
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("disk full"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cancel_job_succeeds_on_healthy_store() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc
+            .cancel_job(CancelProvisionerJobInput {
+                id: Uuid::new_v4(),
+                canceled_at: OffsetDateTime::now_utc(),
+                completed_at: Some(OffsetDateTime::now_utc()),
+            })
+            .await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn cancel_job_propagates_error() {
+        let store = MockStore::new().with_error("network error");
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc
+            .cancel_job(CancelProvisionerJobInput {
+                id: Uuid::new_v4(),
+                canceled_at: OffsetDateTime::now_utc(),
+                completed_at: Some(OffsetDateTime::now_utc()),
+            })
+            .await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn acquire_job_returns_none_on_healthy_store() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc
+            .acquire_job(AcquireProvisionerJobInput {
+                worker_id: Uuid::new_v4(),
+                started_at: OffsetDateTime::now_utc(),
+                organization_id: Uuid::new_v4(),
+                types: Vec::new(),
+                provisioner_tags: serde_json::json!({}),
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap_or(None).is_none(),
+            "mock store returns None for acquire"
+        );
+    }
+
+    #[tokio::test]
+    async fn heartbeat_daemon_succeeds_on_healthy_store() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.heartbeat_daemon(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn heartbeat_daemon_propagates_error() {
+        let store = MockStore::new().with_error("timeout");
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.heartbeat_daemon(Uuid::new_v4()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn list_daemons_returns_empty_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.list_daemons(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_key_returns_none_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.get_key(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap_or(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn get_key_by_secret_returns_none_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.get_key_by_secret(b"some-hashed-secret").await;
+        assert!(result.is_ok());
+        assert!(result.unwrap_or(None).is_none());
+    }
+
+    #[tokio::test]
+    async fn list_keys_returns_empty_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.list_keys(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_key_returns_false_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.delete_key(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+        assert!(!result.unwrap_or(true));
+    }
+
+    #[tokio::test]
+    async fn delete_old_daemons_succeeds_on_healthy_store() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.delete_old_daemons().await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn insert_job_logs_returns_empty_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc
+            .insert_job_logs(InsertProvisionerJobLogsInput {
+                job_id: Uuid::new_v4(),
+                created_at: Vec::new(),
+                source: Vec::new(),
+                level: Vec::new(),
+                stage: Vec::new(),
+                output: Vec::new(),
+            })
+            .await;
+        assert!(result.is_ok());
+        assert!(result.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_logs_after_returns_empty_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.get_logs_after(Uuid::new_v4(), 0).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn get_job_timings_returns_empty_from_mock() {
+        let store = MockStore::new();
+        let svc = ProvisionerService::new(Arc::new(store));
+
+        let result = svc.get_job_timings(Uuid::new_v4()).await;
+        assert!(result.is_ok());
+        assert!(result.unwrap_or_default().is_empty());
+    }
 }
