@@ -19124,7 +19124,7 @@ mod tests {
                 .custom_roles
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
-                .remove(&(name.to_lowercase(), organization_id))
+                .remove(&(name.to_owned(), organization_id))
                 .is_some())
         }
 
