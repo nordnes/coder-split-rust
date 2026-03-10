@@ -1859,9 +1859,11 @@ pub trait InsightsStore: Send + Sync {
     /// Returns user status counts over time for the deployment.
     async fn get_user_status_counts(
         &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
         timezone: &str,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = timezone;
+        let _ = (start_time, end_time, timezone);
         Err(StorageError::unavailable(
             "user status counts are not implemented",
         ))
@@ -2703,9 +2705,11 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Returns user status counts over time.
     async fn get_user_status_counts(
         &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
         timezone: &str,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = timezone;
+        let _ = (start_time, end_time, timezone);
         Err(StorageError::unavailable(
             "user status counts are not implemented",
         ))
@@ -5995,9 +5999,11 @@ where
 
     async fn get_user_status_counts(
         &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
         timezone: &str,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        AppStore::get_user_status_counts(self, timezone).await
+        AppStore::get_user_status_counts(self, start_time, end_time, timezone).await
     }
 }
 
@@ -6058,9 +6064,13 @@ where
 
     async fn get_user_status_counts(
         &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
         timezone: &str,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        (**self).get_user_status_counts(timezone).await
+        (**self)
+            .get_user_status_counts(start_time, end_time, timezone)
+            .await
     }
 }
 

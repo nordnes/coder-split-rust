@@ -1568,6 +1568,8 @@ impl AppStore for PostgresStore {
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_user_status_counts(
         &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
         timezone: &str,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
         let rows = sqlx::query_as::<_, StoredUserStatusCountRow>(
@@ -1578,8 +1580,8 @@ impl AppStore for PostgresStore {
              dates_of_interest AS (
                  SELECT timezone($1::text, gs_local) AS date
                  FROM generate_series(
-                     timezone($1::text, NOW() - INTERVAL '30 days'),
-                     timezone($1::text, NOW()),
+                     timezone($1::text, $2::timestamptz),
+                     timezone($1::text, $3::timestamptz),
                      interval '1 day'
                  ) AS gs_local
              ),
@@ -1593,11 +1595,11 @@ impl AppStore for PostgresStore {
                      SELECT COUNT(*) > 0 AS deleted
                      FROM user_deleted ud
                      WHERE ud.user_id = usc.user_id
-                       AND (ud.deleted_at < usc.changed_at OR ud.deleted_at < NOW() - INTERVAL '30 days')
+                       AND (ud.deleted_at < usc.changed_at OR ud.deleted_at < $2::timestamptz)
                  ) AS ud ON true
                  WHERE usc.user_id NOT IN (SELECT id FROM system_users)
                      AND NOT ud.deleted
-                     AND usc.changed_at < (NOW() - INTERVAL '30 days')
+                     AND usc.changed_at < $2::timestamptz
                  ORDER BY usc.user_id, usc.changed_at DESC
              ),
              status_changes_during_range AS (
@@ -1613,8 +1615,8 @@ impl AppStore for PostgresStore {
                  ) AS ud ON true
                  WHERE usc.user_id NOT IN (SELECT id FROM system_users)
                      AND NOT ud.deleted
-                     AND usc.changed_at >= (NOW() - INTERVAL '30 days')
-                     AND usc.changed_at <= NOW()
+                     AND usc.changed_at >= $2::timestamptz
+                     AND usc.changed_at <= $3::timestamptz
              ),
              relevant_status_changes AS (
                  SELECT user_id, new_status, changed_at
@@ -1655,6 +1657,8 @@ impl AppStore for PostgresStore {
              ORDER BY rscpupd.date",
         )
         .bind(timezone)
+        .bind(start_time)
+        .bind(end_time)
         .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;

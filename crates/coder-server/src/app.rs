@@ -9697,7 +9697,24 @@ async fn insights_user_status_counts(
         _ => "UTC".to_owned(),
     };
 
-    let response = state.store.get_user_status_counts(&timezone).await?;
+    // Compute the time range matching the Go reference:
+    // end_time = next hour boundary, start_time = 60 days before start-of-day.
+    // The SQL query itself applies the timezone conversion.
+    let now = OffsetDateTime::now_utc();
+    // Truncate to the current hour, then advance by one hour.
+    let end_time = now
+        - time::Duration::minutes(i64::from(now.minute()))
+        - time::Duration::seconds(i64::from(now.second()))
+        - time::Duration::nanoseconds(i64::from(now.nanosecond()))
+        + time::Duration::HOUR;
+    // Start of the day containing end_time, then go back 60 days.
+    let start_time =
+        end_time - time::Duration::hours(i64::from(end_time.hour())) - time::Duration::days(60);
+
+    let response = state
+        .store
+        .get_user_status_counts(start_time, end_time, &timezone)
+        .await?;
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
@@ -13525,6 +13542,8 @@ mod tests {
 
         async fn get_user_status_counts(
             &self,
+            _start_time: OffsetDateTime,
+            _end_time: OffsetDateTime,
             _timezone: &str,
         ) -> Result<coder_core::api::GetUserStatusCountsResponse, StorageError> {
             Ok(coder_core::api::GetUserStatusCountsResponse {
