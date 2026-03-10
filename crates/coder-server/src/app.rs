@@ -3,9 +3,9 @@
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use axum::{
-    Json, Router,
+    Form, Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, Form, OriginalUri, Path, Query, State, rejection::JsonRejection},
+    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
@@ -15,7 +15,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post, put},
+    routing::{get, patch, post, put},
 };
 use coder_audit::{AuditAction, AuditEvent, AuditSink};
 use coder_auth::{
@@ -47,21 +47,22 @@ use coder_core::{
     ChatQueuedMessageResponse, ChatRecord, ChatResponse, ChatWithMessagesResponse,
     ConvertLoginRequest, CreateChatMessageApiResponse, CreateChatMessageRequest, CreateChatRequest,
     CreateFirstUserRequest, CreateFirstUserResponse, CreateTaskRequest, CreateTestAuditLogRequest,
-    CreateTokenRequest, CreateUserRequestWithOrgs, DeploymentConfigResponse, ExternalApiKeyScopes,
-    ExternalAuthDeviceExchangeRequest, GetUsersResponse, HealthSettings, HealthcheckReport,
-    InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertTaskInput, LoginType,
-    LoginWithPasswordRequest, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
-    OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
+    CreateTokenRequest, CreateUserRequestWithOrgs, CreateWorkspaceBuildInput, CreateWorkspaceInput,
+    DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
+    GetUsersResponse, HealthSettings, HealthcheckReport, InsertChatInput, InsertChatMessageInput,
+    InsertFileInput, InsertTaskInput, LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest,
+    OAuth2ProviderAppEndpoints, OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
     OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse, OrganizationMember,
     OrganizationMemberWithUserData, OrganizationRecord, OrganizationResponse,
     PaginatedMembersResponse, PersistAuditLogInput, PostOAuth2ProviderAppRequest,
     PutOAuth2ProviderAppRequest, RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse,
-    TaskListFilter, TaskLogSnapshotEnvelope, TaskLogsResponse, TaskRecord,
-    TaskResponse, TaskSendRequest, TasksListResponse, UpdateCheckResponse, UpdateRolesRequest,
+    TaskListFilter, TaskLogSnapshotEnvelope, TaskLogsResponse, TaskRecord, TaskResponse,
+    TaskSendRequest, TasksListResponse, UpdateCheckResponse, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
     UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UploadFileResponse,
-    UserAppearanceSettings, UserListFilter, UserParameter, UserPreferenceSettings, UserRecord,
-    UserResponse, UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
+    UpsertPortShareInput, UserAppearanceSettings, UserListFilter, UserParameter,
+    UserPreferenceSettings, UserRecord, UserResponse, UserRolesResponse, UserStatus,
+    ValidateUserPasswordRequest, ValidationError, WorkspaceListFilter,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
@@ -168,7 +169,7 @@ pub struct AppState {
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
     health: HealthService<Arc<dyn AppStore>>,
     external_auth: ExternalAuthService<Arc<dyn AppStore>>,
-    oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
+    pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
 }
 
 impl AppState {
@@ -438,6 +439,90 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/chats", get(list_chats).post(create_chat))
                 .route("/chats/{chat}", get(get_chat).delete(delete_chat))
                 .route("/chats/{chat}/messages", post(post_chat_message))
+                // Workspace domain routes
+                .route("/workspaces", get(list_workspaces))
+                .route(
+                    "/workspaces/{workspace}",
+                    get(get_workspace).patch(patch_workspace),
+                )
+                .route(
+                    "/workspaces/{workspace}/builds",
+                    get(list_workspace_builds_handler).post(post_workspace_build),
+                )
+                .route(
+                    "/workspaces/{workspace}/autostart",
+                    put(put_workspace_autostart),
+                )
+                .route("/workspaces/{workspace}/ttl", put(put_workspace_ttl))
+                .route(
+                    "/workspaces/{workspace}/dormant",
+                    put(put_workspace_dormant),
+                )
+                .route("/workspaces/{workspace}/extend", put(put_workspace_extend))
+                .route(
+                    "/workspaces/{workspace}/autoupdates",
+                    put(put_workspace_autoupdates),
+                )
+                .route(
+                    "/workspaces/{workspace}/favorite",
+                    put(put_workspace_favorite).delete(delete_workspace_favorite),
+                )
+                .route(
+                    "/workspaces/{workspace}/port-share",
+                    get(list_workspace_port_shares)
+                        .post(post_workspace_port_share)
+                        .delete(delete_workspace_port_share),
+                )
+                .route(
+                    "/workspaces/{workspace}/resolve-autostart",
+                    get(get_workspace_resolve_autostart),
+                )
+                .route(
+                    "/workspaces/{workspace}/timings",
+                    get(get_workspace_timings),
+                )
+                .route("/workspaces/{workspace}/usage", post(post_workspace_usage))
+                .route("/workspaces/{workspace}/watch", get(get_workspace_watch))
+                .route(
+                    "/workspaces/{workspace}/watch-ws",
+                    get(get_workspace_watch_ws),
+                )
+                // Workspace build routes
+                .route("/workspacebuilds/{build}", get(get_workspace_build))
+                .route(
+                    "/workspacebuilds/{build}/cancel",
+                    patch(patch_cancel_workspace_build),
+                )
+                .route(
+                    "/workspacebuilds/{build}/logs",
+                    get(get_workspace_build_logs),
+                )
+                .route(
+                    "/workspacebuilds/{build}/parameters",
+                    get(get_workspace_build_parameters),
+                )
+                .route(
+                    "/workspacebuilds/{build}/resources",
+                    get(get_workspace_build_resources),
+                )
+                .route(
+                    "/workspacebuilds/{build}/state",
+                    get(get_workspace_build_state).put(put_workspace_build_state),
+                )
+                .route(
+                    "/workspacebuilds/{build}/timings",
+                    get(get_workspace_build_timings),
+                )
+                // User workspace routes
+                .route(
+                    "/users/{user}/workspace/{name}",
+                    get(get_user_workspace_by_name),
+                )
+                .route(
+                    "/users/{user}/workspace/{name}/builds/{number}",
+                    get(get_user_workspace_build_by_number),
+                )
+                .route("/users/{user}/workspaces", post(post_user_workspace))
                 .route("/authcheck", post(post_authcheck))
                 // ----- Template routes -----
                 .route(
@@ -4867,9 +4952,1344 @@ fn forbidden_response(message: impl Into<String>) -> Response {
     (StatusCode::FORBIDDEN, Json(ApiResponse::ok(message.into()))).into_response()
 }
 
+fn not_implemented_response(message: impl Into<String>) -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiResponse::ok(message.into())),
+    )
+        .into_response()
+}
+
+fn not_found_response(message: impl Into<String>) -> Response {
+    (StatusCode::NOT_FOUND, Json(ApiResponse::ok(message.into()))).into_response()
+}
+
+fn resource_not_found_response() -> Response {
+    (
+        StatusCode::NOT_FOUND,
+        Json(ApiResponse::ok(
+            "Resource not found or you do not have access to this resource",
+        )),
+    )
+        .into_response()
+}
+
 // ---------------------------------------------------------------------------
-// OAuth2 Provider Handlers
+// Workspace domain query types
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkspacesQuery {
+    owner: Option<String>,
+    template: Option<String>,
+    name: Option<String>,
+    status: Option<String>,
+    has_agent: Option<String>,
+    dormant: Option<bool>,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct WorkspaceBuildsQuery {
+    limit: Option<u32>,
+    offset: Option<u32>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct BuildLogsQuery {
+    after: Option<i64>,
+    follow: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace domain handlers (32 routes)
+// ---------------------------------------------------------------------------
+
+/// GET /workspaces — filtered, paginated workspace listing.
+async fn list_workspaces(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<WorkspacesQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let owner_id = if let Some(ref owner) = query.owner {
+        if owner == "me" {
+            Some(context.user.id)
+        } else {
+            Uuid::parse_str(owner).ok()
+        }
+    } else {
+        None
+    };
+    let owner_username = query
+        .owner
+        .as_deref()
+        .filter(|o| *o != "me" && Uuid::parse_str(o).is_err())
+        .map(String::from);
+
+    let filter = WorkspaceListFilter {
+        owner_id,
+        owner_username,
+        template_name: query.template,
+        template_ids: Vec::new(),
+        name: query.name,
+        status: query.status,
+        has_agent: query.has_agent,
+        dormant: query.dormant,
+        last_used_before: None,
+        last_used_after: None,
+        organization_id: None,
+        limit: query.limit.unwrap_or(25),
+        offset: query.offset.unwrap_or(0),
+        viewer_id: Some(context.user.id),
+    };
+
+    let (workspaces, count) = state.store.list_workspaces(filter).await?;
+    let items: Vec<Value> = workspaces
+        .into_iter()
+        .map(|w| {
+            json!({
+                "id": w.id,
+                "created_at": w.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "updated_at": w.updated_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "owner_id": w.owner_id,
+                "organization_id": w.organization_id,
+                "template_id": w.template_id,
+                "name": w.name,
+                "autostart_schedule": w.autostart_schedule,
+                "ttl_ms": w.ttl_ns.map(|ns| ns / 1_000_000),
+                "last_used_at": w.last_used_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "dormant_at": w.dormant_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+                "deleting_at": w.deleting_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+                "automatic_updates": w.automatic_updates,
+                "favorite": w.favorite,
+                "next_start_at": w.next_start_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+            })
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "workspaces": items, "count": count })),
+    )
+        .into_response())
+}
+
+/// GET /workspaces/{workspace}
+async fn get_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    Ok((StatusCode::OK, Json(workspace_to_json(&workspace))).into_response())
+}
+
+/// PATCH /workspaces/{workspace}
+async fn patch_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        let Some(updated) = state
+            .store
+            .update_workspace_name(workspace_id, name, Some(context.user.id))
+            .await?
+        else {
+            return Ok(resource_not_found_response());
+        };
+        return Ok((StatusCode::OK, Json(workspace_to_json(&updated))).into_response());
+    }
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /workspaces/{workspace}/builds
+async fn list_workspace_builds_handler(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    Query(query): Query<WorkspaceBuildsQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let builds = state
+        .store
+        .list_workspace_builds(
+            workspace_id,
+            query.limit.unwrap_or(25),
+            query.offset.unwrap_or(0),
+        )
+        .await?;
+
+    let items: Vec<Value> = builds.into_iter().map(|b| build_to_json(&b)).collect();
+    Ok((StatusCode::OK, Json(items)).into_response())
+}
+
+/// POST /workspaces/{workspace}/builds — start/stop/delete transition.
+async fn post_workspace_build(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let transition = body
+        .get("transition")
+        .and_then(|v| v.as_str())
+        .unwrap_or("start")
+        .to_owned();
+
+    let template_version_id = body
+        .get("template_version_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok());
+
+    let tv_id = if let Some(id) = template_version_id {
+        id
+    } else {
+        let Some(template) = state
+            .store
+            .find_template_by_id(workspace.template_id)
+            .await?
+        else {
+            return Ok(not_found_response("Template not found."));
+        };
+        template.active_version_id
+    };
+
+    let job_id = Uuid::new_v4();
+    let build_id = Uuid::new_v4();
+
+    let _job = state
+        .store
+        .insert_provisioner_job(CreateProvisionerJobInput {
+            id: job_id,
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+            organization_id: workspace.organization_id,
+            initiator_id: context.user.id,
+            provisioner: "echo".to_owned(),
+            file_id: None,
+            job_type: "workspace_build".to_owned(),
+            input: json!({}),
+            tags: HashMap::new(),
+        })
+        .await?;
+
+    // build_number is computed atomically inside insert_workspace_build.
+    let build = state
+        .store
+        .insert_workspace_build(CreateWorkspaceBuildInput {
+            id: build_id,
+            workspace_id,
+            template_version_id: tv_id,
+            build_number: 0,
+            transition,
+            initiator_id: context.user.id,
+            job_id,
+            reason: "initiator".to_owned(),
+            deadline: None,
+            max_deadline: None,
+        })
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(build_to_json(&build))).into_response())
+}
+
+/// PUT /workspaces/{workspace}/autostart
+async fn put_workspace_autostart(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let schedule = body
+        .get("schedule")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    state
+        .store
+        .update_workspace_autostart(workspace_id, schedule.as_deref())
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// PUT /workspaces/{workspace}/ttl
+async fn put_workspace_ttl(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let ttl_ms = body.get("ttl_ms").and_then(|v| v.as_i64());
+    let ttl_ns = ttl_ms.map(|ms| ms * 1_000_000);
+
+    state
+        .store
+        .update_workspace_ttl(workspace_id, ttl_ns)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// PUT /workspaces/{workspace}/dormant
+async fn put_workspace_dormant(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let dormant = body
+        .get("dormant")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let dormant_at = if dormant {
+        Some(OffsetDateTime::now_utc())
+    } else {
+        None
+    };
+
+    let Some(updated) = state
+        .store
+        .update_workspace_dormant_at(workspace_id, dormant_at, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    Ok((StatusCode::OK, Json(workspace_to_json(&updated))).into_response())
+}
+
+/// PUT /workspaces/{workspace}/extend
+async fn put_workspace_extend(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let deadline_str = body.get("deadline").and_then(|v| v.as_str());
+
+    let new_deadline = match deadline_str {
+        Some(s) => match OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339) {
+            Ok(dt) => Some(dt),
+            Err(_) => {
+                return Ok(validation_response(vec![ValidationError {
+                    field: "deadline".to_owned(),
+                    detail: "Invalid RFC3339 timestamp.".to_owned(),
+                }]));
+            }
+        },
+        None => {
+            return Ok(validation_response(vec![ValidationError {
+                field: "deadline".to_owned(),
+                detail: "Deadline is required.".to_owned(),
+            }]));
+        }
+    };
+
+    let Some(latest_build) = state
+        .store
+        .find_latest_workspace_build(workspace_id)
+        .await?
+    else {
+        return Ok(not_found_response("No build found for workspace."));
+    };
+
+    // Enforce max_deadline: the new deadline cannot exceed the build's max_deadline.
+    let clamped_deadline = match (new_deadline, latest_build.max_deadline) {
+        (Some(nd), Some(md)) if nd > md => Some(md),
+        (d, _) => d,
+    };
+
+    let _updated = state
+        .store
+        .update_workspace_build_deadline(
+            latest_build.id,
+            clamped_deadline,
+            latest_build.max_deadline,
+        )
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// PUT /workspaces/{workspace}/autoupdates
+async fn put_workspace_autoupdates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let automatic_updates = body
+        .get("automatic_updates")
+        .and_then(|v| v.as_str())
+        .unwrap_or("never");
+
+    state
+        .store
+        .update_workspace_automatic_updates(workspace_id, automatic_updates)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// PUT /workspaces/{workspace}/favorite
+async fn put_workspace_favorite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    state
+        .store
+        .favorite_workspace(workspace_id, context.user.id, true)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// DELETE /workspaces/{workspace}/favorite
+async fn delete_workspace_favorite(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    state
+        .store
+        .favorite_workspace(workspace_id, context.user.id, false)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /workspaces/{workspace}/port-share
+async fn list_workspace_port_shares(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let shares = state.store.list_workspace_port_shares(workspace_id).await?;
+    let items: Vec<Value> = shares
+        .into_iter()
+        .map(|s| {
+            json!({
+                "workspace_id": s.workspace_id,
+                "agent_name": s.agent_name,
+                "port": s.port,
+                "share_level": s.share_level,
+                "protocol": s.protocol,
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(json!({ "shares": items }))).into_response())
+}
+
+/// POST /workspaces/{workspace}/port-share
+async fn post_workspace_port_share(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let agent_name = body
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+    let port = body.get("port").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+    let share_level = body
+        .get("share_level")
+        .and_then(|v| v.as_str())
+        .unwrap_or("owner")
+        .to_owned();
+    let protocol = body
+        .get("protocol")
+        .and_then(|v| v.as_str())
+        .unwrap_or("http")
+        .to_owned();
+
+    let share = state
+        .store
+        .upsert_workspace_port_share(UpsertPortShareInput {
+            workspace_id,
+            agent_name,
+            port,
+            share_level,
+            protocol,
+        })
+        .await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({
+            "workspace_id": share.workspace_id,
+            "agent_name": share.agent_name,
+            "port": share.port,
+            "share_level": share.share_level,
+            "protocol": share.protocol,
+        })),
+    )
+        .into_response())
+}
+
+/// DELETE /workspaces/{workspace}/port-share
+async fn delete_workspace_port_share(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let agent_name = body
+        .get("agent_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default();
+    let port = body.get("port").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
+
+    state
+        .store
+        .delete_workspace_port_share(workspace_id, agent_name, port)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /workspaces/{workspace}/resolve-autostart
+async fn get_workspace_resolve_autostart(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let parameter_mismatch = false;
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "parameter_mismatch": parameter_mismatch, "template_id": workspace.template_id })),
+    )
+        .into_response())
+}
+
+/// GET /workspaces/{workspace}/timings
+async fn get_workspace_timings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(latest_build) = state
+        .store
+        .find_latest_workspace_build(workspace_id)
+        .await?
+    else {
+        return Ok((
+            StatusCode::OK,
+            Json(json!({ "provisioner_timings": [], "agent_script_timings": [] })),
+        )
+            .into_response());
+    };
+
+    let timings = state
+        .store
+        .list_provisioner_job_timings(latest_build.job_id)
+        .await?;
+
+    let items: Vec<Value> = timings
+        .into_iter()
+        .map(|t| {
+            json!({
+                "started_at": t.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "ended_at": t.ended_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "stage": t.stage,
+                "source": t.source,
+                "action": t.action,
+                "resource": t.resource,
+            })
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "provisioner_timings": items, "agent_script_timings": [] })),
+    )
+        .into_response())
+}
+
+/// POST /workspaces/{workspace}/usage — updates last_used_at.
+async fn post_workspace_usage(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    state
+        .store
+        .update_workspace_last_used_at(workspace_id, OffsetDateTime::now_utc())
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /workspaces/{workspace}/watch — SSE (returns initial state).
+async fn get_workspace_watch(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Without pub/sub, return initial state as a single SSE event.
+    let body = format!(
+        "data: {}\n\n",
+        serde_json::to_string(&workspace_to_json(&workspace)).unwrap_or_default()
+    );
+    Ok((
+        StatusCode::OK,
+        [(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"))],
+        body,
+    )
+        .into_response())
+}
+
+/// GET /workspaces/{workspace}/watch-ws — WebSocket (returns not implemented).
+async fn get_workspace_watch_ws(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    Ok(not_implemented_response(
+        "WebSocket workspace watch is not yet implemented.",
+    ))
+}
+
+/// GET /workspacebuilds/{build}
+async fn get_workspace_build(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    Ok((StatusCode::OK, Json(build_to_json(&build))).into_response())
+}
+
+/// PATCH /workspacebuilds/{build}/cancel
+async fn patch_cancel_workspace_build(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let canceled = state.store.cancel_provisioner_job(build.job_id).await?;
+
+    if !canceled {
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(ApiResponse::ok("Build is already completed or canceled.")),
+        )
+            .into_response());
+    }
+
+    Ok(StatusCode::OK.into_response())
+}
+
+/// GET /workspacebuilds/{build}/logs
+async fn get_workspace_build_logs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+    Query(query): Query<BuildLogsQuery>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let _follow = query.follow.unwrap_or(false);
+    let logs = state
+        .store
+        .list_provisioner_job_logs(build.job_id, query.after)
+        .await?;
+
+    let items: Vec<Value> = logs
+        .into_iter()
+        .map(|l| {
+            json!({
+                "id": l.id,
+                "created_at": l.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "source": l.source,
+                "level": l.level,
+                "stage": l.stage,
+                "output": l.output,
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(items)).into_response())
+}
+
+/// GET /workspacebuilds/{build}/parameters
+async fn get_workspace_build_parameters(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let params = state
+        .store
+        .list_workspace_build_parameters(build_id)
+        .await?;
+
+    let items: Vec<Value> = params
+        .into_iter()
+        .map(|p| json!({ "name": p.name, "value": p.value }))
+        .collect();
+
+    Ok((StatusCode::OK, Json(items)).into_response())
+}
+
+/// GET /workspacebuilds/{build}/resources
+async fn get_workspace_build_resources(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let resources = state
+        .store
+        .list_workspace_resources_by_job(build.job_id)
+        .await?;
+
+    let items: Vec<Value> = resources
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.id,
+                "created_at": r.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "job_id": r.job_id,
+                "workspace_transition": r.transition,
+                "type": r.resource_type,
+                "name": r.name,
+                "hide": r.hide,
+                "icon": r.icon,
+                "daily_cost": r.daily_cost,
+                "agents": [],
+                "metadata": [],
+            })
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(items)).into_response())
+}
+
+/// GET /workspacebuilds/{build}/state
+async fn get_workspace_build_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let state_bytes = build.provisioner_state.unwrap_or_default();
+    Ok((
+        StatusCode::OK,
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("application/octet-stream"),
+        )],
+        state_bytes,
+    )
+        .into_response())
+}
+
+/// PUT /workspacebuilds/{build}/state
+async fn put_workspace_build_state(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    state
+        .store
+        .update_workspace_build_provisioner_state(build_id, &body)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /workspacebuilds/{build}/timings
+async fn get_workspace_build_timings(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(build_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let timings = state
+        .store
+        .list_provisioner_job_timings(build.job_id)
+        .await?;
+
+    let items: Vec<Value> = timings
+        .into_iter()
+        .map(|t| {
+            json!({
+                "started_at": t.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "ended_at": t.ended_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "stage": t.stage,
+                "source": t.source,
+                "action": t.action,
+                "resource": t.resource,
+            })
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(json!({ "provisioner_timings": items, "agent_script_timings": [] })),
+    )
+        .into_response())
+}
+
+/// GET /users/{user}/workspace/{name}
+async fn get_user_workspace_by_name(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((user, name)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_owner_and_name(target_user.id, &name, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    Ok((StatusCode::OK, Json(workspace_to_json(&workspace))).into_response())
+}
+
+/// GET /users/{user}/workspace/{name}/builds/{number}
+async fn get_user_workspace_build_by_number(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((user, name, number)): Path<(String, String, i64)>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_owner_and_name(target_user.id, &name, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let Some(build) = state
+        .store
+        .find_workspace_build_by_number(workspace.id, number)
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    Ok((StatusCode::OK, Json(build_to_json(&build))).into_response())
+}
+
+/// POST /users/{user}/workspaces — create workspace + initial build.
+async fn post_user_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(user): Path<String>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    let template_id = match body.get("template_id").and_then(|v| v.as_str()) {
+        Some(id) => match Uuid::parse_str(id) {
+            Ok(uuid) => uuid,
+            Err(_) => {
+                return Ok(validation_response(vec![ValidationError {
+                    field: "template_id".to_owned(),
+                    detail: "Invalid UUID.".to_owned(),
+                }]));
+            }
+        },
+        None => {
+            return Ok(validation_response(vec![ValidationError {
+                field: "template_id".to_owned(),
+                detail: "Template ID is required.".to_owned(),
+            }]));
+        }
+    };
+
+    let ws_name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+
+    if ws_name.is_empty() {
+        return Ok(validation_response(vec![ValidationError {
+            field: "name".to_owned(),
+            detail: "Name is required.".to_owned(),
+        }]));
+    }
+
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+
+    let workspace_id = Uuid::new_v4();
+    let autostart_schedule = body
+        .get("autostart_schedule")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let ttl_ms = body.get("ttl_ms").and_then(|v| v.as_i64());
+    let automatic_updates = body
+        .get("automatic_updates")
+        .and_then(|v| v.as_str())
+        .unwrap_or("never")
+        .to_owned();
+
+    let workspace = state
+        .store
+        .insert_workspace(CreateWorkspaceInput {
+            id: workspace_id,
+            owner_id: target_user.id,
+            organization_id: template.organization_id,
+            template_id,
+            name: ws_name,
+            autostart_schedule,
+            ttl_ns: ttl_ms.map(|ms| ms * 1_000_000),
+            automatic_updates,
+        })
+        .await?;
+
+    // Create initial build.
+    let job_id = Uuid::new_v4();
+    let build_id = Uuid::new_v4();
+
+    let template_version_id = body
+        .get("template_version_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or(template.active_version_id);
+
+    let _job = state
+        .store
+        .insert_provisioner_job(CreateProvisionerJobInput {
+            id: job_id,
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+            organization_id: template.organization_id,
+            initiator_id: context.user.id,
+            provisioner: "echo".to_owned(),
+            file_id: None,
+            job_type: "workspace_build".to_owned(),
+            input: json!({}),
+            tags: HashMap::new(),
+        })
+        .await?;
+
+    // build_number is computed atomically inside insert_workspace_build.
+    let _build = state
+        .store
+        .insert_workspace_build(CreateWorkspaceBuildInput {
+            id: build_id,
+            workspace_id,
+            template_version_id,
+            build_number: 0,
+            transition: "start".to_owned(),
+            initiator_id: context.user.id,
+            job_id,
+            reason: "initiator".to_owned(),
+            deadline: None,
+            max_deadline: None,
+        })
+        .await?;
+
+    // Insert build parameters if provided.
+    if let Some(params) = body.get("rich_parameter_values").and_then(|v| v.as_array()) {
+        let param_pairs: Vec<(String, String)> = params
+            .iter()
+            .filter_map(|p| {
+                let name = p.get("name")?.as_str()?.to_owned();
+                let value = p.get("value")?.as_str()?.to_owned();
+                Some((name, value))
+            })
+            .collect();
+        if !param_pairs.is_empty() {
+            state
+                .store
+                .insert_workspace_build_parameters(build_id, &param_pairs)
+                .await?;
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(workspace_to_json(&workspace))).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Workspace JSON helpers
+// ---------------------------------------------------------------------------
+
+fn workspace_to_json(w: &coder_core::WorkspaceRecord) -> Value {
+    json!({
+        "id": w.id,
+        "created_at": w.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        "updated_at": w.updated_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        "owner_id": w.owner_id,
+        "organization_id": w.organization_id,
+        "template_id": w.template_id,
+        "name": w.name,
+        "autostart_schedule": w.autostart_schedule,
+        "ttl_ms": w.ttl_ns.map(|ns| ns / 1_000_000),
+        "last_used_at": w.last_used_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        "dormant_at": w.dormant_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+        "deleting_at": w.deleting_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+        "automatic_updates": w.automatic_updates,
+        "favorite": w.favorite,
+        "next_start_at": w.next_start_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+    })
+}
+
+fn build_to_json(b: &coder_core::WorkspaceBuildRecord) -> Value {
+    json!({
+        "id": b.id,
+        "created_at": b.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        "updated_at": b.updated_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+        "workspace_id": b.workspace_id,
+        "build_number": b.build_number,
+        "transition": b.transition,
+        "job_id": b.job_id,
+        "template_version_id": b.template_version_id,
+        "initiator_id": b.initiator_id,
+        "deadline": b.deadline.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+        "max_deadline": b.max_deadline.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
+        "reason": b.reason,
+        "daily_cost": b.daily_cost,
+    })
+}
 
 async fn list_oauth2_provider_apps(
     State(state): State<AppState>,
@@ -5438,28 +6858,6 @@ fn oauth2_secret_response(
         last_used_at: None,
         client_secret_truncated: secret.display_secret,
     }
-}
-
-fn not_implemented_response(message: impl Into<String>) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::ok(message.into())),
-    )
-        .into_response()
-}
-
-fn not_found_response(message: impl Into<String>) -> Response {
-    (StatusCode::NOT_FOUND, Json(ApiResponse::ok(message.into()))).into_response()
-}
-
-fn resource_not_found_response() -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        Json(ApiResponse::ok(
-            "Resource not found or you do not have access to this resource",
-        )),
-    )
-        .into_response()
 }
 
 // ---------------------------------------------------------------------------

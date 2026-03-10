@@ -69,13 +69,17 @@ pub use password::{
 };
 pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, ChatMessageRecord, ChatQueuedMessageRecord,
-    ChatRecord, DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord,
-    GitSshKeyRecord, IdentityStore, InsertChatInput, InsertChatMessageInput, InsertFileInput,
-    InsertFileResult, InsertTaskInput, OperationalStore, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TemplateStore,
-    UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    ChatRecord, CreateWorkspaceBuildInput, CreateWorkspaceInput, DeploymentMetadata,
+    DeploymentStore, ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore,
+    InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertTaskInput,
+    OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord, ProvisionerJobStatsInput,
+    ProvisionerJobTimingRecord, StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord,
+    TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentStatInput, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
+    WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
