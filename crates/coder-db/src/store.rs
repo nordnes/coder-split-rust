@@ -11998,16 +11998,12 @@ mod tests {
         let deleted = store.delete_task(task_id, delete_time).await?;
         assert!(deleted);
 
-        // Verify deleted_at is set
+        // find_task_by_id uses `WHERE deleted_at IS NULL`, so a soft-deleted
+        // task should no longer be found — matching the user soft-delete pattern.
         let after_delete = store.find_task_by_id(task_id).await?;
-        assert!(after_delete.is_some());
         assert!(
-            after_delete
-                .as_ref()
-                .unwrap_or_else(|| panic!("task missing"))
-                .deleted_at
-                .is_some(),
-            "task should have deleted_at set"
+            after_delete.is_none(),
+            "soft-deleted task should not be found via find_task_by_id"
         );
 
         Ok(())
