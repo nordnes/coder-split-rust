@@ -857,6 +857,8 @@ pub enum NotificationMethod {
 pub enum NotificationMessageStatus {
     /// Waiting to be dispatched.
     Pending,
+    /// Leased by a dispatch worker (being sent).
+    Leased,
     /// Successfully dispatched.
     Sent,
     /// Dispatch temporarily failed (eligible for retry).
