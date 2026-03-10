@@ -1581,11 +1581,15 @@ pub trait IdentityStore: Send + Sync {
     // ----- Notifications -----
 
     /// Fetches pending notification messages for dispatch.
+    ///
+    /// Messages with `attempt_count >= max_attempt_count` are excluded so they
+    /// can be purged separately rather than retried indefinitely.
     async fn fetch_pending_notification_messages(
         &self,
         limit: u32,
+        max_attempt_count: u32,
     ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = limit;
+        let _ = (limit, max_attempt_count);
         Err(StorageError::unavailable(
             "notification messages are not implemented",
         ))
@@ -3920,6 +3924,70 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = (user_id, endpoint);
         Err(StorageError::unavailable(
             "webpush subscriptions are not implemented",
+        ))
+    }
+
+    // ----- Notification message dispatch -----
+
+    /// Fetches pending notification messages for dispatch.
+    ///
+    /// Messages with `attempt_count >= max_attempt_count` are excluded so they
+    /// can be purged separately rather than retried indefinitely.
+    async fn fetch_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        let _ = (limit, max_attempt_count);
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Updates the status of a notification message after dispatch.
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        let _ = (message_id, status);
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Increments the attempt count for a notification message.
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = message_id;
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    // ----- Custom roles -----
+
+    /// Lists custom roles, optionally filtered by organization.
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        let _ = organization_id;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    /// Upserts a custom role.
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
         ))
     }
 }
