@@ -12606,13 +12606,18 @@ mod tests {
         async fn archive_unused_template_versions(
             &self,
             template_id: Uuid,
-            _all: bool,
+            all: bool,
         ) -> Result<Vec<Uuid>, StorageError> {
             let templates = self
                 .templates
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let active_version_id = templates.get(&template_id).map(|t| t.active_version_id);
+
+            let jobs = self
+                .provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
 
             let mut versions = self
                 .template_versions
@@ -12624,6 +12629,16 @@ mod tests {
                     && !v.archived
                     && Some(v.id) != active_version_id
                 {
+                    // When `all` is false, only archive versions whose job failed.
+                    if !all {
+                        let job_failed = jobs
+                            .get(&v.job_id)
+                            .map(|j| j.job_status == "failed")
+                            .unwrap_or(false);
+                        if !job_failed {
+                            continue;
+                        }
+                    }
                     v.archived = true;
                     archived.push(v.id);
                 }

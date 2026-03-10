@@ -5459,8 +5459,12 @@ impl AppStore for PostgresStore {
         let row = if let Some(tid) = template_id {
             sqlx::query_as::<_, StoredTemplateVersionRow>(
                 r#"
-                SELECT tv.*
+                SELECT tv.*,
+                       COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                       COALESCE(u.username, '') AS created_by_username,
+                       COALESCE(u.name, '') AS created_by_name
                 FROM template_versions tv
+                LEFT JOIN users u ON u.id = tv.created_by
                 WHERE tv.organization_id = $1
                   AND tv.template_id = $3
                   AND tv.created_at < (
@@ -5481,8 +5485,12 @@ impl AppStore for PostgresStore {
         } else {
             sqlx::query_as::<_, StoredTemplateVersionRow>(
                 r#"
-                SELECT tv.*
+                SELECT tv.*,
+                       COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                       COALESCE(u.username, '') AS created_by_username,
+                       COALESCE(u.name, '') AS created_by_name
                 FROM template_versions tv
+                LEFT JOIN users u ON u.id = tv.created_by
                 WHERE tv.organization_id = $1
                   AND tv.created_at < (
                       SELECT created_at FROM template_versions
