@@ -11005,8 +11005,12 @@ async fn get_workspace_agent_logs(
         // window).
         let last_sent_id = existing_logs.last().map(|l| l.id);
 
-        let initial_data = serde_json::to_string(&existing_logs).unwrap_or_default();
-        let _ = tx.send(format!("data: {initial_data}\n\n")).await;
+        // Send each existing log as its own SSE event so the format is
+        // consistent with the per-log pubsub messages that follow.
+        for log in &existing_logs {
+            let data = serde_json::to_string(log).unwrap_or_default();
+            let _ = tx.send(format!("data: {data}\n\n")).await;
+        }
 
         // Spawn a task that listens for new log events on pubsub.
         tokio::spawn(async move {
