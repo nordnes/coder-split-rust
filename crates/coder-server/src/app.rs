@@ -10999,6 +10999,12 @@ async fn get_workspace_agent_logs(
             })
             .collect();
 
+        // Track the highest log ID from the initial batch so that the
+        // spawned task can skip any pubsub messages that were already
+        // included (avoids duplicates from the subscribe-before-query race
+        // window).
+        let last_sent_id = existing_logs.last().map(|l| l.id);
+
         let initial_data = serde_json::to_string(&existing_logs).unwrap_or_default();
         let _ = tx.send(format!("data: {initial_data}\n\n")).await;
 
@@ -11010,6 +11016,17 @@ async fn get_workspace_agent_logs(
                         match msg {
                             Ok(bytes) => {
                                 // Each message is a JSON-serialised WorkspaceAgentLog.
+                                // Deduplicate: skip messages with an ID that was
+                                // already sent in the initial batch.
+                                if let Some(max_id) = last_sent_id {
+                                    if let Ok(log) = serde_json::from_slice::<Value>(&bytes) {
+                                        if let Some(id_val) = log.get("id").and_then(|v| v.as_i64()) {
+                                            if id_val <= max_id {
+                                                continue;
+                                            }
+                                        }
+                                    }
+                                }
                                 let data = String::from_utf8_lossy(&bytes);
                                 let sse = format!("data: {data}\n\n");
                                 if tx.send(sse).await.is_err() {

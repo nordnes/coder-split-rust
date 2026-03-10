@@ -208,7 +208,7 @@ pub fn workspace_agent_logs_channel(agent_id: Uuid) -> String {
 /// Returns the pub/sub channel name for workspace agent reinit events.
 #[must_use]
 pub fn workspace_agent_reinit_channel(agent_id: Uuid) -> String {
-    format!("workspace_reinit:{agent_id}")
+    format!("workspace_agent_reinit:{agent_id}")
 }
 
 /// The kind of workspace event broadcast over the pub/sub channel.
@@ -360,7 +360,7 @@ mod tests {
         );
         assert_eq!(
             workspace_agent_reinit_channel(id),
-            "workspace_reinit:00000000-0000-0000-0000-000000000000"
+            "workspace_agent_reinit:00000000-0000-0000-0000-000000000000"
         );
     }
 
