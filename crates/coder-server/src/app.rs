@@ -31193,27 +31193,6 @@ mod tests {
     // watch_chat_git WebSocket tests
     // -----------------------------------------------------------------
 
-    /// Helper: add WebSocket upgrade headers to a request.
-    fn add_ws_upgrade_headers(req: &mut Request<Body>) {
-        let headers = req.headers_mut();
-        headers.insert(
-            HeaderName::from_static("upgrade"),
-            HeaderValue::from_static("websocket"),
-        );
-        headers.insert(
-            HeaderName::from_static("connection"),
-            HeaderValue::from_static("Upgrade"),
-        );
-        headers.insert(
-            HeaderName::from_static("sec-websocket-version"),
-            HeaderValue::from_static("13"),
-        );
-        headers.insert(
-            HeaderName::from_static("sec-websocket-key"),
-            HeaderValue::from_static("dGVzdF9rZXk="),
-        );
-    }
-
     #[tokio::test]
     async fn test_watch_chat_git_requires_auth() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
