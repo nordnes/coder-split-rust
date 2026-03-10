@@ -426,6 +426,14 @@ pub fn build_router(state: AppState) -> Router {
                     "/organizations/{organization}/members/{user}/roles",
                     put(put_organization_member_roles),
                 )
+                .route(
+                    "/organizations/{organization}/members/{user}/workspaces",
+                    post(post_org_member_workspace),
+                )
+                .route(
+                    "/organizations/{organization}/members/{user}/workspaces/available-users",
+                    get(get_org_member_workspace_available_users),
+                )
                 .route("/users", get(list_users).post(post_user))
                 .route("/users/authmethods", get(auth_methods))
                 .route("/updatecheck", get(update_check))
@@ -7398,6 +7406,208 @@ async fn post_user_workspace(
     Ok((StatusCode::CREATED, Json(workspace_to_json(&workspace))).into_response())
 }
 
+/// POST /organizations/{organization}/members/{user}/workspaces — create workspace in org.
+///
+/// Mirrors the Go `postWorkspacesByOrganization` handler: resolves the
+/// organization and member, then delegates to the same workspace-creation
+/// logic used by `post_user_workspace`.
+async fn post_org_member_workspace(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((organization, user)): Path<(String, String)>,
+    payload: Result<Json<Value>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(body) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // Resolve organization.
+    let Some(org_record) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    // Resolve the target user (member) within the organization context.
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // From here, the workspace creation logic is identical to post_user_workspace.
+    let template_id = match body.get("template_id").and_then(|v| v.as_str()) {
+        Some(id) => match Uuid::parse_str(id) {
+            Ok(uuid) => uuid,
+            Err(_) => {
+                return Ok(validation_response(vec![ValidationError {
+                    field: "template_id".to_owned(),
+                    detail: "Invalid UUID.".to_owned(),
+                }]));
+            }
+        },
+        None => {
+            return Ok(validation_response(vec![ValidationError {
+                field: "template_id".to_owned(),
+                detail: "Template ID is required.".to_owned(),
+            }]));
+        }
+    };
+
+    let ws_name = body
+        .get("name")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_owned();
+
+    if ws_name.is_empty() {
+        return Ok(validation_response(vec![ValidationError {
+            field: "name".to_owned(),
+            detail: "Name is required.".to_owned(),
+        }]));
+    }
+
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+
+    // Ensure the template belongs to the resolved organization.
+    if template.organization_id != org_record.id {
+        return Ok(not_found_response(
+            "Template not found in the specified organization.",
+        ));
+    }
+
+    let workspace_id = Uuid::new_v4();
+    let autostart_schedule = body
+        .get("autostart_schedule")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+    let ttl_ms = body.get("ttl_ms").and_then(|v| v.as_i64());
+    let automatic_updates = body
+        .get("automatic_updates")
+        .and_then(|v| v.as_str())
+        .unwrap_or("never")
+        .to_owned();
+
+    let workspace = state
+        .store
+        .insert_workspace(CreateWorkspaceInput {
+            id: workspace_id,
+            owner_id: target_user.id,
+            organization_id: org_record.id,
+            template_id,
+            name: ws_name,
+            autostart_schedule,
+            ttl_ns: ttl_ms.map(|ms| ms * 1_000_000),
+            automatic_updates,
+        })
+        .await?;
+
+    // Create initial build.
+    let job_id = Uuid::new_v4();
+    let build_id = Uuid::new_v4();
+
+    let template_version_id = body
+        .get("template_version_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or(template.active_version_id);
+
+    let _job = state
+        .store
+        .create_provisioner_job(CreateProvisionerJobInput {
+            id: job_id,
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+            organization_id: org_record.id,
+            initiator_id: context.user.id,
+            provisioner: "echo".to_owned(),
+            file_id: None,
+            job_type: "workspace_build".to_owned(),
+            input: json!({}),
+            tags: HashMap::new(),
+        })
+        .await?;
+
+    let _build = state
+        .store
+        .insert_workspace_build(CreateWorkspaceBuildInput {
+            id: build_id,
+            workspace_id,
+            template_version_id,
+            build_number: 0,
+            transition: "start".to_owned(),
+            initiator_id: context.user.id,
+            job_id,
+            reason: "initiator".to_owned(),
+            deadline: None,
+            max_deadline: None,
+        })
+        .await?;
+
+    // Insert build parameters if provided.
+    if let Some(params) = body.get("rich_parameter_values").and_then(|v| v.as_array()) {
+        let param_pairs: Vec<(String, String)> = params
+            .iter()
+            .filter_map(|p| {
+                let name = p.get("name")?.as_str()?.to_owned();
+                let value = p.get("value")?.as_str()?.to_owned();
+                Some((name, value))
+            })
+            .collect();
+        if !param_pairs.is_empty() {
+            state
+                .store
+                .insert_workspace_build_parameters(build_id, &param_pairs)
+                .await?;
+        }
+    }
+
+    Ok((StatusCode::CREATED, Json(workspace_to_json(&workspace))).into_response())
+}
+
+/// GET /organizations/{organization}/members/{user}/workspaces/available-users
+///
+/// Returns a list of users that can own workspaces in the given organization.
+/// Mirrors the Go `workspaceAvailableUsers` handler.
+async fn get_org_member_workspace_available_users(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((organization, _user)): Path<(String, String)>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Validate the organization exists.
+    let Some(_org_record) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    // List all active users — the Go implementation lists all users using
+    // system context.  We return MinimalUser representations.
+    let (users, _count) = state
+        .store
+        .list_users(UserListFilter {
+            status: Some(UserStatus::Active),
+            ..UserListFilter::default()
+        })
+        .await?;
+
+    let minimal_users: Vec<MinimalUser> = users
+        .into_iter()
+        .map(|u| MinimalUser {
+            id: u.id,
+            username: u.username,
+            name: u.name,
+            avatar_url: u.avatar_url,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(minimal_users)).into_response())
+}
+
 // ---------------------------------------------------------------------------
 // Workspace JSON helpers
 // ---------------------------------------------------------------------------
@@ -9605,16 +9815,17 @@ mod tests {
         CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
         CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
         CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
-        DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse, DeploymentStore,
-        DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord,
-        ExternalAuthUser, FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings,
-        InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult,
-        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
-        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, InsertTaskInput, LogFormat,
-        LoginType, LoginWithPasswordRequest, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
-        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
+        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
+        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
+        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertChatInput,
+        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+        InsertProvisionerKeyInput, InsertTaskInput, LogFormat, LoginType, LoginWithPasswordRequest,
+        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
+        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
@@ -9625,8 +9836,9 @@ mod tests {
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
         UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
         UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentStatInput,
-        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
+        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput,
+        WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -9695,6 +9907,9 @@ mod tests {
         template_version_preset_parameters:
             Mutex<HashMap<Uuid, Vec<TemplateVersionPresetParameterRecord>>>,
         files: Mutex<HashMap<Uuid, FileRecord>>,
+        workspaces: Mutex<HashMap<Uuid, WorkspaceRecord>>,
+        workspace_builds: Mutex<HashMap<Uuid, WorkspaceBuildRecord>>,
+        workspace_build_parameters: Mutex<HashMap<Uuid, Vec<WorkspaceBuildParameterRecord>>>,
     }
 
     impl FakeStore {
@@ -9738,6 +9953,9 @@ mod tests {
                 template_version_presets: Mutex::new(HashMap::new()),
                 template_version_preset_parameters: Mutex::new(HashMap::new()),
                 files: Mutex::new(HashMap::new()),
+                workspaces: Mutex::new(HashMap::new()),
+                workspace_builds: Mutex::new(HashMap::new()),
+                workspace_build_parameters: Mutex::new(HashMap::new()),
             }
         }
 
@@ -12696,6 +12914,119 @@ mod tests {
                         .find(|f| f.hash == hash && f.created_by == creator_id)
                         .cloned()
                 })
+        }
+
+        // ---------------------------------------------------------------
+        // Workspace domain overrides
+        // ---------------------------------------------------------------
+
+        async fn insert_workspace(
+            &self,
+            input: CreateWorkspaceInput,
+        ) -> Result<WorkspaceRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let record = WorkspaceRecord {
+                id: input.id,
+                created_at: now,
+                updated_at: now,
+                deleted: false,
+                owner_id: input.owner_id,
+                organization_id: input.organization_id,
+                template_id: input.template_id,
+                name: input.name,
+                autostart_schedule: input.autostart_schedule,
+                ttl_ns: input.ttl_ns,
+                last_used_at: now,
+                dormant_at: None,
+                deleting_at: None,
+                automatic_updates: input.automatic_updates,
+                favorite: false,
+                next_start_at: None,
+            };
+            self.workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_workspace_by_owner_and_name(
+            &self,
+            owner_id: Uuid,
+            name: &str,
+            _viewer_id: Option<Uuid>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(workspaces
+                .values()
+                .find(|w| !w.deleted && w.owner_id == owner_id && w.name == name)
+                .cloned())
+        }
+
+        async fn insert_workspace_build(
+            &self,
+            input: CreateWorkspaceBuildInput,
+        ) -> Result<WorkspaceBuildRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let record = WorkspaceBuildRecord {
+                id: input.id,
+                created_at: now,
+                updated_at: now,
+                workspace_id: input.workspace_id,
+                build_number: input.build_number,
+                transition: input.transition,
+                job_id: input.job_id,
+                template_version_id: input.template_version_id,
+                initiator_id: input.initiator_id,
+                provisioner_state: None,
+                deadline: input.deadline,
+                max_deadline: input.max_deadline,
+                reason: input.reason,
+                daily_cost: 0,
+            };
+            self.workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_workspace_build_by_number(
+            &self,
+            workspace_id: Uuid,
+            build_number: i64,
+        ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(builds
+                .values()
+                .find(|b| b.workspace_id == workspace_id && b.build_number == build_number)
+                .cloned())
+        }
+
+        async fn insert_workspace_build_parameters(
+            &self,
+            build_id: Uuid,
+            params: &[(String, String)],
+        ) -> Result<(), StorageError> {
+            let records: Vec<WorkspaceBuildParameterRecord> = params
+                .iter()
+                .map(|(name, value)| WorkspaceBuildParameterRecord {
+                    workspace_build_id: build_id,
+                    name: name.clone(),
+                    value: value.clone(),
+                })
+                .collect();
+            self.workspace_build_parameters
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(build_id, records);
+            Ok(())
         }
     }
 
@@ -17241,6 +17572,120 @@ mod tests {
         let response = call(app, req).await?;
         // CSP reports are exempt from CSRF; should not get 403.
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    // ----- Organization Workspace Route Tests -----
+
+    #[tokio::test]
+    async fn post_org_member_workspace_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/organizations/some-org/members/some-user/workspaces",
+                &json!({"name": "ws", "template_id": Uuid::nil().to_string()}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_org_member_workspace_creates_workspace() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/members/me/workspaces"),
+                &session_token,
+                &json!({
+                    "name": "org-workspace",
+                    "template_id": template_id,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("org-workspace")
+        );
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_org_member_workspace_validates_missing_fields() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        // Missing template_id
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/members/me/workspaces"),
+                &session_token,
+                &json!({"name": "ws"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_org_member_available_users_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/organizations/some-org/members/some-user/workspaces/available-users",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_org_member_available_users_returns_user_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/members/me/workspaces/available-users"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let users = body.as_array().ok_or("expected array")?;
+        // The bootstrapped owner should be in the list.
+        assert!(!users.is_empty());
+        let first = &users[0];
+        assert!(first.get("id").is_some());
+        assert!(first.get("username").is_some());
         Ok(())
     }
 }
