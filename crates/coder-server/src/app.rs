@@ -4023,9 +4023,11 @@ async fn get_chat_file(
     if file.name.is_empty() {
         builder = builder.header("content-disposition", "inline");
     } else {
+        // Sanitize filename to prevent header injection via embedded quotes/backslashes.
+        let sanitized_name = file.name.replace('"', "").replace('\\', "");
         builder = builder.header(
             "content-disposition",
-            format!("inline; filename=\"{}\"", file.name),
+            format!("inline; filename=\"{}\"", sanitized_name),
         );
     }
 
