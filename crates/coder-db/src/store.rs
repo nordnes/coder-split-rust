@@ -1585,7 +1585,7 @@ impl AppStore for PostgresStore {
              ),
              latest_status_before_range AS (
                  SELECT
-                     DISTINCT usc.user_id,
+                     DISTINCT ON (usc.user_id) usc.user_id,
                      usc.new_status,
                      usc.changed_at
                  FROM user_status_changes usc
