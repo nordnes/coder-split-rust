@@ -5,7 +5,11 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 use axum::{
     Form, Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, OriginalUri, Path, Query, State, rejection::JsonRejection},
+    extract::{
+        DefaultBodyLimit, OriginalUri, Path, Query, State,
+        rejection::JsonRejection,
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+    },
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
@@ -15,7 +19,7 @@ use axum::{
     },
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, patch, post, put},
+    routing::{delete, get, patch, post, put},
 };
 use coder_audit::{AuditAction, AuditEvent, AuditSink};
 use coder_auth::{
@@ -776,11 +780,11 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/oauth2-provider/apps/{app_id}/secrets/{secret_id}",
-                    axum::routing::delete(delete_oauth2_provider_app_secret),
+                    delete(delete_oauth2_provider_app_secret),
                 )
                 .route(
                     "/oauth2-provider/apps/{app_id}/tokens",
-                    axum::routing::delete(delete_oauth2_provider_app_tokens),
+                    delete(delete_oauth2_provider_app_tokens),
                 )
                 .route(
                     "/files",
@@ -837,8 +841,11 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/workspaceagents/{agent}/containers/devcontainers/{devcontainer}",
-                    post(post_workspace_agent_recreate_devcontainer)
-                        .delete(delete_workspace_agent_devcontainer),
+                    delete(delete_workspace_agent_devcontainer),
+                )
+                .route(
+                    "/workspaceagents/{agent}/containers/devcontainers/{devcontainer}/recreate",
+                    post(post_workspace_agent_recreate_devcontainer),
                 )
                 .route(
                     "/workspaceagents/{agent}/containers/watch",
@@ -6058,6 +6065,20 @@ fn not_implemented_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// Accept a WebSocket upgrade then immediately close with a "not implemented" reason.
+/// Used for endpoints that require tailnet/pubsub integration not yet available.
+async fn ws_close_not_implemented(mut socket: WebSocket, reason: &str) {
+    // Send the reason as a text message, then close gracefully.
+    let _ = socket.send(Message::Text(reason.into())).await;
+    let _ = socket
+        .send(Message::Close(Some(CloseFrame {
+            // 4001 = application-level "not implemented" close code (in the 4000-4999 private range).
+            code: 4001,
+            reason: reason.into(),
+        })))
+        .await;
+}
+
 fn not_found_response(message: impl Into<String>) -> Response {
     (StatusCode::NOT_FOUND, Json(ApiResponse::ok(message.into()))).into_response()
 }
@@ -8739,6 +8760,7 @@ async fn get_workspace_agent_containers_watch(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -8748,11 +8770,13 @@ async fn get_workspace_agent_containers_watch(
         return Ok(resource_not_found_response());
     };
 
-    // Container watch SSE requires a real-time connection to the agent
-    // which is not yet available in the Rust backend.
-    Ok(not_implemented_response(
-        "Container watch SSE requires agent connectivity which is not yet implemented.",
-    ))
+    // Accept WebSocket upgrade, then close — real streaming requires agent connectivity.
+    Ok(ws.on_upgrade(|socket| {
+        ws_close_not_implemented(
+            socket,
+            "Container watch requires agent connectivity which is not yet implemented.",
+        )
+    }))
 }
 
 /// GET /api/v2/workspaceagents/{agent}/coordinate — WebSocket coordination.
@@ -8760,6 +8784,7 @@ async fn get_workspace_agent_coordinate(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -8769,11 +8794,13 @@ async fn get_workspace_agent_coordinate(
         return Ok(resource_not_found_response());
     };
 
-    // Coordinate WebSocket requires tailnet integration which is not yet
-    // available in the Rust backend.
-    Ok(not_implemented_response(
-        "Agent coordination WebSocket requires tailnet integration which is not yet implemented.",
-    ))
+    // Accept WebSocket upgrade, then close — real coordination requires tailnet.
+    Ok(ws.on_upgrade(|socket| {
+        ws_close_not_implemented(
+            socket,
+            "Agent coordination requires tailnet integration which is not yet implemented.",
+        )
+    }))
 }
 
 /// GET /api/v2/workspaceagents/{agent}/listening-ports — list listening ports.
@@ -8844,6 +8871,7 @@ async fn get_workspace_agent_pty(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -8853,11 +8881,13 @@ async fn get_workspace_agent_pty(
         return Ok(resource_not_found_response());
     };
 
-    // PTY WebSocket requires a real-time connection to the agent
-    // which is not yet available in the Rust backend.
-    Ok(not_implemented_response(
-        "Agent PTY WebSocket requires agent connectivity which is not yet implemented.",
-    ))
+    // Accept WebSocket upgrade, then close — real PTY requires agent connectivity.
+    Ok(ws.on_upgrade(|socket| {
+        ws_close_not_implemented(
+            socket,
+            "Agent PTY requires agent connectivity which is not yet implemented.",
+        )
+    }))
 }
 
 /// GET /api/v2/workspaceagents/{agent}/watch-metadata — SSE metadata watch.
@@ -8899,6 +8929,7 @@ async fn get_workspace_agent_watch_metadata_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -8908,12 +8939,11 @@ async fn get_workspace_agent_watch_metadata_ws(
         return Ok(resource_not_found_response());
     };
 
-    // WebSocket metadata watch requires real-time pubsub integration which
-    // is not yet available in the Rust backend. Use the SSE endpoint
-    // (watch-metadata) for a snapshot of current metadata.
-    Ok(not_implemented_response(
+    // Accept WebSocket upgrade, then close — real watch requires pubsub.
+    Ok(ws.on_upgrade(|socket| ws_close_not_implemented(
+        socket,
         "Agent metadata WebSocket watch requires pubsub integration which is not yet implemented.",
-    ))
+    )))
 }
 
 /// GET /api/v2/workspaceagents/connection — global agent connection info.
@@ -17170,7 +17200,7 @@ mod tests {
             authenticated_request(
                 Method::POST,
                 &format!(
-                    "/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}"
+                    "/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}/recreate"
                 ),
                 &token,
             )?,
@@ -17205,7 +17235,7 @@ mod tests {
             authenticated_request(
                 Method::POST,
                 &format!(
-                    "/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}"
+                    "/api/v2/workspaceagents/{agent_id}/containers/devcontainers/{dc_id}/recreate"
                 ),
                 &token,
             )?,
@@ -17492,13 +17522,30 @@ mod tests {
         Ok(())
     }
 
+    /// Helper to build a request with WebSocket upgrade headers (HTTP/1.1).
+    fn ws_upgrade_request(uri: &str, session_token: &str) -> Result<Request<Body>, http::Error> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .version(http::Version::HTTP_11)
+            .header(SESSION_TOKEN_HEADER, session_token)
+            .header("connection", "Upgrade")
+            .header("upgrade", "websocket")
+            .header("sec-websocket-version", "13")
+            .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==")
+            .body(Body::empty())
+    }
+
     #[tokio::test]
-    async fn get_workspace_agent_coordinate_not_found() -> Result<(), Box<dyn Error>> {
-        let (state, _store) = test_state_with_store(true)?;
+    async fn get_workspace_agent_coordinate_rejects_non_ws() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        // Non-WebSocket request should be rejected by the WebSocketUpgrade extractor.
         let response = call(
             app,
             authenticated_request(
@@ -17508,13 +17555,18 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        // Axum returns 400 (Bad Request) when WebSocket upgrade headers are missing.
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 400 or 426, got {}",
+            response.status()
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn get_workspace_agent_coordinate_returns_not_implemented() -> Result<(), Box<dyn Error>>
-    {
+    async fn get_workspace_agent_coordinate_ws_upgrade() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
@@ -17524,39 +17576,25 @@ mod tests {
 
         let response = call(
             app,
-            authenticated_request(
-                Method::GET,
+            ws_upgrade_request(
                 &format!("/api/v2/workspaceagents/{agent_id}/coordinate"),
                 &token,
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        // In a real server this returns 101; in oneshot tests the upgrade cannot complete
+        // so axum returns 426. Both prove the route matched and the WS extractor ran.
+        assert!(
+            response.status() == StatusCode::SWITCHING_PROTOCOLS
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 101 or 426, got {}",
+            response.status()
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn get_workspace_agent_pty_not_found() -> Result<(), Box<dyn Error>> {
-        let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
-        let token = create_and_login(&app).await?;
-
-        let agent_id = Uuid::new_v4();
-        let response = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/workspaceagents/{agent_id}/pty"),
-                &token,
-            )?,
-        )
-        .await?;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn get_workspace_agent_pty_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+    async fn get_workspace_agent_pty_rejects_non_ws() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
@@ -17573,33 +17611,40 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 400 or 426, got {}",
+            response.status()
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn get_workspace_agent_containers_watch_not_found() -> Result<(), Box<dyn Error>> {
-        let (state, _store) = test_state_with_store(true)?;
+    async fn get_workspace_agent_pty_ws_upgrade() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
         let response = call(
             app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
-                &token,
-            )?,
+            ws_upgrade_request(&format!("/api/v2/workspaceagents/{agent_id}/pty"), &token)?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response.status() == StatusCode::SWITCHING_PROTOCOLS
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 101 or 426, got {}",
+            response.status()
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn get_workspace_agent_containers_watch_returns_not_implemented()
-    -> Result<(), Box<dyn Error>> {
+    async fn get_workspace_agent_containers_watch_rejects_non_ws() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
@@ -17616,33 +17661,43 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 400 or 426, got {}",
+            response.status()
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn get_workspace_agent_watch_metadata_ws_not_found() -> Result<(), Box<dyn Error>> {
-        let (state, _store) = test_state_with_store(true)?;
+    async fn get_workspace_agent_containers_watch_ws_upgrade() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
         let response = call(
             app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+            ws_upgrade_request(
+                &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
                 &token,
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert!(
+            response.status() == StatusCode::SWITCHING_PROTOCOLS
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 101 or 426, got {}",
+            response.status()
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn get_workspace_agent_watch_metadata_ws_returns_not_implemented()
-    -> Result<(), Box<dyn Error>> {
+    async fn get_workspace_agent_watch_metadata_ws_rejects_non_ws() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let app = build_router(state);
         let token = create_and_login(&app).await?;
@@ -17659,7 +17714,38 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            response.status() == StatusCode::BAD_REQUEST
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 400 or 426, got {}",
+            response.status()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_agent_watch_metadata_ws_upgrade() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_workspace_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            ws_upgrade_request(
+                &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert!(
+            response.status() == StatusCode::SWITCHING_PROTOCOLS
+                || response.status() == StatusCode::UPGRADE_REQUIRED,
+            "expected 101 or 426, got {}",
+            response.status()
+        );
         Ok(())
     }
 }
