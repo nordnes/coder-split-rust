@@ -3670,6 +3670,34 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "SELECT
+                w.id, w.created_at, w.updated_at, w.deleted,
+                w.owner_id, w.organization_id, w.template_id,
+                w.name, w.autostart_schedule, w.ttl,
+                w.last_used_at, w.dormant_at, w.deleting_at,
+                w.automatic_updates::text AS automatic_updates,
+                w.favorite, w.next_start_at
+             FROM workspaces w
+             JOIN workspace_builds wb ON wb.workspace_id = w.id
+             JOIN workspace_resources wr ON wr.job_id = wb.job_id
+             JOIN workspace_agents wa ON wa.resource_id = wr.id
+             WHERE wa.id = $1 AND w.deleted = false
+             ORDER BY wb.build_number DESC
+             LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_agents_by_resource_ids(
         &self,
         resource_ids: &[Uuid],
