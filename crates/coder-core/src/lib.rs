@@ -5,14 +5,17 @@
 pub mod api;
 pub mod build_info;
 pub mod config;
+pub mod enums;
 pub mod identity;
 pub mod password;
 pub mod ports;
+pub mod pubsub;
 
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,
     ApiResponse, AssignableRoleResponse, AuditDiff, AuditDiffField, AuditLog, AuditLogAction,
-    AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods, AvailableExperiments,
+    AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods, AuthorizationCheck,
+    AuthorizationObject, AuthorizationRequest, AuthorizationResponse, AvailableExperiments,
     BaseHealthReport, BuildInfoResponse, ChangePasswordWithOneTimePasscodeRequest, ChatMessagePart,
     ChatMessageResponse, ChatMessageUsage, ChatMessageVisibility, ChatQueuedMessageResponse,
     ChatResponse, ChatStatus, ChatWithMessagesResponse, ConfigOption, ConvertLoginRequest,

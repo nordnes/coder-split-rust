@@ -340,6 +340,11 @@ impl PostgresStore {
         Ok(Self { pool })
     }
 
+    /// Returns a clone of the underlying connection pool.
+    pub fn pool(&self) -> PgPool {
+        self.pool.clone()
+    }
+
     /// Applies the Rust rewrite migrations.
     pub async fn migrate(&self) -> Result<(), DatabaseInitError> {
         MIGRATOR
@@ -608,7 +613,7 @@ impl AppStore for PostgresStore {
         &self,
         token_hash: &[u8],
     ) -> Result<Option<AuthenticatedUser>, StorageError> {
-        sqlx::query_as::<_, StoredUserRow>(
+        let row = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
                 u.email,
@@ -637,10 +642,30 @@ impl AppStore for PostgresStore {
         .bind(token_hash)
         .fetch_optional(&self.pool)
         .await
-        .map_err(storage_error)?
-        .map(user_record_from_row)
-        .transpose()
-        .map(|value| value.map(AuthenticatedUser::from))
+        .map_err(storage_error)?;
+
+        let Some(row) = row else {
+            return Ok(None);
+        };
+
+        let user_id = row.id;
+        let user_record = user_record_from_row(row)?;
+        let mut auth_user = AuthenticatedUser::from(user_record);
+
+        // Fetch organization-scoped roles in "role_name:org_id" format.
+        let org_roles: Vec<String> = sqlx::query_scalar(
+            "SELECT role_name || ':' || sub_om.organization_id::text
+             FROM organization_members sub_om
+             CROSS JOIN LATERAL unnest(sub_om.roles) AS role_name
+             WHERE sub_om.user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        auth_user.org_roles = org_roles;
+        Ok(Some(auth_user))
     }
 
     #[instrument(skip(self, token_hash), err(level = tracing::Level::WARN))]
