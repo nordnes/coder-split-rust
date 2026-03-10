@@ -24,31 +24,32 @@ use coder_core::{
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
     ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
     ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
-    CreateFirstUserInput, CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError,
-    CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
-    DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord,
-    ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord,
-    GroupRecord, HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
-    InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
-    InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-    InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
-    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
-    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
-    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
-    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
-    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
-    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpsertExternalAuthLinkInput,
-    UpsertPortShareInput, UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter,
-    UserPreferenceRecord, UserRecord, UserStatus, WebpushSubscriptionRecord,
-    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
-    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
-    WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput,
-    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
-    WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
-    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput, CreateUserInput,
+    CreateUserStoreError, CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig,
+    DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
+    ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput,
+    GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings, InsertAgentLogInput,
+    InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
+    InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
+    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
+    InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
+    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
+    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
+    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
+    ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
+    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
+    UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
+    UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
+    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
+    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
+    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
+    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
+    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -4488,6 +4489,153 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        let row: (
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        ) = sqlx::query_as(
+            "INSERT INTO groups (name, display_name, organization_id, avatar_url, quota_allowance)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, name, display_name, organization_id, avatar_url,
+                       quota_allowance, source, created_at",
+        )
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(input.organization_id)
+        .bind(&input.avatar_url)
+        .bind(input.quota_allowance)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let (
+            id,
+            name,
+            display_name,
+            organization_id,
+            avatar_url,
+            quota_allowance,
+            source,
+            created_at,
+        ) = row;
+        Ok(GroupRecord {
+            id,
+            name,
+            display_name,
+            organization_id,
+            avatar_url,
+            quota_allowance,
+            source,
+            created_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM groups WHERE id = $1")
+            .bind(group_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        let rows: Vec<(
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        )> = sqlx::query_as(
+            "SELECT id, name, display_name, organization_id, avatar_url,
+                    quota_allowance, source, created_at
+             FROM groups
+             WHERE organization_id = $1
+             ORDER BY name ASC",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    name,
+                    display_name,
+                    organization_id,
+                    avatar_url,
+                    quota_allowance,
+                    source,
+                    created_at,
+                )| {
+                    GroupRecord {
+                        id,
+                        name,
+                        display_name,
+                        organization_id,
+                        avatar_url,
+                        quota_allowance,
+                        source,
+                        created_at,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO group_members (group_id, user_id)
+             VALUES ($1, $2)",
+        )
+        .bind(group_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT gm.group_id, gm.user_id
+             FROM group_members gm
+             JOIN users u ON u.id = gm.user_id
+             WHERE gm.group_id = $1
+               AND u.deleted = false
+             ORDER BY u.username ASC",
+        )
+        .bind(group_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(group_id, user_id)| GroupMemberRecord { group_id, user_id })
+            .collect())
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
