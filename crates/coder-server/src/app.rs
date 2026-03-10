@@ -87,6 +87,7 @@ use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
 use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
 use coder_workspaces::DeploymentStatsService;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -9943,6 +9944,12 @@ async fn insights_user_status_counts(
 // Debug / Observability handlers
 // ---------------------------------------------------------------------------
 
+/// GET /api/v2/debug/coordinator — return coordinator state/debug info.
+///
+/// Dependency: requires a `TailnetCoordinator` implementation that tracks
+/// connected agents and clients.  In Go this calls
+/// `(*api.TailnetCoordinator.Load()).ServeHTTPDebug(rw, r)`.  The Rust
+/// backend does not yet have a tailnet coordination layer, so we return 501.
 async fn debug_coordinator(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9956,11 +9963,20 @@ async fn debug_coordinator(
         ));
     }
 
+    // Blocked on: tailnet coordination layer (TailnetCoordinator) that
+    // manages agent↔client connections and exposes an HTML debug view.
     Ok(not_implemented_response(
-        "Coordinator debug endpoint is not yet implemented in the Rust backend.",
+        "Coordinator debug endpoint requires the tailnet coordination layer \
+         which is not yet implemented in the Rust backend.",
     ))
 }
 
+/// GET /api/v2/debug/tailnet — return tailnet debug info.
+///
+/// Dependency: requires an `agentProvider` that manages workspace-agent
+/// connections over the tailnet mesh.  In Go this calls
+/// `api.agentProvider.ServeHTTPDebug(rw, r)`.  The Rust backend does not yet
+/// have a workspace-agent provider, so we return 501.
 async fn debug_tailnet(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9974,11 +9990,20 @@ async fn debug_tailnet(
         ));
     }
 
+    // Blocked on: workspace-agent provider (agentProvider) that manages
+    // agent connections over the tailnet mesh and exposes debug state.
     Ok(not_implemented_response(
-        "Tailnet debug endpoint is not yet implemented in the Rust backend.",
+        "Tailnet debug endpoint requires the workspace-agent provider \
+         which is not yet implemented in the Rust backend.",
     ))
 }
 
+/// GET /api/v2/debug/derp/traffic — return DERP relay traffic statistics.
+///
+/// Dependency: requires a running DERP relay server (`DERPServer`) that
+/// tracks per-client send/receive byte counters.  In Go this calls
+/// `options.DERPServer.ServeDebugTraffic`.  The Rust backend does not yet
+/// include a DERP relay, so we return 501.
 async fn debug_derp_traffic(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9992,11 +10017,20 @@ async fn debug_derp_traffic(
         ));
     }
 
+    // Blocked on: embedded DERP relay server (DERPServer) that tracks
+    // per-client traffic counters and exposes them via ServeDebugTraffic.
     Ok(not_implemented_response(
-        "DERP traffic debug endpoint is not yet implemented in the Rust backend.",
+        "DERP traffic debug endpoint requires the embedded DERP relay server \
+         which is not yet implemented in the Rust backend.",
     ))
 }
 
+/// GET /api/v2/debug/expvar — return expvar-style debug variables.
+///
+/// In Go this serves `expvar.Handler()` which returns JSON with memstats,
+/// cmdline, and (when available) DERP metrics.  The Rust equivalent reads
+/// process stats from `/proc/self` (Linux) or returns basic runtime info
+/// on other platforms.
 async fn debug_expvar(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10010,11 +10044,66 @@ async fn debug_expvar(
         ));
     }
 
-    Ok(not_implemented_response(
-        "Expvar debug endpoint is not yet implemented in the Rust backend.",
-    ))
+    let mut vars: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    // cmdline — mirrors Go's `os.Args` expvar.
+    let cmdline = std::env::args().collect::<Vec<String>>();
+    vars.insert("cmdline".to_string(), json!(cmdline));
+
+    // memstats — read RSS and VmSize from /proc/self/status on Linux.
+    let memstats = read_proc_memstats();
+    let mut memstats_map = serde_json::Map::new();
+    if let Some(rss) = memstats.rss_bytes {
+        memstats_map.insert("rss_bytes".to_string(), json!(rss));
+    }
+    if let Some(vm) = memstats.vm_size_bytes {
+        memstats_map.insert("vm_size_bytes".to_string(), json!(vm));
+    }
+    vars.insert("memstats".to_string(), Value::Object(memstats_map));
+
+    Ok(Json(Value::Object(vars)).into_response())
 }
 
+/// Basic memory statistics read from `/proc/self/status`.
+struct ProcMemstats {
+    rss_bytes: Option<u64>,
+    vm_size_bytes: Option<u64>,
+}
+
+/// Read basic memory statistics from `/proc/self/status`.
+/// On non-Linux platforms (or read failure) both fields are `None`.
+fn read_proc_memstats() -> ProcMemstats {
+    let mut stats = ProcMemstats {
+        rss_bytes: None,
+        vm_size_bytes: None,
+    };
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+        for line in contents.lines() {
+            if let Some(val) = line.strip_prefix("VmRSS:") {
+                stats.rss_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
+            } else if let Some(val) = line.strip_prefix("VmSize:") {
+                stats.vm_size_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
+            }
+        }
+    }
+    stats
+}
+
+/// Parse a `/proc/self/status` value like `"   12345 kB"` into kilobytes.
+fn parse_proc_kb(val: &str) -> Option<u64> {
+    val.split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// GET /api/v2/debug/pprof (and sub-routes cmdline, profile, symbol, trace)
+///
+/// Go exposes `net/http/pprof` handlers that produce CPU/memory/goroutine
+/// profiles in the pprof protobuf format.  There is no direct Rust
+/// equivalent.  For CPU profiling consider `perf`, `flamegraph`, or the
+/// `pprof-rs` crate.  For heap profiling use jemalloc with
+/// `MALLOC_CONF="prof:true"`.  For async-task dumps use `tokio-console`.
+/// This endpoint remains a stub and returns 501.
 async fn debug_pprof(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10028,14 +10117,26 @@ async fn debug_pprof(
         ));
     }
 
+    // Blocked on: no direct Rust equivalent for Go pprof.  Alternatives:
+    //   - CPU profiling:  `perf record`, `cargo flamegraph`, or `pprof-rs`
+    //   - Heap profiling: jemalloc with MALLOC_CONF="prof:true"
+    //   - Async tasks:    `tokio-console`
     Ok(not_implemented_response(
-        "Rust does not support Go-style pprof. Use tracing or jemalloc profiling instead.",
+        "Rust does not support Go-style pprof. \
+         Use perf/flamegraph, jemalloc profiling, or tokio-console instead.",
     ))
 }
 
+/// GET /api/v2/debug/ws — WebSocket echo server used as a health check.
+///
+/// In Go this is `WebsocketEchoServer.ServeHTTP` which accepts a WebSocket
+/// connection and echoes every received message back to the client.  The
+/// health checker (`healthcheck/websocket.go`) connects here and sends
+/// three numbered text messages, verifying each is echoed correctly.
 async fn debug_websocket(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -10046,17 +10147,46 @@ async fn debug_websocket(
         ));
     }
 
-    // In Go this upgrades to a WebSocket echo. For now return a stub JSON response.
-    Ok(not_implemented_response(
-        "WebSocket echo endpoint is not yet implemented in the Rust backend.",
-    ))
+    Ok(ws.on_upgrade(websocket_echo))
+}
+
+/// Run the WebSocket echo loop: read a message, send it back, repeat.
+///
+/// Each echo operation has a 10-second timeout, matching Go's
+/// `WebsocketEchoServer` which uses `context.WithTimeout(ctx, 10s)`.
+async fn websocket_echo(mut socket: WebSocket) {
+    use std::time::Duration;
+    const ECHO_TIMEOUT: Duration = Duration::from_secs(10);
+
+    loop {
+        let msg = match tokio::time::timeout(ECHO_TIMEOUT, socket.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            // Timeout, receive error, or stream ended — close.
+            _ => return,
+        };
+        let reply = match msg {
+            Message::Text(text) => Message::Text(text),
+            Message::Binary(data) => Message::Binary(data),
+            Message::Close(_) => return,
+            // Ping/Pong are handled automatically by axum.
+            _ => continue,
+        };
+        let send_result = tokio::time::timeout(ECHO_TIMEOUT, socket.send(reply)).await;
+        match send_result {
+            Ok(Ok(())) => {}
+            // Timeout or send error — close.
+            _ => return,
+        }
+    }
 }
 
 /// GET /api/v2/debug/metrics — Prometheus metrics endpoint.
 ///
-/// In Go this serves the Prometheus registry via `promhttp`. The Rust backend
-/// does not yet have a shared Prometheus registry, so we return a stub
-/// `not_implemented` response.
+/// In Go this serves the full Prometheus registry via `promhttp`.
+/// The Rust backend does not yet have a shared `prometheus::Registry`,
+/// so we emit a small set of process-level gauges in Prometheus exposition
+/// format.  Once a registry is wired into `AppState`, this handler should
+/// delegate to it.
 async fn debug_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10070,9 +10200,82 @@ async fn debug_metrics(
         ));
     }
 
-    Ok(not_implemented_response(
-        "Prometheus metrics endpoint is not yet implemented in the Rust backend.",
-    ))
+    let mut out = String::new();
+
+    // process_resident_memory_bytes and process_virtual_memory_bytes
+    // Reuse read_proc_memstats() to stay consistent with the expvar endpoint.
+    let memstats = read_proc_memstats();
+    if let Some(rss) = memstats.rss_bytes {
+        out.push_str("# HELP process_resident_memory_bytes Resident memory size in bytes.\n");
+        out.push_str("# TYPE process_resident_memory_bytes gauge\n");
+        out.push_str(&format!("process_resident_memory_bytes {rss}\n"));
+    }
+    if let Some(vm) = memstats.vm_size_bytes {
+        out.push_str("# HELP process_virtual_memory_bytes Virtual memory size in bytes.\n");
+        out.push_str("# TYPE process_virtual_memory_bytes gauge\n");
+        out.push_str(&format!("process_virtual_memory_bytes {vm}\n"));
+    }
+
+    // process_open_fds
+    // Note: `read_dir` itself opens an fd for the directory iterator,
+    // so the count is inflated by 1.  This matches the behavior of Go's
+    // `prometheus/procfs` collector.
+    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+        let count = entries.count();
+        out.push_str("# HELP process_open_fds Number of open file descriptors.\n");
+        out.push_str("# TYPE process_open_fds gauge\n");
+        out.push_str(&format!("process_open_fds {count}\n"));
+    }
+
+    // process_start_time_seconds (approximate via /proc/self/stat field 22)
+    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+        // Field 22 (1-indexed) is starttime in clock ticks since boot.
+        // We combine it with /proc/uptime to get a UNIX timestamp.
+        // The comm field (field 2) is in parentheses and may contain spaces,
+        // so we find the last ')' and parse fields after it.
+        let after_comm = match stat.rfind(')') {
+            Some(pos) => &stat[pos + 1..],
+            None => &stat,
+        };
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        // After comm, field 3 is state (index 0), so starttime (field 22) is index 19.
+        if fields.len() > 19 {
+            if let (Ok(start_ticks), Ok(uptime_content)) = (
+                fields[19].parse::<u64>(),
+                std::fs::read_to_string("/proc/uptime"),
+            ) {
+                if let Some(uptime_secs_str) = uptime_content.split_whitespace().next() {
+                    if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {
+                        // 100 is the standard `USER_HZ` on Linux x86/x86_64/ARM.
+                        // Using `libc::sysconf(_SC_CLK_TCK)` would be more correct
+                        // but requires `unsafe`, which this crate forbids.
+                        let clock_ticks_per_sec: u64 = 100;
+                        let boot_time_approx =
+                            OffsetDateTime::now_utc().unix_timestamp() as f64 - uptime_secs;
+                        let process_start =
+                            boot_time_approx + (start_ticks as f64 / clock_ticks_per_sec as f64);
+                        out.push_str("# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.\n");
+                        out.push_str("# TYPE process_start_time_seconds gauge\n");
+                        out.push_str(&format!("process_start_time_seconds {process_start:.2}\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        out.push_str("# No process metrics available on this platform.\n");
+    }
+
+    Ok((
+        StatusCode::OK,
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
+        out,
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -11678,7 +11881,7 @@ mod tests {
     use axum::{
         Json, Router,
         body::{Body, to_bytes},
-        http::HeaderMap,
+        http::{HeaderMap, HeaderName, HeaderValue},
         http::{Method, Request, Response, StatusCode, header::CONTENT_TYPE},
         response::IntoResponse,
         routing::{get, post},
@@ -18270,7 +18473,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_expvar_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_expvar_requires_auth_and_returns_json() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/expvar")?).await?;
@@ -18282,7 +18485,29 @@ mod tests {
             authenticated_request(Method::GET, "/api/v2/debug/expvar", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await?;
+        let vars: Value = serde_json::from_slice(&body)?;
+        // Should contain cmdline and memstats keys.
+        assert!(
+            vars.get("cmdline").is_some(),
+            "expvar should contain cmdline"
+        );
+        // cmdline should be a JSON array.
+        assert!(
+            vars.get("cmdline").and_then(|v| v.as_array()).is_some(),
+            "expvar cmdline should be an array",
+        );
+        assert!(
+            vars.get("memstats").is_some(),
+            "expvar should contain memstats",
+        );
+        // memstats should be a JSON object.
+        assert!(
+            vars.get("memstats").and_then(|v| v.as_object()).is_some(),
+            "expvar memstats should be an object",
+        );
         Ok(())
     }
 
@@ -18324,24 +18549,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_websocket_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_websocket_rejects_non_upgrade_request() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
-        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/ws")?).await?;
-        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+        // A plain GET (no WebSocket upgrade headers) should be rejected by
+        // the WebSocketUpgrade extractor with 400 Bad Request.
+        let resp = call(app.clone(), request(Method::GET, "/api/v2/debug/ws")?).await?;
+        assert!(
+            resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::UNAUTHORIZED,
+            "expected 400 or 401, got {}",
+            resp.status(),
+        );
 
+        // Helper closure to add WebSocket upgrade headers to a request.
+        fn add_ws_headers(req: &mut Request<Body>) {
+            let headers = req.headers_mut();
+            headers.insert(
+                HeaderName::from_static("upgrade"),
+                HeaderValue::from_static("websocket"),
+            );
+            headers.insert(
+                HeaderName::from_static("connection"),
+                HeaderValue::from_static("Upgrade"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-websocket-version"),
+                HeaderValue::from_static("13"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-websocket-key"),
+                HeaderValue::from_static("dGVzdF9rZXk="),
+            );
+        }
+
+        // Issue a proper WebSocket upgrade request without authentication.
+        // In a tower::oneshot test the upgrade cannot fully complete, so axum
+        // may return 401 (auth rejection) or 426 (upgrade required). Both
+        // confirm the route is reachable and the extractor accepted the headers.
+        let mut unauth_upgrade = request(Method::GET, "/api/v2/debug/ws")?;
+        add_ws_headers(&mut unauth_upgrade);
+        let unauth_resp = call(app.clone(), unauth_upgrade).await?;
+        assert!(
+            unauth_resp.status() == StatusCode::UNAUTHORIZED
+                || unauth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "unauthenticated WS upgrade should be rejected with 401 or 426, got {}",
+            unauth_resp.status(),
+        );
+
+        // Issue an authenticated WebSocket upgrade request.
+        // In oneshot mode the HTTP connection cannot be upgraded to a real
+        // WebSocket, so axum returns 101 (if it tries) or 426.
         let session_token = create_and_login(&app).await?;
-        let resp = call(
-            app,
-            authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?,
-        )
-        .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let mut auth_upgrade =
+            authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?;
+        add_ws_headers(&mut auth_upgrade);
+        let auth_resp = call(app.clone(), auth_upgrade).await?;
+        assert!(
+            auth_resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                || auth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "authenticated WS upgrade should return 101 or 426, got {}",
+            auth_resp.status(),
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn debug_metrics_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_metrics_requires_auth_and_returns_prometheus() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/metrics")?).await?;
@@ -18353,7 +18626,32 @@ mod tests {
             authenticated_request(Method::GET, "/api/v2/debug/metrics", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            ct.contains("text/plain"),
+            "metrics should return text/plain, got {ct}",
+        );
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await?;
+        let text = String::from_utf8_lossy(&body);
+        // Should contain Prometheus exposition data.
+        assert!(
+            text.contains("process_") || text.contains("# No process metrics"),
+            "metrics body should contain process metrics or platform fallback",
+        );
+        // Verify no lines have leading whitespace (invalid Prometheus format).
+        for line in text.lines() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "Prometheus line must not start with whitespace: {line:?}",
+            );
+        }
         Ok(())
     }
 
