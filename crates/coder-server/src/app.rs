@@ -11912,14 +11912,15 @@ mod tests {
         CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest, CreateTemplateStoreError,
         CreateTemplateVersionInput, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
         CreateUserRequestWithOrgs, CreateUserStoreError, CreateWorkspaceBuildInput,
-        CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
-        DeploymentStore, DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider,
-        ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, GetJobsToBeReapedInput,
-        GitSshKeyRecord, HealthSettings, InsertAgentLogInput, InsertChatInput,
-        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
-        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LogFormat,
-        LoginType, LoginWithPasswordRequest, OrganizationMemberListFilter,
+        CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig, DeploymentMetadata,
+        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
+        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
+        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertAgentLogInput,
+        InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult,
+        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, InsertTaskInput,
+        InsertWorkspaceAppStatusInput, LogFormat, LoginType, LoginWithPasswordRequest,
+        NotificationMessageRecord, NotificationMessageStatus, OrganizationMemberListFilter,
         OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
         ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
         ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
@@ -11930,8 +11931,9 @@ mod tests {
         TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
         TemplateVersionVariableRecord, TokenConfigRecord, UpdateRolesRequest, UpdateTemplateMeta,
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-        UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
-        UpsertPortShareInput, UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter,
+        UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertCustomRoleInput,
+        UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
+        UserAppearanceRecord, UserConfigRecord, UserLinkRecord, UserListFilter,
         UserPreferenceRecord, UserRecord, UserStatus, ValidateUserPasswordRequest,
         WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
         WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
@@ -12034,6 +12036,16 @@ mod tests {
         provisioner_job_timings: Mutex<HashMap<Uuid, Vec<PortsJobTimingRecord>>>,
         workspace_port_shares: Mutex<Vec<WorkspaceAgentPortShareRecord>>,
         workspace_acls: Mutex<HashMap<Uuid, WorkspaceACLRecord>>,
+        // Provisioner keys
+        provisioner_keys: Mutex<HashMap<Uuid, ProvisionerKeyRecord>>,
+        // Custom roles
+        custom_roles: Mutex<HashMap<(String, Option<Uuid>), CustomRoleRecord>>,
+        // User links
+        user_links: Mutex<HashMap<(Uuid, LoginType), UserLinkRecord>>,
+        // User configs
+        user_configs: Mutex<HashMap<(Uuid, String), UserConfigRecord>>,
+        // Notification messages
+        notification_messages: Mutex<Vec<NotificationMessageRecord>>,
     }
 
     impl FakeStore {
@@ -12100,6 +12112,11 @@ mod tests {
                 provisioner_job_timings: Mutex::new(HashMap::new()),
                 workspace_port_shares: Mutex::new(Vec::new()),
                 workspace_acls: Mutex::new(HashMap::new()),
+                provisioner_keys: Mutex::new(HashMap::new()),
+                custom_roles: Mutex::new(HashMap::new()),
+                user_links: Mutex::new(HashMap::new()),
+                user_configs: Mutex::new(HashMap::new()),
+                notification_messages: Mutex::new(Vec::new()),
             }
         }
 
@@ -12309,42 +12326,83 @@ mod tests {
 
         async fn insert_provisioner_key(
             &self,
-            _input: InsertProvisionerKeyInput,
+            input: InsertProvisionerKeyInput,
         ) -> Result<ProvisionerKeyRecord, StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let record = ProvisionerKeyRecord {
+                id: input.id,
+                created_at: input.created_at,
+                organization_id: input.organization_id,
+                name: input.name,
+                hashed_secret: input.hashed_secret,
+                tags: input.tags,
+            };
+            self.provisioner_keys
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
         }
 
         async fn get_provisioner_key_by_id(
             &self,
-            _id: Uuid,
+            id: Uuid,
         ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
-            Ok(None)
+            Ok(self
+                .provisioner_keys
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&id)
+                .cloned())
         }
 
         async fn get_provisioner_key_by_hashed_secret(
             &self,
-            _hashed_secret: &[u8],
+            hashed_secret: &[u8],
         ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
-            Ok(None)
+            Ok(self
+                .provisioner_keys
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .find(|k| k.hashed_secret == hashed_secret)
+                .cloned())
         }
 
         async fn get_provisioner_key_by_name(
             &self,
-            _organization_id: Uuid,
-            _name: &str,
+            organization_id: Uuid,
+            name: &str,
         ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
-            Ok(None)
+            Ok(self
+                .provisioner_keys
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .find(|k| k.organization_id == organization_id && k.name == name)
+                .cloned())
         }
 
         async fn list_provisioner_keys_by_organization(
             &self,
-            _organization_id: Uuid,
+            organization_id: Uuid,
         ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
-            Ok(Vec::new())
+            Ok(self
+                .provisioner_keys
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .filter(|k| k.organization_id == organization_id)
+                .cloned()
+                .collect())
         }
 
-        async fn delete_provisioner_key(&self, _id: Uuid) -> Result<bool, StorageError> {
-            Ok(false)
+        async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError> {
+            Ok(self
+                .provisioner_keys
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&id)
+                .is_some())
         }
     }
 
@@ -13949,12 +14007,29 @@ mod tests {
             _interval: coder_core::api::InsightsReportInterval,
             template_ids: Vec<Uuid>,
         ) -> Result<coder_core::api::TemplateInsightsResponse, StorageError> {
+            // Count active users from stored users whose last_seen_at falls within range
+            let active_users = {
+                let users = self
+                    .users
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                users
+                    .values()
+                    .filter(|u| {
+                        if let Some(last_seen) = u.last_seen_at {
+                            last_seen >= start_time && last_seen <= end_time
+                        } else {
+                            false
+                        }
+                    })
+                    .count() as i64
+            };
             Ok(coder_core::api::TemplateInsightsResponse {
                 report: Some(coder_core::api::TemplateInsightsReport {
                     start_time,
                     end_time,
                     template_ids: template_ids.clone(),
-                    active_users: 0,
+                    active_users,
                     apps_usage: Vec::new(),
                     parameters_usage: Vec::new(),
                 }),
@@ -13963,19 +14038,41 @@ mod tests {
                     end_time,
                     template_ids,
                     interval: coder_core::api::InsightsReportInterval::Day,
-                    active_users: 0,
+                    active_users,
                 }],
             })
         }
 
         async fn get_template_insights_by_interval(
             &self,
-            _start_time: OffsetDateTime,
-            _end_time: OffsetDateTime,
-            _interval: coder_core::api::InsightsReportInterval,
-            _template_ids: Vec<Uuid>,
+            start_time: OffsetDateTime,
+            end_time: OffsetDateTime,
+            interval: coder_core::api::InsightsReportInterval,
+            template_ids: Vec<Uuid>,
         ) -> Result<Vec<coder_core::api::TemplateInsightsIntervalReport>, StorageError> {
-            Ok(Vec::new())
+            let active_users = {
+                let users = self
+                    .users
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                users
+                    .values()
+                    .filter(|u| {
+                        if let Some(last_seen) = u.last_seen_at {
+                            last_seen >= start_time && last_seen <= end_time
+                        } else {
+                            false
+                        }
+                    })
+                    .count() as i64
+            };
+            Ok(vec![coder_core::api::TemplateInsightsIntervalReport {
+                start_time,
+                end_time,
+                template_ids,
+                interval,
+                active_users,
+            }])
         }
 
         async fn get_user_activity_insights(
@@ -13984,12 +14081,36 @@ mod tests {
             end_time: OffsetDateTime,
             template_ids: Vec<Uuid>,
         ) -> Result<coder_core::api::UserActivityInsightsResponse, StorageError> {
+            // Build per-user activity entries from stored users active in the range
+            let user_entries = {
+                let users = self
+                    .users
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                users
+                    .values()
+                    .filter(|u| {
+                        if let Some(last_seen) = u.last_seen_at {
+                            last_seen >= start_time && last_seen <= end_time
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|u| coder_core::api::UserActivity {
+                        template_ids: Vec::new(),
+                        user_id: u.id,
+                        username: u.username.clone(),
+                        avatar_url: u.avatar_url.clone(),
+                        seconds: 0,
+                    })
+                    .collect::<Vec<_>>()
+            };
             Ok(coder_core::api::UserActivityInsightsResponse {
                 report: coder_core::api::UserActivityInsightsReport {
                     start_time,
                     end_time,
                     template_ids,
-                    users: Vec::new(),
+                    users: user_entries,
                 },
             })
         }
@@ -14000,12 +14121,36 @@ mod tests {
             end_time: OffsetDateTime,
             template_ids: Vec<Uuid>,
         ) -> Result<coder_core::api::UserLatencyInsightsResponse, StorageError> {
+            // Build per-user latency entries from stored users active in the range
+            let user_entries = {
+                let users = self
+                    .users
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                users
+                    .values()
+                    .filter(|u| {
+                        if let Some(last_seen) = u.last_seen_at {
+                            last_seen >= start_time && last_seen <= end_time
+                        } else {
+                            false
+                        }
+                    })
+                    .map(|u| coder_core::api::UserLatency {
+                        template_ids: Vec::new(),
+                        user_id: u.id,
+                        username: u.username.clone(),
+                        avatar_url: u.avatar_url.clone(),
+                        latency_ms: coder_core::api::ConnectionLatency { p50: 0.0, p95: 0.0 },
+                    })
+                    .collect::<Vec<_>>()
+            };
             Ok(coder_core::api::UserLatencyInsightsResponse {
                 report: coder_core::api::UserLatencyInsightsReport {
                     start_time,
                     end_time,
                     template_ids,
-                    users: Vec::new(),
+                    users: user_entries,
                 },
             })
         }
@@ -14016,9 +14161,25 @@ mod tests {
             _start_time: OffsetDateTime,
             _end_time: OffsetDateTime,
         ) -> Result<coder_core::api::GetUserStatusCountsResponse, StorageError> {
-            Ok(coder_core::api::GetUserStatusCountsResponse {
-                status_counts: HashMap::new(),
-            })
+            // Count users by status from stored users
+            let mut status_counts: HashMap<String, Vec<coder_core::api::UserStatusChangeCount>> =
+                HashMap::new();
+            {
+                let users = self
+                    .users
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                for user in users.values() {
+                    status_counts
+                        .entry(user.status.as_str().to_owned())
+                        .or_default()
+                        .push(coder_core::api::UserStatusChangeCount {
+                            date: OffsetDateTime::now_utc(),
+                            count: 1,
+                        });
+                }
+            }
+            Ok(coder_core::api::GetUserStatusCountsResponse { status_counts })
         }
 
         // -----------------------------------------------------------------
@@ -16407,6 +16568,148 @@ mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             acls.remove(&workspace_id);
             Ok(())
+        }
+
+        // -----------------------------------------------------------------
+        // Custom Roles
+        // -----------------------------------------------------------------
+
+        async fn list_custom_roles(
+            &self,
+            organization_id: Option<Uuid>,
+        ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+            let roles = self
+                .custom_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(roles
+                .values()
+                .filter(|r| match organization_id {
+                    Some(org_id) => r.organization_id == Some(org_id),
+                    None => true,
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn upsert_custom_role(
+            &self,
+            input: &UpsertCustomRoleInput,
+        ) -> Result<CustomRoleRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let key = (input.name.clone(), input.organization_id);
+            let mut roles = self
+                .custom_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let record = roles.entry(key).or_insert_with(|| CustomRoleRecord {
+                name: input.name.clone(),
+                display_name: input.display_name.clone(),
+                organization_id: input.organization_id,
+                site_permissions: input.site_permissions.clone(),
+                org_permissions: input.org_permissions.clone(),
+                user_permissions: input.user_permissions.clone(),
+                created_at: now,
+                updated_at: now,
+            });
+            // Update existing record fields
+            record.display_name.clone_from(&input.display_name);
+            record.site_permissions.clone_from(&input.site_permissions);
+            record.org_permissions.clone_from(&input.org_permissions);
+            record.user_permissions.clone_from(&input.user_permissions);
+            record.updated_at = now;
+            Ok(record.clone())
+        }
+
+        // -----------------------------------------------------------------
+        // User Links
+        // -----------------------------------------------------------------
+
+        async fn list_user_links(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<UserLinkRecord>, StorageError> {
+            let links = self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(links
+                .values()
+                .filter(|l| l.user_id == user_id)
+                .cloned()
+                .collect())
+        }
+
+        // -----------------------------------------------------------------
+        // User Configs
+        // -----------------------------------------------------------------
+
+        async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+            Ok(self
+                .user_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&(user_id, key.to_owned()))
+                .is_some())
+        }
+
+        // -----------------------------------------------------------------
+        // Notification Messages
+        // -----------------------------------------------------------------
+
+        async fn fetch_pending_notification_messages(
+            &self,
+            limit: u32,
+            max_attempt_count: u32,
+        ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+            let messages = self
+                .notification_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(messages
+                .iter()
+                .filter(|m| {
+                    m.status == NotificationMessageStatus::Pending
+                        && (m.attempt_count as u32) < max_attempt_count
+                })
+                .take(limit as usize)
+                .cloned()
+                .collect())
+        }
+
+        async fn update_notification_message_status(
+            &self,
+            message_id: Uuid,
+            status: NotificationMessageStatus,
+        ) -> Result<bool, StorageError> {
+            let mut messages = self
+                .notification_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                msg.status = status;
+                msg.updated_at = OffsetDateTime::now_utc();
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        async fn increment_notification_message_attempt_count(
+            &self,
+            message_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let mut messages = self
+                .notification_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(msg) = messages.iter_mut().find(|m| m.id == message_id) {
+                msg.attempt_count += 1;
+                msg.updated_at = OffsetDateTime::now_utc();
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
     }
 
