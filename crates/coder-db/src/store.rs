@@ -4661,7 +4661,7 @@ impl AppStore for PostgresStore {
                 wast.ended_at,
                 wast.exit_code,
                 wast.stage::text AS stage,
-                wast.status,
+                wast.status::text AS status,
                 was2.display_name,
                 wa.id AS workspace_agent_id,
                 wa.name AS workspace_agent_name

@@ -6868,10 +6868,10 @@ async fn get_workspace_watch(
             match msg {
                 Ok(bytes) => {
                     // Parse the workspace event to filter by workspace_id.
-                    if let Ok(ev) = serde_json::from_slice::<WorkspaceEvent>(&bytes) {
-                        if ev.workspace_id != workspace_id {
-                            continue;
-                        }
+                    // Skip messages that fail to parse or belong to a different workspace.
+                    match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
+                        Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
+                        _ => continue,
                     }
 
                     // Fetch fresh workspace state.
@@ -6971,10 +6971,10 @@ async fn get_workspace_watch_ws(
             let msg: Result<Vec<u8>, _> = subscription.recv().await;
             match msg {
                 Ok(bytes) => {
-                    if let Ok(ev) = serde_json::from_slice::<WorkspaceEvent>(&bytes) {
-                        if ev.workspace_id != workspace_id {
-                            continue;
-                        }
+                    // Skip messages that fail to parse or belong to a different workspace.
+                    match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
+                        Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
+                        _ => continue,
                     }
 
                     match store
