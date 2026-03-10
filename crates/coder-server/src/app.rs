@@ -9458,11 +9458,11 @@ async fn insights_daus(
     }
 
     let tz_offset = query.tz_offset.unwrap_or(0);
-    if !(-23..=23).contains(&tz_offset) {
+    if !(-12..=14).contains(&tz_offset) {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::ok(
-                "Invalid tz_offset: must be between -23 and 23.",
+                "Invalid tz_offset: must be between -12 and 14.",
             )),
         )
             .into_response());
@@ -9682,10 +9682,10 @@ async fn insights_user_status_counts(
     // Resolve timezone from query params, following Go's Etc/GMT±N convention.
     let timezone = match (&query.timezone, query.tz_offset) {
         (Some(tz), _) if !tz.is_empty() => tz.clone(),
-        (_, Some(offset)) if !(-23..=23).contains(&offset) => {
+        (_, Some(offset)) if !(-12..=14).contains(&offset) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("tz_offset must be between -23 and 23.")),
+                Json(ApiResponse::ok("tz_offset must be between -12 and 14.")),
             )
                 .into_response());
         }
@@ -9697,7 +9697,21 @@ async fn insights_user_status_counts(
         _ => "UTC".to_owned(),
     };
 
-    let response = state.store.get_user_status_counts(&timezone).await?;
+    // Mirror Go's 60-day window: from (next_hour_in_loc - 60 days) to next_hour_in_loc.
+    let now = OffsetDateTime::now_utc();
+    // Round up to the next whole hour.
+    let end_time = now
+        .replace_minute(0)
+        .and_then(|t| t.replace_second(0))
+        .and_then(|t| t.replace_nanosecond(0))
+        .map(|t| t + time::Duration::hours(1))
+        .unwrap_or(now);
+    let start_time = end_time - time::Duration::days(60);
+
+    let response = state
+        .store
+        .get_user_status_counts(&timezone, start_time, end_time)
+        .await?;
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
@@ -13536,6 +13550,8 @@ mod tests {
         async fn get_user_status_counts(
             &self,
             _timezone: &str,
+            _start_time: OffsetDateTime,
+            _end_time: OffsetDateTime,
         ) -> Result<coder_core::api::GetUserStatusCountsResponse, StorageError> {
             Ok(coder_core::api::GetUserStatusCountsResponse {
                 status_counts: HashMap::new(),
