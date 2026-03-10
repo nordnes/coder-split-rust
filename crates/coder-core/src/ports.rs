@@ -1641,11 +1641,15 @@ pub trait IdentityStore: Send + Sync {
 
     // ----- Notifications -----
 
-    /// Fetches pending notification messages for dispatch.
+    /// Atomically acquires pending notification messages for dispatch.
+    ///
+    /// Uses `FOR UPDATE SKIP LOCKED` to lease rows, preventing concurrent
+    /// workers from picking up the same messages. Expired leases (where
+    /// `leased_until < NOW()`) are automatically reclaimed.
     ///
     /// Messages with `attempt_count >= max_attempt_count` are excluded so they
     /// can be purged separately rather than retried indefinitely.
-    async fn fetch_pending_notification_messages(
+    async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
         max_attempt_count: u32,
@@ -2353,6 +2357,57 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     // ----- User identity supplements -----
 
+    /// Lists user links for a user.
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Upserts a user link.
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        let _ = (user_id, input);
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Deletes a user link.
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: crate::identity::LoginType,
+    ) -> Result<bool, StorageError> {
+        let _ = (user_id, login_type);
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Returns a user configuration value.
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        let _ = (user_id, key);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Sets a user configuration value.
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        let _ = (user_id, key, value);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
     /// Deletes a user configuration value.
     async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
         let _ = (user_id, key);
@@ -2361,10 +2416,32 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
-    /// Lists user links for a user.
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable("user links are not implemented"))
+    /// Records a soft-delete tracking entry.
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        let _ = (user_id, deleted_by, reason);
+        Err(StorageError::unavailable(
+            "user deletion tracking is not implemented",
+        ))
+    }
+
+    /// Records a user status change.
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        let _ = (user_id, old_status, new_status, changed_by, reason);
+        Err(StorageError::unavailable(
+            "user status changes are not implemented",
+        ))
     }
 
     /// Lists status changes for a user.
@@ -2375,6 +2452,18 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = user_id;
         Err(StorageError::unavailable(
             "user status changes are not implemented",
+        ))
+    }
+
+    /// Deletes a custom role.
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        let _ = (name, organization_id);
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
         ))
     }
 
@@ -4260,11 +4349,15 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     // ----- Notification message dispatch -----
 
-    /// Fetches pending notification messages for dispatch.
+    /// Atomically acquires pending notification messages for dispatch.
+    ///
+    /// Uses `FOR UPDATE SKIP LOCKED` to lease rows, preventing concurrent
+    /// workers from picking up the same messages. Expired leases (where
+    /// `leased_until < NOW()`) are automatically reclaimed.
     ///
     /// Messages with `attempt_count >= max_attempt_count` are excluded so they
     /// can be purged separately rather than retried indefinitely.
-    async fn fetch_pending_notification_messages(
+    async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
         max_attempt_count: u32,
@@ -5580,12 +5673,68 @@ where
         AppStore::delete_oauth2_provider_app_tokens_by_app_and_user(self, app_id, user_id).await
     }
 
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        AppStore::list_user_links(self, user_id).await
+    }
+
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        AppStore::upsert_user_link(self, user_id, input).await
+    }
+
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: crate::identity::LoginType,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_user_link(self, user_id, login_type).await
+    }
+
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        AppStore::get_user_config(self, user_id, key).await
+    }
+
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        AppStore::upsert_user_config(self, user_id, key, value).await
+    }
+
     async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
         AppStore::delete_user_config(self, user_id, key).await
     }
 
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        AppStore::list_user_links(self, user_id).await
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        AppStore::insert_user_deleted(self, user_id, deleted_by, reason).await
+    }
+
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        AppStore::insert_user_status_change(
+            self, user_id, old_status, new_status, changed_by, reason,
+        )
+        .await
     }
 
     async fn list_user_status_changes(
@@ -5593,6 +5742,14 @@ where
         user_id: Uuid,
     ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
         AppStore::list_user_status_changes(self, user_id).await
+    }
+
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_custom_role(self, name, organization_id).await
     }
 }
 
@@ -6005,12 +6162,69 @@ where
             .await
     }
 
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        (**self).list_user_links(user_id).await
+    }
+
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        (**self).upsert_user_link(user_id, input).await
+    }
+
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: crate::identity::LoginType,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_user_link(user_id, login_type).await
+    }
+
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        (**self).get_user_config(user_id, key).await
+    }
+
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        (**self).upsert_user_config(user_id, key, value).await
+    }
+
     async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
         (**self).delete_user_config(user_id, key).await
     }
 
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        (**self).list_user_links(user_id).await
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        (**self)
+            .insert_user_deleted(user_id, deleted_by, reason)
+            .await
+    }
+
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        (**self)
+            .insert_user_status_change(user_id, old_status, new_status, changed_by, reason)
+            .await
     }
 
     async fn list_user_status_changes(
@@ -6018,6 +6232,14 @@ where
         user_id: Uuid,
     ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
         (**self).list_user_status_changes(user_id).await
+    }
+
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_custom_role(name, organization_id).await
     }
 }
 

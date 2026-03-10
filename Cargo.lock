@@ -373,6 +373,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -528,6 +529,7 @@ dependencies = [
  "axum",
  "clap",
  "coder-audit",
+ "coder-connectivity",
  "coder-core",
  "coder-db",
  "coder-rbac",

@@ -1,6 +1,8 @@
 //! Connectivity, agent, health, and SSH helpers.
 #![forbid(unsafe_code)]
 
+pub mod tailnet;
+
 use std::{
     collections::HashMap,
     sync::Arc,
