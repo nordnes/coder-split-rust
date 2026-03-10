@@ -11573,21 +11573,21 @@ mod tests {
             })
             .await?;
         assert_eq!(user.status, UserStatus::Active);
-        assert!(!user.deleted);
+        assert!(!user.deleted, "new user should not be deleted");
 
         // Find by ID
         let by_id = store.find_user_by_id(user.id).await?;
-        assert!(by_id.is_some());
+        assert!(by_id.is_some(), "should find user by ID");
         assert_eq!(by_id.as_ref().map(|u| &u.email), Some(&user.email));
 
         // Find by username
         let by_name = store.find_user_by_username(&user.username).await?;
-        assert!(by_name.is_some());
+        assert!(by_name.is_some(), "should find user by username");
         assert_eq!(by_name.as_ref().map(|u| u.id), Some(user.id));
 
         // Find by email (via password user)
         let by_email = store.find_password_user_by_email(&user.email).await?;
-        assert!(by_email.is_some());
+        assert!(by_email.is_some(), "should find user by email");
         assert_eq!(by_email.as_ref().map(|u| u.user.id), Some(user.id));
 
         // Update profile
@@ -11595,7 +11595,7 @@ mod tests {
         let updated = store
             .update_user_profile(user.id, &new_username, "Updated Name")
             .await?;
-        assert!(updated.is_some());
+        assert!(updated.is_some(), "update_user_profile should return updated user");
         assert_eq!(
             updated.as_ref().map(|u| u.username.as_str()),
             Some(new_username.as_str())
@@ -11609,7 +11609,7 @@ mod tests {
         let suspended = store
             .update_user_status(user.id, UserStatus::Suspended)
             .await?;
-        assert!(suspended.is_some());
+        assert!(suspended.is_some(), "update_user_status should return updated user");
         assert_eq!(
             suspended.as_ref().map(|u| u.status),
             Some(UserStatus::Suspended)
@@ -11763,8 +11763,8 @@ mod tests {
         let updated = store
             .update_user_appearance(user_id, "dark", "JetBrains Mono")
             .await?;
-        assert!(updated.is_some());
-        let upd = updated.as_ref().unwrap_or_else(|| panic!("no appearance"));
+        assert!(updated.is_some(), "update_user_appearance should return result");
+        let upd = updated.as_ref().expect("no appearance");
         assert_eq!(upd.theme_preference, "dark");
         assert_eq!(upd.terminal_font, "JetBrains Mono");
 
@@ -11779,12 +11779,10 @@ mod tests {
 
         // Update preferences
         let updated_prefs = store.update_user_preferences(user_id, true).await?;
-        assert!(updated_prefs.is_some());
+        let updated_prefs = updated_prefs.expect("update_user_preferences should return result");
         assert!(
-            updated_prefs
-                .as_ref()
-                .unwrap_or_else(|| panic!("no prefs"))
-                .task_notification_alert_dismissed
+            updated_prefs.task_notification_alert_dismissed,
+            "preference should be dismissed after update"
         );
 
         // Verify round-trip
@@ -11807,16 +11805,14 @@ mod tests {
 
         // Verify initial roles are empty
         let user = store.find_user_by_id(user_id).await?;
-        assert!(user.is_some());
-        let user = user.unwrap_or_else(|| panic!("user missing"));
+        let user = user.expect("user should exist");
         assert!(user.roles.is_empty(), "initial roles should be empty");
 
         // Update roles
         let updated = store
             .update_user_roles(user_id, vec!["owner".to_string()])
             .await?;
-        assert!(updated.is_some());
-        let updated = updated.unwrap_or_else(|| panic!("update failed"));
+        let updated = updated.expect("update_user_roles should return updated user");
         assert_eq!(updated.roles.len(), 1);
         assert_eq!(updated.roles[0].name, "owner");
 
@@ -11824,14 +11820,12 @@ mod tests {
         let updated2 = store
             .update_user_roles(user_id, vec!["owner".to_string(), "auditor".to_string()])
             .await?;
-        assert!(updated2.is_some());
-        let updated2 = updated2.unwrap_or_else(|| panic!("update2 failed"));
+        let updated2 = updated2.expect("second role update should succeed");
         assert_eq!(updated2.roles.len(), 2);
 
         // Clear roles
         let cleared = store.update_user_roles(user_id, vec![]).await?;
-        assert!(cleared.is_some());
-        let cleared = cleared.unwrap_or_else(|| panic!("clear failed"));
+        let cleared = cleared.expect("clearing roles should succeed");
         assert!(
             cleared.roles.is_empty(),
             "roles should be empty after clear"
@@ -11880,12 +11874,12 @@ mod tests {
 
         // Find by ID
         let found = store.find_api_key_by_id(&key_id).await?;
-        assert!(found.is_some());
+        assert!(found.is_some(), "should find API key by ID");
         assert_eq!(found.as_ref().map(|k| k.user_id), Some(user_id));
 
         // Delete
         let deleted = store.delete_api_key(&key_id).await?;
-        assert!(deleted);
+        assert!(deleted, "delete_api_key should return true");
 
         // Verify gone
         let gone = store.find_api_key_by_id(&key_id).await?;
@@ -11928,12 +11922,11 @@ mod tests {
         // Expire the key
         let expire_time = OffsetDateTime::now_utc();
         let expired = store.expire_api_key(&key_id, expire_time).await?;
-        assert!(expired);
+        assert!(expired, "expire_api_key should return true");
 
         // Verify it's expired (expires_at <= now)
         let found = store.find_api_key_by_id(&key_id).await?;
-        assert!(found.is_some());
-        let found = found.unwrap_or_else(|| panic!("key should exist"));
+        let found = found.expect("expired key should still be findable");
         assert!(
             found.expires_at <= expire_time,
             "key should be expired: expires_at={:?}, expire_time={:?}",
@@ -11994,12 +11987,12 @@ mod tests {
 
         // Find by ID
         let found = store.find_task_by_id(task_id).await?;
-        assert!(found.is_some());
+        assert!(found.is_some(), "should find task by ID");
         assert_eq!(found.as_ref().map(|t| &t.name), Some(&task_name));
 
         // Update prompt
         let updated = store.update_task_prompt(task_id, "updated prompt").await?;
-        assert!(updated.is_some());
+        assert!(updated.is_some(), "update_task_prompt should return updated task");
         assert_eq!(
             updated.as_ref().map(|t| t.prompt.as_str()),
             Some("updated prompt")
@@ -12008,7 +12001,7 @@ mod tests {
         // Soft-delete
         let delete_time = OffsetDateTime::now_utc();
         let deleted = store.delete_task(task_id, delete_time).await?;
-        assert!(deleted);
+        assert!(deleted, "delete_task should return true");
 
         // find_task_by_id uses `WHERE deleted_at IS NULL`, so a soft-deleted
         // task should no longer be found — matching the user soft-delete pattern.
@@ -12136,14 +12129,8 @@ mod tests {
 
         // Verify archived
         let after_archive = store.find_chat_by_id(chat.id).await?;
-        assert!(after_archive.is_some());
-        assert!(
-            after_archive
-                .as_ref()
-                .unwrap_or_else(|| panic!("chat missing"))
-                .archived,
-            "chat should be archived"
-        );
+        let after_archive = after_archive.expect("chat should exist after archive");
+        assert!(after_archive.archived, "chat should be archived");
 
         // Should not appear in non-archived list
         let non_archived = store.list_chats_by_owner(user_id, Some(false)).await?;
@@ -12157,14 +12144,8 @@ mod tests {
 
         // Verify unarchived
         let after_unarchive = store.find_chat_by_id(chat.id).await?;
-        assert!(after_unarchive.is_some());
-        assert!(
-            !after_unarchive
-                .as_ref()
-                .unwrap_or_else(|| panic!("chat missing"))
-                .archived,
-            "chat should be unarchived"
-        );
+        let after_unarchive = after_unarchive.expect("chat should exist after unarchive");
+        assert!(!after_unarchive.archived, "chat should be unarchived");
 
         Ok(())
     }
@@ -12226,13 +12207,13 @@ mod tests {
         let first = messages
             .iter()
             .find(|m| m.id == msg1.id)
-            .unwrap_or_else(|| panic!("msg1 not found"));
+            .expect("msg1 not found");
         assert_eq!(first.role, "user");
 
         let second = messages
             .iter()
             .find(|m| m.id == msg2.id)
-            .unwrap_or_else(|| panic!("msg2 not found"));
+            .expect("msg2 not found");
         assert_eq!(second.role, "assistant");
 
         // List after first message
@@ -12308,7 +12289,7 @@ mod tests {
 
         // Get by ID
         let found = store.get_provisioner_job_by_id(job_id).await?;
-        assert!(found.is_some());
+        assert!(found.is_some(), "should find provisioner job by ID");
         assert_eq!(
             found.as_ref().map(|j| j.job_status),
             Some(ProvisionerJobStatus::Pending)
@@ -12347,8 +12328,7 @@ mod tests {
 
         // Verify completed
         let completed = store.get_provisioner_job_by_id(job_id).await?;
-        assert!(completed.is_some());
-        let completed = completed.unwrap_or_else(|| panic!("job not found"));
+        let completed = completed.expect("completed job should still be found");
         assert_eq!(completed.job_status, ProvisionerJobStatus::Succeeded);
         assert!(completed.completed_at.is_some());
 
@@ -12550,13 +12530,12 @@ mod tests {
             )
             .await?;
         assert_eq!(link.provider_id, provider_id);
-        assert!(link.authenticated);
+        assert!(link.authenticated, "link should be authenticated");
         assert_eq!(link.access_token, "access-token-123");
 
         // Find
         let found = store.find_external_auth_link(user_id, &provider_id).await?;
-        assert!(found.is_some());
-        let found = found.unwrap_or_else(|| panic!("link not found"));
+        let found = found.expect("should find external auth link");
         assert_eq!(found.provider_id, provider_id);
         assert_eq!(found.access_token, "access-token-123");
 
@@ -12635,7 +12614,7 @@ mod tests {
         let deleted = store
             .delete_external_auth_link(user_id, &provider_id)
             .await?;
-        assert!(deleted);
+        assert!(deleted, "delete should return true");
 
         // Verify gone
         let gone = store.find_external_auth_link(user_id, &provider_id).await?;
@@ -12704,7 +12683,7 @@ mod tests {
 
         // Delete
         let deleted = store.delete_custom_role(&role_name, Some(org_id)).await?;
-        assert!(deleted);
+        assert!(deleted, "delete_custom_role should return true");
 
         // Verify gone
         let after_delete = store.list_custom_roles(Some(org_id)).await?;
@@ -12749,8 +12728,7 @@ mod tests {
 
         // Find by ID
         let found = store.get_file_by_id(file_id).await?;
-        assert!(found.is_some());
-        let found = found.unwrap_or_else(|| panic!("file not found"));
+        let found = found.expect("should find file by ID");
         assert_eq!(found.hash, file_hash);
         assert_eq!(found.data, file_data);
         assert_eq!(found.mimetype, "text/plain");
