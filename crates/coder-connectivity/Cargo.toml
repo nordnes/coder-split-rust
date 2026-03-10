@@ -21,3 +21,9 @@ thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
+time = { workspace = true, features = ["macros"] }
+uuid = { workspace = true }

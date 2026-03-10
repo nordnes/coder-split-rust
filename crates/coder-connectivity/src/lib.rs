@@ -766,3 +766,432 @@ pub fn generate_git_ssh_key(comment: &str) -> Result<GeneratedGitSshKey, GitSshK
         private_key: private_key.to_openssh(LineEnding::LF)?.to_string(),
     })
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use async_trait::async_trait;
+    use coder_core::{
+        DeploymentMetadata, DeploymentStore, HealthSeverity, OperationalStore,
+        ProvisionerDaemonHealthRecord, StorageError, WorkspaceProxyHealthRecord,
+    };
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    // ── Mock store ───────────────────────────────────────────
+
+    /// Configurable mock for `DeploymentStore + OperationalStore`.
+    #[derive(Clone)]
+    struct MockStore {
+        ping_ok: Arc<AtomicBool>,
+        proxies: Arc<Mutex<Vec<WorkspaceProxyHealthRecord>>>,
+        daemons: Arc<Mutex<Vec<ProvisionerDaemonHealthRecord>>>,
+        ping_call_count: Arc<AtomicU32>,
+    }
+
+    impl MockStore {
+        fn healthy() -> Self {
+            Self {
+                ping_ok: Arc::new(AtomicBool::new(true)),
+                proxies: Arc::new(Mutex::new(Vec::new())),
+                daemons: Arc::new(Mutex::new(Vec::new())),
+                ping_call_count: Arc::new(AtomicU32::new(0)),
+            }
+        }
+
+        fn with_ping_failing(self) -> Self {
+            self.ping_ok.store(false, Ordering::SeqCst);
+            self
+        }
+
+        fn with_daemons(daemons: Vec<ProvisionerDaemonHealthRecord>) -> Self {
+            Self {
+                ping_ok: Arc::new(AtomicBool::new(true)),
+                proxies: Arc::new(Mutex::new(Vec::new())),
+                daemons: Arc::new(Mutex::new(daemons)),
+                ping_call_count: Arc::new(AtomicU32::new(0)),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl DeploymentStore for MockStore {
+        async fn ping(&self) -> Result<(), StorageError> {
+            self.ping_call_count.fetch_add(1, Ordering::SeqCst);
+            if self.ping_ok.load(Ordering::SeqCst) {
+                Ok(())
+            } else {
+                Err(StorageError::unavailable("mock database unreachable"))
+            }
+        }
+
+        async fn ensure_deployment_metadata(&self) -> Result<DeploymentMetadata, StorageError> {
+            Ok(DeploymentMetadata {
+                deployment_id: uuid::Uuid::nil(),
+            })
+        }
+    }
+
+    #[async_trait]
+    impl OperationalStore for MockStore {
+        async fn list_workspace_proxies_for_health(
+            &self,
+        ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError> {
+            Ok(self.proxies.lock().await.clone())
+        }
+
+        async fn list_provisioner_daemons_for_health(
+            &self,
+        ) -> Result<Vec<ProvisionerDaemonHealthRecord>, StorageError> {
+            Ok(self.daemons.lock().await.clone())
+        }
+
+        async fn deployment_stats(
+            &self,
+        ) -> Result<coder_core::api::DeploymentStatsResponse, StorageError> {
+            Ok(coder_core::api::DeploymentStatsResponse {
+                aggregated_from: OffsetDateTime::now_utc(),
+                collected_at: OffsetDateTime::now_utc(),
+                next_update_at: OffsetDateTime::now_utc(),
+                workspaces: Default::default(),
+                session_count: Default::default(),
+            })
+        }
+    }
+
+    fn test_config() -> ServerConfig {
+        ServerConfig {
+            listen_addr: "127.0.0.1:0"
+                .parse()
+                .unwrap_or_else(|_| std::net::SocketAddr::from(([127, 0, 0, 1], 0))),
+            access_url: reqwest::Url::parse("http://127.0.0.1:0").unwrap_or_else(|_| {
+                reqwest::Url::parse("http://localhost").unwrap_or_else(|_| unreachable!())
+            }),
+            database: coder_core::DatabaseConfig {
+                postgres_url: String::new(),
+                max_connections: 1,
+                min_connections: 1,
+                acquire_timeout_secs: 5,
+            },
+            telemetry_enabled: false,
+            ssh: coder_core::SshConfig {
+                hostname_prefix: String::new(),
+                hostname_suffix: String::new(),
+                ssh_config_options: Vec::new(),
+            },
+            external_auth_providers: Vec::new(),
+            derp_regions: Vec::new(),
+            shutdown_grace_period_secs: 5,
+            log_format: coder_core::LogFormat::Pretty,
+        }
+    }
+
+    fn test_build_metadata() -> BuildMetadata {
+        BuildMetadata {
+            version: "0.0.0-test".to_owned(),
+            external_url: String::new(),
+            agent_api_version: String::new(),
+            provisioner_api_version: String::new(),
+            upgrade_message: String::new(),
+            workspace_proxy: false,
+        }
+    }
+
+    // ── Git SSH key tests ────────────────────────────────────
+
+    #[test]
+    fn generate_git_ssh_key_returns_valid_keypair() {
+        let result = generate_git_ssh_key("test@coder.com");
+        assert!(result.is_ok());
+        let key = result.unwrap_or_else(|_| unreachable!());
+        assert!(
+            key.public_key.starts_with("ssh-ed25519"),
+            "public key should start with ssh-ed25519"
+        );
+        assert!(
+            key.private_key.contains("BEGIN OPENSSH PRIVATE KEY"),
+            "private key should contain PEM header"
+        );
+    }
+
+    #[test]
+    fn generate_git_ssh_key_includes_comment_in_public_key() {
+        let result = generate_git_ssh_key("alice@example.com");
+        assert!(result.is_ok());
+        let key = result.unwrap_or_else(|_| unreachable!());
+        assert!(
+            key.public_key.contains("alice@example.com"),
+            "public key should contain the comment"
+        );
+        assert!(
+            key.public_key.ends_with('\n'),
+            "public key should end with a newline"
+        );
+    }
+
+    #[test]
+    fn generate_git_ssh_key_empty_comment() {
+        let result = generate_git_ssh_key("");
+        assert!(result.is_ok());
+        let key = result.unwrap_or_else(|_| unreachable!());
+        assert!(key.public_key.starts_with("ssh-ed25519"));
+    }
+
+    #[test]
+    fn generate_git_ssh_key_produces_unique_keys() {
+        let key1 = generate_git_ssh_key("a").unwrap_or_else(|_| unreachable!());
+        let key2 = generate_git_ssh_key("a").unwrap_or_else(|_| unreachable!());
+        assert_ne!(
+            key1.private_key, key2.private_key,
+            "two generated keys should differ"
+        );
+    }
+
+    // ── Health service tests ─────────────────────────────────
+
+    #[tokio::test]
+    async fn health_report_with_healthy_store() {
+        let store = MockStore::healthy();
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(report.database.base.severity, HealthSeverity::Ok);
+        assert!(report.database.healthy);
+        assert!(report.database.reachable);
+    }
+
+    #[tokio::test]
+    async fn health_report_with_unhealthy_database() {
+        let store = MockStore::healthy().with_ping_failing();
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(report.database.base.severity, HealthSeverity::Error);
+        assert!(!report.database.healthy);
+        assert!(!report.database.reachable);
+        assert!(report.database.base.error.is_some());
+    }
+
+    #[tokio::test]
+    async fn health_report_cache_returns_same_result() {
+        let store = MockStore::healthy();
+        let call_count = store.ping_call_count.clone();
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        // First call: populates the cache
+        let report1 = svc.report(&config, &meta, false).await;
+        assert!(report1.is_ok());
+        let count_after_first = call_count.load(Ordering::SeqCst);
+
+        // Second call: should use cache (no additional ping)
+        let report2 = svc.report(&config, &meta, false).await;
+        assert!(report2.is_ok());
+        let count_after_second = call_count.load(Ordering::SeqCst);
+
+        assert_eq!(
+            count_after_first, count_after_second,
+            "second call should use cache without pinging again"
+        );
+
+        let r1 = report1.unwrap_or_else(|_| unreachable!());
+        let r2 = report2.unwrap_or_else(|_| unreachable!());
+        assert_eq!(r1.time, r2.time, "cached report should have same timestamp");
+    }
+
+    #[tokio::test]
+    async fn health_report_force_bypasses_cache() {
+        let store = MockStore::healthy();
+        let call_count = store.ping_call_count.clone();
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let _r1 = svc.report(&config, &meta, true).await;
+        let count1 = call_count.load(Ordering::SeqCst);
+
+        let _r2 = svc.report(&config, &meta, true).await;
+        let count2 = call_count.load(Ordering::SeqCst);
+
+        assert!(
+            count2 > count1,
+            "force=true should bypass cache and ping again"
+        );
+    }
+
+    #[tokio::test]
+    async fn provisioner_daemon_offline_detection() {
+        let old_daemon = ProvisionerDaemonHealthRecord {
+            id: uuid::Uuid::new_v4(),
+            organization_id: uuid::Uuid::new_v4(),
+            created_at: OffsetDateTime::now_utc() - time::Duration::hours(1),
+            last_seen_at: Some(OffsetDateTime::now_utc() - time::Duration::minutes(10)),
+            name: "stale-daemon".to_owned(),
+            version: "1.0.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            provisioners: vec!["terraform".to_owned()],
+            tags: HashMap::new(),
+            status: None,
+        };
+
+        let store = MockStore::with_daemons(vec![old_daemon]);
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(
+            report.provisioner_daemons.base.severity,
+            HealthSeverity::Warning
+        );
+        assert!(
+            report
+                .provisioner_daemons
+                .base
+                .warnings
+                .iter()
+                .any(|w| w.contains("offline")),
+            "should have an offline warning"
+        );
+        assert!(
+            report
+                .provisioner_daemons
+                .items
+                .iter()
+                .any(|i| i.contains("offline")),
+            "daemon item should show offline status"
+        );
+    }
+
+    #[tokio::test]
+    async fn provisioner_daemon_idle_when_recently_seen() {
+        let recent_daemon = ProvisionerDaemonHealthRecord {
+            id: uuid::Uuid::new_v4(),
+            organization_id: uuid::Uuid::new_v4(),
+            created_at: OffsetDateTime::now_utc(),
+            last_seen_at: Some(OffsetDateTime::now_utc() - time::Duration::seconds(30)),
+            name: "active-daemon".to_owned(),
+            version: "1.0.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            provisioners: vec!["terraform".to_owned()],
+            tags: HashMap::new(),
+            status: None,
+        };
+
+        let store = MockStore::with_daemons(vec![recent_daemon]);
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        assert_eq!(report.provisioner_daemons.base.severity, HealthSeverity::Ok);
+        assert!(
+            report
+                .provisioner_daemons
+                .items
+                .iter()
+                .any(|i| i.contains("idle")),
+            "recently-seen daemon should show idle status"
+        );
+    }
+
+    #[tokio::test]
+    async fn provisioner_daemon_with_explicit_status() {
+        let daemon = ProvisionerDaemonHealthRecord {
+            id: uuid::Uuid::new_v4(),
+            organization_id: uuid::Uuid::new_v4(),
+            created_at: OffsetDateTime::now_utc(),
+            last_seen_at: Some(OffsetDateTime::now_utc()),
+            name: "busy-daemon".to_owned(),
+            version: "1.0.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            provisioners: vec!["terraform".to_owned()],
+            tags: HashMap::new(),
+            status: Some("busy".to_owned()),
+        };
+
+        let store = MockStore::with_daemons(vec![daemon]);
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        assert!(
+            report
+                .provisioner_daemons
+                .items
+                .iter()
+                .any(|i| i.contains("busy")),
+            "daemon with explicit status should use that status"
+        );
+    }
+
+    // ── max_severity tests ───────────────────────────────────
+
+    #[test]
+    fn max_severity_error_dominates() {
+        assert_eq!(
+            max_severity(HealthSeverity::Error, HealthSeverity::Ok),
+            HealthSeverity::Error
+        );
+        assert_eq!(
+            max_severity(HealthSeverity::Ok, HealthSeverity::Error),
+            HealthSeverity::Error
+        );
+    }
+
+    #[test]
+    fn max_severity_warning_over_ok() {
+        assert_eq!(
+            max_severity(HealthSeverity::Warning, HealthSeverity::Ok),
+            HealthSeverity::Warning
+        );
+    }
+
+    #[test]
+    fn max_severity_ok_when_both_ok() {
+        assert_eq!(
+            max_severity(HealthSeverity::Ok, HealthSeverity::Ok),
+            HealthSeverity::Ok
+        );
+    }
+
+    // ── Telemetry snapshot test ──────────────────────────────
+
+    #[tokio::test]
+    async fn telemetry_snapshot_collects_stats() {
+        let store = MockStore::healthy();
+        // Create service without background loop by constructing directly
+        let service = Arc::new(TelemetryService {
+            store,
+            deployment_id: "test-deploy-id".to_owned(),
+            version: "0.0.1-test".to_owned(),
+        });
+
+        let snapshot = service.collect_snapshot().await;
+        assert!(snapshot.is_ok());
+        let snapshot = snapshot.unwrap_or_else(|_| unreachable!());
+        assert_eq!(snapshot.deployment_id, "test-deploy-id");
+        assert_eq!(snapshot.version, "0.0.1-test");
+    }
+}

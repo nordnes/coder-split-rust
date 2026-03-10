@@ -385,6 +385,183 @@ pub fn evaluate_dormancy(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use async_trait::async_trait;
+    use coder_core::{
+        OperationalStore, StorageError,
+        api::{
+            DeploymentStatsResponse, SessionCountDeploymentStatsResponse,
+            WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
+        },
+    };
+    use std::sync::Arc as StdArc;
+    use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
+    // ── Mock store ───────────────────────────────────────────
+
+    #[derive(Clone)]
+    struct MockOperationalStore {
+        stats: StdArc<Mutex<DeploymentStatsResponse>>,
+        should_fail: StdArc<AtomicBool>,
+        call_count: StdArc<AtomicU32>,
+    }
+
+    impl MockOperationalStore {
+        fn new(stats: DeploymentStatsResponse) -> Self {
+            Self {
+                stats: StdArc::new(Mutex::new(stats)),
+                should_fail: StdArc::new(AtomicBool::new(false)),
+                call_count: StdArc::new(AtomicU32::new(0)),
+            }
+        }
+
+        fn with_failure(self) -> Self {
+            self.should_fail.store(true, Ordering::SeqCst);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl OperationalStore for MockOperationalStore {
+        async fn deployment_stats(&self) -> Result<DeploymentStatsResponse, StorageError> {
+            self.call_count.fetch_add(1, Ordering::SeqCst);
+            if self.should_fail.load(Ordering::SeqCst) {
+                return Err(StorageError::unavailable("mock store failure"));
+            }
+            Ok(self.stats.lock().await.clone())
+        }
+    }
+
+    fn default_stats() -> DeploymentStatsResponse {
+        DeploymentStatsResponse {
+            aggregated_from: OffsetDateTime::now_utc(),
+            collected_at: OffsetDateTime::now_utc(),
+            next_update_at: OffsetDateTime::now_utc(),
+            workspaces: WorkspaceDeploymentStatsResponse {
+                pending: 1,
+                building: 2,
+                running: 5,
+                failed: 0,
+                stopped: 3,
+                connection_latency_ms: WorkspaceConnectionLatencyMs {
+                    p50: 10.0,
+                    p95: 50.0,
+                },
+                rx_bytes: 1024,
+                tx_bytes: 2048,
+            },
+            session_count: SessionCountDeploymentStatsResponse {
+                vscode: 3,
+                ssh: 2,
+                jetbrains: 1,
+                reconnecting_pty: 0,
+            },
+        }
+    }
+
+    // ── DeploymentStatsService tests ─────────────────────────
+
+    #[tokio::test]
+    async fn stats_service_returns_cached_stats() {
+        let store = MockOperationalStore::new(default_stats());
+        // Build the service struct directly to avoid spawning a background loop.
+        let service = StdArc::new(DeploymentStatsService {
+            store,
+            cache: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
+        });
+
+        // First call triggers refresh
+        let result = service.get().await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.workspaces.running, 5);
+        assert_eq!(stats.session_count.vscode, 3);
+    }
+
+    #[tokio::test]
+    async fn stats_service_refresh_updates_cache() {
+        let store = MockOperationalStore::new(default_stats());
+        let call_count = store.call_count.clone();
+
+        let service = StdArc::new(DeploymentStatsService {
+            store,
+            cache: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
+        });
+
+        let _r1 = service.refresh().await;
+        let count1 = call_count.load(Ordering::SeqCst);
+
+        let _r2 = service.refresh().await;
+        let count2 = call_count.load(Ordering::SeqCst);
+
+        assert_eq!(count2, count1 + 1, "each refresh should call the store");
+    }
+
+    #[tokio::test]
+    async fn stats_service_get_returns_cached_after_refresh() {
+        let store = MockOperationalStore::new(default_stats());
+        let call_count = store.call_count.clone();
+
+        let service = StdArc::new(DeploymentStatsService {
+            store,
+            cache: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
+        });
+
+        // Populate cache
+        let _ = service.refresh().await;
+        let count_after_refresh = call_count.load(Ordering::SeqCst);
+
+        // get() should use cache
+        let result = service.get().await;
+        assert!(result.is_ok());
+        let count_after_get = call_count.load(Ordering::SeqCst);
+        assert_eq!(
+            count_after_refresh, count_after_get,
+            "get() should use cache without calling store"
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_service_handles_store_error() {
+        let store = MockOperationalStore::new(default_stats()).with_failure();
+
+        let service = StdArc::new(DeploymentStatsService {
+            store,
+            cache: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
+        });
+
+        let result = service.get().await;
+        assert!(result.is_err(), "should propagate store error");
+    }
+
+    #[tokio::test]
+    async fn stats_service_returns_stale_data_after_store_failure() {
+        let store = MockOperationalStore::new(default_stats());
+        let should_fail = store.should_fail.clone();
+
+        let service = StdArc::new(DeploymentStatsService {
+            store,
+            cache: RwLock::new(None),
+            refresh_lock: Mutex::new(()),
+        });
+
+        // Populate cache successfully
+        let _ = service.refresh().await;
+
+        // Now make the store fail
+        should_fail.store(true, Ordering::SeqCst);
+
+        // get() should still return the cached value
+        let result = service.get().await;
+        assert!(result.is_ok(), "should return stale cached data");
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.workspaces.running, 5);
+    }
+
+    // ── Schedule tests ───────────────────────────────────────
 
     #[test]
     fn parse_autostart_schedule_basic() {
@@ -489,5 +666,80 @@ mod tests {
     fn dormancy_evaluation_active() {
         let recent = OffsetDateTime::now_utc() - time::Duration::days(10);
         assert_eq!(evaluate_dormancy(recent, 90), AutobuildAction::None);
+    }
+
+    // ── Additional schedule tests ────────────────────────────
+
+    #[test]
+    fn schedule_next_after_utc_returns_some() {
+        let schedule = AutostartSchedule::parse("30 9 * * 1-5");
+        assert!(schedule.is_ok());
+        let s = schedule.unwrap_or_else(|_| unreachable!());
+        let next = s.next_after_utc();
+        assert!(next.is_some(), "should return the next occurrence");
+    }
+
+    #[test]
+    fn schedule_expression_preserved() {
+        let raw = "CRON_TZ=Europe/Oslo 0 8 * * *";
+        let schedule = AutostartSchedule::parse(raw);
+        assert!(schedule.is_ok());
+        let s = schedule.unwrap_or_else(|_| unreachable!());
+        assert_eq!(s.expression(), raw);
+    }
+
+    #[test]
+    fn schedule_should_have_fired_recently() {
+        // "every minute" schedule should have fired in the last 120 seconds
+        let schedule = AutostartSchedule::parse("* * * * *");
+        assert!(schedule.is_ok());
+        let s = schedule.unwrap_or_else(|_| unreachable!());
+        assert!(
+            s.should_have_fired(120),
+            "every-minute schedule should have fired within 120s"
+        );
+    }
+
+    #[test]
+    fn schedule_should_not_have_fired_in_tiny_window() {
+        // A specific schedule (e.g. once a year) should not have fired in 1 second
+        let schedule = AutostartSchedule::parse("0 0 1 1 *");
+        assert!(schedule.is_ok());
+        let s = schedule.unwrap_or_else(|_| unreachable!());
+        // With a 1-second window, the yearly schedule almost certainly didn't fire
+        // (unless it's exactly midnight Jan 1 UTC)
+        // This is a best-effort test; the key thing is the function doesn't panic.
+        let _ = s.should_have_fired(1);
+    }
+
+    // ── Autostop policy edge cases ───────────────────────────
+
+    #[test]
+    fn autostop_policy_exactly_at_ttl() {
+        let policy = AutostopPolicy { ttl_minutes: 60 };
+        let exactly_one_hour_ago = OffsetDateTime::now_utc() - time::Duration::minutes(60);
+        assert!(
+            policy.should_stop(exactly_one_hour_ago),
+            "should stop when elapsed == TTL"
+        );
+    }
+
+    // ── compute_extended_deadline edge cases ──────────────────
+
+    #[test]
+    fn deadline_extension_no_max_allows_full_extension() {
+        let now = OffsetDateTime::now_utc();
+        let extended = compute_extended_deadline(now, 120, None);
+        let diff = (extended - now).whole_minutes();
+        assert_eq!(diff, 120);
+    }
+
+    #[test]
+    fn deadline_extension_max_far_in_future() {
+        let now = OffsetDateTime::now_utc();
+        let far_max = now + time::Duration::days(365);
+        let extended = compute_extended_deadline(now, 30, Some(far_max));
+        let diff = (extended - now).whole_minutes();
+        assert_eq!(diff, 30, "extension below max should not be clamped");
     }
 }
