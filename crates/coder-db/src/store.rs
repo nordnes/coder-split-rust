@@ -659,6 +659,8 @@ struct StoredOAuth2ProviderAppRow {
 struct StoredOAuth2ProviderAppSecretRow {
     id: Uuid,
     created_at: OffsetDateTime,
+    last_used_at: Option<OffsetDateTime>,
+    secret_prefix: Vec<u8>,
     hashed_secret: Vec<u8>,
     display_secret: String,
     app_id: Uuid,
@@ -676,6 +678,8 @@ struct StoredOAuth2ProviderAppCodeRow {
     resource_uri: String,
     code_challenge: String,
     code_challenge_method: String,
+    state_hash: Option<String>,
+    redirect_uri: Option<String>,
 }
 
 #[derive(Debug, FromRow)]
@@ -4656,7 +4660,8 @@ impl AppStore for PostgresStore {
                 updated_at = NOW(),
                 name = $2,
                 icon = $3,
-                callback_url = $4
+                callback_url = $4,
+                redirect_uris = $5
              WHERE id = $1
              RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by",
         )
@@ -4664,6 +4669,7 @@ impl AppStore for PostgresStore {
         .bind(&input.name)
         .bind(&input.icon)
         .bind(&input.callback_url)
+        .bind(&input.redirect_uris)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
@@ -4688,7 +4694,7 @@ impl AppStore for PostgresStore {
         app_id: Uuid,
     ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
-            "SELECT id, created_at, hashed_secret, display_secret, app_id
+            "SELECT id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id
              FROM oauth2_provider_app_secrets
              WHERE app_id = $1
              ORDER BY (created_at, id) ASC",
@@ -4704,18 +4710,20 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
-    #[instrument(skip(self, hashed_secret), err(level = tracing::Level::WARN))]
+    #[instrument(skip(self, secret_prefix, hashed_secret), err(level = tracing::Level::WARN))]
     async fn create_oauth2_provider_app_secret(
         &self,
         app_id: Uuid,
+        secret_prefix: &[u8],
         hashed_secret: &[u8],
         display_secret: &str,
     ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
         let row = sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
-            "INSERT INTO oauth2_provider_app_secrets (hashed_secret, display_secret, app_id)
-             VALUES ($1, $2, $3)
-             RETURNING id, created_at, hashed_secret, display_secret, app_id",
+            "INSERT INTO oauth2_provider_app_secrets (secret_prefix, hashed_secret, display_secret, app_id)
+             VALUES ($1, $2, $3, $4)
+             RETURNING id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id",
         )
+        .bind(secret_prefix)
         .bind(hashed_secret)
         .bind(display_secret)
         .bind(app_id)
@@ -4732,8 +4740,41 @@ impl AppStore for PostgresStore {
         secret_id: Uuid,
     ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
         sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
-            "SELECT id, created_at, hashed_secret, display_secret, app_id
+            "SELECT id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id
              FROM oauth2_provider_app_secrets WHERE id = $1",
+        )
+        .bind(secret_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_secret_from_row))
+    }
+
+    #[instrument(skip(self, secret_prefix), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_secret_by_prefix(
+        &self,
+        secret_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
+            "SELECT id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id
+             FROM oauth2_provider_app_secrets WHERE secret_prefix = $1",
+        )
+        .bind(secret_prefix)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_secret_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_oauth2_provider_app_secret_last_used(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppSecretRow>(
+            "UPDATE oauth2_provider_app_secrets SET last_used_at = NOW()
+             WHERE id = $1
+             RETURNING id, created_at, last_used_at, secret_prefix, hashed_secret, display_secret, app_id",
         )
         .bind(secret_id)
         .fetch_optional(&self.pool)
@@ -4768,14 +4809,17 @@ impl AppStore for PostgresStore {
         resource_uri: &str,
         code_challenge: &str,
         code_challenge_method: &str,
+        state_hash: Option<&str>,
+        redirect_uri: Option<&str>,
     ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
         let row = sqlx::query_as::<_, StoredOAuth2ProviderAppCodeRow>(
             "INSERT INTO oauth2_provider_app_codes
                 (expires_at, secret_prefix, hashed_secret, app_id, user_id,
-                 resource_uri, code_challenge, code_challenge_method)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                 resource_uri, code_challenge, code_challenge_method, state_hash, redirect_uri)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
              RETURNING id, created_at, expires_at, secret_prefix, hashed_secret,
-                       app_id, user_id, resource_uri, code_challenge, code_challenge_method",
+                       app_id, user_id, resource_uri, code_challenge, code_challenge_method,
+                       state_hash, redirect_uri",
         )
         .bind(expires_at)
         .bind(secret_prefix)
@@ -4785,6 +4829,8 @@ impl AppStore for PostgresStore {
         .bind(resource_uri)
         .bind(code_challenge)
         .bind(code_challenge_method)
+        .bind(state_hash)
+        .bind(redirect_uri)
         .fetch_one(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -4799,10 +4845,29 @@ impl AppStore for PostgresStore {
     ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
         sqlx::query_as::<_, StoredOAuth2ProviderAppCodeRow>(
             "SELECT id, created_at, expires_at, secret_prefix, hashed_secret,
-                    app_id, user_id, resource_uri, code_challenge, code_challenge_method
+                    app_id, user_id, resource_uri, code_challenge, code_challenge_method,
+                    state_hash, redirect_uri
              FROM oauth2_provider_app_codes WHERE secret_prefix = $1",
         )
         .bind(secret_prefix)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_code_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_code_by_id(
+        &self,
+        code_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppCodeRow>(
+            "SELECT id, created_at, expires_at, secret_prefix, hashed_secret,
+                    app_id, user_id, resource_uri, code_challenge, code_challenge_method,
+                    state_hash, redirect_uri
+             FROM oauth2_provider_app_codes WHERE id = $1",
+        )
+        .bind(code_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
@@ -4817,6 +4882,22 @@ impl AppStore for PostgresStore {
             .await
             .map_err(storage_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_oauth2_provider_app_codes_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        let result =
+            sqlx::query("DELETE FROM oauth2_provider_app_codes WHERE app_id = $1 AND user_id = $2")
+                .bind(app_id)
+                .bind(user_id)
+                .execute(&self.pool)
+                .await
+                .map_err(storage_error)?;
+        Ok(result.rows_affected())
     }
 
     // ----- OAuth2 Provider App Tokens -----
@@ -4858,6 +4939,23 @@ impl AppStore for PostgresStore {
              FROM oauth2_provider_app_tokens WHERE hash_prefix = $1",
         )
         .bind(hash_prefix)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(oauth2_provider_app_token_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_oauth2_provider_app_token_by_api_key_id(
+        &self,
+        api_key_id: &str,
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        sqlx::query_as::<_, StoredOAuth2ProviderAppTokenRow>(
+            "SELECT id, created_at, expires_at, hash_prefix, refresh_hash,
+                    app_secret_id, api_key_id, audience, user_id
+             FROM oauth2_provider_app_tokens WHERE api_key_id = $1",
+        )
+        .bind(api_key_id)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
@@ -7998,6 +8096,8 @@ fn oauth2_provider_app_secret_from_row(
     OAuth2ProviderAppSecretRecord {
         id: row.id,
         created_at: row.created_at,
+        last_used_at: row.last_used_at,
+        secret_prefix: row.secret_prefix,
         hashed_secret: row.hashed_secret,
         display_secret: row.display_secret,
         app_id: row.app_id,
@@ -8018,6 +8118,8 @@ fn oauth2_provider_app_code_from_row(
         resource_uri: row.resource_uri,
         code_challenge: row.code_challenge,
         code_challenge_method: row.code_challenge_method,
+        state_hash: row.state_hash,
+        redirect_uri: row.redirect_uri,
     }
 }
 

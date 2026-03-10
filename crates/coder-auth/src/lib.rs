@@ -2054,6 +2054,7 @@ where
             name: name.trim().to_owned(),
             icon: icon.to_owned(),
             callback_url: callback_url.trim().to_owned(),
+            redirect_uris: vec![],
         };
         self.store
             .update_oauth2_provider_app(&input)
@@ -2111,7 +2112,7 @@ where
 
         let record = self
             .store
-            .create_oauth2_provider_app_secret(app_id, &hashed, &display_secret)
+            .create_oauth2_provider_app_secret(app_id, &hashed[..8], &hashed, &display_secret)
             .await?;
         Ok((raw_secret, record))
     }
@@ -2190,6 +2191,8 @@ where
                 resource_uri,
                 code_challenge,
                 code_challenge_method,
+                None,
+                None,
             )
             .await?;
 
