@@ -374,6 +374,7 @@ dependencies = [
  "subtle",
  "thiserror",
  "time",
+ "tokio",
  "url",
  "uuid",
 ]
@@ -389,6 +390,7 @@ dependencies = [
  "sqlx",
  "thiserror",
  "time",
+ "tokio",
  "tracing",
  "uuid",
 ]
