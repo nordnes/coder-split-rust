@@ -7165,17 +7165,19 @@ async fn get_workspace_watch_ws(
     let pubsub = state.pubsub.clone();
 
     Ok(ws.on_upgrade(move |mut socket| async move {
-        // Send initial workspace state.
-        let initial = serde_json::to_string(&workspace_to_json(&workspace)).unwrap_or_default();
-        if socket.send(Message::Text(initial.into())).await.is_err() {
-            return;
-        }
-
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
         let channel = workspace_event_channel(owner_id);
         let mut subscription = match pubsub.subscribe(&channel).await {
             Ok(sub) => sub,
             Err(_) => return,
         };
+
+        // Send initial workspace state.
+        let initial = serde_json::to_string(&workspace_to_json(&workspace)).unwrap_or_default();
+        if socket.send(Message::Text(initial.into())).await.is_err() {
+            return;
+        }
 
         loop {
             // Race pub/sub recv against WebSocket client messages to detect disconnect.
