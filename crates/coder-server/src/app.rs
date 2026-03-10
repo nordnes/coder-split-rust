@@ -1858,6 +1858,22 @@ async fn post_user(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can create users.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::User),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create users.",
+        ));
+    }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -1955,8 +1971,21 @@ async fn put_user_git_ssh_key(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
-    if !context.actor.can_access_user(target_user.id) {
-        return Ok(not_found_response("User not found."));
+    // RBAC: verify the actor can update this user's SSH key.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::UpdatePersonal,
+            &Object::new(ResourceType::User)
+                .with_id(target_user.id)
+                .with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this user's SSH key.",
+        ));
     }
 
     let key = match store_new_git_ssh_key(&state, &target_user).await {
@@ -2182,6 +2211,7 @@ async fn put_user_appearance(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2249,6 +2279,7 @@ async fn put_user_preferences(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2290,6 +2321,7 @@ async fn put_user_password(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2633,6 +2665,25 @@ async fn post_organization_member(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can add members to this organization.
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::OrganizationMember).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to add members to this organization.",
+        ));
+    }
+
     let member = match state
         .identity
         .create_organization_member(&context.actor, &context.user, &organization, &user)
@@ -2667,6 +2718,25 @@ async fn delete_organization_member(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can remove members from this organization.
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::OrganizationMember).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to remove members from this organization.",
+        ));
+    }
+
     let (organization_id, user_id) = match state
         .identity
         .delete_organization_member(&context.actor, &context.user, &organization, &user)
@@ -2698,6 +2768,25 @@ async fn put_organization_member_roles(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can assign roles in this organization.
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Assign,
+            &Object::new(ResourceType::AssignOrgRole).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to assign roles in this organization.",
+        ));
+    }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2745,6 +2834,25 @@ async fn create_session_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can create API keys for this user.
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create API keys for this user.",
+        ));
+    }
+
     let result = match state
         .auth
         .create_session_api_key(&context.actor, &context.user, &user)
@@ -2776,6 +2884,25 @@ async fn create_token_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can create token API keys for this user.
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create token API keys for this user.",
+        ));
+    }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2877,6 +3004,25 @@ async fn delete_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can delete API keys for this user.
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete API keys for this user.",
+        ));
+    }
+
     let key_id = match state
         .auth
         .delete_api_key(&context.actor, &context.user, &user, &keyid)
@@ -2907,6 +3053,25 @@ async fn expire_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can expire API keys for this user.
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to expire API keys for this user.",
+        ));
+    }
+
     let key_id = match state
         .auth
         .expire_api_key(&context.actor, &context.user, &user, &keyid)
@@ -3064,13 +3229,30 @@ async fn list_provisioner_daemons(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
+        Ok(o) => o,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    // RBAC: verify the actor can read provisioner daemons in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerDaemon).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner daemons.",
+        ));
     }
+
     let empty: Vec<coder_core::ProvisionerDaemonResponse> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -3088,13 +3270,30 @@ async fn list_provisioner_jobs(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
+        Ok(o) => o,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    // RBAC: verify the actor can read provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner jobs.",
+        ));
     }
+
     let empty: Vec<ProvisionerJobResponse> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -3112,12 +3311,28 @@ async fn get_provisioner_job(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
+        Ok(o) => o,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    // RBAC: verify the actor can read provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner jobs.",
+        ));
     }
     Ok((
         StatusCode::NOT_FOUND,
@@ -3152,6 +3367,21 @@ async fn cancel_provisioner_job(
             return handle_identity_error(error);
         }
     };
+
+    // RBAC: verify the actor can update provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel provisioner jobs.",
+        ));
+    }
 
     // Parse job UUID.
     let job_id = match Uuid::from_str(&job) {
@@ -3237,6 +3467,21 @@ async fn get_provisioner_job_logs(
             return handle_identity_error(error);
         }
     };
+
+    // RBAC: verify the actor can read provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner job logs.",
+        ));
+    }
 
     // Parse job UUID.
     let job_id = match Uuid::from_str(&job) {
@@ -5835,6 +6080,21 @@ async fn post_org_template(
         }
     };
 
+    // RBAC: verify the actor can create templates in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Template).in_org(org_record.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create templates in this organization.",
+        ));
+    }
+
     let now = OffsetDateTime::now_utc();
     let template_id = Uuid::new_v4();
     let input = CreateTemplateInput {
@@ -6044,6 +6304,21 @@ async fn post_org_template_version(
         }
     };
 
+    // RBAC: verify the actor can create template versions in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Template).in_org(org_record.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create template versions in this organization.",
+        ));
+    }
+
     let now = OffsetDateTime::now_utc();
     let job_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
@@ -6182,6 +6457,28 @@ async fn delete_template(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Look up the template to get org info for RBAC.
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+
+    // RBAC: verify the actor can delete this template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Template)
+                .with_id(template_id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete this template.",
+        ));
+    }
+
     let deleted = state.store.soft_delete_template(template_id).await?;
     if !deleted {
         return Ok(not_found_response("Template not found."));
@@ -6222,6 +6519,23 @@ async fn patch_template(
         Some(t) if !t.deleted => t,
         _ => return Ok(not_found_response("Template not found.")),
     };
+
+    // RBAC: verify the actor can update this template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template_id)
+                .in_org(existing.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this template.",
+        ));
+    }
 
     let name = if body.name.is_empty() {
         &existing.name
@@ -6447,6 +6761,21 @@ async fn patch_template_version(
         None => return Ok(not_found_response("Template version not found.")),
     };
 
+    // RBAC: verify the actor can update this template version.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(existing.organization_id);
+    if let Some(tid) = existing.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this template version.",
+        ));
+    }
+
     let name = if body.name.is_empty() {
         &existing.name
     } else {
@@ -6487,6 +6816,27 @@ async fn post_archive_template_version(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Look up the version to get template info for RBAC.
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
+
+    // RBAC: verify the actor can update this template version.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&_context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to archive this template version.",
+        ));
+    }
+
     let archived = state.store.archive_template_version(version_id).await?;
     if !archived {
         return Ok(not_found_response("Template version not found."));
@@ -6512,6 +6862,21 @@ async fn patch_cancel_template_version(
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
+
+    // RBAC: verify the actor can update this template version.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&_context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel this template version job.",
+        ));
+    }
 
     let canceled = state
         .store
@@ -6602,12 +6967,32 @@ async fn get_template_version_dry_run(
 /// PATCH /templateversions/{templateversion}/dry-run/{jobid}
 async fn patch_template_version_dry_run(
     State(state): State<AppState>,
-    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // Look up the template version for org-scoped RBAC.
+    let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
+        return Ok(not_found_response("Template version not found."));
+    };
+
+    // RBAC: verify the actor can update templates (dry-run mutation).
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&_context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update template version dry runs.",
+        ));
+    }
 
     let canceled = state.store.cancel_template_provisioner_job(job_id).await?;
     if !canceled {
@@ -6631,12 +7016,32 @@ async fn patch_template_version_dry_run(
 /// PATCH /templateversions/{templateversion}/dry-run/{jobid}/cancel
 async fn patch_cancel_template_version_dry_run(
     State(state): State<AppState>,
-    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // Look up the template version for org-scoped RBAC.
+    let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
+        return Ok(not_found_response("Template version not found."));
+    };
+
+    // RBAC: verify the actor can update templates (dry-run cancel).
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&_context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel template version dry runs.",
+        ));
+    }
 
     let canceled = state.store.cancel_template_provisioner_job(job_id).await?;
     if !canceled {
@@ -7769,13 +8174,31 @@ async fn patch_workspace(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
         let Some(updated) = state
@@ -7845,6 +8268,25 @@ async fn post_workspace_build(
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace (creating a build
+    // is a mutation on an existing workspace, not creating a new one).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create builds for this workspace.",
+        ));
+    }
 
     let transition = body
         .get("transition")
@@ -8911,6 +9353,33 @@ async fn patch_cancel_workspace_build(
         return Ok(resource_not_found_response());
     };
 
+    // Look up the workspace to get owner/org info for RBAC.
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(build.workspace_id, None)
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // RBAC: verify the actor can update this workspace build.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &_context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(build.workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel this workspace build.",
+        ));
+    }
+
     let canceled = state
         .store
         .cancel_template_provisioner_job(build.job_id)
@@ -9092,9 +9561,36 @@ async fn put_workspace_build_state(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_build) = state.store.find_workspace_build_by_id(build_id).await? else {
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // Look up the workspace to get owner/org info for RBAC.
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(build.workspace_id, None)
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // RBAC: verify the actor can update this workspace build state.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &_context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(build.workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace build state.",
+        ));
+    }
 
     state
         .store
@@ -9135,6 +9631,21 @@ async fn get_user_workspace_by_name(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can read workspaces owned by target user.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::Workspace).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view this user's workspaces.",
+        ));
+    }
 
     let Some(workspace) = state
         .store
@@ -9198,6 +9709,21 @@ async fn post_user_workspace(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can create workspaces for this user.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create workspaces for this user.",
+        ));
+    }
 
     let template_id = match body.get("template_id").and_then(|v| v.as_str()) {
         Some(id) => match Uuid::parse_str(id) {
@@ -13054,8 +13580,9 @@ mod tests {
     };
     use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
     use coder_core::provisioner::{
-        ProvisionerJobLogRecord as ProvisionerLogRecord,
-        ProvisionerJobTimingRecord as ProvisionerTimingRecord,
+        LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord, ProvisionerJobStatus,
+        ProvisionerJobTimingRecord as ProvisionerTimingRecord, ProvisionerJobType,
+        ProvisionerStorageMethod, ProvisionerType,
     };
     use coder_core::template::ProvisionerJobRecord as TemplateProvisionerJobRecord;
     use coder_core::{
@@ -13193,6 +13720,12 @@ mod tests {
         provisioner_job_timings: Mutex<HashMap<Uuid, Vec<PortsJobTimingRecord>>>,
         workspace_port_shares: Mutex<Vec<WorkspaceAgentPortShareRecord>>,
         workspace_acls: Mutex<HashMap<Uuid, WorkspaceACLRecord>>,
+        // ProvisionerStore fields
+        prov_jobs: Mutex<HashMap<Uuid, ProvisionerJobRecord>>,
+        prov_job_logs: Mutex<Vec<ProvisionerLogRecord>>,
+        prov_job_log_next_id: Mutex<i64>,
+        prov_job_timings: Mutex<Vec<ProvisionerTimingRecord>>,
+        prov_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonRecord>>,
         // Provisioner keys
         provisioner_keys: Mutex<HashMap<Uuid, ProvisionerKeyRecord>>,
         // Custom roles
@@ -13269,6 +13802,11 @@ mod tests {
                 provisioner_job_timings: Mutex::new(HashMap::new()),
                 workspace_port_shares: Mutex::new(Vec::new()),
                 workspace_acls: Mutex::new(HashMap::new()),
+                prov_jobs: Mutex::new(HashMap::new()),
+                prov_job_logs: Mutex::new(Vec::new()),
+                prov_job_log_next_id: Mutex::new(1),
+                prov_job_timings: Mutex::new(Vec::new()),
+                prov_daemons: Mutex::new(HashMap::new()),
                 provisioner_keys: Mutex::new(HashMap::new()),
                 custom_roles: Mutex::new(HashMap::new()),
                 user_links: Mutex::new(HashMap::new()),
@@ -13371,114 +13909,372 @@ mod tests {
     impl ProvisionerStore for FakeStore {
         async fn acquire_provisioner_job(
             &self,
-            _input: AcquireProvisionerJobInput,
+            input: AcquireProvisionerJobInput,
         ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-            Ok(None)
+            // TODO: This simplified implementation does not filter by
+            // organization_id, types, or provisioner_tags. It simply grabs
+            // the first pending job. The real PostgresStore filters by all
+            // three fields — add matching logic if tests require it.
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let found = jobs
+                .values_mut()
+                .find(|j| j.job_status == ProvisionerJobStatus::Pending);
+            if let Some(job) = found {
+                job.job_status = ProvisionerJobStatus::Running;
+                job.started_at = Some(input.started_at);
+                job.updated_at = input.started_at;
+                job.worker_id = Some(input.worker_id);
+                Ok(Some(job.clone()))
+            } else {
+                Ok(None)
+            }
         }
 
         async fn get_provisioner_job_by_id(
             &self,
-            _id: Uuid,
+            id: Uuid,
         ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-            Ok(None)
+            Ok(self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&id)
+                .cloned())
         }
 
         async fn get_provisioner_jobs_by_ids(
             &self,
-            _ids: &[Uuid],
+            ids: &[Uuid],
         ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
-            Ok(Vec::new())
+            let jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(ids.iter().filter_map(|id| jobs.get(id).cloned()).collect())
         }
 
         async fn insert_provisioner_job(
             &self,
-            _input: InsertProvisionerJobInput,
+            input: InsertProvisionerJobInput,
         ) -> Result<ProvisionerJobRecord, StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let record = ProvisionerJobRecord {
+                id: input.id,
+                created_at: input.created_at,
+                updated_at: input.created_at,
+                started_at: None,
+                canceled_at: None,
+                completed_at: None,
+                error: String::new(),
+                error_code: String::new(),
+                organization_id: Some(input.organization_id),
+                initiator_id: Some(input.initiator_id),
+                provisioner: input.provisioner,
+                storage_method: input.storage_method,
+                file_id: Some(input.file_id),
+                job_type: input.job_type,
+                input: input.input,
+                tags: input.tags,
+                trace_metadata: input.trace_metadata,
+                worker_id: None,
+                job_status: ProvisionerJobStatus::Pending,
+                logs_overflowed: false,
+                logs_length: 0,
+            };
+            self.prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
         }
 
         async fn update_provisioner_job_by_id(
             &self,
-            _id: Uuid,
-            _updated_at: OffsetDateTime,
+            id: Uuid,
+            updated_at: OffsetDateTime,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let job = jobs
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::invalid_data(format!("job {id} not found")))?;
+            job.updated_at = updated_at;
+            Ok(())
         }
 
         async fn update_provisioner_job_with_complete_by_id(
             &self,
-            _input: CompleteProvisionerJobInput,
+            input: CompleteProvisionerJobInput,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let job = jobs
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::invalid_data(format!("job {} not found", input.id)))?;
+            job.updated_at = input.updated_at;
+            job.completed_at = Some(input.completed_at);
+            job.error = input.error.clone();
+            job.error_code = input.error_code.clone();
+            job.job_status = if input.error.is_empty() {
+                ProvisionerJobStatus::Succeeded
+            } else {
+                ProvisionerJobStatus::Failed
+            };
+            Ok(())
         }
 
         async fn update_provisioner_job_with_cancel_by_id(
             &self,
-            _input: CancelProvisionerJobInput,
+            input: CancelProvisionerJobInput,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let job = jobs
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::invalid_data(format!("job {} not found", input.id)))?;
+            job.canceled_at = Some(input.canceled_at);
+            job.updated_at = input.canceled_at;
+            if let Some(completed_at) = input.completed_at {
+                job.completed_at = Some(completed_at);
+                job.job_status = ProvisionerJobStatus::Canceled;
+            } else {
+                job.job_status = ProvisionerJobStatus::Canceling;
+            }
+            Ok(())
         }
 
         async fn get_provisioner_jobs_to_be_reaped(
             &self,
-            _input: GetJobsToBeReapedInput,
+            input: GetJobsToBeReapedInput,
         ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
-            Ok(Vec::new())
+            let jobs = self
+                .prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<ProvisionerJobRecord> = jobs
+                .values()
+                .filter(|j| {
+                    let stale_pending = j.job_status == ProvisionerJobStatus::Pending
+                        && j.created_at < input.pending_since;
+                    let hung_running = j.job_status == ProvisionerJobStatus::Running
+                        && j.updated_at < input.hung_since;
+                    stale_pending || hung_running
+                })
+                .cloned()
+                .collect();
+            let max_jobs = usize::try_from(input.max_jobs).unwrap_or(0);
+            result.truncate(max_jobs);
+            Ok(result)
         }
 
         async fn insert_provisioner_job_logs(
             &self,
-            _input: InsertProvisionerJobLogsInput,
+            input: InsertProvisionerJobLogsInput,
         ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
-            Ok(Vec::new())
+            let count = input.created_at.len();
+            if input.source.len() != count
+                || input.level.len() != count
+                || input.stage.len() != count
+                || input.output.len() != count
+            {
+                return Err(StorageError::invalid_data(
+                    "insert_provisioner_job_logs: all input vectors must have the same length",
+                ));
+            }
+            let mut logs = self
+                .prov_job_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut next_id = self
+                .prov_job_log_next_id
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut inserted = Vec::with_capacity(count);
+            for i in 0..count {
+                let record = ProvisionerLogRecord {
+                    id: *next_id,
+                    job_id: input.job_id,
+                    created_at: input.created_at[i],
+                    source: input.source[i],
+                    level: input.level[i],
+                    stage: input.stage[i].clone(),
+                    output: input.output[i].clone(),
+                };
+                *next_id += 1;
+                logs.push(record.clone());
+                inserted.push(record);
+            }
+            // Mirror real DB behavior: increment parent job's logs_length.
+            let logs_length_delta: i32 = input.output.iter().map(|s| s.len() as i32).sum();
+            if logs_length_delta > 0 {
+                drop(logs);
+                let mut jobs = self
+                    .prov_jobs
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                if let Some(job) = jobs.get_mut(&input.job_id) {
+                    job.logs_length += logs_length_delta;
+                }
+            }
+            Ok(inserted)
         }
 
         async fn get_provisioner_logs_after_id(
             &self,
-            _job_id: Uuid,
-            _after_id: i64,
+            job_id: Uuid,
+            after_id: i64,
         ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
-            Ok(Vec::new())
+            let logs = self
+                .prov_job_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(logs
+                .iter()
+                .filter(|l| l.job_id == job_id && l.id > after_id)
+                .cloned()
+                .collect())
         }
 
         async fn insert_provisioner_job_timings(
             &self,
-            _input: InsertProvisionerJobTimingsInput,
+            input: InsertProvisionerJobTimingsInput,
         ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
-            Ok(Vec::new())
+            let count = input.started_at.len();
+            if input.ended_at.len() != count
+                || input.stage.len() != count
+                || input.source.len() != count
+                || input.action.len() != count
+                || input.resource.len() != count
+            {
+                return Err(StorageError::invalid_data(
+                    "insert_provisioner_job_timings: all input vectors must have the same length",
+                ));
+            }
+            let mut timings = self
+                .prov_job_timings
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut inserted = Vec::with_capacity(count);
+            for i in 0..count {
+                let record = ProvisionerTimingRecord {
+                    job_id: input.job_id,
+                    started_at: input.started_at[i],
+                    ended_at: input.ended_at[i],
+                    stage: input.stage[i],
+                    source: input.source[i].clone(),
+                    action: input.action[i].clone(),
+                    resource: input.resource[i].clone(),
+                };
+                timings.push(record.clone());
+                inserted.push(record);
+            }
+            Ok(inserted)
         }
 
         async fn get_provisioner_job_timings_by_job_id(
             &self,
-            _job_id: Uuid,
+            job_id: Uuid,
         ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
-            Ok(Vec::new())
+            let timings = self
+                .prov_job_timings
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(timings
+                .iter()
+                .filter(|t| t.job_id == job_id)
+                .cloned()
+                .collect())
         }
 
         async fn upsert_provisioner_daemon(
             &self,
-            _input: UpsertProvisionerDaemonInput,
+            input: UpsertProvisionerDaemonInput,
         ) -> Result<ProvisionerDaemonRecord, StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Look for existing daemon with same name and organization.
+            let existing_id = daemons
+                .values()
+                .find(|d| d.name == input.name && d.organization_id == input.organization_id)
+                .map(|d| d.id);
+            if let Some(id) = existing_id {
+                let daemon = daemons
+                    .get_mut(&id)
+                    .ok_or_else(|| StorageError::unavailable("concurrent modification"))?;
+                daemon.last_seen_at = Some(input.last_seen_at);
+                daemon.version = input.version.clone();
+                daemon.api_version = input.api_version.clone();
+                daemon.provisioners = input.provisioners.clone();
+                daemon.tags = input.tags.clone();
+                daemon.key_id = input.key_id;
+                Ok(daemon.clone())
+            } else {
+                let record = ProvisionerDaemonRecord {
+                    id: Uuid::new_v4(),
+                    organization_id: input.organization_id,
+                    created_at: input.last_seen_at,
+                    last_seen_at: Some(input.last_seen_at),
+                    name: input.name,
+                    version: input.version,
+                    api_version: input.api_version,
+                    provisioners: input.provisioners,
+                    tags: input.tags,
+                    key_id: input.key_id,
+                };
+                daemons.insert(record.id, record.clone());
+                Ok(record)
+            }
         }
 
         async fn update_provisioner_daemon_last_seen_at(
             &self,
-            _id: Uuid,
-            _last_seen_at: OffsetDateTime,
+            id: Uuid,
+            last_seen_at: OffsetDateTime,
         ) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let daemon = daemons
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::invalid_data(format!("daemon {id} not found")))?;
+            daemon.last_seen_at = Some(last_seen_at);
+            Ok(())
         }
 
         async fn get_provisioner_daemons_by_organization(
             &self,
-            _organization_id: Uuid,
+            organization_id: Uuid,
         ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
-            Ok(Vec::new())
+            let daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(daemons
+                .values()
+                .filter(|d| d.organization_id == organization_id)
+                .cloned()
+                .collect())
         }
 
         async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
-            Err(StorageError::unavailable("not implemented in FakeStore"))
+            let mut daemons = self
+                .prov_daemons
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let cutoff = OffsetDateTime::now_utc() - time::Duration::days(7);
+            daemons.retain(|_, d| d.last_seen_at.is_none_or(|last_seen| last_seen >= cutoff));
+            Ok(())
         }
 
         async fn insert_provisioner_key(
@@ -30232,6 +31028,225 @@ mod tests {
                 .and_then(|v| v.to_str().ok()),
             Some("text/event-stream")
         );
+        Ok(())
+    }
+
+    // ── FakeStore ProvisionerStore unit tests ─────────────────
+
+    /// Helper: create a FakeStore and insert a default pending provisioner job.
+    fn insert_test_prov_job(store: &FakeStore) -> Result<ProvisionerJobRecord, StorageError> {
+        let now = OffsetDateTime::now_utc();
+        let input = InsertProvisionerJobInput {
+            id: Uuid::new_v4(),
+            created_at: now,
+            organization_id: Uuid::new_v4(),
+            initiator_id: Uuid::new_v4(),
+            provisioner: ProvisionerType::Echo,
+            storage_method: ProvisionerStorageMethod::File,
+            file_id: Uuid::new_v4(),
+            job_type: ProvisionerJobType::TemplateVersionImport,
+            input: json!({}),
+            tags: json!({}),
+            trace_metadata: json!({}),
+        };
+        // Call the sync-compatible path: lock and insert directly.
+        let record = ProvisionerJobRecord {
+            id: input.id,
+            created_at: input.created_at,
+            updated_at: input.created_at,
+            started_at: None,
+            canceled_at: None,
+            completed_at: None,
+            error: String::new(),
+            error_code: String::new(),
+            organization_id: Some(input.organization_id),
+            initiator_id: Some(input.initiator_id),
+            provisioner: input.provisioner,
+            storage_method: input.storage_method,
+            file_id: Some(input.file_id),
+            job_type: input.job_type,
+            input: input.input,
+            tags: input.tags,
+            trace_metadata: input.trace_metadata,
+            worker_id: None,
+            job_status: ProvisionerJobStatus::Pending,
+            logs_overflowed: false,
+            logs_length: 0,
+        };
+        store
+            .prov_jobs
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(record.id, record.clone());
+        Ok(record)
+    }
+
+    #[tokio::test]
+    async fn prov_store_insert_acquire_complete_flow() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        // Acquire the pending job.
+        let acquired = store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id: Uuid::new_v4(),
+                started_at: OffsetDateTime::now_utc(),
+                organization_id: job.organization_id.unwrap_or_default(),
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: json!({}),
+            })
+            .await?;
+        let acquired = acquired.ok_or("expected a job to be acquired")?;
+        assert_eq!(acquired.id, job.id);
+        assert_eq!(acquired.job_status, ProvisionerJobStatus::Running);
+        assert!(acquired.started_at.is_some());
+
+        // Complete it successfully.
+        let now = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: job.id,
+                updated_at: now,
+                completed_at: now,
+                error: String::new(),
+                error_code: String::new(),
+            })
+            .await?;
+
+        let completed = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(completed.job_status, ProvisionerJobStatus::Succeeded);
+        assert!(completed.completed_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_cancel_sets_updated_at() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        let cancel_time = OffsetDateTime::now_utc();
+        // Cancel without completing — transitions to Canceling.
+        store
+            .update_provisioner_job_with_cancel_by_id(CancelProvisionerJobInput {
+                id: job.id,
+                canceled_at: cancel_time,
+                completed_at: None,
+            })
+            .await?;
+
+        let canceled = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(canceled.job_status, ProvisionerJobStatus::Canceling);
+        assert_eq!(canceled.updated_at, cancel_time);
+        assert_eq!(canceled.canceled_at, Some(cancel_time));
+
+        // Cancel with completed_at — transitions to Canceled.
+        let completed_time = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_cancel_by_id(CancelProvisionerJobInput {
+                id: job.id,
+                canceled_at: completed_time,
+                completed_at: Some(completed_time),
+            })
+            .await?;
+
+        let fully_canceled = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(fully_canceled.job_status, ProvisionerJobStatus::Canceled);
+        assert!(fully_canceled.completed_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_reap_stale_jobs() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let _job = insert_test_prov_job(&store)?;
+
+        let far_future = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        // max_jobs = 10 — should find the stale pending job.
+        let reaped = store
+            .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+                pending_since: far_future,
+                hung_since: far_future,
+                max_jobs: 10,
+            })
+            .await?;
+        assert_eq!(reaped.len(), 1);
+
+        // max_jobs = 0 — should return nothing.
+        let empty = store
+            .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+                pending_since: far_future,
+                hung_since: far_future,
+                max_jobs: 0,
+            })
+            .await?;
+        assert!(empty.is_empty());
+
+        // Negative max_jobs — should return 0 (not wrap to large number).
+        let negative = store
+            .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+                pending_since: far_future,
+                hung_since: far_future,
+                max_jobs: -1,
+            })
+            .await?;
+        assert!(negative.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_log_insert_vector_length_mismatch() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        // Mismatched vector lengths: 2 timestamps but only 1 output.
+        let now = OffsetDateTime::now_utc();
+        let result = store
+            .insert_provisioner_job_logs(InsertProvisionerJobLogsInput {
+                job_id: job.id,
+                created_at: vec![now, now],
+                source: vec![LogSource::Provisioner, LogSource::Provisioner],
+                level: vec![LogLevel::Info, LogLevel::Info],
+                stage: vec!["build".to_owned(), "build".to_owned()],
+                output: vec!["only one".to_owned()], // mismatch!
+            })
+            .await;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_logs_length_tracking() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        let now = OffsetDateTime::now_utc();
+        let logs = store
+            .insert_provisioner_job_logs(InsertProvisionerJobLogsInput {
+                job_id: job.id,
+                created_at: vec![now, now],
+                source: vec![LogSource::Provisioner, LogSource::Provisioner],
+                level: vec![LogLevel::Info, LogLevel::Info],
+                stage: vec!["build".to_owned(), "apply".to_owned()],
+                output: vec!["hello".to_owned(), "world!".to_owned()], // 5 + 6 = 11
+            })
+            .await?;
+        assert_eq!(logs.len(), 2);
+
+        // Verify logs_length on the parent job was updated.
+        let updated_job = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(updated_job.logs_length, 11); // "hello"(5) + "world!"(6)
         Ok(())
     }
 }
