@@ -9950,39 +9950,26 @@ async fn debug_metrics(
 
     let mut out = String::new();
 
-    // process_resident_memory_bytes
-    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
-        for line in contents.lines() {
-            if let Some(val) = line.strip_prefix("VmRSS:") {
-                if let Some(kb) = parse_proc_kb(val) {
-                    out.push_str(&format!(
-                        "# HELP process_resident_memory_bytes Resident memory size in bytes.\n\
-                         # TYPE process_resident_memory_bytes gauge\n\
-                         process_resident_memory_bytes {}\n",
-                        kb * 1024,
-                    ));
-                }
-            } else if let Some(val) = line.strip_prefix("VmSize:") {
-                if let Some(kb) = parse_proc_kb(val) {
-                    out.push_str(&format!(
-                        "# HELP process_virtual_memory_bytes Virtual memory size in bytes.\n\
-                         # TYPE process_virtual_memory_bytes gauge\n\
-                         process_virtual_memory_bytes {}\n",
-                        kb * 1024,
-                    ));
-                }
-            }
-        }
+    // process_resident_memory_bytes and process_virtual_memory_bytes
+    // Reuse read_proc_memstats() to stay consistent with the expvar endpoint.
+    let memstats = read_proc_memstats();
+    if let Some(rss) = memstats.get("rss_bytes").and_then(|v| v.as_u64()) {
+        out.push_str("# HELP process_resident_memory_bytes Resident memory size in bytes.\n");
+        out.push_str("# TYPE process_resident_memory_bytes gauge\n");
+        out.push_str(&format!("process_resident_memory_bytes {rss}\n"));
+    }
+    if let Some(vm) = memstats.get("vm_size_bytes").and_then(|v| v.as_u64()) {
+        out.push_str("# HELP process_virtual_memory_bytes Virtual memory size in bytes.\n");
+        out.push_str("# TYPE process_virtual_memory_bytes gauge\n");
+        out.push_str(&format!("process_virtual_memory_bytes {vm}\n"));
     }
 
     // process_open_fds
     if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
         let count = entries.count();
-        out.push_str(&format!(
-            "# HELP process_open_fds Number of open file descriptors.\n\
-             # TYPE process_open_fds gauge\n\
-             process_open_fds {count}\n",
-        ));
+        out.push_str("# HELP process_open_fds Number of open file descriptors.\n");
+        out.push_str("# TYPE process_open_fds gauge\n");
+        out.push_str(&format!("process_open_fds {count}\n"));
     }
 
     // process_start_time_seconds (approximate via /proc/self/stat field 22)
@@ -10004,16 +9991,17 @@ async fn debug_metrics(
             ) {
                 if let Some(uptime_secs_str) = uptime_content.split_whitespace().next() {
                     if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {
-                        let clock_ticks_per_sec: u64 = 100; // standard on Linux
+                        // 100 is the standard `USER_HZ` on Linux x86/x86_64/ARM.
+                        // Using `libc::sysconf(_SC_CLK_TCK)` would be more correct
+                        // but requires `unsafe`, which this crate forbids.
+                        let clock_ticks_per_sec: u64 = 100;
                         let boot_time_approx =
                             OffsetDateTime::now_utc().unix_timestamp() as f64 - uptime_secs;
                         let process_start =
                             boot_time_approx + (start_ticks as f64 / clock_ticks_per_sec as f64);
-                        out.push_str(&format!(
-                            "# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.\n\
-                             # TYPE process_start_time_seconds gauge\n\
-                             process_start_time_seconds {process_start:.2}\n",
-                        ));
+                        out.push_str("# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.\n");
+                        out.push_str("# TYPE process_start_time_seconds gauge\n");
+                        out.push_str(&format!("process_start_time_seconds {process_start:.2}\n"));
                     }
                 }
             }
@@ -11638,7 +11626,7 @@ mod tests {
     use axum::{
         Json, Router,
         body::{Body, to_bytes},
-        http::HeaderMap,
+        http::{HeaderMap, HeaderName, HeaderValue},
         http::{Method, Request, Response, StatusCode, header::CONTENT_TYPE},
         response::IntoResponse,
         routing::{get, post},
@@ -18300,12 +18288,60 @@ mod tests {
         // A plain GET (no WebSocket upgrade headers) should be rejected by
         // the WebSocketUpgrade extractor with 400 Bad Request.
         let resp = call(app.clone(), request(Method::GET, "/api/v2/debug/ws")?).await?;
-        // Without the required Upgrade/Connection headers, axum rejects
-        // before our handler runs, so we get 400 (not 401).
         assert!(
             resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::UNAUTHORIZED,
             "expected 400 or 401, got {}",
             resp.status(),
+        );
+
+        // Helper closure to add WebSocket upgrade headers to a request.
+        fn add_ws_headers(req: &mut Request<Body>) {
+            let headers = req.headers_mut();
+            headers.insert(
+                HeaderName::from_static("upgrade"),
+                HeaderValue::from_static("websocket"),
+            );
+            headers.insert(
+                HeaderName::from_static("connection"),
+                HeaderValue::from_static("Upgrade"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-websocket-version"),
+                HeaderValue::from_static("13"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-websocket-key"),
+                HeaderValue::from_static("dGVzdF9rZXk="),
+            );
+        }
+
+        // Issue a proper WebSocket upgrade request without authentication.
+        // In a tower::oneshot test the upgrade cannot fully complete, so axum
+        // may return 401 (auth rejection) or 426 (upgrade required). Both
+        // confirm the route is reachable and the extractor accepted the headers.
+        let mut unauth_upgrade = request(Method::GET, "/api/v2/debug/ws")?;
+        add_ws_headers(&mut unauth_upgrade);
+        let unauth_resp = call(app.clone(), unauth_upgrade).await?;
+        assert!(
+            unauth_resp.status() == StatusCode::UNAUTHORIZED
+                || unauth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "unauthenticated WS upgrade should be rejected with 401 or 426, got {}",
+            unauth_resp.status(),
+        );
+
+        // Issue an authenticated WebSocket upgrade request.
+        // In oneshot mode the HTTP connection cannot be upgraded to a real
+        // WebSocket, so axum returns 101 (if it tries) or 426.
+        let session_token = create_and_login(&app).await?;
+        let mut auth_upgrade =
+            authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?;
+        add_ws_headers(&mut auth_upgrade);
+        let auth_resp = call(app.clone(), auth_upgrade).await?;
+        assert!(
+            auth_resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                || auth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "authenticated WS upgrade should return 101 or 426, got {}",
+            auth_resp.status(),
         );
         Ok(())
     }
