@@ -34,6 +34,10 @@ use coder_core::api::{
     UpdateTemplateMeta, WorkspaceResource,
 };
 use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
+use coder_core::api::{
+    UpdateWorkspaceACLRequest, WorkspaceACLGroup, WorkspaceACLResponse, WorkspaceACLUser,
+};
+use coder_core::ports::UpdateWorkspaceACLInput;
 use coder_core::pubsub::PubSub;
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
@@ -607,6 +611,12 @@ pub fn build_router(state: AppState) -> Router {
                     put(put_workspace_favorite).delete(delete_workspace_favorite),
                 )
                 .route(
+                    "/workspaces/{workspace}/acl",
+                    get(get_workspace_acl)
+                        .patch(patch_workspace_acl)
+                        .delete(delete_workspace_acl),
+                )
+                .route(
                     "/workspaces/{workspace}/port-share",
                     get(list_workspace_port_shares)
                         .post(post_workspace_port_share)
@@ -820,7 +830,7 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/workspaceagents/me/app-status",
-                    axum::routing::patch(patch_workspace_agent_app_status),
+                    patch(patch_workspace_agent_app_status),
                 )
                 .route(
                     "/workspaceagents/me/external-auth",
@@ -840,7 +850,7 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/workspaceagents/me/logs",
-                    axum::routing::patch(patch_workspace_agent_logs),
+                    patch(patch_workspace_agent_logs),
                 )
                 .route(
                     "/workspaceagents/me/reinit",
@@ -6804,6 +6814,119 @@ async fn delete_workspace_port_share(
         .store
         .delete_workspace_port_share(workspace_id, agent_name, port)
         .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// GET /workspaces/{workspace}/acl
+async fn get_workspace_acl(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let acl_record = state.store.get_workspace_acl(workspace_id).await?;
+
+    // Resolve user details for user ACL entries.
+    let mut users = Vec::new();
+    for (user_id_str, role) in &acl_record.user_acl {
+        if let Ok(uid) = Uuid::from_str(user_id_str) {
+            if let Some(user) = state.store.find_user_by_id(uid).await? {
+                users.push(WorkspaceACLUser {
+                    id: user.id,
+                    username: user.username,
+                    avatar_url: user.avatar_url,
+                    role: role.clone(),
+                });
+            }
+        }
+    }
+
+    // Resolve group details for group ACL entries.
+    let mut groups = Vec::new();
+    for (group_id_str, role) in &acl_record.group_acl {
+        if let Ok(gid) = Uuid::from_str(group_id_str) {
+            let name = if let Some(group) = state.store.find_group_by_id(gid).await? {
+                group.name
+            } else {
+                group_id_str.clone()
+            };
+            groups.push(WorkspaceACLGroup {
+                id: gid,
+                name,
+                role: role.clone(),
+            });
+        }
+    }
+
+    Ok((StatusCode::OK, Json(WorkspaceACLResponse { users, groups })).into_response())
+}
+
+/// PATCH /workspaces/{workspace}/acl
+async fn patch_workspace_acl(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+    payload: Result<Json<UpdateWorkspaceACLRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(req) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    let input = UpdateWorkspaceACLInput {
+        user_roles: req.user_roles,
+        group_roles: req.group_roles,
+    };
+    state
+        .store
+        .update_workspace_acl(workspace_id, &input)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+/// DELETE /workspaces/{workspace}/acl
+async fn delete_workspace_acl(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(workspace_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    state.store.delete_workspace_acl(workspace_id).await?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
