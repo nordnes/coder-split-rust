@@ -9989,10 +9989,17 @@ async fn debug_metrics(
     if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
         // Field 22 (1-indexed) is starttime in clock ticks since boot.
         // We combine it with /proc/uptime to get a UNIX timestamp.
-        let fields: Vec<&str> = stat.split_whitespace().collect();
-        if fields.len() > 21 {
+        // The comm field (field 2) is in parentheses and may contain spaces,
+        // so we find the last ')' and parse fields after it.
+        let after_comm = match stat.rfind(')') {
+            Some(pos) => &stat[pos + 1..],
+            None => &stat,
+        };
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        // After comm, field 3 is state (index 0), so starttime (field 22) is index 19.
+        if fields.len() > 19 {
             if let (Ok(start_ticks), Ok(uptime_content)) = (
-                fields[21].parse::<u64>(),
+                fields[19].parse::<u64>(),
                 std::fs::read_to_string("/proc/uptime"),
             ) {
                 if let Some(uptime_secs_str) = uptime_content.split_whitespace().next() {
