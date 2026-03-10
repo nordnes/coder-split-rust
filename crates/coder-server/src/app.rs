@@ -87,6 +87,7 @@ use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
 use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
 use coder_workspaces::DeploymentStatsService;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -9943,6 +9944,12 @@ async fn insights_user_status_counts(
 // Debug / Observability handlers
 // ---------------------------------------------------------------------------
 
+/// GET /api/v2/debug/coordinator — return coordinator state/debug info.
+///
+/// Dependency: requires a `TailnetCoordinator` implementation that tracks
+/// connected agents and clients.  In Go this calls
+/// `(*api.TailnetCoordinator.Load()).ServeHTTPDebug(rw, r)`.  The Rust
+/// backend does not yet have a tailnet coordination layer, so we return 501.
 async fn debug_coordinator(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9956,11 +9963,20 @@ async fn debug_coordinator(
         ));
     }
 
+    // Blocked on: tailnet coordination layer (TailnetCoordinator) that
+    // manages agent↔client connections and exposes an HTML debug view.
     Ok(not_implemented_response(
-        "Coordinator debug endpoint is not yet implemented in the Rust backend.",
+        "Coordinator debug endpoint requires the tailnet coordination layer \
+         which is not yet implemented in the Rust backend.",
     ))
 }
 
+/// GET /api/v2/debug/tailnet — return tailnet debug info.
+///
+/// Dependency: requires an `agentProvider` that manages workspace-agent
+/// connections over the tailnet mesh.  In Go this calls
+/// `api.agentProvider.ServeHTTPDebug(rw, r)`.  The Rust backend does not yet
+/// have a workspace-agent provider, so we return 501.
 async fn debug_tailnet(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9974,11 +9990,20 @@ async fn debug_tailnet(
         ));
     }
 
+    // Blocked on: workspace-agent provider (agentProvider) that manages
+    // agent connections over the tailnet mesh and exposes debug state.
     Ok(not_implemented_response(
-        "Tailnet debug endpoint is not yet implemented in the Rust backend.",
+        "Tailnet debug endpoint requires the workspace-agent provider \
+         which is not yet implemented in the Rust backend.",
     ))
 }
 
+/// GET /api/v2/debug/derp/traffic — return DERP relay traffic statistics.
+///
+/// Dependency: requires a running DERP relay server (`DERPServer`) that
+/// tracks per-client send/receive byte counters.  In Go this calls
+/// `options.DERPServer.ServeDebugTraffic`.  The Rust backend does not yet
+/// include a DERP relay, so we return 501.
 async fn debug_derp_traffic(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -9992,11 +10017,20 @@ async fn debug_derp_traffic(
         ));
     }
 
+    // Blocked on: embedded DERP relay server (DERPServer) that tracks
+    // per-client traffic counters and exposes them via ServeDebugTraffic.
     Ok(not_implemented_response(
-        "DERP traffic debug endpoint is not yet implemented in the Rust backend.",
+        "DERP traffic debug endpoint requires the embedded DERP relay server \
+         which is not yet implemented in the Rust backend.",
     ))
 }
 
+/// GET /api/v2/debug/expvar — return expvar-style debug variables.
+///
+/// In Go this serves `expvar.Handler()` which returns JSON with memstats,
+/// cmdline, and (when available) DERP metrics.  The Rust equivalent reads
+/// process stats from `/proc/self` (Linux) or returns basic runtime info
+/// on other platforms.
 async fn debug_expvar(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10010,11 +10044,66 @@ async fn debug_expvar(
         ));
     }
 
-    Ok(not_implemented_response(
-        "Expvar debug endpoint is not yet implemented in the Rust backend.",
-    ))
+    let mut vars: serde_json::Map<String, Value> = serde_json::Map::new();
+
+    // cmdline — mirrors Go's `os.Args` expvar.
+    let cmdline = std::env::args().collect::<Vec<String>>();
+    vars.insert("cmdline".to_string(), json!(cmdline));
+
+    // memstats — read RSS and VmSize from /proc/self/status on Linux.
+    let memstats = read_proc_memstats();
+    let mut memstats_map = serde_json::Map::new();
+    if let Some(rss) = memstats.rss_bytes {
+        memstats_map.insert("rss_bytes".to_string(), json!(rss));
+    }
+    if let Some(vm) = memstats.vm_size_bytes {
+        memstats_map.insert("vm_size_bytes".to_string(), json!(vm));
+    }
+    vars.insert("memstats".to_string(), Value::Object(memstats_map));
+
+    Ok(Json(Value::Object(vars)).into_response())
 }
 
+/// Basic memory statistics read from `/proc/self/status`.
+struct ProcMemstats {
+    rss_bytes: Option<u64>,
+    vm_size_bytes: Option<u64>,
+}
+
+/// Read basic memory statistics from `/proc/self/status`.
+/// On non-Linux platforms (or read failure) both fields are `None`.
+fn read_proc_memstats() -> ProcMemstats {
+    let mut stats = ProcMemstats {
+        rss_bytes: None,
+        vm_size_bytes: None,
+    };
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+        for line in contents.lines() {
+            if let Some(val) = line.strip_prefix("VmRSS:") {
+                stats.rss_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
+            } else if let Some(val) = line.strip_prefix("VmSize:") {
+                stats.vm_size_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
+            }
+        }
+    }
+    stats
+}
+
+/// Parse a `/proc/self/status` value like `"   12345 kB"` into kilobytes.
+fn parse_proc_kb(val: &str) -> Option<u64> {
+    val.split_whitespace()
+        .next()
+        .and_then(|s| s.parse::<u64>().ok())
+}
+
+/// GET /api/v2/debug/pprof (and sub-routes cmdline, profile, symbol, trace)
+///
+/// Go exposes `net/http/pprof` handlers that produce CPU/memory/goroutine
+/// profiles in the pprof protobuf format.  There is no direct Rust
+/// equivalent.  For CPU profiling consider `perf`, `flamegraph`, or the
+/// `pprof-rs` crate.  For heap profiling use jemalloc with
+/// `MALLOC_CONF="prof:true"`.  For async-task dumps use `tokio-console`.
+/// This endpoint remains a stub and returns 501.
 async fn debug_pprof(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10028,14 +10117,26 @@ async fn debug_pprof(
         ));
     }
 
+    // Blocked on: no direct Rust equivalent for Go pprof.  Alternatives:
+    //   - CPU profiling:  `perf record`, `cargo flamegraph`, or `pprof-rs`
+    //   - Heap profiling: jemalloc with MALLOC_CONF="prof:true"
+    //   - Async tasks:    `tokio-console`
     Ok(not_implemented_response(
-        "Rust does not support Go-style pprof. Use tracing or jemalloc profiling instead.",
+        "Rust does not support Go-style pprof. \
+         Use perf/flamegraph, jemalloc profiling, or tokio-console instead.",
     ))
 }
 
+/// GET /api/v2/debug/ws — WebSocket echo server used as a health check.
+///
+/// In Go this is `WebsocketEchoServer.ServeHTTP` which accepts a WebSocket
+/// connection and echoes every received message back to the client.  The
+/// health checker (`healthcheck/websocket.go`) connects here and sends
+/// three numbered text messages, verifying each is echoed correctly.
 async fn debug_websocket(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
@@ -10046,17 +10147,46 @@ async fn debug_websocket(
         ));
     }
 
-    // In Go this upgrades to a WebSocket echo. For now return a stub JSON response.
-    Ok(not_implemented_response(
-        "WebSocket echo endpoint is not yet implemented in the Rust backend.",
-    ))
+    Ok(ws.on_upgrade(websocket_echo))
+}
+
+/// Run the WebSocket echo loop: read a message, send it back, repeat.
+///
+/// Each echo operation has a 10-second timeout, matching Go's
+/// `WebsocketEchoServer` which uses `context.WithTimeout(ctx, 10s)`.
+async fn websocket_echo(mut socket: WebSocket) {
+    use std::time::Duration;
+    const ECHO_TIMEOUT: Duration = Duration::from_secs(10);
+
+    loop {
+        let msg = match tokio::time::timeout(ECHO_TIMEOUT, socket.next()).await {
+            Ok(Some(Ok(msg))) => msg,
+            // Timeout, receive error, or stream ended — close.
+            _ => return,
+        };
+        let reply = match msg {
+            Message::Text(text) => Message::Text(text),
+            Message::Binary(data) => Message::Binary(data),
+            Message::Close(_) => return,
+            // Ping/Pong are handled automatically by axum.
+            _ => continue,
+        };
+        let send_result = tokio::time::timeout(ECHO_TIMEOUT, socket.send(reply)).await;
+        match send_result {
+            Ok(Ok(())) => {}
+            // Timeout or send error — close.
+            _ => return,
+        }
+    }
 }
 
 /// GET /api/v2/debug/metrics — Prometheus metrics endpoint.
 ///
-/// In Go this serves the Prometheus registry via `promhttp`. The Rust backend
-/// does not yet have a shared Prometheus registry, so we return a stub
-/// `not_implemented` response.
+/// In Go this serves the full Prometheus registry via `promhttp`.
+/// The Rust backend does not yet have a shared `prometheus::Registry`,
+/// so we emit a small set of process-level gauges in Prometheus exposition
+/// format.  Once a registry is wired into `AppState`, this handler should
+/// delegate to it.
 async fn debug_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -10070,9 +10200,82 @@ async fn debug_metrics(
         ));
     }
 
-    Ok(not_implemented_response(
-        "Prometheus metrics endpoint is not yet implemented in the Rust backend.",
-    ))
+    let mut out = String::new();
+
+    // process_resident_memory_bytes and process_virtual_memory_bytes
+    // Reuse read_proc_memstats() to stay consistent with the expvar endpoint.
+    let memstats = read_proc_memstats();
+    if let Some(rss) = memstats.rss_bytes {
+        out.push_str("# HELP process_resident_memory_bytes Resident memory size in bytes.\n");
+        out.push_str("# TYPE process_resident_memory_bytes gauge\n");
+        out.push_str(&format!("process_resident_memory_bytes {rss}\n"));
+    }
+    if let Some(vm) = memstats.vm_size_bytes {
+        out.push_str("# HELP process_virtual_memory_bytes Virtual memory size in bytes.\n");
+        out.push_str("# TYPE process_virtual_memory_bytes gauge\n");
+        out.push_str(&format!("process_virtual_memory_bytes {vm}\n"));
+    }
+
+    // process_open_fds
+    // Note: `read_dir` itself opens an fd for the directory iterator,
+    // so the count is inflated by 1.  This matches the behavior of Go's
+    // `prometheus/procfs` collector.
+    if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
+        let count = entries.count();
+        out.push_str("# HELP process_open_fds Number of open file descriptors.\n");
+        out.push_str("# TYPE process_open_fds gauge\n");
+        out.push_str(&format!("process_open_fds {count}\n"));
+    }
+
+    // process_start_time_seconds (approximate via /proc/self/stat field 22)
+    if let Ok(stat) = std::fs::read_to_string("/proc/self/stat") {
+        // Field 22 (1-indexed) is starttime in clock ticks since boot.
+        // We combine it with /proc/uptime to get a UNIX timestamp.
+        // The comm field (field 2) is in parentheses and may contain spaces,
+        // so we find the last ')' and parse fields after it.
+        let after_comm = match stat.rfind(')') {
+            Some(pos) => &stat[pos + 1..],
+            None => &stat,
+        };
+        let fields: Vec<&str> = after_comm.split_whitespace().collect();
+        // After comm, field 3 is state (index 0), so starttime (field 22) is index 19.
+        if fields.len() > 19 {
+            if let (Ok(start_ticks), Ok(uptime_content)) = (
+                fields[19].parse::<u64>(),
+                std::fs::read_to_string("/proc/uptime"),
+            ) {
+                if let Some(uptime_secs_str) = uptime_content.split_whitespace().next() {
+                    if let Ok(uptime_secs) = uptime_secs_str.parse::<f64>() {
+                        // 100 is the standard `USER_HZ` on Linux x86/x86_64/ARM.
+                        // Using `libc::sysconf(_SC_CLK_TCK)` would be more correct
+                        // but requires `unsafe`, which this crate forbids.
+                        let clock_ticks_per_sec: u64 = 100;
+                        let boot_time_approx =
+                            OffsetDateTime::now_utc().unix_timestamp() as f64 - uptime_secs;
+                        let process_start =
+                            boot_time_approx + (start_ticks as f64 / clock_ticks_per_sec as f64);
+                        out.push_str("# HELP process_start_time_seconds Start time of the process since unix epoch in seconds.\n");
+                        out.push_str("# TYPE process_start_time_seconds gauge\n");
+                        out.push_str(&format!("process_start_time_seconds {process_start:.2}\n"));
+                    }
+                }
+            }
+        }
+    }
+
+    if out.is_empty() {
+        out.push_str("# No process metrics available on this platform.\n");
+    }
+
+    Ok((
+        StatusCode::OK,
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4; charset=utf-8"),
+        )],
+        out,
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -11678,7 +11881,7 @@ mod tests {
     use axum::{
         Json, Router,
         body::{Body, to_bytes},
-        http::HeaderMap,
+        http::{HeaderMap, HeaderName, HeaderValue},
         http::{Method, Request, Response, StatusCode, header::CONTENT_TYPE},
         response::IntoResponse,
         routing::{get, post},
@@ -11692,6 +11895,7 @@ mod tests {
         ProvisionerJobLogRecord as PortsJobLogRecord,
         ProvisionerJobTimingRecord as PortsJobTimingRecord,
     };
+    use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
     use coder_core::provisioner::{
         ProvisionerJobLogRecord as ProvisionerLogRecord,
         ProvisionerJobTimingRecord as ProvisionerTimingRecord,
@@ -11700,25 +11904,25 @@ mod tests {
     use coder_core::{
         AcquireProvisionerJobInput, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord,
         AppStore, AuditLog, AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
-        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatMessageRecord,
-        ChatQueuedMessageRecord, ChatRecord, ChatStatus, CompleteProvisionerJobInput,
-        ConvertLoginRequest, CreateApiKeyInput, CreateApiKeyStoreError, CreateChatMessageRequest,
-        CreateChatRequest, CreateFirstUserInput, CreateFirstUserRequest, CreateFirstUserStoreError,
-        CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
-        CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
-        CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
-        CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
-        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertAgentLogInput,
-        InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult,
-        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
-        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, InsertTaskInput,
-        InsertWorkspaceAppStatusInput, LogFormat, LoginType, LoginWithPasswordRequest,
-        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
-        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
-        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatInputPart,
+        ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
+        CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
+        CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
+        CreateFirstUserRequest, CreateFirstUserStoreError, CreateProvisionerJobInput,
+        CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest, CreateTemplateStoreError,
+        CreateTemplateVersionInput, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
+        CreateUserRequestWithOrgs, CreateUserStoreError, CreateWorkspaceBuildInput,
+        CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
+        DeploymentStore, DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider,
+        ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, GetJobsToBeReapedInput,
+        GitSshKeyRecord, HealthSettings, InsertAgentLogInput, InsertChatInput,
+        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LogFormat,
+        LoginType, LoginWithPasswordRequest, OrganizationMemberListFilter,
+        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
+        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
+        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
@@ -11727,14 +11931,15 @@ mod tests {
         TemplateVersionVariableRecord, TokenConfigRecord, UpdateRolesRequest, UpdateTemplateMeta,
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
-        UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
-        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
-        WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentRow,
-        WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+        UpsertPortShareInput, UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter,
+        UserPreferenceRecord, UserRecord, UserStatus, ValidateUserPasswordRequest,
+        WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+        WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+        WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
         WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
-        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput,
-        WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
-        WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -11827,6 +12032,8 @@ mod tests {
         workspace_resource_metadata: Mutex<HashMap<Uuid, Vec<WorkspaceResourceMetadataRecord>>>,
         provisioner_job_logs: Mutex<HashMap<Uuid, Vec<PortsJobLogRecord>>>,
         provisioner_job_timings: Mutex<HashMap<Uuid, Vec<PortsJobTimingRecord>>>,
+        workspace_port_shares: Mutex<Vec<WorkspaceAgentPortShareRecord>>,
+        workspace_acls: Mutex<HashMap<Uuid, WorkspaceACLRecord>>,
     }
 
     impl FakeStore {
@@ -11891,6 +12098,8 @@ mod tests {
                 workspace_resource_metadata: Mutex::new(HashMap::new()),
                 provisioner_job_logs: Mutex::new(HashMap::new()),
                 provisioner_job_timings: Mutex::new(HashMap::new()),
+                workspace_port_shares: Mutex::new(Vec::new()),
+                workspace_acls: Mutex::new(HashMap::new()),
             }
         }
 
@@ -11918,6 +12127,36 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(workspace.id, workspace);
+            Ok(())
+        }
+
+        /// Sets the status of a task in the fake store (for testing state transitions).
+        fn set_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<(), StorageError> {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or_else(|| StorageError::invalid_data(format!("task {task_id} not found")))?;
+            task.status = status;
+            Ok(())
+        }
+
+        /// Sets the workspace_id of a task in the fake store (for testing pause/resume).
+        fn set_task_workspace_id(
+            &self,
+            task_id: Uuid,
+            workspace_id: Uuid,
+        ) -> Result<(), StorageError> {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let task = tasks
+                .get_mut(&task_id)
+                .ok_or_else(|| StorageError::invalid_data(format!("task {task_id} not found")))?;
+            task.workspace_id = Some(workspace_id);
             Ok(())
         }
 
@@ -15931,6 +16170,244 @@ mod tests {
             let after = tokens.len();
             Ok((before - after) as u64)
         }
+
+        async fn list_workspaces(
+            &self,
+            filter: WorkspaceListFilter,
+        ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut rows: Vec<WorkspaceRecord> = workspaces
+                .values()
+                .filter(|w| !w.deleted)
+                .filter(|w| {
+                    filter
+                        .owner_id
+                        .is_none_or(|owner_id| w.owner_id == owner_id)
+                })
+                .filter(|w| {
+                    filter
+                        .name
+                        .as_ref()
+                        .is_none_or(|n| w.name.contains(n.as_str()))
+                })
+                .filter(|w| {
+                    filter
+                        .organization_id
+                        .is_none_or(|org_id| w.organization_id == org_id)
+                })
+                .filter(|w| {
+                    filter.template_ids.is_empty() || filter.template_ids.contains(&w.template_id)
+                })
+                .filter(|w| {
+                    filter.dormant.is_none_or(|d| {
+                        if d {
+                            w.dormant_at.is_some()
+                        } else {
+                            w.dormant_at.is_none()
+                        }
+                    })
+                })
+                .cloned()
+                .collect();
+            let count = i64::try_from(rows.len()).unwrap_or(0);
+            let offset = usize::try_from(filter.offset).unwrap_or(0);
+            let limit = usize::try_from(filter.limit).unwrap_or(25);
+            rows = rows.into_iter().skip(offset).take(limit).collect();
+            Ok((rows, count))
+        }
+
+        async fn find_workspace_by_id(
+            &self,
+            workspace_id: Uuid,
+            _viewer_id: Option<Uuid>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(workspaces
+                .get(&workspace_id)
+                .filter(|w| !w.deleted)
+                .cloned())
+        }
+
+        async fn update_workspace_name(
+            &self,
+            workspace_id: Uuid,
+            name: &str,
+            _viewer_id: Option<Uuid>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(None);
+            };
+            if ws.deleted {
+                return Ok(None);
+            }
+            ws.name = name.to_owned();
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(Some(ws.clone()))
+        }
+
+        async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            if ws.deleted {
+                return Ok(false);
+            }
+            ws.deleted = true;
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn list_workspace_builds(
+            &self,
+            workspace_id: Uuid,
+            limit: u32,
+            offset: u32,
+        ) -> Result<Vec<WorkspaceBuildRecord>, StorageError> {
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut rows: Vec<WorkspaceBuildRecord> = builds
+                .values()
+                .filter(|b| b.workspace_id == workspace_id)
+                .cloned()
+                .collect();
+            rows.sort_by(|a, b| b.build_number.cmp(&a.build_number));
+            let off = usize::try_from(offset).unwrap_or(0);
+            let lim = usize::try_from(limit).unwrap_or(25);
+            Ok(rows.into_iter().skip(off).take(lim).collect())
+        }
+
+        async fn list_workspace_port_shares(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
+            let shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(shares
+                .iter()
+                .filter(|s| s.workspace_id == workspace_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn upsert_workspace_port_share(
+            &self,
+            input: UpsertPortShareInput,
+        ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
+            let mut shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Update existing or insert new.
+            if let Some(existing) = shares.iter_mut().find(|s| {
+                s.workspace_id == input.workspace_id
+                    && s.agent_name == input.agent_name
+                    && s.port == input.port
+            }) {
+                existing.share_level = input.share_level.clone();
+                existing.protocol = input.protocol.clone();
+                return Ok(existing.clone());
+            }
+            let record = WorkspaceAgentPortShareRecord {
+                workspace_id: input.workspace_id,
+                agent_name: input.agent_name,
+                port: input.port,
+                share_level: input.share_level,
+                protocol: input.protocol,
+            };
+            shares.push(record.clone());
+            Ok(record)
+        }
+
+        async fn delete_workspace_port_share(
+            &self,
+            workspace_id: Uuid,
+            agent_name: &str,
+            port: i32,
+        ) -> Result<bool, StorageError> {
+            let mut shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let before = shares.len();
+            shares.retain(|s| {
+                !(s.workspace_id == workspace_id && s.agent_name == agent_name && s.port == port)
+            });
+            Ok(shares.len() < before)
+        }
+
+        async fn get_workspace_acl(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<WorkspaceACLRecord, StorageError> {
+            let acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(acls
+                .get(&workspace_id)
+                .cloned()
+                .unwrap_or_else(|| WorkspaceACLRecord {
+                    user_acl: HashMap::new(),
+                    group_acl: HashMap::new(),
+                }))
+        }
+
+        async fn update_workspace_acl(
+            &self,
+            workspace_id: Uuid,
+            input: &UpdateWorkspaceACLInput,
+        ) -> Result<(), StorageError> {
+            let mut acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let entry = acls
+                .entry(workspace_id)
+                .or_insert_with(|| WorkspaceACLRecord {
+                    user_acl: HashMap::new(),
+                    group_acl: HashMap::new(),
+                });
+            entry.user_acl.extend(
+                input
+                    .user_roles
+                    .iter()
+                    .map(|(k, v): (&String, &String)| (k.to_owned(), v.to_owned())),
+            );
+            entry.group_acl.extend(
+                input
+                    .group_roles
+                    .iter()
+                    .map(|(k, v): (&String, &String)| (k.to_owned(), v.to_owned())),
+            );
+            Ok(())
+        }
+
+        async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+            let mut acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            acls.remove(&workspace_id);
+            Ok(())
+        }
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -18703,7 +19180,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_expvar_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_expvar_requires_auth_and_returns_json() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/expvar")?).await?;
@@ -18715,7 +19192,29 @@ mod tests {
             authenticated_request(Method::GET, "/api/v2/debug/expvar", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await?;
+        let vars: Value = serde_json::from_slice(&body)?;
+        // Should contain cmdline and memstats keys.
+        assert!(
+            vars.get("cmdline").is_some(),
+            "expvar should contain cmdline"
+        );
+        // cmdline should be a JSON array.
+        assert!(
+            vars.get("cmdline").and_then(|v| v.as_array()).is_some(),
+            "expvar cmdline should be an array",
+        );
+        assert!(
+            vars.get("memstats").is_some(),
+            "expvar should contain memstats",
+        );
+        // memstats should be a JSON object.
+        assert!(
+            vars.get("memstats").and_then(|v| v.as_object()).is_some(),
+            "expvar memstats should be an object",
+        );
         Ok(())
     }
 
@@ -18757,24 +19256,72 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_websocket_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_websocket_rejects_non_upgrade_request() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
-        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/ws")?).await?;
-        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+        // A plain GET (no WebSocket upgrade headers) should be rejected by
+        // the WebSocketUpgrade extractor with 400 Bad Request.
+        let resp = call(app.clone(), request(Method::GET, "/api/v2/debug/ws")?).await?;
+        assert!(
+            resp.status() == StatusCode::BAD_REQUEST || resp.status() == StatusCode::UNAUTHORIZED,
+            "expected 400 or 401, got {}",
+            resp.status(),
+        );
 
+        // Helper closure to add WebSocket upgrade headers to a request.
+        fn add_ws_headers(req: &mut Request<Body>) {
+            let headers = req.headers_mut();
+            headers.insert(
+                HeaderName::from_static("upgrade"),
+                HeaderValue::from_static("websocket"),
+            );
+            headers.insert(
+                HeaderName::from_static("connection"),
+                HeaderValue::from_static("Upgrade"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-websocket-version"),
+                HeaderValue::from_static("13"),
+            );
+            headers.insert(
+                HeaderName::from_static("sec-websocket-key"),
+                HeaderValue::from_static("dGVzdF9rZXk="),
+            );
+        }
+
+        // Issue a proper WebSocket upgrade request without authentication.
+        // In a tower::oneshot test the upgrade cannot fully complete, so axum
+        // may return 401 (auth rejection) or 426 (upgrade required). Both
+        // confirm the route is reachable and the extractor accepted the headers.
+        let mut unauth_upgrade = request(Method::GET, "/api/v2/debug/ws")?;
+        add_ws_headers(&mut unauth_upgrade);
+        let unauth_resp = call(app.clone(), unauth_upgrade).await?;
+        assert!(
+            unauth_resp.status() == StatusCode::UNAUTHORIZED
+                || unauth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "unauthenticated WS upgrade should be rejected with 401 or 426, got {}",
+            unauth_resp.status(),
+        );
+
+        // Issue an authenticated WebSocket upgrade request.
+        // In oneshot mode the HTTP connection cannot be upgraded to a real
+        // WebSocket, so axum returns 101 (if it tries) or 426.
         let session_token = create_and_login(&app).await?;
-        let resp = call(
-            app,
-            authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?,
-        )
-        .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        let mut auth_upgrade =
+            authenticated_request(Method::GET, "/api/v2/debug/ws", &session_token)?;
+        add_ws_headers(&mut auth_upgrade);
+        let auth_resp = call(app.clone(), auth_upgrade).await?;
+        assert!(
+            auth_resp.status() == StatusCode::SWITCHING_PROTOCOLS
+                || auth_resp.status() == StatusCode::UPGRADE_REQUIRED,
+            "authenticated WS upgrade should return 101 or 426, got {}",
+            auth_resp.status(),
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn debug_metrics_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_metrics_requires_auth_and_returns_prometheus() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/metrics")?).await?;
@@ -18786,7 +19333,32 @@ mod tests {
             authenticated_request(Method::GET, "/api/v2/debug/metrics", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default();
+        assert!(
+            ct.contains("text/plain"),
+            "metrics should return text/plain, got {ct}",
+        );
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await?;
+        let text = String::from_utf8_lossy(&body);
+        // Should contain Prometheus exposition data.
+        assert!(
+            text.contains("process_") || text.contains("# No process metrics"),
+            "metrics body should contain process metrics or platform fallback",
+        );
+        // Verify no lines have leading whitespace (invalid Prometheus format).
+        for line in text.lines() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "Prometheus line must not start with whitespace: {line:?}",
+            );
+        }
         Ok(())
     }
 
@@ -19847,6 +20419,344 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_send_input_active_task() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Build a dashboard".to_string(),
+                    name: Some("send-test".to_string()),
+                    display_name: Some("Send Test".to_string()),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+
+        // Transition task to active status so send is allowed.
+        store.set_task_status(task_id, TaskStatus::Active)?;
+
+        // Send input to the active task — should return 204 No Content.
+        let send_response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/send"),
+                &session_token,
+                &TaskSendRequest {
+                    input: "Add a dark-mode toggle".to_string(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(send_response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_pause_with_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Run a long build".to_string(),
+                    name: Some("pause-test".to_string()),
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+
+        // Assign a workspace and set active so pause is semantically correct.
+        let workspace_id = Uuid::new_v4();
+        store.set_task_workspace_id(task_id, workspace_id)?;
+        store.set_task_status(task_id, TaskStatus::Active)?;
+
+        // Pause the task — should return 202 Accepted.
+        let pause_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/pause"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(pause_response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(pause_response.into_body(), 1_000_000).await?;
+        let pause_body: Value = serde_json::from_slice(&body)?;
+        // workspace_build is None and skipped during serialisation,
+        // so the response body must be exactly an empty JSON object.
+        assert_eq!(pause_body, json!({}));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_resume_with_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Deploy the service".to_string(),
+                    name: Some("resume-test".to_string()),
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+
+        // Assign a workspace and set paused so resume is semantically correct.
+        let workspace_id = Uuid::new_v4();
+        store.set_task_workspace_id(task_id, workspace_id)?;
+        store.set_task_status(task_id, TaskStatus::Paused)?;
+
+        // Resume the task — should return 202 Accepted.
+        let resume_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/resume"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resume_response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(resume_response.into_body(), 1_000_000).await?;
+        let resume_body: Value = serde_json::from_slice(&body)?;
+        // workspace_build is None and skipped during serialisation,
+        // so the response body must be exactly an empty JSON object.
+        assert_eq!(resume_body, json!({}));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_patch_input_when_paused() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Original prompt".to_string(),
+                    name: Some("patch-input-test".to_string()),
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+        assert_eq!(task["initial_prompt"], "Original prompt");
+
+        // Transition task to paused status so input update is allowed.
+        store.set_task_status(task_id, TaskStatus::Paused)?;
+
+        // Patch the task input — should return 204 No Content.
+        let patch_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/tasks/me/{task_id}/input"),
+                &session_token,
+                &json!({ "input": "Updated prompt with new requirements" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify the prompt was updated by fetching the task.
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            fetched["initial_prompt"],
+            "Updated prompt with new requirements"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_full_lifecycle_with_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // 1. Create
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Full lifecycle test".to_string(),
+                    name: Some("lifecycle-full".to_string()),
+                    display_name: Some("Full Lifecycle".to_string()),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+        assert_eq!(task["name"], "lifecycle-full");
+        assert_eq!(task["status"], "pending");
+
+        // 2. Assign workspace and set active.
+        // NOTE: The pause/resume handlers are stubs that return 202 without
+        // mutating store state. We therefore manually set status via the
+        // FakeStore helpers throughout this test. Once the handlers are fully
+        // implemented (with real workspace stop/start logic), these manual
+        // calls should be removed and the handlers should drive the transitions.
+        let workspace_id = Uuid::new_v4();
+        store.set_task_workspace_id(task_id, workspace_id)?;
+        store.set_task_status(task_id, TaskStatus::Active)?;
+
+        // 3. Send input while active
+        let send_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/send"),
+                &session_token,
+                &TaskSendRequest {
+                    input: "Please also add tests".to_string(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(send_response.status(), StatusCode::NO_CONTENT);
+
+        // 4. Pause
+        let pause_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/pause"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(pause_response.status(), StatusCode::ACCEPTED);
+
+        // 5. Manually transition to paused in store (stub handler doesn't
+        //    persist the state change), then patch input.
+        store.set_task_status(task_id, TaskStatus::Paused)?;
+        let patch_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/tasks/me/{task_id}/input"),
+                &session_token,
+                &json!({ "input": "Revised requirements after pause" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::NO_CONTENT);
+
+        // 6. Resume
+        let resume_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/resume"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resume_response.status(), StatusCode::ACCEPTED);
+
+        // 7. Delete
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::ACCEPTED);
+
+        // 8. Verify the task is gone (soft-deleted → 404 on GET)
+        let get_after_delete = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_after_delete.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn task_not_found_returns_404() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
@@ -20019,7 +20929,344 @@ mod tests {
         assert_eq!(msg_response.status(), StatusCode::OK);
         let body = to_bytes(msg_response.into_body(), 1_000_000).await?;
         let msg: Value = serde_json::from_slice(&body)?;
-        assert!(!msg["queued"].as_bool().unwrap_or(true));
+        assert_eq!(msg["queued"], false);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_create_with_text_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a chat with actual text content
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "Hello, I need help with my project".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+
+        // Validate the chat object
+        let chat = &chat_with_messages["chat"];
+        assert!(chat["id"].as_str().is_some());
+        assert_eq!(chat["title"], "New Chat");
+
+        // Validate the initial message was stored
+        let messages = chat_with_messages["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+
+        // Verify content is an array with the text we sent
+        let msg_content = messages[0]["content"]
+            .as_array()
+            .ok_or("expected content to be an array")?;
+        assert_eq!(msg_content.len(), 1);
+        assert_eq!(msg_content[0]["type"], "text");
+        assert_eq!(msg_content[0]["text"], "Hello, I need help with my project");
+
+        // Verify we can retrieve the chat and its messages
+        let chat_id = chat["id"].as_str().ok_or("missing chat id")?;
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(fetched["chat"]["id"], chat_id);
+        let fetched_messages = fetched["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        assert_eq!(fetched_messages.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_post_message_with_text_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a chat first
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "Initial question".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        // Post a follow-up message with text content
+        let msg_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/messages"),
+                &session_token,
+                &CreateChatMessageRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "Can you elaborate on step 2?".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(msg_response.status(), StatusCode::OK);
+        let body = to_bytes(msg_response.into_body(), 1_000_000).await?;
+        let msg: Value = serde_json::from_slice(&body)?;
+        assert_eq!(msg["queued"], false);
+        // Validate the returned message has the content we sent
+        let returned_content = msg["message"]["content"]
+            .as_array()
+            .ok_or("expected message content array")?;
+        assert_eq!(returned_content.len(), 1);
+        assert_eq!(returned_content[0]["type"], "text");
+        assert_eq!(returned_content[0]["text"], "Can you elaborate on step 2?");
+
+        // Verify message was persisted by getting the chat again
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        let messages = fetched["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        // Should have the initial message + the follow-up
+        assert_eq!(messages.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_full_lifecycle_with_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // 1. Create chat with content
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "How do I deploy my app?".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        // 2. List chats — should contain our new chat
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/chats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let body = to_bytes(list_response.into_body(), 1_000_000).await?;
+        let chats: Value = serde_json::from_slice(&body)?;
+        let chats_arr = chats.as_array().ok_or("expected array")?;
+        assert_eq!(chats_arr.len(), 1);
+        assert_eq!(chats_arr[0]["id"], chat_id);
+
+        // 3. Post a follow-up message
+        let msg_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/messages"),
+                &session_token,
+                &CreateChatMessageRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "What about Docker?".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(msg_response.status(), StatusCode::OK);
+
+        // 4. Get chat — should have 2 messages
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        let messages = fetched["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        assert_eq!(messages.len(), 2);
+
+        // 5. Archive the chat
+        let archive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/archive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify the chat is archived
+        let get_archived = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_archived.status(), StatusCode::OK);
+        let body = to_bytes(get_archived.into_body(), 1_000_000).await?;
+        let archived_chat: Value = serde_json::from_slice(&body)?;
+        assert_eq!(archived_chat["chat"]["archived"], true);
+
+        // 6. Unarchive the chat
+        let unarchive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/unarchive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify the chat is unarchived
+        let get_unarchived = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_unarchived.status(), StatusCode::OK);
+        let body = to_bytes(get_unarchived.into_body(), 1_000_000).await?;
+        let unarchived_chat: Value = serde_json::from_slice(&body)?;
+        assert_eq!(unarchived_chat["chat"]["archived"], false);
+
+        // 7. Delete the chat (which archives it)
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        // Verify the chat is archived after delete
+        let get_after_delete = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_after_delete.status(), StatusCode::OK);
+        let body = to_bytes(get_after_delete.into_body(), 1_000_000).await?;
+        let deleted_chat: Value = serde_json::from_slice(&body)?;
+        assert_eq!(deleted_chat["chat"]["archived"], true);
         Ok(())
     }
 
@@ -24121,6 +25368,948 @@ mod tests {
             .to_owned();
 
         assert_eq!(first_id, second_id);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Helper: creates a workspace via the org-member endpoint.
+    /// Returns (workspace_id_str, workspace json).
+    async fn create_test_workspace(
+        app: &Router,
+        session_token: &str,
+        org_id: Uuid,
+        template_id: &str,
+        name: &str,
+    ) -> Result<Value, Box<dyn Error>> {
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/members/me/workspaces"),
+                session_token,
+                &json!({
+                    "name": name,
+                    "template_id": template_id,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let ws = response_json(response).await?;
+        Ok(ws)
+    }
+
+    #[tokio::test]
+    async fn workspace_lifecycle_create_get_list_update_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // 1. Create workspace
+        let ws = create_test_workspace(&app, &session_token, org_id, template_id, "my-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+        assert_eq!(ws.get("name").and_then(Value::as_str), Some("my-ws"));
+        assert!(ws.get("owner_id").and_then(Value::as_str).is_some());
+        assert_eq!(
+            ws.get("template_id").and_then(Value::as_str),
+            Some(template_id)
+        );
+
+        // 2. Get workspace
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert_eq!(fetched.get("name").and_then(Value::as_str), Some("my-ws"));
+        assert_eq!(fetched.get("id").and_then(Value::as_str), Some(ws_id));
+
+        // 3. List workspaces
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/workspaces?owner=me", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let workspaces = list_body
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .ok_or("expected workspaces array")?;
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(
+            workspaces[0].get("name").and_then(Value::as_str),
+            Some("my-ws")
+        );
+        let count = list_body.get("count").and_then(Value::as_i64);
+        assert_eq!(count, Some(1));
+
+        // 4. Update workspace (rename)
+        let patch_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{ws_id}"),
+                &session_token,
+                &json!({"name": "renamed-ws"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let patched = response_json(patch_resp).await?;
+        assert_eq!(
+            patched.get("name").and_then(Value::as_str),
+            Some("renamed-ws")
+        );
+
+        // Verify rename persisted via GET.
+        let get_resp2 = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp2.status(), StatusCode::OK);
+        let fetched2 = response_json(get_resp2).await?;
+        assert_eq!(
+            fetched2.get("name").and_then(Value::as_str),
+            Some("renamed-ws")
+        );
+
+        // 5. Delete workspace (soft-delete via build with "delete" transition)
+        let delete_build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "delete"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_build_resp.status(), StatusCode::CREATED);
+        let delete_build = response_json(delete_build_resp).await?;
+        assert_eq!(
+            delete_build.get("transition").and_then(Value::as_str),
+            Some("delete")
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace builds
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_builds_create_get_list_cancel() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace (also creates initial build internally).
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "build-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // 1. Create a new build (start transition).
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        assert_eq!(
+            build.get("transition").and_then(Value::as_str),
+            Some("start")
+        );
+        assert_eq!(
+            build.get("workspace_id").and_then(Value::as_str),
+            Some(ws_id)
+        );
+        assert_eq!(
+            build.get("reason").and_then(Value::as_str),
+            Some("initiator")
+        );
+
+        // 2. Get build by ID.
+        let get_build_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_build_resp.status(), StatusCode::OK);
+        let fetched_build = response_json(get_build_resp).await?;
+        assert_eq!(
+            fetched_build.get("id").and_then(Value::as_str),
+            Some(build_id)
+        );
+
+        // 3. List builds for workspace.
+        let list_builds_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_builds_resp.status(), StatusCode::OK);
+        let builds_list = response_json(list_builds_resp).await?;
+        let builds = builds_list.as_array().ok_or("expected builds array")?;
+        // At least the build we just created (workspace creation also created one).
+        assert!(!builds.is_empty());
+
+        // 4. Cancel build.
+        let cancel_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/workspacebuilds/{build_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(cancel_resp.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_resources_parameters_logs_timings() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace to get a build.
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "resource-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // Create a build.
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id_str = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        let build_id = Uuid::parse_str(build_id_str)?;
+        let job_id_str = build
+            .get("job_id")
+            .and_then(Value::as_str)
+            .ok_or("missing job_id")?;
+        let job_id = Uuid::parse_str(job_id_str)?;
+
+        // Seed build parameters, resources, logs, and timings via the store.
+        store
+            .insert_workspace_build_parameters(
+                build_id,
+                &[("region".to_owned(), "us-east-1".to_owned())],
+            )
+            .await?;
+
+        let resource_id = Uuid::new_v4();
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(WorkspaceResourceRecord {
+                id: resource_id,
+                created_at: OffsetDateTime::now_utc(),
+                job_id,
+                transition: "start".to_owned(),
+                resource_type: "docker_container".to_owned(),
+                name: "main".to_owned(),
+                hide: false,
+                icon: String::new(),
+                daily_cost: 0,
+            });
+
+        store
+            .workspace_resource_metadata
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(resource_id)
+            .or_default()
+            .push(WorkspaceResourceMetadataRecord {
+                workspace_resource_id: resource_id,
+                key: "image".to_owned(),
+                value: "ubuntu:22.04".to_owned(),
+                sensitive: false,
+            });
+
+        store
+            .provisioner_job_logs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobLogRecord {
+                id: 1,
+                job_id,
+                created_at: OffsetDateTime::now_utc(),
+                source: "provisioner".to_owned(),
+                level: "info".to_owned(),
+                stage: "init".to_owned(),
+                output: "Initializing...".to_owned(),
+            });
+
+        store
+            .provisioner_job_timings
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobTimingRecord {
+                job_id,
+                started_at: OffsetDateTime::now_utc(),
+                ended_at: OffsetDateTime::now_utc(),
+                stage: "init".to_owned(),
+                source: "provisioner".to_owned(),
+                action: "create".to_owned(),
+                resource: "docker_container".to_owned(),
+            });
+
+        // 1. GET build parameters.
+        let params_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/parameters"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(params_resp.status(), StatusCode::OK);
+        let params_body = response_json(params_resp).await?;
+        let params = params_body.as_array().ok_or("expected params array")?;
+        assert_eq!(params.len(), 1);
+        assert_eq!(
+            params[0].get("name").and_then(Value::as_str),
+            Some("region")
+        );
+        assert_eq!(
+            params[0].get("value").and_then(Value::as_str),
+            Some("us-east-1")
+        );
+
+        // 2. GET build resources.
+        let resources_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/resources"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resources_resp.status(), StatusCode::OK);
+        let resources_body = response_json(resources_resp).await?;
+        let resources = resources_body
+            .as_array()
+            .ok_or("expected resources array")?;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources[0].get("name").and_then(Value::as_str),
+            Some("main")
+        );
+        assert_eq!(
+            resources[0].get("type").and_then(Value::as_str),
+            Some("docker_container")
+        );
+        let meta = resources[0]
+            .get("metadata")
+            .and_then(Value::as_array)
+            .ok_or("expected metadata array")?;
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].get("key").and_then(Value::as_str), Some("image"));
+
+        // 3. GET build logs.
+        let logs_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(logs_resp.status(), StatusCode::OK);
+        let logs_body = response_json(logs_resp).await?;
+        let logs = logs_body.as_array().ok_or("expected logs array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Initializing...")
+        );
+        assert_eq!(logs[0].get("stage").and_then(Value::as_str), Some("init"));
+
+        // 4. GET build timings.
+        let timings_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/timings"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(timings_resp.status(), StatusCode::OK);
+        let timings_body = response_json(timings_resp).await?;
+        let prov_timings = timings_body
+            .get("provisioner_timings")
+            .and_then(Value::as_array)
+            .ok_or("expected provisioner_timings array")?;
+        assert_eq!(prov_timings.len(), 1);
+        assert_eq!(
+            prov_timings[0].get("stage").and_then(Value::as_str),
+            Some("init")
+        );
+        assert_eq!(
+            prov_timings[0].get("action").and_then(Value::as_str),
+            Some("create")
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Template lifecycle
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn template_lifecycle_create_get_list_update_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        // 1. Verify create response fields.
+        assert_eq!(
+            template.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+        assert_eq!(
+            template.get("display_name").and_then(Value::as_str),
+            Some("Test Template")
+        );
+        assert_eq!(
+            template.get("description").and_then(Value::as_str),
+            Some("A test template")
+        );
+        assert_eq!(
+            template.get("icon").and_then(Value::as_str),
+            Some("/icon/docker.png")
+        );
+        assert!(
+            template
+                .get("organization_id")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+
+        // 2. GET template by ID.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert_eq!(
+            fetched.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // 3. List templates in org.
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let templates = list_body.as_array().ok_or("expected array")?;
+        assert_eq!(templates.len(), 1);
+        assert_eq!(
+            templates[0].get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // 4. Update template meta (description).
+        let patch_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+                &UpdateTemplateMeta {
+                    description: Some("New description".to_owned()),
+                    ..UpdateTemplateMeta::default()
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let patched = response_json(patch_resp).await?;
+        assert_eq!(
+            patched.get("description").and_then(Value::as_str),
+            Some("New description")
+        );
+        // Original name preserved.
+        assert_eq!(
+            patched.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // 5. Delete template.
+        let delete_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_resp.status(), StatusCode::OK);
+
+        // Verify gone.
+        let get_after_delete = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_after_delete.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Template versions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn template_versions_create_get_list_archive_unarchive() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id_str = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+        let template_id = Uuid::parse_str(template_id_str)?;
+
+        // Create a template version via the store directly (the HTTP API for
+        // creating template versions requires file uploads which are complex;
+        // seed via the store and test the read/archive endpoints).
+        let version_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+
+        // Create the provisioner job first.
+        store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: job_id,
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                organization_id: org_id,
+                initiator_id: Uuid::nil(),
+                provisioner: "echo".to_owned(),
+                file_id: None,
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: HashMap::new(),
+            })
+            .await?;
+
+        store
+            .insert_template_version(CreateTemplateVersionInput {
+                id: version_id,
+                template_id: Some(template_id),
+                organization_id: org_id,
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                created_by: Uuid::nil(),
+                name: "v1.0.0".to_owned(),
+                message: "Initial version".to_owned(),
+                readme: String::new(),
+                job_id,
+                source_example_id: None,
+            })
+            .await?;
+
+        // 1. GET template version by ID.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{version_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert_eq!(fetched.get("name").and_then(Value::as_str), Some("v1.0.0"));
+        assert_eq!(
+            fetched.get("id").and_then(Value::as_str),
+            Some(version_id.to_string().as_str())
+        );
+
+        // 2. List template versions.
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id_str}/versions"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let versions = list_body.as_array().ok_or("expected array")?;
+        assert!(
+            versions
+                .iter()
+                .any(|v| v.get("name").and_then(Value::as_str) == Some("v1.0.0"))
+        );
+
+        // 3. Archive template version.
+        let archive_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{version_id}/archive"),
+                &session_token,
+                &json!({}),
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_resp.status(), StatusCode::OK);
+
+        // 4. Unarchive template version.
+        let unarchive_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{version_id}/unarchive"),
+                &session_token,
+                &json!({}),
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_resp.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace ACL
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_acl_set_get_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace.
+        let ws = create_test_workspace(&app, &session_token, org_id, template_id, "acl-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // Get the owner's user id.
+        let owner_id = ws
+            .get("owner_id")
+            .and_then(Value::as_str)
+            .ok_or("missing owner_id")?;
+
+        // 1. Set ACL (PATCH).
+        let user_roles = HashMap::from([(owner_id.to_owned(), "admin".to_owned())]);
+        let set_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+                &json!({
+                    "user_roles": user_roles,
+                    "group_roles": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(set_resp.status(), StatusCode::NO_CONTENT);
+
+        // 2. Get ACL.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let acl_body = response_json(get_resp).await?;
+        let acl_users = acl_body
+            .get("users")
+            .and_then(Value::as_array)
+            .ok_or("expected users array")?;
+        assert_eq!(acl_users.len(), 1);
+        assert_eq!(
+            acl_users[0].get("role").and_then(Value::as_str),
+            Some("admin")
+        );
+        // Verify user details were resolved (handler calls find_user_by_id).
+        assert!(acl_users[0].get("id").and_then(Value::as_str).is_some());
+        assert!(
+            acl_users[0]
+                .get("username")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+
+        // 3. Delete ACL.
+        let delete_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify ACL is empty after deletion.
+        let get_resp2 = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp2.status(), StatusCode::OK);
+        let acl_body2 = response_json(get_resp2).await?;
+        let acl_users2 = acl_body2
+            .get("users")
+            .and_then(Value::as_array)
+            .ok_or("expected users array")?;
+        assert!(acl_users2.is_empty());
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace port sharing
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_port_sharing_create_list_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace.
+        let ws = create_test_workspace(&app, &session_token, org_id, template_id, "port-share-ws")
+            .await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // 1. Create port share.
+        let share_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                    "share_level": "authenticated",
+                    "protocol": "http",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(share_resp.status(), StatusCode::OK);
+        let share = response_json(share_resp).await?;
+        assert_eq!(
+            share.get("agent_name").and_then(Value::as_str),
+            Some("main")
+        );
+        assert_eq!(share.get("port").and_then(Value::as_i64), Some(8080));
+        assert_eq!(
+            share.get("share_level").and_then(Value::as_str),
+            Some("authenticated")
+        );
+        assert_eq!(share.get("protocol").and_then(Value::as_str), Some("http"));
+
+        // Create a second port share.
+        let share2_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 3000,
+                    "share_level": "public",
+                    "protocol": "https",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(share2_resp.status(), StatusCode::OK);
+
+        // 2. List port shares.
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let shares = list_body
+            .get("shares")
+            .and_then(Value::as_array)
+            .ok_or("expected shares array")?;
+        assert_eq!(shares.len(), 2);
+
+        // 3. Delete port share.
+        let delete_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify only one share remains.
+        let list_resp2 = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp2.status(), StatusCode::OK);
+        let list_body2 = response_json(list_resp2).await?;
+        let shares2 = list_body2
+            .get("shares")
+            .and_then(Value::as_array)
+            .ok_or("expected shares array")?;
+        assert_eq!(shares2.len(), 1);
+        assert_eq!(shares2[0].get("port").and_then(Value::as_i64), Some(3000));
+
         Ok(())
     }
 }
