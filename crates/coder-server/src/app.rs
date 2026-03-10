@@ -1091,13 +1091,10 @@ async fn list_audit_logs(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
-        return Ok(forbidden_response(
-            "You are not authorized to view audit logs.",
-        ));
-    }
-
     // RBAC: verify the actor can read audit logs.
+    // This replaces the previous can_view_operational_data() check, which was
+    // redundant — role_auditor() and role_owner() both grant AuditLog::Read at
+    // site level, and the RBAC check is strictly more correct and extensible.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -2401,18 +2398,18 @@ async fn put_user_roles(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: verify the actor can update user roles (admin-only).
+    // RBAC: verify the actor can assign user roles (admin-only).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
-            Action::Update,
-            &Object::new(ResourceType::User),
+            Action::Assign,
+            &Object::new(ResourceType::AssignRole),
         )
         .is_err()
     {
         return Ok(forbidden_response(
-            "You are not authorized to update user roles.",
+            "You are not authorized to assign user roles.",
         ));
     }
 
@@ -7811,7 +7808,7 @@ async fn put_workspace_autostart(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -7825,7 +7822,10 @@ async fn put_workspace_autostart(
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::Workspace).with_id(workspace_id),
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -7862,7 +7862,7 @@ async fn put_workspace_ttl(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -7876,7 +7876,10 @@ async fn put_workspace_ttl(
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::Workspace).with_id(workspace_id),
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -7947,7 +7950,7 @@ async fn put_workspace_extend(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -7961,7 +7964,10 @@ async fn put_workspace_extend(
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::Workspace).with_id(workspace_id),
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -8250,7 +8256,7 @@ async fn get_workspace_acl(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -8264,7 +8270,10 @@ async fn get_workspace_acl(
         .authorize(
             &context.actor,
             Action::Read,
-            &Object::new(ResourceType::Workspace).with_id(workspace_id),
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -8325,7 +8334,7 @@ async fn patch_workspace_acl(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -8339,7 +8348,10 @@ async fn patch_workspace_acl(
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::Workspace).with_id(workspace_id),
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -8370,7 +8382,7 @@ async fn delete_workspace_acl(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -8384,7 +8396,10 @@ async fn delete_workspace_acl(
         .authorize(
             &context.actor,
             Action::Delete,
-            &Object::new(ResourceType::Workspace).with_id(workspace_id),
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -8468,7 +8483,7 @@ async fn post_workspace_usage(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -8482,7 +8497,10 @@ async fn post_workspace_usage(
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::Workspace).with_id(workspace_id),
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
         )
         .is_err()
     {
@@ -9490,6 +9508,8 @@ async fn list_oauth2_provider_apps(
     };
 
     // RBAC: verify the actor can read OAuth2 provider apps.
+    // The member site role grants Oauth2App::Read, so all authenticated users
+    // with the default member role retain access (backward compatible).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -9523,6 +9543,8 @@ async fn post_oauth2_provider_app(
     };
 
     // RBAC: verify the actor can create OAuth2 provider apps.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -9578,6 +9600,8 @@ async fn get_oauth2_provider_app(
     };
 
     // RBAC: verify the actor can read OAuth2 provider apps.
+    // The member site role grants Oauth2App::Read, so all authenticated users
+    // with the default member role retain access (backward compatible).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -9616,6 +9640,8 @@ async fn put_oauth2_provider_app(
     };
 
     // RBAC: verify the actor can update OAuth2 provider apps.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -9677,6 +9703,8 @@ async fn delete_oauth2_provider_app(
     };
 
     // RBAC: verify the actor can delete OAuth2 provider apps.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -9763,6 +9791,8 @@ async fn post_oauth2_provider_app_secret(
     };
 
     // RBAC: verify the actor can create OAuth2 provider app secrets.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -9816,6 +9846,8 @@ async fn delete_oauth2_provider_app_secret(
     };
 
     // RBAC: verify the actor can delete OAuth2 provider app secrets.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -9873,6 +9905,8 @@ async fn delete_oauth2_provider_app_tokens(
     };
 
     // RBAC: verify the actor can delete OAuth2 provider app tokens.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -18492,6 +18526,95 @@ mod tests {
         )
         .await?;
         assert_eq!(delete_self_response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_owner_member_is_rejected_by_rbac() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let owner_session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &owner_session_token).await?;
+
+        // Create a regular member user (no owner or admin roles).
+        let create_user_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &owner_session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "regular@example.com".to_owned(),
+                    username: "regular".to_owned(),
+                    name: "Regular User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_user_response.status(), StatusCode::CREATED);
+
+        // Log in as the regular member.
+        let member_login_response = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "regular@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(member_login_response.status(), StatusCode::CREATED);
+        let member_session_token = response_json(member_login_response)
+            .await?
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing member session token")?
+            .to_owned();
+
+        // A regular member should be forbidden from assigning user roles
+        // (admin-only operation gated by RBAC AssignRole::Assign).
+        let assign_roles_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/owner/roles",
+                &member_session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["user-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(assign_roles_response.status(), StatusCode::FORBIDDEN);
+
+        // A regular member should be forbidden from viewing audit logs
+        // (gated by RBAC AuditLog::Read — only owner/auditor roles).
+        let audit_logs_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/audit?limit=10", &member_session_token)?,
+        )
+        .await?;
+        assert_eq!(audit_logs_response.status(), StatusCode::FORBIDDEN);
+
+        // A regular member should be forbidden from suspending users
+        // (gated by RBAC User::Update — admin-only).
+        let suspend_response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/owner/status/suspend",
+                &member_session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(suspend_response.status(), StatusCode::FORBIDDEN);
+
         Ok(())
     }
 
