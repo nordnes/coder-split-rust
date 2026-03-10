@@ -2769,7 +2769,7 @@ async fn put_organization_member_roles(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: verify the actor can update member roles in this organization.
+    // RBAC: verify the actor can assign roles in this organization.
     let Some(org) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
     };
@@ -2777,13 +2777,13 @@ async fn put_organization_member_roles(
     if authorizer
         .authorize(
             &context.actor,
-            Action::Update,
-            &Object::new(ResourceType::OrganizationMember).in_org(org.id),
+            Action::Assign,
+            &Object::new(ResourceType::AssignOrgRole).in_org(org.id),
         )
         .is_err()
     {
         return Ok(forbidden_response(
-            "You are not authorized to update member roles in this organization.",
+            "You are not authorized to assign roles in this organization.",
         ));
     }
 
