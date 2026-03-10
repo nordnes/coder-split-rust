@@ -5,6 +5,9 @@ use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use coder_audit::{AuditEvent, AuditSink};
+use coder_connectivity::tailnet::{
+    DerpTrafficTracker, InMemoryCoordinator, build_derp_map_from_config,
+};
 use coder_core::pubsub::PubSub;
 use coder_core::{
     AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
@@ -201,6 +204,10 @@ async fn run() -> Result<(), MainError> {
             .map_err(|error| MainError::Config(format!("create pubsub: {error}")))?,
     );
 
+    let derp_map = build_derp_map_from_config(&config.derp_regions);
+    let coordinator = InMemoryCoordinator::new(derp_map);
+    let derp_tracker = DerpTrafficTracker::new();
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -208,6 +215,8 @@ async fn run() -> Result<(), MainError> {
         store.clone(),
         Arc::new(PersistingAuditSink::new(store)),
         pubsub.clone(),
+        coordinator,
+        derp_tracker,
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
