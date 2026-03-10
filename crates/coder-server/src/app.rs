@@ -13054,8 +13054,9 @@ mod tests {
     };
     use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
     use coder_core::provisioner::{
-        ProvisionerJobLogRecord as ProvisionerLogRecord, ProvisionerJobStatus,
-        ProvisionerJobTimingRecord as ProvisionerTimingRecord,
+        LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord, ProvisionerJobStatus,
+        ProvisionerJobTimingRecord as ProvisionerTimingRecord, ProvisionerJobType,
+        ProvisionerStorageMethod, ProvisionerType,
     };
     use coder_core::template::ProvisionerJobRecord as TemplateProvisionerJobRecord;
     use coder_core::{
@@ -13384,6 +13385,10 @@ mod tests {
             &self,
             input: AcquireProvisionerJobInput,
         ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            // TODO: This simplified implementation does not filter by
+            // organization_id, types, or provisioner_tags. It simply grabs
+            // the first pending job. The real PostgresStore filters by all
+            // three fields — add matching logic if tests require it.
             let mut jobs = self
                 .prov_jobs
                 .lock()
@@ -13540,7 +13545,7 @@ mod tests {
                 .cloned()
                 .collect();
             let max_jobs = usize::try_from(input.max_jobs).unwrap_or(0);
-            result.truncate(max_jobs.min(result.len()));
+            result.truncate(max_jobs);
             Ok(result)
         }
 
@@ -28565,6 +28570,225 @@ mod tests {
         let body = response_json(response).await?;
         let logs = body.as_array().ok_or("expected array")?;
         assert_eq!(logs.len(), 2);
+        Ok(())
+    }
+
+    // ── FakeStore ProvisionerStore unit tests ─────────────────
+
+    /// Helper: create a FakeStore and insert a default pending provisioner job.
+    fn insert_test_prov_job(store: &FakeStore) -> Result<ProvisionerJobRecord, StorageError> {
+        let now = OffsetDateTime::now_utc();
+        let input = InsertProvisionerJobInput {
+            id: Uuid::new_v4(),
+            created_at: now,
+            organization_id: Uuid::new_v4(),
+            initiator_id: Uuid::new_v4(),
+            provisioner: ProvisionerType::Echo,
+            storage_method: ProvisionerStorageMethod::File,
+            file_id: Uuid::new_v4(),
+            job_type: ProvisionerJobType::TemplateVersionImport,
+            input: json!({}),
+            tags: json!({}),
+            trace_metadata: json!({}),
+        };
+        // Call the sync-compatible path: lock and insert directly.
+        let record = ProvisionerJobRecord {
+            id: input.id,
+            created_at: input.created_at,
+            updated_at: input.created_at,
+            started_at: None,
+            canceled_at: None,
+            completed_at: None,
+            error: String::new(),
+            error_code: String::new(),
+            organization_id: Some(input.organization_id),
+            initiator_id: Some(input.initiator_id),
+            provisioner: input.provisioner,
+            storage_method: input.storage_method,
+            file_id: Some(input.file_id),
+            job_type: input.job_type,
+            input: input.input,
+            tags: input.tags,
+            trace_metadata: input.trace_metadata,
+            worker_id: None,
+            job_status: ProvisionerJobStatus::Pending,
+            logs_overflowed: false,
+            logs_length: 0,
+        };
+        store
+            .prov_jobs
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(record.id, record.clone());
+        Ok(record)
+    }
+
+    #[tokio::test]
+    async fn prov_store_insert_acquire_complete_flow() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        // Acquire the pending job.
+        let acquired = store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id: Uuid::new_v4(),
+                started_at: OffsetDateTime::now_utc(),
+                organization_id: job.organization_id.unwrap_or_default(),
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: json!({}),
+            })
+            .await?;
+        let acquired = acquired.ok_or("expected a job to be acquired")?;
+        assert_eq!(acquired.id, job.id);
+        assert_eq!(acquired.job_status, ProvisionerJobStatus::Running);
+        assert!(acquired.started_at.is_some());
+
+        // Complete it successfully.
+        let now = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: job.id,
+                updated_at: now,
+                completed_at: now,
+                error: String::new(),
+                error_code: String::new(),
+            })
+            .await?;
+
+        let completed = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(completed.job_status, ProvisionerJobStatus::Succeeded);
+        assert!(completed.completed_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_cancel_sets_updated_at() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        let cancel_time = OffsetDateTime::now_utc();
+        // Cancel without completing — transitions to Canceling.
+        store
+            .update_provisioner_job_with_cancel_by_id(CancelProvisionerJobInput {
+                id: job.id,
+                canceled_at: cancel_time,
+                completed_at: None,
+            })
+            .await?;
+
+        let canceled = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(canceled.job_status, ProvisionerJobStatus::Canceling);
+        assert_eq!(canceled.updated_at, cancel_time);
+        assert_eq!(canceled.canceled_at, Some(cancel_time));
+
+        // Cancel with completed_at — transitions to Canceled.
+        let completed_time = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_cancel_by_id(CancelProvisionerJobInput {
+                id: job.id,
+                canceled_at: completed_time,
+                completed_at: Some(completed_time),
+            })
+            .await?;
+
+        let fully_canceled = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(fully_canceled.job_status, ProvisionerJobStatus::Canceled);
+        assert!(fully_canceled.completed_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_reap_stale_jobs() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let _job = insert_test_prov_job(&store)?;
+
+        let far_future = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        // max_jobs = 10 — should find the stale pending job.
+        let reaped = store
+            .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+                pending_since: far_future,
+                hung_since: far_future,
+                max_jobs: 10,
+            })
+            .await?;
+        assert_eq!(reaped.len(), 1);
+
+        // max_jobs = 0 — should return nothing.
+        let empty = store
+            .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+                pending_since: far_future,
+                hung_since: far_future,
+                max_jobs: 0,
+            })
+            .await?;
+        assert!(empty.is_empty());
+
+        // Negative max_jobs — should return 0 (not wrap to large number).
+        let negative = store
+            .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+                pending_since: far_future,
+                hung_since: far_future,
+                max_jobs: -1,
+            })
+            .await?;
+        assert!(negative.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_log_insert_vector_length_mismatch() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        // Mismatched vector lengths: 2 timestamps but only 1 output.
+        let now = OffsetDateTime::now_utc();
+        let result = store
+            .insert_provisioner_job_logs(InsertProvisionerJobLogsInput {
+                job_id: job.id,
+                created_at: vec![now, now],
+                source: vec![LogSource::Provisioner, LogSource::Provisioner],
+                level: vec![LogLevel::Info, LogLevel::Info],
+                stage: vec!["build".to_owned(), "build".to_owned()],
+                output: vec!["only one".to_owned()], // mismatch!
+            })
+            .await;
+        assert!(result.is_err());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn prov_store_logs_length_tracking() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let job = insert_test_prov_job(&store)?;
+
+        let now = OffsetDateTime::now_utc();
+        let logs = store
+            .insert_provisioner_job_logs(InsertProvisionerJobLogsInput {
+                job_id: job.id,
+                created_at: vec![now, now],
+                source: vec![LogSource::Provisioner, LogSource::Provisioner],
+                level: vec![LogLevel::Info, LogLevel::Info],
+                stage: vec!["build".to_owned(), "apply".to_owned()],
+                output: vec!["hello".to_owned(), "world!".to_owned()], // 5 + 6 = 11
+            })
+            .await?;
+        assert_eq!(logs.len(), 2);
+
+        // Verify logs_length on the parent job was updated.
+        let updated_job = store
+            .get_provisioner_job_by_id(job.id)
+            .await?
+            .ok_or("job missing")?;
+        assert_eq!(updated_job.logs_length, 11); // "hello"(5) + "world!"(6)
         Ok(())
     }
 }
