@@ -15287,8 +15287,8 @@ mod tests {
         ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, StorageError> {
             let record = coder_core::identity::OAuth2ProviderAppRecord {
                 id: Uuid::new_v4(),
-                created_at: time::OffsetDateTime::now_utc(),
-                updated_at: time::OffsetDateTime::now_utc(),
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
                 name: input.name.clone(),
                 icon: input.icon.clone(),
                 callback_url: input.callback_url.clone(),
@@ -15325,7 +15325,7 @@ mod tests {
                 app.name = input.name.clone();
                 app.icon = input.icon.clone();
                 app.callback_url = input.callback_url.clone();
-                app.updated_at = time::OffsetDateTime::now_utc();
+                app.updated_at = OffsetDateTime::now_utc();
                 Ok(Some(app.clone()))
             } else {
                 Ok(None)
@@ -15337,7 +15337,29 @@ mod tests {
                 .oauth2_apps
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(apps.remove(&app_id).is_some())
+            let removed = apps.remove(&app_id).is_some();
+            if removed {
+                // Cascade: collect secret IDs for this app, then remove secrets, codes, and tokens
+                let mut secrets = self
+                    .oauth2_app_secrets
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                let secret_ids: std::collections::HashSet<Uuid> = secrets
+                    .values()
+                    .filter(|s| s.app_id == app_id)
+                    .map(|s| s.id)
+                    .collect();
+                secrets.retain(|_, s| s.app_id != app_id);
+                self.oauth2_app_codes
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?
+                    .retain(|_, c| c.app_id != app_id);
+                self.oauth2_app_tokens
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?
+                    .retain(|_, t| !secret_ids.contains(&t.app_secret_id));
+            }
+            Ok(removed)
         }
 
         async fn list_oauth2_provider_app_secrets(
@@ -15364,7 +15386,7 @@ mod tests {
         ) -> Result<coder_core::identity::OAuth2ProviderAppSecretRecord, StorageError> {
             let record = coder_core::identity::OAuth2ProviderAppSecretRecord {
                 id: Uuid::new_v4(),
-                created_at: time::OffsetDateTime::now_utc(),
+                created_at: OffsetDateTime::now_utc(),
                 hashed_secret: hashed_secret.to_vec(),
                 display_secret: display_secret.to_owned(),
                 app_id,
@@ -15384,7 +15406,15 @@ mod tests {
                 .oauth2_app_secrets
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(secrets.remove(&secret_id).is_some())
+            let removed = secrets.remove(&secret_id).is_some();
+            if removed {
+                // Cascade: remove tokens that reference this secret
+                self.oauth2_app_tokens
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?
+                    .retain(|_, t| t.app_secret_id != secret_id);
+            }
+            Ok(removed)
         }
 
         async fn find_oauth2_provider_app_secret_by_id(
@@ -15405,14 +15435,14 @@ mod tests {
             user_id: Uuid,
             secret_prefix: &[u8],
             hashed_secret: &[u8],
-            expires_at: time::OffsetDateTime,
+            expires_at: OffsetDateTime,
             resource_uri: &str,
             code_challenge: &str,
             code_challenge_method: &str,
         ) -> Result<coder_core::identity::OAuth2ProviderAppCodeRecord, StorageError> {
             let record = coder_core::identity::OAuth2ProviderAppCodeRecord {
                 id: Uuid::new_v4(),
-                created_at: time::OffsetDateTime::now_utc(),
+                created_at: OffsetDateTime::now_utc(),
                 expires_at,
                 secret_prefix: secret_prefix.to_vec(),
                 hashed_secret: hashed_secret.to_vec(),
@@ -15461,7 +15491,7 @@ mod tests {
         ) -> Result<coder_core::identity::OAuth2ProviderAppTokenRecord, StorageError> {
             let record = coder_core::identity::OAuth2ProviderAppTokenRecord {
                 id: Uuid::new_v4(),
-                created_at: time::OffsetDateTime::now_utc(),
+                created_at: OffsetDateTime::now_utc(),
                 expires_at: input.expires_at,
                 hash_prefix: input.hash_prefix.clone(),
                 refresh_hash: input.refresh_hash.clone(),
@@ -15523,19 +15553,22 @@ mod tests {
             app_id: Uuid,
             user_id: Uuid,
         ) -> Result<Vec<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError> {
+            // Collect secret IDs first, then drop the secrets lock before acquiring tokens lock
+            let app_secret_ids: std::collections::HashSet<Uuid> = {
+                let secrets = self
+                    .oauth2_app_secrets
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                secrets
+                    .values()
+                    .filter(|s| s.app_id == app_id)
+                    .map(|s| s.id)
+                    .collect()
+            };
             let tokens = self
                 .oauth2_app_tokens
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let secrets = self
-                .oauth2_app_secrets
-                .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let app_secret_ids: std::collections::HashSet<Uuid> = secrets
-                .values()
-                .filter(|s| s.app_id == app_id)
-                .map(|s| s.id)
-                .collect();
             Ok(tokens
                 .values()
                 .filter(|t| t.user_id == user_id && app_secret_ids.contains(&t.app_secret_id))
@@ -15548,20 +15581,22 @@ mod tests {
             app_id: Uuid,
             user_id: Uuid,
         ) -> Result<u64, StorageError> {
-            // Lock tokens first, then secrets — same order as list_oauth2_provider_app_tokens_by_app_and_user
+            // Collect secret IDs first, then drop the secrets lock before acquiring tokens lock
+            let app_secret_ids: std::collections::HashSet<Uuid> = {
+                let secrets = self
+                    .oauth2_app_secrets
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                secrets
+                    .values()
+                    .filter(|s| s.app_id == app_id)
+                    .map(|s| s.id)
+                    .collect()
+            };
             let mut tokens = self
                 .oauth2_app_tokens
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let secrets = self
-                .oauth2_app_secrets
-                .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let app_secret_ids: std::collections::HashSet<Uuid> = secrets
-                .values()
-                .filter(|s| s.app_id == app_id)
-                .map(|s| s.id)
-                .collect();
             let before = tokens.len();
             tokens.retain(|_, t| {
                 !(t.user_id == user_id && app_secret_ids.contains(&t.app_secret_id))
@@ -23293,6 +23328,7 @@ mod tests {
             )?,
         )
         .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
         let create_body = response_json(create_response).await?;
         let client_id = create_body
             .get("id")
