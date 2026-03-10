@@ -1091,7 +1091,19 @@ async fn list_audit_logs(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read audit logs.
+    // This replaces the previous can_view_operational_data() check, which was
+    // redundant — role_auditor() and role_owner() both grant AuditLog::Read at
+    // site level, and the RBAC check is strictly more correct and extensible.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::AuditLog),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view audit logs.",
         ));
@@ -2078,6 +2090,22 @@ async fn put_user_status(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update user status.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::User),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update user status.",
+        ));
+    }
+
     let updated_user = match state
         .identity
         .update_user_status(&context.actor, &context.user, &user, status)
@@ -2369,6 +2397,22 @@ async fn put_user_roles(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can assign user roles (admin-only).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Assign,
+            &Object::new(ResourceType::AssignRole),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to assign user roles.",
+        ));
+    }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2946,6 +2990,22 @@ async fn delete_user(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can delete users.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::User),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete users.",
+        ));
+    }
+
     let target_user = match state
         .identity
         .delete_user(&context.actor, &context.user, &user)
@@ -3432,6 +3492,21 @@ async fn create_task(
             .into_response());
     }
 
+    // RBAC: verify the actor can create a task.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Task).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create tasks.",
+        ));
+    }
+
     let now = OffsetDateTime::now_utc();
     let task_id = Uuid::new_v4();
     let name = request.name.unwrap_or_else(|| format!("task-{task_id}"));
@@ -3551,6 +3626,21 @@ async fn patch_task_input(
             .into_response());
     }
 
+    // RBAC: verify the actor can update a task.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Task).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this task.",
+        ));
+    }
+
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
@@ -3613,6 +3703,21 @@ async fn delete_task(
             Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
+    }
+
+    // RBAC: verify the actor can delete a task.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Task).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete this task.",
+        ));
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
@@ -3734,6 +3839,21 @@ async fn post_task_send(
             .into_response());
     }
 
+    // RBAC: verify the actor can update a task (send is a form of update).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Task).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to send input to this task.",
+        ));
+    }
+
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
@@ -3821,6 +3941,21 @@ async fn post_task_pause(
             .into_response());
     }
 
+    // RBAC: verify the actor can update a task (pause is a form of update).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Task).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to pause this task.",
+        ));
+    }
+
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
@@ -3873,6 +4008,21 @@ async fn post_task_resume(
             Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
+    }
+
+    // RBAC: verify the actor can update a task (resume is a form of update).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Task).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to resume this task.",
+        ));
     }
 
     let Some(record) = resolve_task(&state, &task_param, target_user.id).await? else {
@@ -4017,6 +4167,21 @@ async fn create_chat(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // RBAC: verify the actor can create a chat.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Chat).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create chats.",
+        ));
+    }
+
     // Use a default model config ID if none provided.
     let model_config_id = request.model_config_id.unwrap_or_else(Uuid::nil);
 
@@ -4126,6 +4291,23 @@ async fn delete_chat(
             .into_response());
     }
 
+    // RBAC: verify the actor can delete this chat.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Chat)
+                .with_id(chat_id)
+                .with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete this chat.",
+        ));
+    }
+
     state.store.archive_chat(chat_id).await?;
     Ok((StatusCode::OK, Json(ApiResponse::ok("Chat archived."))).into_response())
 }
@@ -4154,6 +4336,23 @@ async fn post_chat_message(
             Json(ApiResponse::error("Chat not found.", "")),
         )
             .into_response());
+    }
+
+    // RBAC: verify the actor can create messages in this chat.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Chat)
+                .with_id(chat_id)
+                .with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to post messages to this chat.",
+        ));
     }
 
     let model_config_id = request.model_config_id.unwrap_or(chat.last_model_config_id);
@@ -4498,6 +4697,23 @@ async fn archive_chat_handler(
             .into_response());
     }
 
+    // RBAC: verify the actor can update (archive) this chat.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Chat)
+                .with_id(chat_id)
+                .with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to archive this chat.",
+        ));
+    }
+
     if chat.archived {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -4534,6 +4750,23 @@ async fn unarchive_chat_handler(
             Json(ApiResponse::error("Chat not found.", "")),
         )
             .into_response());
+    }
+
+    // RBAC: verify the actor can update (unarchive) this chat.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Chat)
+                .with_id(chat_id)
+                .with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to unarchive this chat.",
+        ));
     }
 
     if !chat.archived {
@@ -4862,6 +5095,21 @@ async fn list_inbox_notifications(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // RBAC: verify the actor can read their own notifications.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::InboxNotification).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read inbox notifications.",
+        ));
+    }
+
     let read_status = params.read_status.unwrap_or_else(|| "all".to_owned());
     if !matches!(read_status.as_str(), "all" | "unread" | "read") {
         return Ok((
@@ -4969,6 +5217,21 @@ async fn put_mark_all_inbox_notifications_read(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // RBAC: verify the actor can update their own notifications.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::InboxNotification).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update inbox notifications.",
+        ));
+    }
+
     state
         .store
         .mark_all_inbox_notifications_as_read(context.user.id, OffsetDateTime::now_utc())
@@ -5015,6 +5278,21 @@ async fn put_inbox_notification_read_status(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update their own notifications.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::InboxNotification).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update inbox notifications.",
+        ));
+    }
 
     let Json(body) = match payload {
         Ok(request) => request,
@@ -7627,13 +7905,31 @@ async fn put_workspace_autostart(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let schedule = body
         .get("schedule")
@@ -7663,13 +7959,31 @@ async fn put_workspace_ttl(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let ttl_ms = body.get("ttl_ms").and_then(|v| v.as_i64());
     let ttl_ns = ttl_ms.map(|ms| ms * 1_000_000);
@@ -7733,13 +8047,31 @@ async fn put_workspace_extend(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let deadline_str = body.get("deadline").and_then(|v| v.as_str());
 
@@ -8021,13 +8353,31 @@ async fn get_workspace_acl(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can read this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read this workspace's ACL.",
+        ));
+    }
 
     let acl_record = state.store.get_workspace_acl(workspace_id).await?;
 
@@ -8081,13 +8431,31 @@ async fn patch_workspace_acl(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace's ACL.",
+        ));
+    }
 
     let input = UpdateWorkspaceACLInput {
         user_roles: req.user_roles,
@@ -8111,13 +8479,31 @@ async fn delete_workspace_acl(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can delete this workspace's ACL.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete this workspace's ACL.",
+        ));
+    }
 
     state.store.delete_workspace_acl(workspace_id).await?;
 
@@ -8194,13 +8580,31 @@ async fn post_workspace_usage(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     state
         .store
@@ -9196,9 +9600,27 @@ async fn list_oauth2_provider_apps(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read OAuth2 provider apps.
+    // The member site role grants Oauth2App::Read, so all authenticated users
+    // with the default member role retain access (backward compatible).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::Oauth2App),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to list OAuth2 provider apps.",
+        ));
+    }
+
     let apps = match state.oauth2_provider.list_apps().await {
         Ok(apps) => apps,
         Err(error) => return handle_oauth2_provider_error(error),
@@ -9216,11 +9638,24 @@ async fn post_oauth2_provider_app(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can create OAuth2 provider apps.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Oauth2App),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
-            "You must be an owner to manage OAuth2 provider apps.",
+            "You are not authorized to create OAuth2 provider apps.",
         ));
     }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -9257,9 +9692,27 @@ async fn get_oauth2_provider_app(
     Path(app_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read OAuth2 provider apps.
+    // The member site role grants Oauth2App::Read, so all authenticated users
+    // with the default member role retain access (backward compatible).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::Oauth2App),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read OAuth2 provider apps.",
+        ));
+    }
+
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -9282,11 +9735,24 @@ async fn put_oauth2_provider_app(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can update OAuth2 provider apps.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Oauth2App),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
-            "You must be an owner to manage OAuth2 provider apps.",
+            "You are not authorized to update OAuth2 provider apps.",
         ));
     }
+
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -9332,11 +9798,24 @@ async fn delete_oauth2_provider_app(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can delete OAuth2 provider apps.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Oauth2App),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
-            "You must be an owner to manage OAuth2 provider apps.",
+            "You are not authorized to delete OAuth2 provider apps.",
         ));
     }
+
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -9365,9 +9844,25 @@ async fn list_oauth2_provider_app_secrets(
     Path(app_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read OAuth2 provider app secrets.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::Oauth2AppSecret),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to list OAuth2 provider app secrets.",
+        ));
+    }
+
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -9391,11 +9886,24 @@ async fn post_oauth2_provider_app_secret(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can create OAuth2 provider app secrets.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Oauth2AppSecret),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
-            "You must be an owner to manage OAuth2 provider app secrets.",
+            "You are not authorized to create OAuth2 provider app secrets.",
         ));
     }
+
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -9433,11 +9941,24 @@ async fn delete_oauth2_provider_app_secret(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can delete OAuth2 provider app secrets.
+    // This intentionally replaces the prior is_owner() gate to support future
+    // custom roles that may grant OAuth2 app management without full ownership.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Oauth2AppSecret),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
-            "You must be an owner to manage OAuth2 provider app secrets.",
+            "You are not authorized to delete OAuth2 provider app secrets.",
         ));
     }
+
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -9479,6 +10000,12 @@ async fn delete_oauth2_provider_app_tokens(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // No RBAC check here: this is a self-service endpoint where any
+    // authenticated user can revoke their own OAuth2 app authorizations.
+    // The downstream revoke_tokens() call is scoped to context.user.id,
+    // so users can only revoke their own tokens.
+
     let app_uuid = match Uuid::parse_str(&app_id) {
         Ok(id) => id,
         Err(_) => {
@@ -18088,6 +18615,95 @@ mod tests {
         )
         .await?;
         assert_eq!(delete_self_response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_owner_member_is_rejected_by_rbac() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let owner_session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &owner_session_token).await?;
+
+        // Create a regular member user (no owner or admin roles).
+        let create_user_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &owner_session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "regular@example.com".to_owned(),
+                    username: "regular".to_owned(),
+                    name: "Regular User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_user_response.status(), StatusCode::CREATED);
+
+        // Log in as the regular member.
+        let member_login_response = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "regular@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(member_login_response.status(), StatusCode::CREATED);
+        let member_session_token = response_json(member_login_response)
+            .await?
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing member session token")?
+            .to_owned();
+
+        // A regular member should be forbidden from assigning user roles
+        // (admin-only operation gated by RBAC AssignRole::Assign).
+        let assign_roles_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/owner/roles",
+                &member_session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["user-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(assign_roles_response.status(), StatusCode::FORBIDDEN);
+
+        // A regular member should be forbidden from viewing audit logs
+        // (gated by RBAC AuditLog::Read — only owner/auditor roles).
+        let audit_logs_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/audit?limit=10", &member_session_token)?,
+        )
+        .await?;
+        assert_eq!(audit_logs_response.status(), StatusCode::FORBIDDEN);
+
+        // A regular member should be forbidden from suspending users
+        // (gated by RBAC User::Update — admin-only).
+        let suspend_response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/owner/status/suspend",
+                &member_session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(suspend_response.status(), StatusCode::FORBIDDEN);
+
         Ok(())
     }
 
