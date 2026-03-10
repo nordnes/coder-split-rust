@@ -2085,4 +2085,268 @@ mod tests {
         actor.scope = None;
         assert!(authorizer.authorize(&actor, Action::Read, &tpl).is_ok());
     }
+
+    #[test]
+    fn test_action_as_str_roundtrip() {
+        let actions = [
+            (Action::Create, "create"),
+            (Action::Read, "read"),
+            (Action::Update, "update"),
+            (Action::Delete, "delete"),
+            (Action::Use, "use"),
+            (Action::Ssh, "ssh"),
+            (Action::ApplicationConnect, "application_connect"),
+            (Action::ViewInsights, "view_insights"),
+            (Action::Start, "start"),
+            (Action::Stop, "stop"),
+            (Action::Assign, "assign"),
+            (Action::Unassign, "unassign"),
+            (Action::ReadPersonal, "read_personal"),
+            (Action::UpdatePersonal, "update_personal"),
+            (Action::CreateAgent, "create_agent"),
+            (Action::DeleteAgent, "delete_agent"),
+            (Action::UpdateAgent, "update_agent"),
+            (Action::Share, "share"),
+        ];
+        for (action, expected) in &actions {
+            assert_eq!(action.as_str(), *expected, "Action::{action:?} as_str");
+            assert_eq!(action.to_string(), *expected, "Action::{action:?} Display");
+        }
+    }
+
+    #[test]
+    fn test_resource_type_as_str_roundtrip() {
+        // Wildcard has a special string.
+        assert_eq!(ResourceType::Wildcard.as_str(), "*");
+        // Spot-check a few representative variants.
+        assert_eq!(ResourceType::ApiKey.as_str(), "api_key");
+        assert_eq!(ResourceType::AuditLog.as_str(), "audit_log");
+        assert_eq!(ResourceType::Workspace.as_str(), "workspace");
+        assert_eq!(ResourceType::Template.as_str(), "template");
+        assert_eq!(ResourceType::User.as_str(), "user");
+        assert_eq!(
+            ResourceType::WorkspaceAgentDevcontainers.as_str(),
+            "workspace_agent_devcontainers"
+        );
+    }
+
+    #[test]
+    fn test_resource_type_from_str_opt() {
+        // Valid inputs.
+        assert_eq!(
+            ResourceType::from_str_opt("api_key"),
+            Some(ResourceType::ApiKey)
+        );
+        assert_eq!(
+            ResourceType::from_str_opt("workspace"),
+            Some(ResourceType::Workspace)
+        );
+        assert_eq!(
+            ResourceType::from_str_opt("*"),
+            Some(ResourceType::Wildcard)
+        );
+        // Invalid inputs return None.
+        assert_eq!(ResourceType::from_str_opt("nonexistent"), None);
+        assert_eq!(ResourceType::from_str_opt(""), None);
+        assert_eq!(ResourceType::from_str_opt("WORKSPACE"), None);
+    }
+
+    #[test]
+    fn test_object_builder_pattern() {
+        let owner_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap_or_default();
+        let org_id = Uuid::parse_str("00000000-0000-0000-0000-000000000099").unwrap_or_default();
+        let resource_id =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000042").unwrap_or_default();
+        // Guard against silent nil fallback from malformed UUID literals.
+        assert_ne!(owner_id, Uuid::nil());
+        assert_ne!(org_id, Uuid::nil());
+        assert_ne!(resource_id, Uuid::nil());
+
+        let object = Object::new(ResourceType::Workspace)
+            .with_owner(owner_id)
+            .in_org(org_id)
+            .with_id(resource_id);
+
+        assert_eq!(object.resource_type, ResourceType::Workspace);
+        assert_eq!(object.owner_id, Some(owner_id));
+        assert_eq!(object.org_id, Some(org_id));
+        assert_eq!(object.id, Some(resource_id));
+        assert!(!object.any_org);
+
+        // any_organization clears org_id.
+        let object2 = Object::new(ResourceType::Template).any_organization();
+        assert!(object2.any_org);
+        assert_eq!(object2.org_id, None);
+    }
+
+    #[test]
+    fn test_permission_allow_deny() {
+        let allow = Permission::allow(ResourceType::User, Action::Read);
+        assert!(!allow.negate);
+        assert_eq!(allow.resource_type, ResourceType::User);
+        assert_eq!(allow.action, Some(Action::Read));
+        assert!(allow.matches(ResourceType::User, Action::Read));
+        assert!(!allow.matches(ResourceType::User, Action::Create));
+
+        let deny = Permission::deny(ResourceType::Workspace, Action::Create);
+        assert!(deny.negate);
+        assert_eq!(deny.resource_type, ResourceType::Workspace);
+        assert_eq!(deny.action, Some(Action::Create));
+        assert!(deny.matches(ResourceType::Workspace, Action::Create));
+
+        let allow_all = Permission::allow_all(ResourceType::Template);
+        assert!(!allow_all.negate);
+        assert_eq!(allow_all.action, None);
+        assert!(allow_all.matches(ResourceType::Template, Action::Read));
+        assert!(allow_all.matches(ResourceType::Template, Action::Delete));
+    }
+
+    /// Extends `owner_can_do_anything_on_site_resources` by testing with an
+    /// *owned* workspace (`with_owner`) and verifying the actor helper methods
+    /// (`is_owner`, `can_access_user`).
+    #[test]
+    fn test_authorizer_owner_can_access_own_resource() {
+        let authorizer = Authorizer::new();
+        let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap_or_default();
+        let actor = test_actor(&[ROLE_OWNER]);
+        let object = Object::new(ResourceType::Workspace).with_owner(user_id);
+
+        assert!(authorizer.authorize(&actor, Action::Read, &object).is_ok());
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Update, &object)
+                .is_ok()
+        );
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Delete, &object)
+                .is_ok()
+        );
+
+        // Also verify actor helper.
+        assert!(actor.is_owner());
+        assert!(actor.can_access_user(user_id));
+    }
+
+    /// Complements `member_cannot_create_users` and `member_can_read_assign_role`
+    /// by combining both positive and negative assertions in one test, plus
+    /// checking Oauth2App and the `is_owner()` helper.
+    #[test]
+    fn test_authorizer_member_basic_permissions() {
+        let authorizer = Authorizer::new();
+        let actor = test_actor(&[ROLE_MEMBER]);
+
+        // Member can read AssignRole at site level.
+        let assign_role = Object::new(ResourceType::AssignRole);
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Read, &assign_role)
+                .is_ok()
+        );
+
+        // Member can read Oauth2App at site level.
+        let oauth = Object::new(ResourceType::Oauth2App);
+        assert!(authorizer.authorize(&actor, Action::Read, &oauth).is_ok());
+
+        // Member cannot create users at site level.
+        let user = Object::new(ResourceType::User);
+        assert!(authorizer.authorize(&actor, Action::Create, &user).is_err());
+
+        // Member is not owner.
+        assert!(!actor.is_owner());
+    }
+
+    /// Extends existing owner tests by iterating over multiple resource types
+    /// and verifying `can_list_users()` helper.
+    #[test]
+    fn test_authorizer_admin_has_broad_access() {
+        let authorizer = Authorizer::new();
+        let actor = test_actor(&[ROLE_OWNER]);
+
+        // Owner has broad access to many resource types.
+        for rt in &[
+            ResourceType::User,
+            ResourceType::Template,
+            ResourceType::Organization,
+            ResourceType::AuditLog,
+            ResourceType::ApiKey,
+        ] {
+            assert!(
+                authorizer
+                    .authorize(&actor, Action::Read, &Object::new(*rt))
+                    .is_ok(),
+                "Owner should be able to read {rt:?}"
+            );
+        }
+
+        // Verify actor helpers.
+        assert!(actor.is_owner());
+        assert!(actor.can_list_users());
+    }
+
+    #[test]
+    fn test_authorizer_denies_cross_org_access() {
+        let authorizer = Authorizer::new();
+        let org_a = Uuid::parse_str("00000000-0000-0000-0000-00000000000a").unwrap_or_default();
+        let org_b = Uuid::parse_str("00000000-0000-0000-0000-00000000000b").unwrap_or_default();
+        let org_role_a = format!("{ROLE_ORGANIZATION_ADMIN}:{org_a}");
+        let actor = test_actor_with_orgs(&[], &[&org_role_a], &[org_a]);
+
+        // Can access resources in org A.
+        let obj_a = Object::new(ResourceType::Template).in_org(org_a);
+        assert!(authorizer.authorize(&actor, Action::Read, &obj_a).is_ok());
+
+        // Cannot access resources in org B.
+        let obj_b = Object::new(ResourceType::Template).in_org(org_b);
+        assert!(authorizer.authorize(&actor, Action::Read, &obj_b).is_err());
+
+        // Actor helpers confirm.
+        assert!(actor.can_access_organization(org_a));
+        assert!(!actor.can_access_organization(org_b));
+    }
+
+    /// Extends `acl_user_list_grants_access` by testing both allowed and
+    /// disallowed actions in the ACL, and verifying a *different* user is denied.
+    #[test]
+    fn test_authorizer_acl_user_list_grants_access() {
+        let authorizer = Authorizer::new();
+        let user_id = Uuid::parse_str("00000000-0000-0000-0000-000000000001").unwrap_or_default();
+        // Actor with no roles.
+        let actor = test_actor(&[]);
+        let mut acl = HashMap::new();
+        acl.insert(user_id.to_string(), vec![Action::Read, Action::Update]);
+        let object = Object::new(ResourceType::Workspace).with_acl_user_list(acl);
+
+        // ACL grants read and update.
+        assert!(authorizer.authorize(&actor, Action::Read, &object).is_ok());
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Update, &object)
+                .is_ok()
+        );
+        // But not delete.
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Delete, &object)
+                .is_err()
+        );
+
+        // Different user should not have access.
+        let other_user =
+            Uuid::parse_str("00000000-0000-0000-0000-000000000002").unwrap_or_default();
+        let other_actor = Actor {
+            user_id: other_user,
+            username: "other".to_owned(),
+            organization_ids: vec![],
+            site_roles: vec![],
+            org_roles: vec![],
+            groups: vec![],
+            scope: None,
+        };
+        assert!(
+            authorizer
+                .authorize(&other_actor, Action::Read, &object)
+                .is_err()
+        );
+    }
 }
