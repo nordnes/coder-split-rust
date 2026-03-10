@@ -5,6 +5,7 @@ use std::{str::FromStr, time::Duration};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+use coder_core::api::{DAUEntry, DAUsResponse, GetUserStatusCountsResponse, UserStatusChangeCount};
 use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
 use coder_core::provisioner::{
     LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord,
@@ -2526,6 +2527,171 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct DauRow {
+            date: time::Date,
+            user_id: Option<Uuid>,
+        }
+
+        let rows = sqlx::query_as::<_, DauRow>(
+            "SELECT
+                (created_at AT TIME ZONE CAST($1::integer AS text))::date AS date,
+                user_id
+             FROM workspace_agent_stats
+             WHERE connection_count > 0
+             GROUP BY date, user_id
+             ORDER BY date ASC",
+        )
+        .bind(tz_offset)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        // Aggregate rows: count distinct users per date.
+        let mut date_counts: std::collections::BTreeMap<time::Date, i64> =
+            std::collections::BTreeMap::new();
+        for row in &rows {
+            if row.user_id.is_some() {
+                *date_counts.entry(row.date).or_insert(0) += 1;
+            }
+        }
+
+        let entries = date_counts
+            .into_iter()
+            .map(|(date, amount)| DAUEntry {
+                date: date.to_string(),
+                amount,
+            })
+            .collect();
+
+        Ok(DAUsResponse {
+            tz_hour_offset: tz_offset,
+            entries,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_user_status_counts(
+        &self,
+        timezone: &str,
+    ) -> Result<GetUserStatusCountsResponse, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct StatusCountRow {
+            date: OffsetDateTime,
+            status: String,
+            count: i64,
+        }
+
+        let rows = sqlx::query_as::<_, StatusCountRow>(
+            r#"
+            WITH
+            system_users AS (
+                SELECT id FROM users WHERE is_system = TRUE
+            ),
+            dates_of_interest AS (
+                SELECT timezone($1::text, gs_local) AS date
+                FROM generate_series(
+                    timezone($1::text, NOW() - INTERVAL '30 days'),
+                    timezone($1::text, NOW()),
+                    interval '1 day'
+                ) AS gs_local
+            ),
+            latest_status_before_range AS (
+                SELECT
+                    DISTINCT usc.user_id,
+                    usc.new_status,
+                    usc.changed_at
+                FROM user_status_changes usc
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) > 0 AS deleted
+                    FROM user_deleted ud
+                    WHERE ud.user_id = usc.user_id
+                      AND (ud.deleted_at < usc.changed_at OR ud.deleted_at < NOW() - INTERVAL '30 days')
+                ) AS ud ON true
+                WHERE usc.user_id NOT IN (SELECT id FROM system_users)
+                    AND NOT ud.deleted
+                    AND usc.changed_at < NOW() - INTERVAL '30 days'
+                ORDER BY usc.user_id, usc.changed_at DESC
+            ),
+            status_changes_during_range AS (
+                SELECT
+                    usc.user_id,
+                    usc.new_status,
+                    usc.changed_at
+                FROM user_status_changes usc
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) > 0 AS deleted
+                    FROM user_deleted ud
+                    WHERE ud.user_id = usc.user_id AND ud.deleted_at < usc.changed_at
+                ) AS ud ON true
+                WHERE usc.user_id NOT IN (SELECT id FROM system_users)
+                    AND NOT ud.deleted
+                    AND usc.changed_at >= NOW() - INTERVAL '30 days'
+                    AND usc.changed_at <= NOW()
+            ),
+            relevant_status_changes AS (
+                SELECT user_id, new_status, changed_at
+                FROM latest_status_before_range
+                UNION ALL
+                SELECT user_id, new_status, changed_at
+                FROM status_changes_during_range
+            ),
+            statuses AS (
+                SELECT DISTINCT new_status FROM relevant_status_changes
+            ),
+            ranked_status_change_per_user_per_date AS (
+                SELECT
+                    d.date,
+                    rsc1.user_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d.date, rsc1.user_id
+                        ORDER BY rsc1.changed_at DESC
+                    ) AS rn,
+                    rsc1.new_status
+                FROM dates_of_interest d
+                LEFT JOIN relevant_status_changes rsc1 ON rsc1.changed_at <= d.date
+            )
+            SELECT
+                rscpupd.date::timestamptz AS date,
+                statuses.new_status::text AS status,
+                COUNT(rscpupd.user_id) FILTER (
+                    WHERE rscpupd.rn = 1
+                    AND (
+                        rscpupd.new_status = statuses.new_status
+                        AND (
+                            NOT EXISTS (SELECT 1 FROM user_deleted WHERE user_id = rscpupd.user_id)
+                            OR
+                            rscpupd.date < (SELECT deleted_at FROM user_deleted WHERE user_id = rscpupd.user_id)
+                        )
+                    )
+                ) AS count
+            FROM ranked_status_change_per_user_per_date rscpupd
+            CROSS JOIN statuses
+            GROUP BY rscpupd.date, statuses.new_status
+            ORDER BY rscpupd.date
+            "#,
+        )
+        .bind(timezone)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let mut status_counts: HashMap<String, Vec<UserStatusChangeCount>> = HashMap::new();
+        for row in rows {
+            status_counts
+                .entry(row.status)
+                .or_default()
+                .push(UserStatusChangeCount {
+                    date: row.date,
+                    count: row.count,
+                });
+        }
+
+        Ok(GetUserStatusCountsResponse { status_counts })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_proxies_for_health(
         &self,
     ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError> {
@@ -4925,6 +5091,24 @@ impl AppStore for PostgresStore {
                 workspace_agent_name: r.workspace_agent_name,
             })
             .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredWorkspaceResourceRow>(
+            "SELECT id, created_at, job_id, transition, type AS resource_type,
+                    name, hide, icon, daily_cost
+             FROM workspace_resources
+             WHERE id = $1",
+        )
+        .bind(resource_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(workspace_resource_record_from_row))
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
