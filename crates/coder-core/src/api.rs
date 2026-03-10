@@ -1532,7 +1532,7 @@ pub struct NotificationTemplate {
     pub title_template: String,
     pub body_template: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub actions: Option<String>,
+    pub actions: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

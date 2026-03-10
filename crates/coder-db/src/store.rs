@@ -2647,20 +2647,25 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| NotificationTemplate {
+        let mut templates = Vec::with_capacity(rows.len());
+        for r in rows {
+            templates.push(NotificationTemplate {
                 id: r.id,
                 name: r.name,
                 title_template: r.title_template,
                 body_template: r.body_template,
-                actions: r.actions,
+                actions: r
+                    .actions
+                    .map(|s| from_str(&s))
+                    .transpose()
+                    .map_err(|e| StorageError::invalid_data(e.to_string()))?,
                 group: r.group,
                 method: r.method,
                 kind: r.kind,
                 enabled_by_default: r.enabled_by_default,
-            })
-            .collect())
+            });
+        }
+        Ok(templates)
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2682,17 +2687,24 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(row.map(|r| NotificationTemplate {
-            id: r.id,
-            name: r.name,
-            title_template: r.title_template,
-            body_template: r.body_template,
-            actions: r.actions,
-            group: r.group,
-            method: r.method,
-            kind: r.kind,
-            enabled_by_default: r.enabled_by_default,
-        }))
+        match row {
+            Some(r) => Ok(Some(NotificationTemplate {
+                id: r.id,
+                name: r.name,
+                title_template: r.title_template,
+                body_template: r.body_template,
+                actions: r
+                    .actions
+                    .map(|s| from_str(&s))
+                    .transpose()
+                    .map_err(|e| StorageError::invalid_data(e.to_string()))?,
+                group: r.group,
+                method: r.method,
+                kind: r.kind,
+                enabled_by_default: r.enabled_by_default,
+            })),
+            None => Ok(None),
+        }
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
