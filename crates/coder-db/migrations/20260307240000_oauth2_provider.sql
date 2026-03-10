@@ -19,9 +19,12 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_oauth2_provider_apps_name
 CREATE TABLE IF NOT EXISTS oauth2_provider_app_secrets (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    last_used_at TIMESTAMPTZ,
+    secret_prefix BYTEA NOT NULL,
     hashed_secret BYTEA NOT NULL,
     display_secret TEXT NOT NULL DEFAULT '',
-    app_id UUID NOT NULL REFERENCES oauth2_provider_apps(id) ON DELETE CASCADE
+    app_id UUID NOT NULL REFERENCES oauth2_provider_apps(id) ON DELETE CASCADE,
+    UNIQUE(secret_prefix)
 );
 
 CREATE INDEX IF NOT EXISTS idx_oauth2_provider_app_secrets_app_id
@@ -38,7 +41,9 @@ CREATE TABLE IF NOT EXISTS oauth2_provider_app_codes (
     user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     resource_uri TEXT NOT NULL DEFAULT '',
     code_challenge TEXT NOT NULL DEFAULT '',
-    code_challenge_method TEXT NOT NULL DEFAULT ''
+    code_challenge_method TEXT NOT NULL DEFAULT '',
+    state_hash TEXT,
+    redirect_uri TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_oauth2_provider_app_codes_app_id

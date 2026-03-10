@@ -716,6 +716,8 @@ pub fn build_router(state: AppState) -> Router {
                     "/organizations/{organization}/templateversions",
                     post(post_org_template_version),
                 )
+                .route("/templates", get(list_all_templates))
+                .route("/templates/examples", get(get_all_template_examples))
                 .route(
                     "/templates/{template}",
                     get(get_template).delete(delete_template).patch(patch_template),
@@ -5167,6 +5169,150 @@ fn template_response(rec: &TemplateRecord) -> TemplateResponse {
     }
 }
 
+/// Returns the static list of built-in starter template examples.
+///
+/// This mirrors the Go `examples.List()` function which reads from the embedded
+/// `examples.gen.json` file. The Rust implementation returns the same metadata
+/// without embedding the full template archives or README markdown.
+fn starter_template_examples() -> Vec<TemplateExample> {
+    const BASE_URL: &str = "https://github.com/coder/coder/tree/main/examples/templates/";
+
+    let entries: &[(&str, &str, &str, &str, &[&str])] = &[
+        (
+            "aws-devcontainer",
+            "AWS EC2 (Devcontainer)",
+            "Provision AWS EC2 VMs with a devcontainer as Coder workspaces",
+            "/icon/aws.svg",
+            &["vm", "linux", "aws", "persistent", "devcontainer"],
+        ),
+        (
+            "aws-linux",
+            "AWS EC2 (Linux)",
+            "Provision AWS EC2 VMs as Coder workspaces",
+            "/icon/aws.svg",
+            &["vm", "linux", "aws", "persistent-vm"],
+        ),
+        (
+            "aws-windows",
+            "AWS EC2 (Windows)",
+            "Provision AWS EC2 VMs as Coder workspaces",
+            "/icon/aws.svg",
+            &["vm", "windows", "aws"],
+        ),
+        (
+            "azure-linux",
+            "Azure VM (Linux)",
+            "Provision Azure VMs as Coder workspaces",
+            "/icon/azure.png",
+            &["vm", "linux", "azure"],
+        ),
+        (
+            "digitalocean-linux",
+            "DigitalOcean Droplet (Linux)",
+            "Provision DigitalOcean Droplets as Coder workspaces",
+            "/icon/do.png",
+            &["vm", "linux", "digitalocean"],
+        ),
+        (
+            "docker",
+            "Docker Containers",
+            "Provision Docker containers as Coder workspaces",
+            "/icon/docker.png",
+            &["docker", "container"],
+        ),
+        (
+            "docker-devcontainer",
+            "Docker-in-Docker Dev Containers",
+            "Provision Docker containers as Coder workspaces running Dev Containers via Docker-in-Docker.",
+            "/icon/docker.png",
+            &["docker", "container", "devcontainer"],
+        ),
+        (
+            "docker-envbuilder",
+            "Docker (Envbuilder)",
+            "Provision envbuilder containers as Coder workspaces",
+            "/icon/docker.png",
+            &["container", "docker", "devcontainer", "envbuilder"],
+        ),
+        (
+            "gcp-devcontainer",
+            "Google Compute Engine (Devcontainer)",
+            "Provision a Devcontainer on Google Compute Engine instances as Coder workspaces",
+            "/icon/gcp.png",
+            &["vm", "linux", "gcp", "devcontainer"],
+        ),
+        (
+            "gcp-linux",
+            "Google Compute Engine (Linux)",
+            "Provision Google Compute Engine instances as Coder workspaces",
+            "/icon/gcp.png",
+            &["vm", "linux", "gcp"],
+        ),
+        (
+            "gcp-vm-container",
+            "Google Compute Engine (VM Container)",
+            "Provision Google Compute Engine instances as Coder workspaces",
+            "/icon/gcp.png",
+            &["vm-container", "linux", "gcp"],
+        ),
+        (
+            "gcp-windows",
+            "Google Compute Engine (Windows)",
+            "Provision Google Compute Engine instances as Coder workspaces",
+            "/icon/gcp.png",
+            &["vm", "windows", "gcp"],
+        ),
+        (
+            "kubernetes",
+            "Kubernetes (Deployment)",
+            "Provision Kubernetes Deployments as Coder workspaces",
+            "/icon/k8s.png",
+            &["kubernetes", "container"],
+        ),
+        (
+            "kubernetes-devcontainer",
+            "Kubernetes (Devcontainer)",
+            "Provision envbuilder pods as Coder workspaces",
+            "/icon/k8s.png",
+            &["container", "kubernetes", "devcontainer"],
+        ),
+        (
+            "nomad-docker",
+            "Nomad",
+            "Provision Nomad Jobs as Coder workspaces",
+            "/icon/nomad.svg",
+            &["nomad", "container"],
+        ),
+        (
+            "scratch",
+            "Scratch",
+            "A minimal starter template for Coder",
+            "/emojis/1f4e6.png",
+            &[],
+        ),
+        (
+            "tasks-docker",
+            "Tasks on Docker",
+            "Run Coder Tasks on Docker with an example application",
+            "/icon/tasks.svg",
+            &["docker", "container", "ai", "tasks"],
+        ),
+    ];
+
+    entries
+        .iter()
+        .map(|(id, name, description, icon, tags)| TemplateExample {
+            id: (*id).to_owned(),
+            url: format!("{BASE_URL}{id}"),
+            name: (*name).to_owned(),
+            description: (*description).to_owned(),
+            icon: (*icon).to_owned(),
+            tags: tags.iter().map(|t| (*t).to_owned()).collect(),
+            markdown: String::new(),
+        })
+        .collect()
+}
+
 /// Converts a `TemplateProvisionerJobRecord` into a `ProvisionerJobResponse`.
 fn provisioner_job_response(job: &TemplateProvisionerJobRecord) -> ProvisionerJobResponse {
     ProvisionerJobResponse {
@@ -5234,7 +5380,7 @@ async fn list_org_templates(
     headers: HeaderMap,
     Query(query): Query<TemplateFilter>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -5257,7 +5403,18 @@ async fn list_org_templates(
         })
         .await?;
 
-    let body: Vec<TemplateResponse> = templates.iter().map(template_response).collect();
+    // RBAC: filter templates the actor is allowed to read.
+    let authorizer = Authorizer::new();
+    let body: Vec<TemplateResponse> = templates
+        .iter()
+        .filter(|t| {
+            let obj = Object::new(ResourceType::Template).in_org(t.organization_id);
+            authorizer
+                .authorize(&context.actor, Action::Read, &obj)
+                .is_ok()
+        })
+        .map(template_response)
+        .collect();
     Ok((StatusCode::OK, Json(body)).into_response())
 }
 
@@ -5408,11 +5565,11 @@ async fn get_org_template_examples(
     Path(org): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _org_record = match resolve_organization(&state, &org).await? {
+    let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
             return Ok(not_found_response(format!(
@@ -5421,8 +5578,17 @@ async fn get_org_template_examples(
         }
     };
 
-    // Template examples are static / built-in. Return empty list for now.
-    let examples: Vec<TemplateExample> = Vec::new();
+    // RBAC: check that the actor can read templates in this organization.
+    let authorizer = Authorizer::new();
+    let obj = Object::new(ResourceType::Template).in_org(org_record.id);
+    if authorizer
+        .authorize(&context.actor, Action::Read, &obj)
+        .is_err()
+    {
+        return Ok(not_found_response("Resource not found.".to_owned()));
+    }
+
+    let examples = starter_template_examples();
     Ok((StatusCode::OK, Json(examples)).into_response())
 }
 
@@ -5534,6 +5700,64 @@ async fn post_org_template_version(
 
     let resp = build_tv_response(&state, &ver).await?;
     Ok((StatusCode::CREATED, Json(resp)).into_response())
+}
+
+/// GET /templates
+async fn list_all_templates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(query): Query<TemplateFilter>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let templates = state
+        .store
+        .list_templates(TemplateListFilter {
+            organization_id: query.organization_id,
+            exact_name: query.exact_name,
+            search: query.search,
+            deleted: query.deleted.unwrap_or(false),
+        })
+        .await?;
+
+    // RBAC: filter templates the actor is allowed to read.
+    let authorizer = Authorizer::new();
+    let body: Vec<TemplateResponse> = templates
+        .iter()
+        .filter(|t| {
+            let obj = Object::new(ResourceType::Template).in_org(t.organization_id);
+            authorizer
+                .authorize(&context.actor, Action::Read, &obj)
+                .is_ok()
+        })
+        .map(template_response)
+        .collect();
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// GET /templates/examples
+async fn get_all_template_examples(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // RBAC: check that the actor can read templates in any organization.
+    let authorizer = Authorizer::new();
+    let obj = Object::new(ResourceType::Template).any_organization();
+    if authorizer
+        .authorize(&context.actor, Action::Read, &obj)
+        .is_err()
+    {
+        return Ok(not_found_response("Resource not found.".to_owned()));
+    }
+
+    let examples = starter_template_examples();
+    Ok((StatusCode::OK, Json(examples)).into_response())
 }
 
 /// GET /templates/{template}
@@ -15401,12 +15625,15 @@ mod tests {
         async fn create_oauth2_provider_app_secret(
             &self,
             app_id: Uuid,
+            secret_prefix: &[u8],
             hashed_secret: &[u8],
             display_secret: &str,
         ) -> Result<coder_core::identity::OAuth2ProviderAppSecretRecord, StorageError> {
             let record = coder_core::identity::OAuth2ProviderAppSecretRecord {
                 id: Uuid::new_v4(),
                 created_at: OffsetDateTime::now_utc(),
+                last_used_at: None,
+                secret_prefix: secret_prefix.to_vec(),
                 hashed_secret: hashed_secret.to_vec(),
                 display_secret: display_secret.to_owned(),
                 app_id,
@@ -15438,6 +15665,38 @@ mod tests {
             Ok(removed)
         }
 
+        async fn find_oauth2_provider_app_secret_by_prefix(
+            &self,
+            secret_prefix: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError>
+        {
+            let secrets = self
+                .oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(secrets
+                .values()
+                .find(|s| s.secret_prefix == secret_prefix)
+                .cloned())
+        }
+
+        async fn update_oauth2_provider_app_secret_last_used(
+            &self,
+            secret_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError>
+        {
+            let mut secrets = self
+                .oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(secret) = secrets.get_mut(&secret_id) {
+                secret.last_used_at = Some(OffsetDateTime::now_utc());
+                Ok(Some(secret.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
         async fn find_oauth2_provider_app_secret_by_id(
             &self,
             secret_id: Uuid,
@@ -15460,6 +15719,8 @@ mod tests {
             resource_uri: &str,
             code_challenge: &str,
             code_challenge_method: &str,
+            state_hash: Option<&str>,
+            redirect_uri: Option<&str>,
         ) -> Result<coder_core::identity::OAuth2ProviderAppCodeRecord, StorageError> {
             let record = coder_core::identity::OAuth2ProviderAppCodeRecord {
                 id: Uuid::new_v4(),
@@ -15472,6 +15733,8 @@ mod tests {
                 resource_uri: resource_uri.to_owned(),
                 code_challenge: code_challenge.to_owned(),
                 code_challenge_method: code_challenge_method.to_owned(),
+                state_hash: state_hash.map(|s| s.to_owned()),
+                redirect_uri: redirect_uri.map(|s| s.to_owned()),
             };
             self.oauth2_app_codes
                 .lock()
@@ -15504,6 +15767,33 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             Ok(codes.remove(&code_id).is_some())
+        }
+
+        async fn find_oauth2_provider_app_code_by_id(
+            &self,
+            code_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppCodeRecord>, StorageError>
+        {
+            let codes = self
+                .oauth2_app_codes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(codes.get(&code_id).cloned())
+        }
+
+        async fn delete_oauth2_provider_app_codes_by_app_and_user(
+            &self,
+            app_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<u64, StorageError> {
+            let mut codes = self
+                .oauth2_app_codes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let before = codes.len();
+            codes.retain(|_, c| !(c.app_id == app_id && c.user_id == user_id));
+            let removed = before - codes.len();
+            Ok(removed as u64)
         }
 
         async fn create_oauth2_provider_app_token(
@@ -15540,6 +15830,21 @@ mod tests {
             Ok(tokens
                 .values()
                 .find(|t| t.hash_prefix == hash_prefix)
+                .cloned())
+        }
+
+        async fn find_oauth2_provider_app_token_by_api_key_id(
+            &self,
+            api_key_id: &str,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError>
+        {
+            let tokens = self
+                .oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(tokens
+                .values()
+                .find(|t| t.api_key_id == api_key_id)
                 .cloned())
         }
 
@@ -18048,7 +18353,7 @@ mod tests {
         .await?;
         assert_eq!(schema_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /organizations/{org}/templates/examples returns 200 + empty array ---
+        // --- GET /organizations/{org}/templates/examples returns 200 + 17 starter templates ---
         let examples_response = call(
             app.clone(),
             authenticated_request(
@@ -18060,7 +18365,7 @@ mod tests {
         .await?;
         assert_eq!(examples_response.status(), StatusCode::OK);
         let examples_body = response_json(examples_response).await?;
-        assert_eq!(examples_body.as_array().map(Vec::len), Some(0));
+        assert_eq!(examples_body.as_array().map(Vec::len), Some(17));
 
         // --- GET /organizations/{org}/templates/examples without auth returns 401 ---
         let examples_unauth = call(
@@ -19066,6 +19371,123 @@ mod tests {
         )
         .await?;
         assert_eq!(delete_response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_all_templates_returns_created_template() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        // GET /templates should return a non-empty array containing the template.
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await?;
+        let templates = list_body.as_array().ok_or("expected array")?;
+        assert_eq!(templates.len(), 1);
+        assert_eq!(
+            templates[0].get("name").and_then(Value::as_str),
+            template.get("name").and_then(Value::as_str),
+        );
+
+        // Create a second template so we can verify multi-template listing.
+        let create_body2 = CreateTemplateRequest {
+            name: "second-template".to_owned(),
+            display_name: "Second Template".to_owned(),
+            description: "Another template".to_owned(),
+            icon: "/icon/docker.png".to_owned(),
+            template_version_id: Uuid::nil(),
+            default_ttl_ms: 3_600_000,
+            activity_bump_ms: 1_800_000,
+            allow_user_cancel_workspace_jobs: true,
+            allow_user_autostart: true,
+            allow_user_autostop: true,
+            require_active_version: false,
+            failure_ttl_ms: 0,
+            time_til_dormant_ms: 0,
+            time_til_dormant_autodelete_ms: 0,
+            disable_everyone_group_access: false,
+            max_port_share_level: "owner".to_owned(),
+        };
+        let create2 = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+                &create_body2,
+            )?,
+        )
+        .await?;
+        assert_eq!(create2.status(), StatusCode::CREATED);
+
+        // Listing all templates should now return both.
+        let list2 = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list2.status(), StatusCode::OK);
+        let list2_body = response_json(list2).await?;
+        let all_templates = list2_body.as_array().ok_or("expected array")?;
+        assert_eq!(all_templates.len(), 2);
+
+        // Filter by q (fuzzy search) — only "second" should match.
+        let search_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates?q=second", &session_token)?,
+        )
+        .await?;
+        assert_eq!(search_response.status(), StatusCode::OK);
+        let search_body = response_json(search_response).await?;
+        let search_results = search_body.as_array().ok_or("expected array")?;
+        assert_eq!(search_results.len(), 1);
+        assert_eq!(
+            search_results[0].get("name").and_then(Value::as_str),
+            Some("second-template"),
+        );
+
+        // Unauthenticated request returns 401.
+        let unauth_response = call(app, request(Method::GET, "/api/v2/templates")?).await?;
+        assert_eq!(unauth_response.status(), StatusCode::UNAUTHORIZED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_all_template_examples_returns_starter_templates() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET /templates/examples should return 200 with 17 starter templates.
+        let examples_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/templates/examples", &session_token)?,
+        )
+        .await?;
+        assert_eq!(examples_response.status(), StatusCode::OK);
+        let examples_body = response_json(examples_response).await?;
+        let examples = examples_body.as_array().ok_or("expected array")?;
+        assert_eq!(examples.len(), 17);
+
+        // Verify first example has the expected shape.
+        let first = &examples[0];
+        assert!(first.get("id").and_then(Value::as_str).is_some());
+        assert!(first.get("url").and_then(Value::as_str).is_some());
+        assert!(first.get("name").and_then(Value::as_str).is_some());
+        assert!(first.get("description").and_then(Value::as_str).is_some());
+        assert!(first.get("icon").and_then(Value::as_str).is_some());
+        assert!(first.get("tags").and_then(Value::as_array).is_some());
+
+        // Unauthenticated request returns 401.
+        let unauth_response =
+            call(app, request(Method::GET, "/api/v2/templates/examples")?).await?;
+        assert_eq!(unauth_response.status(), StatusCode::UNAUTHORIZED);
 
         Ok(())
     }

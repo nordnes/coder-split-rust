@@ -740,6 +740,8 @@ pub struct UpdateOAuth2ProviderAppInput {
     pub icon: String,
     /// Updated callback URL.
     pub callback_url: String,
+    /// Updated redirect URIs.
+    pub redirect_uris: Vec<String>,
 }
 
 /// A secret for an OAuth2 provider application.
@@ -749,6 +751,10 @@ pub struct OAuth2ProviderAppSecretRecord {
     pub id: Uuid,
     /// Creation time.
     pub created_at: OffsetDateTime,
+    /// Last time this secret was used.
+    pub last_used_at: Option<OffsetDateTime>,
+    /// Prefix for fast lookup.
+    pub secret_prefix: Vec<u8>,
     /// Hashed secret.
     pub hashed_secret: Vec<u8>,
     /// Truncated display string for the UI.
@@ -780,6 +786,10 @@ pub struct OAuth2ProviderAppCodeRecord {
     pub code_challenge: String,
     /// PKCE code challenge method.
     pub code_challenge_method: String,
+    /// SHA-256 hash of the OAuth2 state parameter.
+    pub state_hash: Option<String>,
+    /// The redirect_uri provided during authorization.
+    pub redirect_uri: Option<String>,
 }
 
 /// An access token issued by the OAuth2 provider.
