@@ -2637,6 +2637,7 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine as _;
     use coder_core::{
         ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthStore, AuthenticatedUser,
         CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError,
@@ -3015,6 +3016,12 @@ mod tests {
             password: String::new(),
         });
         assert!(!result.valid);
+
+        // Too long (> 64 characters).
+        let result = service.validate_user_password(&ValidateUserPasswordRequest {
+            password: "a".repeat(65),
+        });
+        assert!(!result.valid);
     }
 
     #[test]
@@ -3028,14 +3035,24 @@ mod tests {
 
     #[test]
     fn test_api_key_generation_format() {
-        // new_session_token should produce a non-empty string.
+        // new_session_token produces base64-encoded 32 random bytes (no padding).
         let token = new_session_token();
         assert!(!token.is_empty());
-        // hash_session_token should produce a non-empty hash.
+        // 32 bytes → ceil(32*4/3) = 43 base64 characters (no-pad).
+        assert_eq!(token.len(), 43, "session token should be 43 base64 chars");
+        // The token must be valid base64 (no-pad).
+        assert!(
+            base64::engine::general_purpose::STANDARD_NO_PAD
+                .decode(&token)
+                .is_ok(),
+            "session token must be valid base64"
+        );
+        // hash_session_token should produce a SHA-256 digest (32 bytes).
         let hash = hash_session_token(&token);
-        assert!(!hash.is_empty());
+        assert_eq!(hash.len(), 32, "hash should be 32 bytes (SHA-256)");
         // Two different tokens should hash differently.
         let token2 = new_session_token();
+        assert_ne!(token, token2, "tokens should be unique");
         let hash2 = hash_session_token(&token2);
         assert_ne!(hash, hash2);
     }
@@ -3070,6 +3087,10 @@ mod tests {
         let exists = service.first_user_exists().await;
         assert!(exists.is_ok());
         assert!(exists.unwrap_or(false));
+
+        // Creating a second first user should fail (AlreadyExists).
+        let duplicate = service.create_first_user(&request).await;
+        assert!(duplicate.is_err(), "duplicate first user must be rejected");
     }
 
     #[tokio::test]
@@ -3138,6 +3159,14 @@ mod tests {
         assert!(auth_result.is_ok());
         let authenticated = auth_result.unwrap_or(None);
         assert!(authenticated.is_none());
+
+        // Login with wrong password must fail.
+        let bad_login = LoginWithPasswordRequest {
+            email: "testuser@example.com".to_owned(),
+            password: "wrongpassword999".to_owned(),
+        };
+        let bad_result = service.login_with_password(&bad_login).await;
+        assert!(bad_result.is_err(), "wrong password must be rejected");
     }
 }
 

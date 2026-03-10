@@ -2201,6 +2201,9 @@ mod tests {
         assert!(allow_all.matches(ResourceType::Template, Action::Delete));
     }
 
+    /// Extends `owner_can_do_anything_on_site_resources` by testing with an
+    /// *owned* workspace (`with_owner`) and verifying the actor helper methods
+    /// (`is_owner`, `can_access_user`).
     #[test]
     fn test_authorizer_owner_can_access_own_resource() {
         let authorizer = Authorizer::new();
@@ -2225,6 +2228,9 @@ mod tests {
         assert!(actor.can_access_user(user_id));
     }
 
+    /// Complements `member_cannot_create_users` and `member_can_read_assign_role`
+    /// by combining both positive and negative assertions in one test, plus
+    /// checking Oauth2App and the `is_owner()` helper.
     #[test]
     fn test_authorizer_member_basic_permissions() {
         let authorizer = Authorizer::new();
@@ -2250,6 +2256,8 @@ mod tests {
         assert!(!actor.is_owner());
     }
 
+    /// Extends existing owner tests by iterating over multiple resource types
+    /// and verifying `can_list_users()` helper.
     #[test]
     fn test_authorizer_admin_has_broad_access() {
         let authorizer = Authorizer::new();
@@ -2297,6 +2305,8 @@ mod tests {
         assert!(!actor.can_access_organization(org_b));
     }
 
+    /// Extends `acl_user_list_grants_access` by testing both allowed and
+    /// disallowed actions in the ACL, and verifying a *different* user is denied.
     #[test]
     fn test_authorizer_acl_user_list_grants_access() {
         let authorizer = Authorizer::new();
