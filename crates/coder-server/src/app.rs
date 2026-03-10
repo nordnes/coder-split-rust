@@ -665,8 +665,16 @@ pub fn build_router(state: AppState) -> Router {
                     get(get_org_template_by_name),
                 )
                 .route(
+                    "/organizations/{organization}/templates/examples",
+                    get(get_org_template_examples),
+                )
+                .route(
                     "/organizations/{organization}/templates/{templatename}/versions/{templateversionname}",
                     get(get_org_template_version_by_name),
+                )
+                .route(
+                    "/organizations/{organization}/templates/{templatename}/versions/{templateversionname}/previous",
+                    get(get_org_previous_template_version),
                 )
                 .route(
                     "/organizations/{organization}/templateversions",
@@ -4722,6 +4730,65 @@ async fn get_org_template_version_by_name(
         }
         None => Ok(not_found_response(format!(
             "Template version '{vname}' not found."
+        ))),
+    }
+}
+
+/// GET /organizations/{organization}/templates/examples
+async fn get_org_template_examples(
+    State(state): State<AppState>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _org_record = match resolve_organization(&state, &org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
+
+    // Template examples are static / built-in. Return empty list for now.
+    let examples: Vec<TemplateExample> = Vec::new();
+    Ok((StatusCode::OK, Json(examples)).into_response())
+}
+
+/// GET /organizations/{organization}/templates/{templatename}/versions/{templateversionname}/previous
+async fn get_org_previous_template_version(
+    State(state): State<AppState>,
+    Path((org, tname, vname)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let org_record = match resolve_organization(&state, &org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
+
+    let ver = state
+        .store
+        .find_previous_template_version(org_record.id, &tname, &vname)
+        .await?;
+
+    match ver {
+        Some(v) => {
+            let resp = build_tv_response(&state, &v).await?;
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        }
+        None => Ok(not_found_response(format!(
+            "No previous version found for '{vname}'."
         ))),
     }
 }
@@ -12337,6 +12404,55 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_previous_template_version(
+            &self,
+            organization_id: Uuid,
+            template_name: &str,
+            version_name: &str,
+        ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let template_id = match templates
+                .values()
+                .find(|t| t.organization_id == organization_id && t.name == template_name)
+                .map(|t| t.id)
+            {
+                Some(id) => id,
+                None => return Ok(None),
+            };
+            drop(templates);
+
+            let versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+            // Find the target version to get its created_at timestamp.
+            let target = versions.values().find(|v| {
+                v.organization_id == organization_id
+                    && v.template_id == Some(template_id)
+                    && v.name == version_name
+            });
+            let target_created_at = match target {
+                Some(t) => t.created_at,
+                None => return Ok(None),
+            };
+
+            // Find the version created immediately before the target.
+            let mut candidates: Vec<&TemplateVersionRecord> = versions
+                .values()
+                .filter(|v| {
+                    v.organization_id == organization_id
+                        && v.template_id == Some(template_id)
+                        && v.created_at < target_created_at
+                })
+                .collect();
+            candidates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(candidates.first().cloned().cloned())
+        }
+
         async fn insert_template_version(
             &self,
             input: CreateTemplateVersionInput,
@@ -15005,6 +15121,80 @@ mod tests {
         )
         .await?;
         assert_eq!(schema_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{org}/templates/examples returns 200 + empty array ---
+        let examples_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/examples"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(examples_response.status(), StatusCode::OK);
+        let examples_body = response_json(examples_response).await?;
+        assert_eq!(examples_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET /organizations/{org}/templates/examples without auth returns 401 ---
+        let examples_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/examples"),
+            )?,
+        )
+        .await?;
+        assert_eq!(examples_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{invalid_org}/templates/examples returns 404 ---
+        let examples_bad_org = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{fake_org}/templates/examples"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(examples_bad_org.status(), StatusCode::NOT_FOUND);
+
+        // --- GET /organizations/{org}/templates/{t}/versions/{v}/previous returns 404 (no previous) ---
+        let prev_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/mytemplate/versions/v1/previous"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(prev_response.status(), StatusCode::NOT_FOUND);
+
+        // --- GET /organizations/{org}/templates/{t}/versions/{v}/previous without auth returns 401 ---
+        let prev_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/mytemplate/versions/v1/previous"),
+            )?,
+        )
+        .await?;
+        assert_eq!(prev_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{invalid_org}/templates/{t}/versions/{v}/previous returns 404 ---
+        let prev_bad_org = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/api/v2/organizations/{fake_org}/templates/mytemplate/versions/v1/previous"
+                ),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(prev_bad_org.status(), StatusCode::NOT_FOUND);
 
         Ok(())
     }
