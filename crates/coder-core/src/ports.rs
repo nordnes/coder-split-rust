@@ -5133,6 +5133,14 @@ where
     async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
         (**self).insert_group_member(group_id, user_id).await
     }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_group_member(group_id, user_id).await
+    }
 }
 
 #[async_trait]
