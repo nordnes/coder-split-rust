@@ -40,11 +40,11 @@ use coder_core::api::{
     CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest, DAUEntry, DAUsResponse,
     DynamicParametersRequest, DynamicParametersResponse, MatchedProvisioners, MinimalUser,
     PatchTemplateVersionRequest, ProvisionerJobLog, ProvisionerJobResponse, ProvisionerJobStatus,
-    ProvisionerTiming, TemplateExample, TemplateFilter, TemplateResponse,
-    TemplateVersionExternalAuth, TemplateVersionParameter, TemplateVersionPreset,
-    TemplateVersionPresetParameter, TemplateVersionResponse, TemplateVersionVariable,
-    UpdateActiveTemplateVersionRequest, UpdateTemplateMeta, WorkspaceBuildParameter,
-    WorkspaceBuildTimings, WorkspaceResource, WorkspaceResourceMetadata, WorkspaceResourceResponse,
+    TemplateExample, TemplateFilter, TemplateResponse, TemplateVersionExternalAuth,
+    TemplateVersionParameter, TemplateVersionPreset, TemplateVersionPresetParameter,
+    TemplateVersionResponse, TemplateVersionVariable, UpdateActiveTemplateVersionRequest,
+    UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceResource, WorkspaceResourceMetadata,
+    WorkspaceResourceResponse,
 };
 use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
 use coder_core::api::{
@@ -1148,7 +1148,17 @@ async fn post_generate_test_audit_log(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can create audit log entries.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::AuditLog),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to generate audit logs.",
         ));
@@ -1304,7 +1314,17 @@ async fn put_health_settings(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can update deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to update health settings.",
         ));
@@ -4794,6 +4814,23 @@ async fn upload_chat_file(
         }
     };
 
+    // RBAC: verify the actor can create chat resources.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::File)
+                .with_owner(context.user.id)
+                .in_org(org_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to upload chat files.",
+        ));
+    }
+
     // Enforce file size limit.
     if body.len() > MAX_CHAT_FILE_SIZE {
         return Ok((
@@ -4922,7 +4959,7 @@ async fn get_chat_file(
         builder = builder.header("content-disposition", "inline");
     } else {
         // Sanitize filename to prevent header injection via embedded quotes/backslashes.
-        let sanitized_name = file.name.replace('"', "").replace('\\', "");
+        let sanitized_name = file.name.replace(['"', '\\'], "");
         builder = builder.header(
             "content-disposition",
             format!("inline; filename=\"{}\"", sanitized_name),
@@ -5122,7 +5159,17 @@ async fn put_notifications_settings(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can update deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to update notification settings.",
         ));
@@ -5172,9 +5219,24 @@ async fn post_test_notification(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to send test notifications.",
+        ));
+    }
 
     // The test notification endpoint just returns 200 OK to confirm it's reachable.
     // Full dispatch integration is not implemented yet.
@@ -5195,7 +5257,17 @@ async fn put_notification_template_method(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.is_owner() {
+
+    // RBAC: verify the actor can update notification templates.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::NotificationTemplate),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to update notification template methods.",
         ));
@@ -6812,7 +6884,7 @@ async fn post_archive_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6829,7 +6901,7 @@ async fn post_archive_template_version(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -6854,7 +6926,7 @@ async fn patch_cancel_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6870,7 +6942,7 @@ async fn patch_cancel_template_version(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -6917,6 +6989,24 @@ async fn post_template_version_dry_run(
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
+
+    // RBAC: verify the actor can create workspaces in this org (dry runs simulate workspace builds).
+    // Mirrors Go: policy.ActionCreate on rbac.ResourceWorkspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace)
+                .with_owner(context.user.id)
+                .in_org(ver.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create template version dry runs.",
+        ));
+    }
 
     let now = OffsetDateTime::now_utc();
     let job_id = Uuid::new_v4();
@@ -6970,7 +7060,7 @@ async fn patch_template_version_dry_run(
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6986,7 +7076,7 @@ async fn patch_template_version_dry_run(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7019,7 +7109,7 @@ async fn patch_cancel_template_version_dry_run(
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -7035,7 +7125,7 @@ async fn patch_cancel_template_version_dry_run(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7153,14 +7243,29 @@ async fn post_template_version_dynamic_parameters_evaluate(
     headers: HeaderMap,
     body: Result<Json<DynamicParametersRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
+
+    // RBAC: verify the actor can read this template (parameter evaluation requires template read access).
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Read, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to evaluate template version parameters.",
+        ));
+    }
 
     let req = match body {
         Ok(Json(r)) => r,
@@ -7189,7 +7294,7 @@ async fn patch_active_template_version(
     headers: HeaderMap,
     body: Result<Json<UpdateActiveTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -7197,6 +7302,23 @@ async fn patch_active_template_version(
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
     };
+
+    // RBAC: verify the actor can update this template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template.id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update the active template version.",
+        ));
+    }
 
     let req = match body {
         Ok(Json(r)) => r,
@@ -7244,14 +7366,31 @@ async fn post_archive_template_versions(
     headers: HeaderMap,
     body: Result<Json<ArchiveTemplateVersionsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _template = match state.store.find_template_by_id(template_id).await? {
+    let template = match state.store.find_template_by_id(template_id).await? {
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
     };
+
+    // RBAC: verify the actor can update this template (archiving versions is a template mutation).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template.id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to archive template versions.",
+        ));
+    }
 
     let req = match body {
         Ok(Json(r)) => r,
@@ -7484,9 +7623,29 @@ async fn post_unarchive_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // Look up the template version for org-scoped RBAC.
+    let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
+        return Ok(not_found_response("Template version not found."));
+    };
+
+    // RBAC: verify the actor can update templates (unarchiving is a template mutation).
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to unarchive template versions.",
+        ));
+    }
 
     let unarchived = state.store.unarchive_template_version(version_id).await?;
     if !unarchived {
@@ -8509,6 +8668,32 @@ async fn put_workspace_dormant(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // RBAC: verify the actor can update workspace dormancy.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::WorkspaceDormant)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update workspace dormancy.",
+        ));
+    }
+
     let dormant = body
         .get("dormant")
         .and_then(|v| v.as_bool())
@@ -8632,13 +8817,31 @@ async fn put_workspace_autoupdates(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let automatic_updates = body
         .get("automatic_updates")
@@ -8663,13 +8866,31 @@ async fn put_workspace_favorite(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     state
         .store
@@ -8689,13 +8910,31 @@ async fn delete_workspace_favorite(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     state
         .store
@@ -8755,13 +8994,31 @@ async fn post_workspace_port_share(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let agent_name = body
         .get("agent_name")
@@ -8819,13 +9076,31 @@ async fn delete_workspace_port_share(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     let agent_name = body
         .get("agent_name")
@@ -9237,7 +9512,7 @@ async fn get_workspace_watch_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    ws: axum::extract::ws::WebSocketUpgrade,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     use axum::extract::ws::Message;
     use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
@@ -9345,7 +9620,7 @@ async fn patch_cancel_workspace_build(
     headers: HeaderMap,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -9366,7 +9641,7 @@ async fn patch_cancel_workspace_build(
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
-            &_context.actor,
+            &context.actor,
             Action::Update,
             &Object::new(ResourceType::Workspace)
                 .with_id(build.workspace_id)
@@ -9557,7 +9832,7 @@ async fn put_workspace_build_state(
     Path(build_id): Path<Uuid>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -9578,7 +9853,7 @@ async fn put_workspace_build_state(
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
-            &_context.actor,
+            &context.actor,
             Action::Update,
             &Object::new(ResourceType::Workspace)
                 .with_id(build.workspace_id)
@@ -9878,6 +10153,23 @@ async fn post_org_member_workspace(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can create workspaces for this user in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace)
+                .with_owner(target_user.id)
+                .in_org(org_record.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create workspaces in this organization.",
+        ));
+    }
 
     // From here, the workspace creation logic is identical to post_user_workspace.
     let template_id = match body.get("template_id").and_then(|v| v.as_str()) {
@@ -11634,47 +11926,115 @@ async fn tailnet_rpc_conn(
     let coordinator = state.coordinator.clone();
 
     Ok(ws.on_upgrade(move |mut socket| async move {
-        use coder_connectivity::tailnet::PeerKind;
+        use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse, PeerKind};
 
-        coordinator.add_peer(peer_id, peer_name, PeerKind::Client);
+        // Start a coordination session — this returns a handle with a
+        // channel that receives responses pushed by the coordinator when
+        // tunnel peers update their node info.
+        // TODO(peer-kind): All peers are currently registered as Client.
+        // The Go reference distinguishes agents from clients — agents use
+        // authenticate_agent_request() with an agent auth token, whereas
+        // clients use authenticate_request() with a session token (as we
+        // do here).  When agent coordination is routed through this same
+        // handler (or a dedicated one), the PeerKind should be determined
+        // from the authentication context.
+        let mut handle =
+            coordinator.coordinate(peer_id, peer_name, PeerKind::Client);
 
-        // Keep the connection open, reading messages until the client disconnects.
-        // In a full implementation, this would handle the coordination protocol.
+        // Multiplex: read from WebSocket AND from the coordinator response
+        // channel simultaneously.  When the client sends a coordination
+        // request we process it; when the coordinator pushes a response we
+        // forward it over the WebSocket.
         loop {
-            match socket.next().await {
-                Some(Ok(Message::Text(text))) => {
-                    // Echo back an acknowledgement for now.  A real coordinator
-                    // would parse the coordination message and route node info.
-                    let ack = serde_json::json!({
-                        "type": "ack",
-                        "peer_id": peer_id.to_string(),
-                        "received": text.len(),
-                    });
-                    if let Ok(payload) = serde_json::to_string(&ack) {
-                        if socket.send(Message::Text(payload.into())).await.is_err() {
-                            break;
+            tokio::select! {
+                // --- Incoming WebSocket message from the client ---
+                ws_msg = socket.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            // Parse the JSON coordination request.
+                            match serde_json::from_str::<CoordinateRequest>(&text) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(peer_id, request) {
+                                        tracing::warn!(
+                                            peer_id = %peer_id,
+                                            error = %e,
+                                            "coordination request error",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        peer_id = %peer_id,
+                                        error = %e,
+                                        "invalid coordination request JSON",
+                                    );
+                                    // Send a proper CoordinateResponse error back to the peer.
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        Some(Ok(Message::Binary(bin))) => {
+                            // Try to parse binary as JSON coordination request.
+                            match serde_json::from_slice::<CoordinateRequest>(&bin) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(peer_id, request) {
+                                        tracing::warn!(
+                                            peer_id = %peer_id,
+                                            error = %e,
+                                            "coordination request error (binary)",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        peer_id = %peer_id,
+                                        error = %e,
+                                        "invalid coordination request (binary)",
+                                    );
+                                    // Send a proper CoordinateResponse error back to the peer.
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
                     }
                 }
-                Some(Ok(Message::Binary(_))) => {
-                    // Binary coordination messages — acknowledge.
-                    let ack = serde_json::json!({
-                        "type": "ack",
-                        "peer_id": peer_id.to_string(),
-                    });
-                    if let Ok(payload) = serde_json::to_string(&ack) {
-                        if socket.send(Message::Text(payload.into())).await.is_err() {
-                            break;
+                // --- Outgoing coordination response from the coordinator ---
+                resp = handle.response_rx.recv() => {
+                    match resp {
+                        Some(coord_response) => {
+                            if let Ok(payload) = serde_json::to_string(&coord_response) {
+                                if socket.send(Message::Text(payload.into())).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
+                        // Channel closed — coordinator shut down our session.
+                        None => break,
                     }
                 }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Err(_)) => break,
-                _ => continue,
             }
         }
 
-        coordinator.remove_peer(peer_id);
+        coordinator.close_coordination(peer_id, handle.session_id);
     }))
 }
 
@@ -11700,6 +12060,25 @@ async fn post_custom_notification(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can create notification messages.
+    // In Go, postCustomNotification checks policy.ActionCreate on
+    // rbac.ResourceNotificationMessage at site level. Only the owner role
+    // has NotificationMessage:Create at site scope, so this is intentionally
+    // restricted to site owners. No org scoping needed.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::NotificationMessage),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to send custom notifications.",
+        ));
+    }
 
     let Json(req) = match payload {
         Ok(request) => request,
@@ -12099,13 +12478,32 @@ async fn post_workspace_agent_recreate_devcontainer(
     headers: HeaderMap,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update workspace agent devcontainers.
+    // Look up the workspace for org/owner-scoped RBAC when available.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
+    let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::WorkspaceAgentDevcontainers)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::WorkspaceAgentDevcontainers),
+    };
+    if authorizer
+        .authorize(&context.actor, Action::Update, &rbac_obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to recreate devcontainers.",
+        ));
+    }
 
     let status = derive_agent_status(&row);
     if status != coder_core::WorkspaceAgentStatus::Connected {
@@ -12150,13 +12548,32 @@ async fn delete_workspace_agent_devcontainer(
     headers: HeaderMap,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can delete workspace agent devcontainers.
+    // Look up the workspace for org/owner-scoped RBAC when available.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
+    let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::WorkspaceAgentDevcontainers)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::WorkspaceAgentDevcontainers),
+    };
+    if authorizer
+        .authorize(&context.actor, Action::Delete, &rbac_obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete devcontainers.",
+        ));
+    }
 
     let status = derive_agent_status(&row);
     if status != coder_core::WorkspaceAgentStatus::Connected {
@@ -13297,6 +13714,26 @@ async fn post_file(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // RBAC: verify the actor can upload files.
+    // In Go, postFile checks rbac.ActionCreate on rbac.ResourceFile at the
+    // site level (no org/owner scoping). This intentionally differs from
+    // upload_chat_file which uses .with_owner().in_org() because chat file
+    // uploads are organization-scoped, while general file uploads (used for
+    // template archives) are a site-level operation.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::File),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to upload files.",
+        ));
+    }
+
     let raw_content_type = headers
         .get(CONTENT_TYPE)
         .and_then(|v| v.to_str().ok())
@@ -13592,22 +14029,23 @@ mod tests {
         ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
         CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
-        CreateFirstUserRequest, CreateFirstUserStoreError, CreateProvisionerJobInput,
-        CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest, CreateTemplateStoreError,
-        CreateTemplateVersionInput, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
-        CreateUserRequestWithOrgs, CreateUserStoreError, CreateWorkspaceBuildInput,
-        CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig, DeploymentMetadata,
-        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertAgentLogInput,
-        InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult,
-        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
-        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, InsertTaskInput,
-        InsertWorkspaceAppStatusInput, LogFormat, LoginType, LoginWithPasswordRequest,
-        NotificationMessageRecord, NotificationMessageStatus, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
-        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        CreateFirstUserRequest, CreateFirstUserStoreError, CreateGroupInput,
+        CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
+        CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
+        CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
+        CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig,
+        DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, DerpNodeConfig,
+        DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser,
+        FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
+        HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput,
+        InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LogFormat,
+        LoginType, LoginWithPasswordRequest, NotificationMessageRecord, NotificationMessageStatus,
+        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
+        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
@@ -13617,10 +14055,11 @@ mod tests {
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertCustomRoleInput,
         UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-        UserAppearanceRecord, UserConfigRecord, UserLinkRecord, UserListFilter,
-        UserPreferenceRecord, UserRecord, UserStatus, ValidateUserPasswordRequest,
-        WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
-        WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+        UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord,
+        UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+        UserStatusChangeRecord, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
+        WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
+        WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
         WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
         WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
         WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
@@ -13736,6 +14175,12 @@ mod tests {
         user_configs: Mutex<HashMap<(Uuid, String), UserConfigRecord>>,
         // Notification messages
         notification_messages: Mutex<Vec<NotificationMessageRecord>>,
+        // Groups
+        groups: Mutex<HashMap<Uuid, GroupRecord>>,
+        group_members: Mutex<Vec<GroupMemberRecord>>,
+        // User deletions and status changes
+        user_deletions: Mutex<Vec<UserDeletedRecord>>,
+        user_status_changes: Mutex<Vec<UserStatusChangeRecord>>,
     }
 
     impl FakeStore {
@@ -13812,6 +14257,10 @@ mod tests {
                 user_links: Mutex::new(HashMap::new()),
                 user_configs: Mutex::new(HashMap::new()),
                 notification_messages: Mutex::new(Vec::new()),
+                groups: Mutex::new(HashMap::new()),
+                group_members: Mutex::new(Vec::new()),
+                user_deletions: Mutex::new(Vec::new()),
+                user_status_changes: Mutex::new(Vec::new()),
             }
         }
 
@@ -17239,12 +17688,21 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             match jobs.get_mut(&job_id) {
-                Some(j) => {
-                    j.canceled_at = Some(OffsetDateTime::now_utc());
-                    j.job_status = "canceling".to_owned();
+                Some(j) if j.canceled_at.is_none() && j.completed_at.is_none() => {
+                    let now = OffsetDateTime::now_utc();
+                    j.canceled_at = Some(now);
+                    // Only complete immediately if no worker has picked up the job
+                    // (matches Go semantics: !job.WorkerID.Valid)
+                    if j.worker_id.is_none() {
+                        j.completed_at = Some(now);
+                        j.job_status = "canceled".to_owned();
+                    } else {
+                        j.job_status = "canceling".to_owned();
+                    }
+                    j.updated_at = now;
                     Ok(true)
                 }
-                None => Ok(false),
+                _ => Ok(false),
             }
         }
 
@@ -18712,13 +19170,13 @@ mod tests {
             input: &UpsertCustomRoleInput,
         ) -> Result<CustomRoleRecord, StorageError> {
             let now = OffsetDateTime::now_utc();
-            let key = (input.name.clone(), input.organization_id);
+            let key = (input.name.to_lowercase(), input.organization_id);
             let mut roles = self
                 .custom_roles
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let record = roles.entry(key).or_insert_with(|| CustomRoleRecord {
-                name: input.name.clone(),
+                name: input.name.to_lowercase(),
                 display_name: input.display_name.clone(),
                 organization_id: input.organization_id,
                 site_permissions: input.site_permissions.clone(),
@@ -18825,6 +19283,459 @@ mod tests {
             } else {
                 Ok(false)
             }
+        }
+
+        // -----------------------------------------------------------------
+        // Groups
+        // -----------------------------------------------------------------
+
+        async fn create_group(
+            &self,
+            input: &CreateGroupInput,
+        ) -> Result<GroupRecord, StorageError> {
+            let mut groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Check for duplicate name within the organization.
+            let duplicate = groups
+                .values()
+                .any(|g| g.organization_id == input.organization_id && g.name == input.name);
+            if duplicate {
+                return Err(StorageError::invalid_data(
+                    "group with this name already exists in the organization",
+                ));
+            }
+            let id = Uuid::new_v4();
+            let now = OffsetDateTime::now_utc();
+            let record = GroupRecord {
+                id,
+                name: input.name.clone(),
+                display_name: input.display_name.clone(),
+                organization_id: input.organization_id,
+                avatar_url: input.avatar_url.clone(),
+                quota_allowance: input.quota_allowance,
+                source: "user".to_owned(),
+                created_at: now,
+            };
+            groups.insert(id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_group_by_id(
+            &self,
+            group_id: Uuid,
+        ) -> Result<Option<GroupRecord>, StorageError> {
+            Ok(self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&group_id)
+                .cloned())
+        }
+
+        async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+            let removed = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&group_id)
+                .is_some();
+            if removed {
+                // Also remove all members of this group.
+                self.group_members
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?
+                    .retain(|m| m.group_id != group_id);
+            }
+            Ok(removed)
+        }
+
+        async fn list_groups(
+            &self,
+            organization_id: Uuid,
+        ) -> Result<Vec<GroupRecord>, StorageError> {
+            let groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<GroupRecord> = groups
+                .values()
+                .filter(|g| g.organization_id == organization_id)
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            Ok(result)
+        }
+
+        async fn insert_group_member(
+            &self,
+            group_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<(), StorageError> {
+            // Validate that the group exists (mirrors FK constraint in PostgresStore).
+            {
+                let groups = self
+                    .groups
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                if !groups.contains_key(&group_id) {
+                    return Err(StorageError::invalid_data("group not found"));
+                }
+            }
+            let mut members = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let already_exists = members
+                .iter()
+                .any(|m| m.group_id == group_id && m.user_id == user_id);
+            if already_exists {
+                return Err(StorageError::invalid_data(
+                    "user is already a member of this group",
+                ));
+            }
+            members.push(GroupMemberRecord { group_id, user_id });
+            Ok(())
+        }
+
+        async fn delete_group_member(
+            &self,
+            group_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let mut members = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let before = members.len();
+            members.retain(|m| !(m.group_id == group_id && m.user_id == user_id));
+            Ok(members.len() < before)
+        }
+
+        async fn list_group_members(
+            &self,
+            group_id: Uuid,
+        ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+            let members = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // PostgresStore JOINs on users, filters u.deleted = false,
+            // and sorts by LOWER(u.username) ASC.
+            let mut result: Vec<GroupMemberRecord> = members
+                .iter()
+                .filter(|m| m.group_id == group_id)
+                .filter(|m| users.get(&m.user_id).is_some_and(|u| !u.deleted))
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| {
+                let a_name = users
+                    .get(&a.user_id)
+                    .map(|u| u.username.to_lowercase())
+                    .unwrap_or_default();
+                let b_name = users
+                    .get(&b.user_id)
+                    .map(|u| u.username.to_lowercase())
+                    .unwrap_or_default();
+                a_name.cmp(&b_name)
+            });
+            Ok(result)
+        }
+
+        // -----------------------------------------------------------------
+        // User Links (upsert / delete)
+        // -----------------------------------------------------------------
+
+        async fn upsert_user_link(
+            &self,
+            user_id: Uuid,
+            input: &UpsertUserLinkInput,
+        ) -> Result<UserLinkRecord, StorageError> {
+            let mut links = self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let record = UserLinkRecord {
+                user_id,
+                login_type: input.login_type,
+                linked_id: input.linked_id.clone(),
+                oauth_access_token: input.oauth_access_token.clone(),
+                oauth_refresh_token: input.oauth_refresh_token.clone(),
+                oauth_expiry: input.oauth_expiry,
+            };
+            links.insert((user_id, input.login_type), record.clone());
+            Ok(record)
+        }
+
+        async fn delete_user_link(
+            &self,
+            user_id: Uuid,
+            login_type: LoginType,
+        ) -> Result<bool, StorageError> {
+            Ok(self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&(user_id, login_type))
+                .is_some())
+        }
+
+        // -----------------------------------------------------------------
+        // User Configs (get / upsert)
+        // -----------------------------------------------------------------
+
+        async fn get_user_config(
+            &self,
+            user_id: Uuid,
+            key: &str,
+        ) -> Result<Option<UserConfigRecord>, StorageError> {
+            Ok(self
+                .user_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&(user_id, key.to_owned()))
+                .cloned())
+        }
+
+        async fn upsert_user_config(
+            &self,
+            user_id: Uuid,
+            key: &str,
+            value: &str,
+        ) -> Result<UserConfigRecord, StorageError> {
+            let mut configs = self
+                .user_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let record = UserConfigRecord {
+                user_id,
+                key: key.to_owned(),
+                value: value.to_owned(),
+            };
+            configs.insert((user_id, key.to_owned()), record.clone());
+            Ok(record)
+        }
+
+        // -----------------------------------------------------------------
+        // User Deletion / Status Changes
+        // -----------------------------------------------------------------
+
+        async fn insert_user_deleted(
+            &self,
+            user_id: Uuid,
+            deleted_by: Option<Uuid>,
+            reason: &str,
+        ) -> Result<UserDeletedRecord, StorageError> {
+            let record = UserDeletedRecord {
+                id: Uuid::new_v4(),
+                user_id,
+                deleted_at: OffsetDateTime::now_utc(),
+                deleted_by,
+                reason: reason.to_owned(),
+            };
+            self.user_deletions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(record.clone());
+            Ok(record)
+        }
+
+        async fn insert_user_status_change(
+            &self,
+            user_id: Uuid,
+            old_status: UserStatus,
+            new_status: UserStatus,
+            changed_by: Option<Uuid>,
+            reason: &str,
+        ) -> Result<UserStatusChangeRecord, StorageError> {
+            let record = UserStatusChangeRecord {
+                id: Uuid::new_v4(),
+                user_id,
+                new_status,
+                old_status,
+                changed_at: OffsetDateTime::now_utc(),
+                changed_by,
+                reason: reason.to_owned(),
+            };
+            self.user_status_changes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(record.clone());
+            Ok(record)
+        }
+
+        async fn list_user_status_changes(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+            let changes = self
+                .user_status_changes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<UserStatusChangeRecord> = changes
+                .iter()
+                .filter(|c| c.user_id == user_id)
+                .cloned()
+                .collect();
+            result.sort_by_key(|c| c.changed_at);
+            Ok(result)
+        }
+
+        // -----------------------------------------------------------------
+        // Delete Custom Role
+        // -----------------------------------------------------------------
+
+        async fn delete_custom_role(
+            &self,
+            name: &str,
+            organization_id: Option<Uuid>,
+        ) -> Result<bool, StorageError> {
+            Ok(self
+                .custom_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&(name.to_lowercase(), organization_id))
+                .is_some())
+        }
+
+        // -----------------------------------------------------------------
+        // Workspace Domain
+        // -----------------------------------------------------------------
+
+        async fn find_workspace_port_share(
+            &self,
+            workspace_id: Uuid,
+            agent_name: &str,
+            port: i32,
+        ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
+            let shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(shares
+                .iter()
+                .find(|s| {
+                    s.workspace_id == workspace_id && s.agent_name == agent_name && s.port == port
+                })
+                .cloned())
+        }
+
+        /// NOTE: PostgresStore filters `deleted = false` on workspace agents,
+        /// but `WorkspaceAgentRow` does not expose a `deleted` field in the
+        /// domain type, so FakeStore cannot replicate this filter. Tests that
+        /// insert soft-deleted agents will see them returned here.
+        async fn list_workspace_agents_by_resource_ids(
+            &self,
+            resource_ids: &[Uuid],
+        ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<WorkspaceAgentRow> = agents
+                .values()
+                .filter(|a| resource_ids.contains(&a.resource_id))
+                .cloned()
+                .collect();
+            result.sort_by_key(|a| a.created_at);
+            Ok(result)
+        }
+
+        /// NOTE: FakeStore limitation — this method synthesizes timing rows from
+        /// the scripts themselves with hardcoded defaults (`exit_code: 0`,
+        /// `stage: "start"`, `status: "ok"`, `started_at == ended_at ==
+        /// script.created_at`). PostgresStore joins against a real
+        /// `workspace_agent_script_timings` table. Do not rely on realistic
+        /// timing values in tests that use FakeStore.
+        async fn list_workspace_agent_script_timings_by_build_id(
+            &self,
+            build_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+            // Walk: build -> resources (via job_id) -> agents (via resource_id)
+            //       -> scripts (via workspace_agent_id) -> timings (via script_id)
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let build = match builds.get(&build_id) {
+                Some(b) => b.clone(),
+                None => return Ok(Vec::new()),
+            };
+            drop(builds);
+
+            let resources = self
+                .workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let resource_ids: Vec<Uuid> = resources
+                .get(&build.job_id)
+                .map(|rs| rs.iter().map(|r| r.id).collect())
+                .unwrap_or_default();
+            drop(resources);
+
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let agent_map: HashMap<Uuid, WorkspaceAgentRow> = agents
+                .values()
+                .filter(|a| resource_ids.contains(&a.resource_id))
+                .map(|a| (a.id, a.clone()))
+                .collect();
+            drop(agents);
+
+            let scripts = self
+                .workspace_agent_scripts
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let matching_scripts: Vec<&WorkspaceAgentScriptRow> = scripts
+                .iter()
+                .filter(|s| agent_map.contains_key(&s.workspace_agent_id))
+                .collect();
+
+            // For the fake store, we don't have a separate script-timings table.
+            // Build timing rows from the scripts themselves with default timing
+            // data. In tests, this provides the structural join that the real
+            // query performs.
+            let mut result = Vec::new();
+            for script in matching_scripts {
+                if let Some(agent) = agent_map.get(&script.workspace_agent_id) {
+                    result.push(WorkspaceAgentScriptTimingRow {
+                        script_id: script.id,
+                        started_at: script.created_at,
+                        ended_at: script.created_at,
+                        exit_code: 0,
+                        stage: "start".to_owned(),
+                        status: "ok".to_owned(),
+                        display_name: script.display_name.clone(),
+                        workspace_agent_id: agent.id,
+                        workspace_agent_name: agent.name.clone(),
+                    });
+                }
+            }
+            Ok(result)
+        }
+
+        async fn next_workspace_build_number(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<i64, StorageError> {
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let max = builds
+                .values()
+                .filter(|b| b.workspace_id == workspace_id)
+                .map(|b| b.build_number)
+                .max()
+                .unwrap_or(0);
+            Ok(max + 1)
         }
     }
 
