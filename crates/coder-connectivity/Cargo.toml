@@ -14,6 +14,7 @@ workspace = true
 async-trait.workspace = true
 coder-core = { path = "../coder-core" }
 reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 ssh-key.workspace = true
 thiserror.workspace = true

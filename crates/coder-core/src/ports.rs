@@ -11,11 +11,15 @@ use uuid::Uuid;
 use crate::api::{AuditLogResponse, ExternalAuthAppInstallation, ExternalAuthUser, HealthSettings};
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
-    CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError, CreateUserInput,
-    CreateUserStoreError, FirstUserRecord, InsertOrganizationMemberError,
+    CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
+    CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateUserInput,
+    CreateUserStoreError, CustomRoleRecord, FirstUserRecord, GroupMemberRecord, GroupRecord,
+    InsertOrganizationMemberError, NotificationMessageRecord, OAuth2ProviderAppCodeRecord,
+    OAuth2ProviderAppRecord, OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord,
     OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    TokenConfigRecord, UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord,
-    UserStatus,
+    TokenConfigRecord, UpdateOAuth2ProviderAppInput, UpsertCustomRoleInput, UpsertUserLinkInput,
+    UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter,
+    UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
 };
 
 /// Deployment metadata required by the HTTP layer.
@@ -524,6 +528,7 @@ pub trait AuthStore: Send + Sync {
 }
 
 /// Narrow storage contract for identity-owned domain logic.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait IdentityStore: Send + Sync {
     /// Lists users matching the supplied filter.
@@ -655,6 +660,444 @@ pub trait IdentityStore: Send + Sync {
         user_id: Uuid,
         roles: Vec<String>,
     ) -> Result<Option<OrganizationMemberRecord>, StorageError>;
+
+    // ----- User identity supplements -----
+
+    /// Lists user links for a user.
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Upserts a user link.
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        let _ = (user_id, input);
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Deletes a user link.
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: crate::identity::LoginType,
+    ) -> Result<bool, StorageError> {
+        let _ = (user_id, login_type);
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Returns a user configuration value.
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        let _ = (user_id, key);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Sets a user configuration value.
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        let _ = (user_id, key, value);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Deletes a user configuration value.
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        let _ = (user_id, key);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Records a soft-delete tracking entry.
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        let _ = (user_id, deleted_by, reason);
+        Err(StorageError::unavailable(
+            "user deletion tracking is not implemented",
+        ))
+    }
+
+    /// Records a user status change.
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        let _ = (user_id, old_status, new_status, changed_by, reason);
+        Err(StorageError::unavailable(
+            "user status changes are not implemented",
+        ))
+    }
+
+    /// Lists status changes for a user.
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "user status changes are not implemented",
+        ))
+    }
+
+    // ----- Custom roles -----
+
+    /// Lists custom roles, optionally filtered by organization.
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        let _ = organization_id;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    /// Upserts a custom role.
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    /// Deletes a custom role.
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        let _ = (name, organization_id);
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    // ----- Groups -----
+
+    /// Lists groups for an organization.
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        let _ = organization_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Creates a new group.
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Looks up a group by identifier.
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Deletes a group.
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Lists members of a group.
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    /// Adds a user to a group.
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        let _ = (group_id, user_id);
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    /// Removes a user from a group.
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = (group_id, user_id);
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    // ----- OAuth2 Provider -----
+
+    /// Lists registered OAuth2 provider apps.
+    async fn list_oauth2_provider_apps(
+        &self,
+    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Creates an OAuth2 provider app.
+    async fn create_oauth2_provider_app(
+        &self,
+        input: &CreateOAuth2ProviderAppInput,
+    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Looks up an OAuth2 provider app by identifier.
+    async fn find_oauth2_provider_app_by_id(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        let _ = app_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Updates an OAuth2 provider app.
+    async fn update_oauth2_provider_app(
+        &self,
+        input: &UpdateOAuth2ProviderAppInput,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Deletes an OAuth2 provider app.
+    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
+        let _ = app_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Lists secrets for an OAuth2 provider app.
+    async fn list_oauth2_provider_app_secrets(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
+        let _ = app_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Creates a secret for an OAuth2 provider app.
+    async fn create_oauth2_provider_app_secret(
+        &self,
+        app_id: Uuid,
+        hashed_secret: &[u8],
+        display_secret: &str,
+    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
+        let _ = (app_id, hashed_secret, display_secret);
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Deletes a secret for an OAuth2 provider app.
+    async fn delete_oauth2_provider_app_secret(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = secret_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Finds an OAuth2 provider app secret by identifier.
+    async fn find_oauth2_provider_app_secret_by_id(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        let _ = secret_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Creates an authorization code for the OAuth2 flow.
+    async fn create_oauth2_provider_app_code(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        secret_prefix: &[u8],
+        hashed_secret: &[u8],
+        expires_at: OffsetDateTime,
+        resource_uri: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
+        let _ = (
+            app_id,
+            user_id,
+            secret_prefix,
+            hashed_secret,
+            expires_at,
+            resource_uri,
+            code_challenge,
+            code_challenge_method,
+        );
+        Err(StorageError::unavailable(
+            "oauth2 provider app codes are not implemented",
+        ))
+    }
+
+    /// Finds an authorization code by secret prefix.
+    async fn find_oauth2_provider_app_code_by_prefix(
+        &self,
+        secret_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
+        let _ = secret_prefix;
+        Err(StorageError::unavailable(
+            "oauth2 provider app codes are not implemented",
+        ))
+    }
+
+    /// Deletes an authorization code.
+    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
+        let _ = code_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app codes are not implemented",
+        ))
+    }
+
+    /// Creates an OAuth2 provider app token.
+    async fn create_oauth2_provider_app_token(
+        &self,
+        input: &CreateOAuth2ProviderAppTokenInput,
+    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Finds an OAuth2 token by hash prefix.
+    async fn find_oauth2_provider_app_token_by_prefix(
+        &self,
+        hash_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let _ = hash_prefix;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Finds an OAuth2 token by refresh hash.
+    async fn find_oauth2_provider_app_token_by_refresh_hash(
+        &self,
+        refresh_hash: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let _ = refresh_hash;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Deletes an OAuth2 provider app token.
+    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
+        let _ = token_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Lists all OAuth2 tokens for a given user and app.
+    async fn list_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let _ = (app_id, user_id);
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Deletes all OAuth2 tokens for a given user and app.
+    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        let _ = (app_id, user_id);
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    // ----- Notifications -----
+
+    /// Fetches pending notification messages for dispatch.
+    async fn fetch_pending_notification_messages(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        let _ = limit;
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Updates the status of a notification message after dispatch.
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        let _ = (message_id, status);
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Increments the attempt count for a notification message.
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = message_id;
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
 }
 
 /// Narrow storage contract for operational and deployment-owned state.
@@ -1224,6 +1667,444 @@ pub trait AppStore: DeploymentStore + Send + Sync {
             "external auth links are not implemented",
         ))
     }
+
+    // ----- User identity supplements (forwarded from IdentityStore) -----
+
+    /// Lists user links for a user.
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Upserts a user link.
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        let _ = (user_id, input);
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Deletes a user link.
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: crate::identity::LoginType,
+    ) -> Result<bool, StorageError> {
+        let _ = (user_id, login_type);
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Returns a user configuration value.
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        let _ = (user_id, key);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Sets a user configuration value.
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        let _ = (user_id, key, value);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Deletes a user configuration value.
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        let _ = (user_id, key);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Records a soft-delete tracking entry.
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        let _ = (user_id, deleted_by, reason);
+        Err(StorageError::unavailable(
+            "user deletion tracking is not implemented",
+        ))
+    }
+
+    /// Records a user status change.
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        let _ = (user_id, old_status, new_status, changed_by, reason);
+        Err(StorageError::unavailable(
+            "user status changes are not implemented",
+        ))
+    }
+
+    /// Lists status changes for a user.
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "user status changes are not implemented",
+        ))
+    }
+
+    // ----- Custom roles -----
+
+    /// Lists custom roles, optionally filtered by organization.
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        let _ = organization_id;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    /// Upserts a custom role.
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    /// Deletes a custom role.
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        let _ = (name, organization_id);
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    // ----- Groups -----
+
+    /// Lists groups for an organization.
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        let _ = organization_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Creates a new group.
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Looks up a group by identifier.
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Deletes a group.
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Lists members of a group.
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    /// Adds a user to a group.
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        let _ = (group_id, user_id);
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    /// Removes a user from a group.
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = (group_id, user_id);
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    // ----- OAuth2 Provider -----
+
+    /// Lists registered OAuth2 provider apps.
+    async fn list_oauth2_provider_apps(
+        &self,
+    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Creates an OAuth2 provider app.
+    async fn create_oauth2_provider_app(
+        &self,
+        input: &CreateOAuth2ProviderAppInput,
+    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Looks up an OAuth2 provider app by identifier.
+    async fn find_oauth2_provider_app_by_id(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        let _ = app_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Updates an OAuth2 provider app.
+    async fn update_oauth2_provider_app(
+        &self,
+        input: &UpdateOAuth2ProviderAppInput,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Deletes an OAuth2 provider app.
+    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
+        let _ = app_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider apps are not implemented",
+        ))
+    }
+
+    /// Lists secrets for an OAuth2 provider app.
+    async fn list_oauth2_provider_app_secrets(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
+        let _ = app_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Creates a secret for an OAuth2 provider app.
+    async fn create_oauth2_provider_app_secret(
+        &self,
+        app_id: Uuid,
+        hashed_secret: &[u8],
+        display_secret: &str,
+    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
+        let _ = (app_id, hashed_secret, display_secret);
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Deletes a secret for an OAuth2 provider app.
+    async fn delete_oauth2_provider_app_secret(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = secret_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Finds an OAuth2 provider app secret by identifier.
+    async fn find_oauth2_provider_app_secret_by_id(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        let _ = secret_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app secrets are not implemented",
+        ))
+    }
+
+    /// Creates an authorization code for the OAuth2 flow.
+    async fn create_oauth2_provider_app_code(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        secret_prefix: &[u8],
+        hashed_secret: &[u8],
+        expires_at: OffsetDateTime,
+        resource_uri: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
+        let _ = (
+            app_id,
+            user_id,
+            secret_prefix,
+            hashed_secret,
+            expires_at,
+            resource_uri,
+            code_challenge,
+            code_challenge_method,
+        );
+        Err(StorageError::unavailable(
+            "oauth2 provider app codes are not implemented",
+        ))
+    }
+
+    /// Finds an authorization code by secret prefix.
+    async fn find_oauth2_provider_app_code_by_prefix(
+        &self,
+        secret_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
+        let _ = secret_prefix;
+        Err(StorageError::unavailable(
+            "oauth2 provider app codes are not implemented",
+        ))
+    }
+
+    /// Deletes an authorization code.
+    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
+        let _ = code_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app codes are not implemented",
+        ))
+    }
+
+    /// Creates an OAuth2 provider app token.
+    async fn create_oauth2_provider_app_token(
+        &self,
+        input: &CreateOAuth2ProviderAppTokenInput,
+    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Finds an OAuth2 token by hash prefix.
+    async fn find_oauth2_provider_app_token_by_prefix(
+        &self,
+        hash_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let _ = hash_prefix;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Finds an OAuth2 token by refresh hash.
+    async fn find_oauth2_provider_app_token_by_refresh_hash(
+        &self,
+        refresh_hash: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let _ = refresh_hash;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Deletes an OAuth2 provider app token.
+    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
+        let _ = token_id;
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Lists all OAuth2 tokens for a given user and app.
+    async fn list_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
+        let _ = (app_id, user_id);
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    /// Deletes all OAuth2 tokens for a given user and app.
+    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        let _ = (app_id, user_id);
+        Err(StorageError::unavailable(
+            "oauth2 provider app tokens are not implemented",
+        ))
+    }
+
+    // ----- Notifications -----
+
+    /// Fetches pending notification messages for dispatch.
+    async fn fetch_pending_notification_messages(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        let _ = limit;
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Updates the status of a notification message after dispatch.
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        let _ = (message_id, status);
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Increments the attempt count for a notification message.
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = message_id;
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
 }
 
 #[async_trait]
@@ -1700,6 +2581,297 @@ where
     ) -> Result<Option<OrganizationMemberRecord>, StorageError> {
         AppStore::update_organization_member_roles(self, organization_id, user_id, roles).await
     }
+
+    // ----- Forwarded user identity supplements -----
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        AppStore::list_user_links(self, user_id).await
+    }
+
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        AppStore::upsert_user_link(self, user_id, input).await
+    }
+
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: crate::identity::LoginType,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_user_link(self, user_id, login_type).await
+    }
+
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        AppStore::get_user_config(self, user_id, key).await
+    }
+
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        AppStore::upsert_user_config(self, user_id, key, value).await
+    }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        AppStore::delete_user_config(self, user_id, key).await
+    }
+
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        AppStore::insert_user_deleted(self, user_id, deleted_by, reason).await
+    }
+
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        AppStore::insert_user_status_change(
+            self, user_id, old_status, new_status, changed_by, reason,
+        )
+        .await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        AppStore::list_user_status_changes(self, user_id).await
+    }
+
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        AppStore::list_custom_roles(self, organization_id).await
+    }
+
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        AppStore::upsert_custom_role(self, input).await
+    }
+
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_custom_role(self, name, organization_id).await
+    }
+
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        AppStore::list_groups(self, organization_id).await
+    }
+
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        AppStore::create_group(self, input).await
+    }
+
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        AppStore::find_group_by_id(self, group_id).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_group(self, group_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        AppStore::list_group_members(self, group_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        AppStore::insert_group_member(self, group_id, user_id).await
+    }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_group_member(self, group_id, user_id).await
+    }
+
+    async fn list_oauth2_provider_apps(
+        &self,
+    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
+        AppStore::list_oauth2_provider_apps(self).await
+    }
+
+    async fn create_oauth2_provider_app(
+        &self,
+        input: &CreateOAuth2ProviderAppInput,
+    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
+        AppStore::create_oauth2_provider_app(self, input).await
+    }
+
+    async fn find_oauth2_provider_app_by_id(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        AppStore::find_oauth2_provider_app_by_id(self, app_id).await
+    }
+
+    async fn update_oauth2_provider_app(
+        &self,
+        input: &UpdateOAuth2ProviderAppInput,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        AppStore::update_oauth2_provider_app(self, input).await
+    }
+
+    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_oauth2_provider_app(self, app_id).await
+    }
+
+    async fn list_oauth2_provider_app_secrets(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
+        AppStore::list_oauth2_provider_app_secrets(self, app_id).await
+    }
+
+    async fn create_oauth2_provider_app_secret(
+        &self,
+        app_id: Uuid,
+        hashed_secret: &[u8],
+        display_secret: &str,
+    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
+        AppStore::create_oauth2_provider_app_secret(self, app_id, hashed_secret, display_secret)
+            .await
+    }
+
+    async fn delete_oauth2_provider_app_secret(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_oauth2_provider_app_secret(self, secret_id).await
+    }
+
+    async fn find_oauth2_provider_app_secret_by_id(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        AppStore::find_oauth2_provider_app_secret_by_id(self, secret_id).await
+    }
+
+    async fn create_oauth2_provider_app_code(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        secret_prefix: &[u8],
+        hashed_secret: &[u8],
+        expires_at: OffsetDateTime,
+        resource_uri: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
+        AppStore::create_oauth2_provider_app_code(
+            self,
+            app_id,
+            user_id,
+            secret_prefix,
+            hashed_secret,
+            expires_at,
+            resource_uri,
+            code_challenge,
+            code_challenge_method,
+        )
+        .await
+    }
+
+    async fn find_oauth2_provider_app_code_by_prefix(
+        &self,
+        secret_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
+        AppStore::find_oauth2_provider_app_code_by_prefix(self, secret_prefix).await
+    }
+
+    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_oauth2_provider_app_code(self, code_id).await
+    }
+
+    async fn create_oauth2_provider_app_token(
+        &self,
+        input: &CreateOAuth2ProviderAppTokenInput,
+    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
+        AppStore::create_oauth2_provider_app_token(self, input).await
+    }
+
+    async fn find_oauth2_provider_app_token_by_prefix(
+        &self,
+        hash_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        AppStore::find_oauth2_provider_app_token_by_prefix(self, hash_prefix).await
+    }
+
+    async fn find_oauth2_provider_app_token_by_refresh_hash(
+        &self,
+        refresh_hash: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        AppStore::find_oauth2_provider_app_token_by_refresh_hash(self, refresh_hash).await
+    }
+
+    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_oauth2_provider_app_token(self, token_id).await
+    }
+
+    async fn list_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
+        AppStore::list_oauth2_provider_app_tokens_by_app_and_user(self, app_id, user_id).await
+    }
+
+    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        AppStore::delete_oauth2_provider_app_tokens_by_app_and_user(self, app_id, user_id).await
+    }
+
+    async fn fetch_pending_notification_messages(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        AppStore::fetch_pending_notification_messages(self, limit).await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_notification_message_status(self, message_id, status).await
+    }
+
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::increment_notification_message_attempt_count(self, message_id).await
+    }
 }
 
 #[async_trait]
@@ -1870,6 +3042,315 @@ where
     ) -> Result<Option<OrganizationMemberRecord>, StorageError> {
         (**self)
             .update_organization_member_roles(organization_id, user_id, roles)
+            .await
+    }
+
+    // ----- Forwarded user identity supplements -----
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        (**self).list_user_links(user_id).await
+    }
+
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        (**self).upsert_user_link(user_id, input).await
+    }
+
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: crate::identity::LoginType,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_user_link(user_id, login_type).await
+    }
+
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        (**self).get_user_config(user_id, key).await
+    }
+
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        (**self).upsert_user_config(user_id, key, value).await
+    }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        (**self).delete_user_config(user_id, key).await
+    }
+
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        (**self)
+            .insert_user_deleted(user_id, deleted_by, reason)
+            .await
+    }
+
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        (**self)
+            .insert_user_status_change(user_id, old_status, new_status, changed_by, reason)
+            .await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        (**self).list_user_status_changes(user_id).await
+    }
+
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        (**self).list_custom_roles(organization_id).await
+    }
+
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        (**self).upsert_custom_role(input).await
+    }
+
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_custom_role(name, organization_id).await
+    }
+
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        (**self).list_groups(organization_id).await
+    }
+
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        (**self).create_group(input).await
+    }
+
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        (**self).find_group_by_id(group_id).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_group(group_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        (**self).list_group_members(group_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        (**self).insert_group_member(group_id, user_id).await
+    }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_group_member(group_id, user_id).await
+    }
+
+    async fn list_oauth2_provider_apps(
+        &self,
+    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
+        (**self).list_oauth2_provider_apps().await
+    }
+
+    async fn create_oauth2_provider_app(
+        &self,
+        input: &CreateOAuth2ProviderAppInput,
+    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
+        (**self).create_oauth2_provider_app(input).await
+    }
+
+    async fn find_oauth2_provider_app_by_id(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        (**self).find_oauth2_provider_app_by_id(app_id).await
+    }
+
+    async fn update_oauth2_provider_app(
+        &self,
+        input: &UpdateOAuth2ProviderAppInput,
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
+        (**self).update_oauth2_provider_app(input).await
+    }
+
+    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_oauth2_provider_app(app_id).await
+    }
+
+    async fn list_oauth2_provider_app_secrets(
+        &self,
+        app_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
+        (**self).list_oauth2_provider_app_secrets(app_id).await
+    }
+
+    async fn create_oauth2_provider_app_secret(
+        &self,
+        app_id: Uuid,
+        hashed_secret: &[u8],
+        display_secret: &str,
+    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
+        (**self)
+            .create_oauth2_provider_app_secret(app_id, hashed_secret, display_secret)
+            .await
+    }
+
+    async fn delete_oauth2_provider_app_secret(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_oauth2_provider_app_secret(secret_id).await
+    }
+
+    async fn find_oauth2_provider_app_secret_by_id(
+        &self,
+        secret_id: Uuid,
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
+        (**self)
+            .find_oauth2_provider_app_secret_by_id(secret_id)
+            .await
+    }
+
+    async fn create_oauth2_provider_app_code(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        secret_prefix: &[u8],
+        hashed_secret: &[u8],
+        expires_at: OffsetDateTime,
+        resource_uri: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
+        (**self)
+            .create_oauth2_provider_app_code(
+                app_id,
+                user_id,
+                secret_prefix,
+                hashed_secret,
+                expires_at,
+                resource_uri,
+                code_challenge,
+                code_challenge_method,
+            )
+            .await
+    }
+
+    async fn find_oauth2_provider_app_code_by_prefix(
+        &self,
+        secret_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
+        (**self)
+            .find_oauth2_provider_app_code_by_prefix(secret_prefix)
+            .await
+    }
+
+    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_oauth2_provider_app_code(code_id).await
+    }
+
+    async fn create_oauth2_provider_app_token(
+        &self,
+        input: &CreateOAuth2ProviderAppTokenInput,
+    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
+        (**self).create_oauth2_provider_app_token(input).await
+    }
+
+    async fn find_oauth2_provider_app_token_by_prefix(
+        &self,
+        hash_prefix: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        (**self)
+            .find_oauth2_provider_app_token_by_prefix(hash_prefix)
+            .await
+    }
+
+    async fn find_oauth2_provider_app_token_by_refresh_hash(
+        &self,
+        refresh_hash: &[u8],
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
+        (**self)
+            .find_oauth2_provider_app_token_by_refresh_hash(refresh_hash)
+            .await
+    }
+
+    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_oauth2_provider_app_token(token_id).await
+    }
+
+    async fn list_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
+        (**self)
+            .list_oauth2_provider_app_tokens_by_app_and_user(app_id, user_id)
+            .await
+    }
+
+    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<u64, StorageError> {
+        (**self)
+            .delete_oauth2_provider_app_tokens_by_app_and_user(app_id, user_id)
+            .await
+    }
+
+    async fn fetch_pending_notification_messages(
+        &self,
+        limit: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        (**self).fetch_pending_notification_messages(limit).await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_notification_message_status(message_id, status)
+            .await
+    }
+
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .increment_notification_message_attempt_count(message_id)
             .await
     }
 }
