@@ -6884,7 +6884,7 @@ async fn post_archive_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6901,7 +6901,7 @@ async fn post_archive_template_version(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -6926,7 +6926,7 @@ async fn patch_cancel_template_version(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -6942,7 +6942,7 @@ async fn patch_cancel_template_version(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7060,7 +7060,7 @@ async fn patch_template_version_dry_run(
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -7076,7 +7076,7 @@ async fn patch_template_version_dry_run(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7109,7 +7109,7 @@ async fn patch_cancel_template_version_dry_run(
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -7125,7 +7125,7 @@ async fn patch_cancel_template_version_dry_run(
         obj = obj.with_id(tid);
     }
     if authorizer
-        .authorize(&_context.actor, Action::Update, &obj)
+        .authorize(&context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7252,7 +7252,7 @@ async fn post_template_version_dynamic_parameters_evaluate(
         None => return Ok(not_found_response("Template version not found.")),
     };
 
-    // RBAC: verify the actor can read templates (parameter evaluation is a read operation).
+    // RBAC: verify the actor can read this template (parameter evaluation requires template read access).
     let authorizer = Authorizer::new();
     let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
     if let Some(tid) = ver.template_id {
@@ -9620,7 +9620,7 @@ async fn patch_cancel_workspace_build(
     headers: HeaderMap,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -9641,7 +9641,7 @@ async fn patch_cancel_workspace_build(
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
-            &_context.actor,
+            &context.actor,
             Action::Update,
             &Object::new(ResourceType::Workspace)
                 .with_id(build.workspace_id)
@@ -9832,7 +9832,7 @@ async fn put_workspace_build_state(
     Path(build_id): Path<Uuid>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -9853,7 +9853,7 @@ async fn put_workspace_build_state(
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
-            &_context.actor,
+            &context.actor,
             Action::Update,
             &Object::new(ResourceType::Workspace)
                 .with_id(build.workspace_id)
@@ -11994,6 +11994,10 @@ async fn post_custom_notification(
     };
 
     // RBAC: verify the actor can create notification messages.
+    // In Go, postCustomNotification checks policy.ActionCreate on
+    // rbac.ResourceNotificationMessage at site level. Only the owner role
+    // has NotificationMessage:Create at site scope, so this is intentionally
+    // restricted to site owners. No org scoping needed.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -12414,21 +12418,18 @@ async fn post_workspace_agent_recreate_devcontainer(
         return Ok(resource_not_found_response());
     };
 
-    // Look up the workspace for org/owner-scoped RBAC.
-    let Some(workspace) = state.store.find_workspace_by_agent_id(agent_id).await? else {
-        return Ok(resource_not_found_response());
-    };
-
     // RBAC: verify the actor can update workspace agent devcontainers.
+    // Look up the workspace for org/owner-scoped RBAC when available.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
     let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::WorkspaceAgentDevcontainers)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::WorkspaceAgentDevcontainers),
+    };
     if authorizer
-        .authorize(
-            &context.actor,
-            Action::Update,
-            &Object::new(ResourceType::WorkspaceAgentDevcontainers)
-                .with_owner(workspace.owner_id)
-                .in_org(workspace.organization_id),
-        )
+        .authorize(&context.actor, Action::Update, &rbac_obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -12487,21 +12488,18 @@ async fn delete_workspace_agent_devcontainer(
         return Ok(resource_not_found_response());
     };
 
-    // Look up the workspace for org/owner-scoped RBAC.
-    let Some(workspace) = state.store.find_workspace_by_agent_id(agent_id).await? else {
-        return Ok(resource_not_found_response());
-    };
-
     // RBAC: verify the actor can delete workspace agent devcontainers.
+    // Look up the workspace for org/owner-scoped RBAC when available.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
     let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::WorkspaceAgentDevcontainers)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::WorkspaceAgentDevcontainers),
+    };
     if authorizer
-        .authorize(
-            &context.actor,
-            Action::Delete,
-            &Object::new(ResourceType::WorkspaceAgentDevcontainers)
-                .with_owner(workspace.owner_id)
-                .in_org(workspace.organization_id),
-        )
+        .authorize(&context.actor, Action::Delete, &rbac_obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -13649,14 +13647,17 @@ async fn post_file(
     };
 
     // RBAC: verify the actor can upload files.
-    // Note: Go reference has no explicit RBAC here (auth-only), but we add
-    // a permissive check with owner scoping so org-level roles pass.
+    // In Go, postFile checks rbac.ActionCreate on rbac.ResourceFile at the
+    // site level (no org/owner scoping). This intentionally differs from
+    // upload_chat_file which uses .with_owner().in_org() because chat file
+    // uploads are organization-scoped, while general file uploads (used for
+    // template archives) are a site-level operation.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
             Action::Create,
-            &Object::new(ResourceType::File).with_owner(context.user.id),
+            &Object::new(ResourceType::File),
         )
         .is_err()
     {
