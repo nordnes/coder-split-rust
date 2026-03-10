@@ -3147,13 +3147,16 @@ async fn get_provisioner_job_logs(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
-    }
+        Ok(o) => o,
+        Err(error) => {
+            return handle_identity_error(error);
+        }
+    };
 
     // Parse job UUID.
     let job_id = match Uuid::from_str(&job) {
@@ -3171,9 +3174,14 @@ async fn get_provisioner_job_logs(
     };
 
     // Look up the provisioner job to verify it exists.
-    let Some(_pj) = state.store.find_provisioner_job(job_id).await? else {
+    let Some(pj) = state.store.find_provisioner_job(job_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // Verify the job belongs to the requested organization.
+    if pj.organization_id != org.id {
+        return Ok(resource_not_found_response());
+    }
 
     // Fetch the logs.
     let logs = state
