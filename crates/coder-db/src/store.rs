@@ -22,29 +22,30 @@ use coder_core::{
     AcquireProvisionerJobInput, ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord,
     ApiKeyWithOwnerRecord, AppStore, AuditDiff, AuditLog, AuditLogAction, AuditLogListFilter,
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
-    ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
-    CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
-    CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
-    CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
-    DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser,
-    FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupRecord,
-    HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
-    InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
-    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
-    InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
-    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
-    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
-    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
-    ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
-    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
-    UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-    UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
-    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow,
-    WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
+    ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
+    ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
+    CreateFirstUserInput, CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError,
+    CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
+    DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord,
+    ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord,
+    GroupRecord, HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
+    InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+    InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+    InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
+    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
+    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
+    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
+    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
+    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
+    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
+    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpsertExternalAuthLinkInput,
+    UpsertPortShareInput, UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter,
+    UserPreferenceRecord, UserRecord, UserStatus, WebpushSubscriptionRecord,
+    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
+    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
+    WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput,
+    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
     WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
     WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
@@ -404,6 +405,17 @@ struct StoredChatQueuedMessageRow {
     chat_id: Uuid,
     content: Value,
     created_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatFileRow {
+    id: Uuid,
+    owner_id: Uuid,
+    organization_id: Uuid,
+    created_at: OffsetDateTime,
+    name: String,
+    mimetype: String,
+    data: Vec<u8>,
 }
 
 #[derive(Debug, FromRow)]
@@ -3249,6 +3261,76 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chats SET archived = false, updated_at = now()
+             WHERE id = $1",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Files
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_chat_file(
+        &self,
+        input: InsertChatFileInput,
+    ) -> Result<ChatFileRecord, StorageError> {
+        let row: StoredChatFileRow = sqlx::query_as(
+            "INSERT INTO chat_files (owner_id, organization_id, name, mimetype, data)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, owner_id, organization_id, created_at, name, mimetype, data",
+        )
+        .bind(input.owner_id)
+        .bind(input.organization_id)
+        .bind(&input.name)
+        .bind(&input.mimetype)
+        .bind(&input.data)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(ChatFileRecord {
+            id: row.id,
+            owner_id: row.owner_id,
+            organization_id: row.organization_id,
+            created_at: row.created_at,
+            name: row.name,
+            mimetype: row.mimetype,
+            data: row.data,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_chat_file_by_id(&self, id: Uuid) -> Result<Option<ChatFileRecord>, StorageError> {
+        let row: Option<StoredChatFileRow> = sqlx::query_as(
+            "SELECT id, owner_id, organization_id, created_at, name, mimetype, data
+             FROM chat_files WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| ChatFileRecord {
+            id: r.id,
+            owner_id: r.owner_id,
+            organization_id: r.organization_id,
+            created_at: r.created_at,
+            name: r.name,
+            mimetype: r.mimetype,
+            data: r.data,
+        }))
+    }
+
     // -----------------------------------------------------------------------
     // Notifications domain
     // -----------------------------------------------------------------------
@@ -4754,6 +4836,64 @@ impl AppStore for PostgresStore {
         Ok(rows
             .into_iter()
             .map(provisioner_job_timing_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            script_id: Uuid,
+            started_at: OffsetDateTime,
+            ended_at: OffsetDateTime,
+            exit_code: i32,
+            stage: String,
+            status: String,
+            display_name: String,
+            workspace_agent_id: Uuid,
+            workspace_agent_name: String,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT
+                DISTINCT ON (wast.script_id) wast.script_id,
+                wast.started_at,
+                wast.ended_at,
+                wast.exit_code,
+                wast.stage::text AS stage,
+                wast.status::text AS status,
+                was2.display_name,
+                wa.id AS workspace_agent_id,
+                wa.name AS workspace_agent_name
+             FROM workspace_agent_script_timings wast
+             INNER JOIN workspace_agent_scripts was2 ON was2.id = wast.script_id
+             INNER JOIN workspace_agents wa ON wa.id = was2.workspace_agent_id
+             INNER JOIN workspace_resources wr ON wr.id = wa.resource_id
+             INNER JOIN workspace_builds wb ON wb.job_id = wr.job_id
+             WHERE wb.id = $1
+             ORDER BY wast.script_id, wast.started_at",
+        )
+        .bind(build_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| WorkspaceAgentScriptTimingRow {
+                script_id: r.script_id,
+                started_at: r.started_at,
+                ended_at: r.ended_at,
+                exit_code: r.exit_code,
+                stage: r.stage,
+                status: r.status,
+                display_name: r.display_name,
+                workspace_agent_id: r.workspace_agent_id,
+                workspace_agent_name: r.workspace_agent_name,
+            })
             .collect())
     }
 
