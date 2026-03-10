@@ -256,5 +256,11 @@ mod tests {
 
         let info = provider.debug_info().await;
         assert_eq!(info.len(), 2);
+        for id in [id1, id2] {
+            assert!(
+                info.iter().any(|i| i.agent_id == id),
+                "expected agent {id} in debug_info"
+            );
+        }
     }
 }

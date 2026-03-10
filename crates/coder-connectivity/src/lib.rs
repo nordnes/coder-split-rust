@@ -1195,5 +1195,11 @@ mod tests {
         let snapshot = snapshot.unwrap_or_else(|_| unreachable!());
         assert_eq!(snapshot.deployment_id, "test-deploy-id");
         assert_eq!(snapshot.version, "0.0.1-test");
+        assert!(
+            !snapshot.timestamp.is_empty(),
+            "timestamp should be non-empty"
+        );
+        assert_eq!(snapshot.active_sessions, 0);
+        assert_eq!(snapshot.workspaces, 0);
     }
 }
