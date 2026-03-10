@@ -5,7 +5,7 @@ use std::{str::FromStr, time::Duration};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-use coder_core::api::{GetUserStatusCountsResponse, UserStatusChangeCount};
+use coder_core::api::{DAUEntry, DAUsResponse, GetUserStatusCountsResponse, UserStatusChangeCount};
 use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
 use coder_core::provisioner::{
     LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord,
@@ -25,32 +25,32 @@ use coder_core::{
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
     ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
     ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
-    CreateFirstUserInput, CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError,
-    CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
-    DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord,
-    ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord,
-    GroupRecord, HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
-    InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
-    InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-    InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
-    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
-    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
-    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
-    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
-    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
-    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpsertExternalAuthLinkInput,
-    UpsertPortShareInput, UpsertProvisionerDaemonInput, UserAppearanceRecord, UserLinkRecord,
-    UserListFilter, UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
-    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
-    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
-    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
-    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
-    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
-    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput, CreateUserInput,
+    CreateUserStoreError, CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig,
+    DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
+    ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput,
+    GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings, InsertAgentLogInput,
+    InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
+    InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
+    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
+    InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
+    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
+    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
+    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
+    ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
+    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
+    UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
+    UserAppearanceRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+    UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
+    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -647,13 +647,6 @@ struct StoredUserStatusChangeRow {
     changed_at: OffsetDateTime,
     changed_by: Option<Uuid>,
     reason: String,
-}
-
-#[derive(Debug, FromRow)]
-struct StoredUserStatusCountRow {
-    date: OffsetDateTime,
-    status: String,
-    count: i64,
 }
 
 #[derive(Debug, FromRow)]
@@ -1563,114 +1556,6 @@ impl AppStore for PostgresStore {
         rows.into_iter()
             .map(user_status_change_record_from_row)
             .collect()
-    }
-
-    #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn get_user_status_counts(
-        &self,
-        timezone: &str,
-    ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let rows = sqlx::query_as::<_, StoredUserStatusCountRow>(
-            "WITH
-             system_users AS (
-                 SELECT id FROM users WHERE is_system = TRUE
-             ),
-             dates_of_interest AS (
-                 SELECT timezone($1::text, gs_local) AS date
-                 FROM generate_series(
-                     timezone($1::text, NOW() - INTERVAL '30 days'),
-                     timezone($1::text, NOW()),
-                     interval '1 day'
-                 ) AS gs_local
-             ),
-             latest_status_before_range AS (
-                 SELECT
-                     DISTINCT ON (usc.user_id) usc.user_id,
-                     usc.new_status,
-                     usc.changed_at
-                 FROM user_status_changes usc
-                 LEFT JOIN LATERAL (
-                     SELECT COUNT(*) > 0 AS deleted
-                     FROM user_deleted ud
-                     WHERE ud.user_id = usc.user_id
-                       AND (ud.deleted_at < usc.changed_at OR ud.deleted_at < NOW() - INTERVAL '30 days')
-                 ) AS ud ON true
-                 WHERE usc.user_id NOT IN (SELECT id FROM system_users)
-                     AND NOT ud.deleted
-                     AND usc.changed_at < (NOW() - INTERVAL '30 days')
-                 ORDER BY usc.user_id, usc.changed_at DESC
-             ),
-             status_changes_during_range AS (
-                 SELECT
-                     usc.user_id,
-                     usc.new_status,
-                     usc.changed_at
-                 FROM user_status_changes usc
-                 LEFT JOIN LATERAL (
-                     SELECT COUNT(*) > 0 AS deleted
-                     FROM user_deleted ud
-                     WHERE ud.user_id = usc.user_id AND ud.deleted_at < usc.changed_at
-                 ) AS ud ON true
-                 WHERE usc.user_id NOT IN (SELECT id FROM system_users)
-                     AND NOT ud.deleted
-                     AND usc.changed_at >= (NOW() - INTERVAL '30 days')
-                     AND usc.changed_at <= NOW()
-             ),
-             relevant_status_changes AS (
-                 SELECT user_id, new_status, changed_at
-                 FROM latest_status_before_range
-                 UNION ALL
-                 SELECT user_id, new_status, changed_at
-                 FROM status_changes_during_range
-             ),
-             statuses AS (
-                 SELECT DISTINCT new_status FROM relevant_status_changes
-             ),
-             ranked_status_change_per_user_per_date AS (
-                 SELECT
-                     d.date,
-                     rsc1.user_id,
-                     ROW_NUMBER() OVER (PARTITION BY d.date, rsc1.user_id ORDER BY rsc1.changed_at DESC) AS rn,
-                     rsc1.new_status
-                 FROM dates_of_interest d
-                 LEFT JOIN relevant_status_changes rsc1 ON rsc1.changed_at <= d.date
-             )
-             SELECT
-                 rscpupd.date::timestamptz AS date,
-                 statuses.new_status::text AS status,
-                 COUNT(rscpupd.user_id) FILTER (
-                     WHERE rscpupd.rn = 1
-                     AND (
-                         rscpupd.new_status = statuses.new_status
-                         AND (
-                             NOT EXISTS (SELECT 1 FROM user_deleted WHERE user_id = rscpupd.user_id)
-                             OR
-                             rscpupd.date < (SELECT MIN(deleted_at) FROM user_deleted WHERE user_id = rscpupd.user_id)
-                         )
-                     )
-                 ) AS count
-             FROM ranked_status_change_per_user_per_date rscpupd
-             CROSS JOIN statuses
-             GROUP BY rscpupd.date, statuses.new_status
-             ORDER BY rscpupd.date",
-        )
-        .bind(timezone)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_error)?;
-
-        let mut status_counts: HashMap<String, Vec<UserStatusChangeCount>> = HashMap::new();
-        for row in rows {
-            status_counts
-                .entry(row.status.clone())
-                .or_default()
-                .push(UserStatusChangeCount {
-                    date: row.date,
-                    count: row.count,
-                });
-        }
-
-        Ok(GetUserStatusCountsResponse { status_counts })
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2724,6 +2609,178 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)?;
 
         Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct DauRow {
+            date: time::Date,
+            amount: i64,
+        }
+
+        // Build a proper Etc/GMT timezone string from the integer offset.
+        // Etc/GMT sign convention is inverted: positive tz_offset → Etc/GMT-N.
+        let tz_name = if tz_offset == 0 {
+            "UTC".to_string()
+        } else if tz_offset > 0 {
+            format!("Etc/GMT-{tz_offset}")
+        } else {
+            format!("Etc/GMT+{}", tz_offset.abs())
+        };
+
+        let rows = sqlx::query_as::<_, DauRow>(
+            "SELECT
+                (created_at AT TIME ZONE $1)::date AS date,
+                COUNT(DISTINCT user_id) AS amount
+             FROM workspace_agent_stats
+             WHERE connection_count > 0
+               AND user_id IS NOT NULL
+             GROUP BY date
+             ORDER BY date ASC",
+        )
+        .bind(&tz_name)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let entries = rows
+            .into_iter()
+            .map(|row| DAUEntry {
+                date: row.date.to_string(),
+                amount: row.amount,
+            })
+            .collect();
+
+        Ok(DAUsResponse {
+            tz_hour_offset: tz_offset,
+            entries,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_user_status_counts(
+        &self,
+        timezone: &str,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
+    ) -> Result<GetUserStatusCountsResponse, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct StatusCountRow {
+            date: OffsetDateTime,
+            status: String,
+            count: i64,
+        }
+
+        let rows = sqlx::query_as::<_, StatusCountRow>(
+            r#"
+            WITH
+            system_users AS (
+                SELECT id FROM users WHERE is_system = TRUE
+            ),
+            dates_of_interest AS (
+                SELECT timezone($1::text, gs_local) AS date
+                FROM generate_series(
+                    timezone($1::text, $2::timestamptz),
+                    timezone($1::text, $3::timestamptz),
+                    interval '1 day'
+                ) AS gs_local
+            ),
+            latest_status_before_range AS (
+                SELECT
+                    DISTINCT ON (usc.user_id)
+                    usc.user_id,
+                    usc.new_status,
+                    usc.changed_at
+                FROM user_status_changes usc
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) > 0 AS deleted
+                    FROM user_deleted ud
+                    WHERE ud.user_id = usc.user_id
+                      AND (ud.deleted_at < usc.changed_at OR ud.deleted_at < $2::timestamptz)
+                ) AS ud ON true
+                WHERE usc.user_id NOT IN (SELECT id FROM system_users)
+                    AND NOT ud.deleted
+                    AND usc.changed_at < $2::timestamptz
+                ORDER BY usc.user_id, usc.changed_at DESC
+            ),
+            status_changes_during_range AS (
+                SELECT
+                    usc.user_id,
+                    usc.new_status,
+                    usc.changed_at
+                FROM user_status_changes usc
+                LEFT JOIN LATERAL (
+                    SELECT COUNT(*) > 0 AS deleted
+                    FROM user_deleted ud
+                    WHERE ud.user_id = usc.user_id AND ud.deleted_at < usc.changed_at
+                ) AS ud ON true
+                WHERE usc.user_id NOT IN (SELECT id FROM system_users)
+                    AND NOT ud.deleted
+                    AND usc.changed_at >= $2::timestamptz
+                    AND usc.changed_at <= $3::timestamptz
+            ),
+            relevant_status_changes AS (
+                SELECT user_id, new_status, changed_at
+                FROM latest_status_before_range
+                UNION ALL
+                SELECT user_id, new_status, changed_at
+                FROM status_changes_during_range
+            ),
+            statuses AS (
+                SELECT DISTINCT new_status FROM relevant_status_changes
+            ),
+            ranked_status_change_per_user_per_date AS (
+                SELECT
+                    d.date,
+                    rsc1.user_id,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY d.date, rsc1.user_id
+                        ORDER BY rsc1.changed_at DESC
+                    ) AS rn,
+                    rsc1.new_status
+                FROM dates_of_interest d
+                LEFT JOIN relevant_status_changes rsc1 ON rsc1.changed_at <= d.date
+            )
+            SELECT
+                rscpupd.date::timestamptz AS date,
+                statuses.new_status::text AS status,
+                COUNT(rscpupd.user_id) FILTER (
+                    WHERE rscpupd.rn = 1
+                    AND (
+                        rscpupd.new_status = statuses.new_status
+                        AND (
+                            NOT EXISTS (SELECT 1 FROM user_deleted WHERE user_id = rscpupd.user_id)
+                            OR
+                            rscpupd.date < (SELECT MIN(deleted_at) FROM user_deleted WHERE user_id = rscpupd.user_id)
+                        )
+                    )
+                ) AS count
+            FROM ranked_status_change_per_user_per_date rscpupd
+            CROSS JOIN statuses
+            GROUP BY rscpupd.date, statuses.new_status
+            ORDER BY rscpupd.date
+            "#,
+        )
+        .bind(timezone)
+        .bind(start_time)
+        .bind(end_time)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let mut status_counts: HashMap<String, Vec<UserStatusChangeCount>> = HashMap::new();
+        for row in rows {
+            status_counts
+                .entry(row.status)
+                .or_default()
+                .push(UserStatusChangeCount {
+                    date: row.date,
+                    count: row.count,
+                });
+        }
+
+        Ok(GetUserStatusCountsResponse { status_counts })
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -4692,6 +4749,182 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        let row: (
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        ) = sqlx::query_as(
+            "INSERT INTO groups (name, display_name, organization_id, avatar_url, quota_allowance)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, name, display_name, organization_id, avatar_url,
+                       quota_allowance, source, created_at",
+        )
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(input.organization_id)
+        .bind(&input.avatar_url)
+        .bind(input.quota_allowance)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                StorageError::invalid_data(
+                    "group with this name already exists in the organization",
+                )
+            } else {
+                storage_error(e)
+            }
+        })?;
+
+        let (
+            id,
+            name,
+            display_name,
+            organization_id,
+            avatar_url,
+            quota_allowance,
+            source,
+            created_at,
+        ) = row;
+        Ok(GroupRecord {
+            id,
+            name,
+            display_name,
+            organization_id,
+            avatar_url,
+            quota_allowance,
+            source,
+            created_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM groups WHERE id = $1")
+            .bind(group_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        let rows: Vec<(
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        )> = sqlx::query_as(
+            "SELECT id, name, display_name, organization_id, avatar_url,
+                    quota_allowance, source, created_at
+             FROM groups
+             WHERE organization_id = $1
+             ORDER BY LOWER(name) ASC",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    name,
+                    display_name,
+                    organization_id,
+                    avatar_url,
+                    quota_allowance,
+                    source,
+                    created_at,
+                )| {
+                    GroupRecord {
+                        id,
+                        name,
+                        display_name,
+                        organization_id,
+                        avatar_url,
+                        quota_allowance,
+                        source,
+                        created_at,
+                    }
+                },
+            )
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO group_members (group_id, user_id)
+             VALUES ($1, $2)",
+        )
+        .bind(group_id)
+        .bind(user_id)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                StorageError::invalid_data("user is already a member of this group")
+            } else {
+                storage_error(e)
+            }
+        })?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        let rows: Vec<(Uuid, Uuid)> = sqlx::query_as(
+            "SELECT gm.group_id, gm.user_id
+             FROM group_members gm
+             JOIN users u ON u.id = gm.user_id
+             WHERE gm.group_id = $1
+               AND u.deleted = false
+             ORDER BY LOWER(u.username) ASC",
+        )
+        .bind(group_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|(group_id, user_id)| GroupMemberRecord { group_id, user_id })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM group_members WHERE group_id = $1 AND user_id = $2")
+            .bind(group_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
         let row: Option<(
             Uuid,
@@ -5126,6 +5359,24 @@ impl AppStore for PostgresStore {
                 workspace_agent_name: r.workspace_agent_name,
             })
             .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredWorkspaceResourceRow>(
+            "SELECT id, created_at, job_id, transition, type AS resource_type,
+                    name, hide, icon, daily_cost
+             FROM workspace_resources
+             WHERE id = $1",
+        )
+        .bind(resource_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(workspace_resource_record_from_row))
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
