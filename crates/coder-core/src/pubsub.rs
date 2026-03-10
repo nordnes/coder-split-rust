@@ -199,6 +199,18 @@ pub fn workspace_build_logs_channel(build_id: Uuid) -> String {
     format!("workspace_build_logs:{build_id}")
 }
 
+/// Returns the pub/sub channel name for workspace agent log streaming.
+#[must_use]
+pub fn workspace_agent_logs_channel(agent_id: Uuid) -> String {
+    format!("workspace_agent_logs:{agent_id}")
+}
+
+/// Returns the pub/sub channel name for workspace agent reinit events.
+#[must_use]
+pub fn workspace_agent_reinit_channel(agent_id: Uuid) -> String {
+    format!("workspace_reinit:{agent_id}")
+}
+
 /// The kind of workspace event broadcast over the pub/sub channel.
 ///
 /// String representations match the Go `wspubsub.WorkspaceEventKind` constants.
@@ -341,6 +353,14 @@ mod tests {
         assert_eq!(
             workspace_build_logs_channel(id),
             "workspace_build_logs:00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(
+            workspace_agent_logs_channel(id),
+            "workspace_agent_logs:00000000-0000-0000-0000-000000000000"
+        );
+        assert_eq!(
+            workspace_agent_reinit_channel(id),
+            "workspace_reinit:00000000-0000-0000-0000-000000000000"
         );
     }
 
