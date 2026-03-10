@@ -11454,6 +11454,7 @@ mod tests {
         ProvisionerJobLogRecord as PortsJobLogRecord,
         ProvisionerJobTimingRecord as PortsJobTimingRecord,
     };
+    use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
     use coder_core::provisioner::{
         ProvisionerJobLogRecord as ProvisionerLogRecord,
         ProvisionerJobTimingRecord as ProvisionerTimingRecord,
@@ -11489,14 +11490,15 @@ mod tests {
         TemplateVersionVariableRecord, TokenConfigRecord, UpdateRolesRequest, UpdateTemplateMeta,
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
-        UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
-        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
-        WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentRow,
-        WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+        UpsertPortShareInput, UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter,
+        UserPreferenceRecord, UserRecord, UserStatus, ValidateUserPasswordRequest,
+        WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+        WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+        WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
         WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
-        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput,
-        WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
-        WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -11583,6 +11585,8 @@ mod tests {
         workspace_resource_metadata: Mutex<HashMap<Uuid, Vec<WorkspaceResourceMetadataRecord>>>,
         provisioner_job_logs: Mutex<HashMap<Uuid, Vec<PortsJobLogRecord>>>,
         provisioner_job_timings: Mutex<HashMap<Uuid, Vec<PortsJobTimingRecord>>>,
+        workspace_port_shares: Mutex<Vec<WorkspaceAgentPortShareRecord>>,
+        workspace_acls: Mutex<HashMap<Uuid, WorkspaceACLRecord>>,
     }
 
     impl FakeStore {
@@ -11643,6 +11647,8 @@ mod tests {
                 workspace_resource_metadata: Mutex::new(HashMap::new()),
                 provisioner_job_logs: Mutex::new(HashMap::new()),
                 provisioner_job_timings: Mutex::new(HashMap::new()),
+                workspace_port_shares: Mutex::new(Vec::new()),
+                workspace_acls: Mutex::new(HashMap::new()),
             }
         }
 
@@ -15256,6 +15262,230 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(build_id, records);
+            Ok(())
+        }
+
+        async fn list_workspaces(
+            &self,
+            filter: WorkspaceListFilter,
+        ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut rows: Vec<WorkspaceRecord> = workspaces
+                .values()
+                .filter(|w| !w.deleted)
+                .filter(|w| {
+                    filter
+                        .owner_id
+                        .is_none_or(|owner_id| w.owner_id == owner_id)
+                })
+                .filter(|w| {
+                    filter
+                        .name
+                        .as_ref()
+                        .is_none_or(|n| w.name.contains(n.as_str()))
+                })
+                .cloned()
+                .collect();
+            let count = i64::try_from(rows.len()).unwrap_or(0);
+            let offset = usize::try_from(filter.offset).unwrap_or(0);
+            let limit = usize::try_from(filter.limit).unwrap_or(25);
+            rows = rows.into_iter().skip(offset).take(limit).collect();
+            Ok((rows, count))
+        }
+
+        async fn find_workspace_by_id(
+            &self,
+            workspace_id: Uuid,
+            _viewer_id: Option<Uuid>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(workspaces
+                .get(&workspace_id)
+                .filter(|w| !w.deleted)
+                .cloned())
+        }
+
+        async fn update_workspace_name(
+            &self,
+            workspace_id: Uuid,
+            name: &str,
+            _viewer_id: Option<Uuid>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(None);
+            };
+            if ws.deleted {
+                return Ok(None);
+            }
+            ws.name = name.to_owned();
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(Some(ws.clone()))
+        }
+
+        async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            if ws.deleted {
+                return Ok(false);
+            }
+            ws.deleted = true;
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn list_workspace_builds(
+            &self,
+            workspace_id: Uuid,
+            limit: u32,
+            offset: u32,
+        ) -> Result<Vec<WorkspaceBuildRecord>, StorageError> {
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut rows: Vec<WorkspaceBuildRecord> = builds
+                .values()
+                .filter(|b| b.workspace_id == workspace_id)
+                .cloned()
+                .collect();
+            rows.sort_by(|a, b| b.build_number.cmp(&a.build_number));
+            let off = usize::try_from(offset).unwrap_or(0);
+            let lim = usize::try_from(limit).unwrap_or(25);
+            Ok(rows.into_iter().skip(off).take(lim).collect())
+        }
+
+        async fn list_workspace_port_shares(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
+            let shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(shares
+                .iter()
+                .filter(|s| s.workspace_id == workspace_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn upsert_workspace_port_share(
+            &self,
+            input: UpsertPortShareInput,
+        ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
+            let mut shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Update existing or insert new.
+            if let Some(existing) = shares.iter_mut().find(|s| {
+                s.workspace_id == input.workspace_id
+                    && s.agent_name == input.agent_name
+                    && s.port == input.port
+            }) {
+                existing.share_level = input.share_level.clone();
+                existing.protocol = input.protocol.clone();
+                return Ok(existing.clone());
+            }
+            let record = WorkspaceAgentPortShareRecord {
+                workspace_id: input.workspace_id,
+                agent_name: input.agent_name,
+                port: input.port,
+                share_level: input.share_level,
+                protocol: input.protocol,
+            };
+            shares.push(record.clone());
+            Ok(record)
+        }
+
+        async fn delete_workspace_port_share(
+            &self,
+            workspace_id: Uuid,
+            agent_name: &str,
+            port: i32,
+        ) -> Result<bool, StorageError> {
+            let mut shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let before = shares.len();
+            shares.retain(|s| {
+                !(s.workspace_id == workspace_id && s.agent_name == agent_name && s.port == port)
+            });
+            Ok(shares.len() < before)
+        }
+
+        async fn get_workspace_acl(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<WorkspaceACLRecord, StorageError> {
+            let acls = self.workspace_acls.lock().map_err(
+                |e: std::sync::PoisonError<
+                    std::sync::MutexGuard<'_, HashMap<Uuid, WorkspaceACLRecord>>,
+                >| { StorageError::unavailable(e.to_string()) },
+            )?;
+            Ok(acls
+                .get(&workspace_id)
+                .cloned()
+                .unwrap_or_else(|| WorkspaceACLRecord {
+                    user_acl: HashMap::new(),
+                    group_acl: HashMap::new(),
+                }))
+        }
+
+        async fn update_workspace_acl(
+            &self,
+            workspace_id: Uuid,
+            input: &UpdateWorkspaceACLInput,
+        ) -> Result<(), StorageError> {
+            let mut acls = self.workspace_acls.lock().map_err(
+                |e: std::sync::PoisonError<
+                    std::sync::MutexGuard<'_, HashMap<Uuid, WorkspaceACLRecord>>,
+                >| { StorageError::unavailable(e.to_string()) },
+            )?;
+            let entry = acls
+                .entry(workspace_id)
+                .or_insert_with(|| WorkspaceACLRecord {
+                    user_acl: HashMap::new(),
+                    group_acl: HashMap::new(),
+                });
+            entry.user_acl.extend(
+                input
+                    .user_roles
+                    .iter()
+                    .map(|(k, v): (&String, &String)| (k.to_owned(), v.to_owned())),
+            );
+            entry.group_acl.extend(
+                input
+                    .group_roles
+                    .iter()
+                    .map(|(k, v): (&String, &String)| (k.to_owned(), v.to_owned())),
+            );
+            Ok(())
+        }
+
+        async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+            let mut acls = self.workspace_acls.lock().map_err(
+                |e: std::sync::PoisonError<
+                    std::sync::MutexGuard<'_, HashMap<Uuid, WorkspaceACLRecord>>,
+                >| { StorageError::unavailable(e.to_string()) },
+            )?;
+            acls.remove(&workspace_id);
             Ok(())
         }
     }
@@ -22496,6 +22726,948 @@ mod tests {
         let first = &users[0];
         assert!(first.get("id").is_some());
         assert!(first.get("username").is_some());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace lifecycle
+    // -----------------------------------------------------------------------
+
+    /// Helper: creates a workspace via the org-member endpoint.
+    /// Returns (workspace_id_str, workspace json).
+    async fn create_test_workspace(
+        app: &Router,
+        session_token: &str,
+        org_id: Uuid,
+        template_id: &str,
+        name: &str,
+    ) -> Result<Value, Box<dyn Error>> {
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/members/me/workspaces"),
+                session_token,
+                &json!({
+                    "name": name,
+                    "template_id": template_id,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let ws = response_json(response).await?;
+        Ok(ws)
+    }
+
+    #[tokio::test]
+    async fn workspace_lifecycle_create_get_list_update_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // 1. Create workspace
+        let ws = create_test_workspace(&app, &session_token, org_id, template_id, "my-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+        assert_eq!(ws.get("name").and_then(Value::as_str), Some("my-ws"));
+        assert!(ws.get("owner_id").and_then(Value::as_str).is_some());
+        assert_eq!(
+            ws.get("template_id").and_then(Value::as_str),
+            Some(template_id)
+        );
+
+        // 2. Get workspace
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert_eq!(fetched.get("name").and_then(Value::as_str), Some("my-ws"));
+        assert_eq!(fetched.get("id").and_then(Value::as_str), Some(ws_id));
+
+        // 3. List workspaces
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/workspaces?owner=me", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let workspaces = list_body
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .ok_or("expected workspaces array")?;
+        assert_eq!(workspaces.len(), 1);
+        assert_eq!(
+            workspaces[0].get("name").and_then(Value::as_str),
+            Some("my-ws")
+        );
+        let count = list_body.get("count").and_then(Value::as_i64);
+        assert_eq!(count, Some(1));
+
+        // 4. Update workspace (rename)
+        let patch_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{ws_id}"),
+                &session_token,
+                &json!({"name": "renamed-ws"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let patched = response_json(patch_resp).await?;
+        assert_eq!(
+            patched.get("name").and_then(Value::as_str),
+            Some("renamed-ws")
+        );
+
+        // Verify rename persisted via GET.
+        let get_resp2 = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp2.status(), StatusCode::OK);
+        let fetched2 = response_json(get_resp2).await?;
+        assert_eq!(
+            fetched2.get("name").and_then(Value::as_str),
+            Some("renamed-ws")
+        );
+
+        // 5. Delete workspace (soft-delete via build with "delete" transition)
+        let delete_build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "delete"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_build_resp.status(), StatusCode::CREATED);
+        let delete_build = response_json(delete_build_resp).await?;
+        assert_eq!(
+            delete_build.get("transition").and_then(Value::as_str),
+            Some("delete")
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace builds
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_builds_create_get_list_cancel() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace (also creates initial build internally).
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "build-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // 1. Create a new build (start transition).
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        assert_eq!(
+            build.get("transition").and_then(Value::as_str),
+            Some("start")
+        );
+        assert_eq!(
+            build.get("workspace_id").and_then(Value::as_str),
+            Some(ws_id)
+        );
+        assert_eq!(
+            build.get("reason").and_then(Value::as_str),
+            Some("initiator")
+        );
+
+        // 2. Get build by ID.
+        let get_build_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_build_resp.status(), StatusCode::OK);
+        let fetched_build = response_json(get_build_resp).await?;
+        assert_eq!(
+            fetched_build.get("id").and_then(Value::as_str),
+            Some(build_id)
+        );
+
+        // 3. List builds for workspace.
+        let list_builds_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_builds_resp.status(), StatusCode::OK);
+        let builds_list = response_json(list_builds_resp).await?;
+        let builds = builds_list.as_array().ok_or("expected builds array")?;
+        // At least the build we just created (workspace creation also created one).
+        assert!(!builds.is_empty());
+
+        // 4. Cancel build.
+        let cancel_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/workspacebuilds/{build_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(cancel_resp.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_resources_parameters_logs_timings() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace to get a build.
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "resource-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // Create a build.
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id_str = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        let build_id = Uuid::parse_str(build_id_str)?;
+        let job_id_str = build
+            .get("job_id")
+            .and_then(Value::as_str)
+            .ok_or("missing job_id")?;
+        let job_id = Uuid::parse_str(job_id_str)?;
+
+        // Seed build parameters, resources, logs, and timings via the store.
+        store
+            .insert_workspace_build_parameters(
+                build_id,
+                &[("region".to_owned(), "us-east-1".to_owned())],
+            )
+            .await?;
+
+        let resource_id = Uuid::new_v4();
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(WorkspaceResourceRecord {
+                id: resource_id,
+                created_at: OffsetDateTime::now_utc(),
+                job_id,
+                transition: "start".to_owned(),
+                resource_type: "docker_container".to_owned(),
+                name: "main".to_owned(),
+                hide: false,
+                icon: String::new(),
+                daily_cost: 0,
+            });
+
+        store
+            .workspace_resource_metadata
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(resource_id)
+            .or_default()
+            .push(WorkspaceResourceMetadataRecord {
+                workspace_resource_id: resource_id,
+                key: "image".to_owned(),
+                value: "ubuntu:22.04".to_owned(),
+                sensitive: false,
+            });
+
+        store
+            .provisioner_job_logs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobLogRecord {
+                id: 1,
+                job_id,
+                created_at: OffsetDateTime::now_utc(),
+                source: "provisioner".to_owned(),
+                level: "info".to_owned(),
+                stage: "init".to_owned(),
+                output: "Initializing...".to_owned(),
+            });
+
+        store
+            .provisioner_job_timings
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobTimingRecord {
+                job_id,
+                started_at: OffsetDateTime::now_utc(),
+                ended_at: OffsetDateTime::now_utc(),
+                stage: "init".to_owned(),
+                source: "provisioner".to_owned(),
+                action: "create".to_owned(),
+                resource: "docker_container".to_owned(),
+            });
+
+        // 1. GET build parameters.
+        let params_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/parameters"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(params_resp.status(), StatusCode::OK);
+        let params_body = response_json(params_resp).await?;
+        let params = params_body.as_array().ok_or("expected params array")?;
+        assert_eq!(params.len(), 1);
+        assert_eq!(
+            params[0].get("name").and_then(Value::as_str),
+            Some("region")
+        );
+        assert_eq!(
+            params[0].get("value").and_then(Value::as_str),
+            Some("us-east-1")
+        );
+
+        // 2. GET build resources.
+        let resources_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/resources"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resources_resp.status(), StatusCode::OK);
+        let resources_body = response_json(resources_resp).await?;
+        let resources = resources_body
+            .as_array()
+            .ok_or("expected resources array")?;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources[0].get("name").and_then(Value::as_str),
+            Some("main")
+        );
+        assert_eq!(
+            resources[0].get("type").and_then(Value::as_str),
+            Some("docker_container")
+        );
+        let meta = resources[0]
+            .get("metadata")
+            .and_then(Value::as_array)
+            .ok_or("expected metadata array")?;
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0].get("key").and_then(Value::as_str), Some("image"));
+
+        // 3. GET build logs.
+        let logs_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(logs_resp.status(), StatusCode::OK);
+        let logs_body = response_json(logs_resp).await?;
+        let logs = logs_body.as_array().ok_or("expected logs array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Initializing...")
+        );
+        assert_eq!(logs[0].get("stage").and_then(Value::as_str), Some("init"));
+
+        // 4. GET build timings.
+        let timings_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/timings"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(timings_resp.status(), StatusCode::OK);
+        let timings_body = response_json(timings_resp).await?;
+        let prov_timings = timings_body
+            .get("provisioner_timings")
+            .and_then(Value::as_array)
+            .ok_or("expected provisioner_timings array")?;
+        assert_eq!(prov_timings.len(), 1);
+        assert_eq!(
+            prov_timings[0].get("stage").and_then(Value::as_str),
+            Some("init")
+        );
+        assert_eq!(
+            prov_timings[0].get("action").and_then(Value::as_str),
+            Some("create")
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Template lifecycle
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn template_lifecycle_create_get_list_update_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        // 1. Verify create response fields.
+        assert_eq!(
+            template.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+        assert_eq!(
+            template.get("display_name").and_then(Value::as_str),
+            Some("Test Template")
+        );
+        assert_eq!(
+            template.get("description").and_then(Value::as_str),
+            Some("A test template")
+        );
+        assert_eq!(
+            template.get("icon").and_then(Value::as_str),
+            Some("/icon/docker.png")
+        );
+        assert!(
+            template
+                .get("organization_id")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+
+        // 2. GET template by ID.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert_eq!(
+            fetched.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // 3. List templates in org.
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let templates = list_body.as_array().ok_or("expected array")?;
+        assert_eq!(templates.len(), 1);
+        assert_eq!(
+            templates[0].get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // 4. Update template meta (description).
+        let patch_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+                &UpdateTemplateMeta {
+                    description: Some("New description".to_owned()),
+                    ..UpdateTemplateMeta::default()
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let patched = response_json(patch_resp).await?;
+        assert_eq!(
+            patched.get("description").and_then(Value::as_str),
+            Some("New description")
+        );
+        // Original name preserved.
+        assert_eq!(
+            patched.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+
+        // 5. Delete template.
+        let delete_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_resp.status(), StatusCode::OK);
+
+        // Verify gone.
+        let get_after_delete = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_after_delete.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Template versions
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn template_versions_create_get_list_archive_unarchive() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id_str = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+        let template_id = Uuid::parse_str(template_id_str)?;
+
+        // Create a template version via the store directly (the HTTP API for
+        // creating template versions requires file uploads which are complex;
+        // seed via the store and test the read/archive endpoints).
+        let version_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+
+        // Create the provisioner job first.
+        store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: job_id,
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                organization_id: org_id,
+                initiator_id: Uuid::nil(),
+                provisioner: "echo".to_owned(),
+                file_id: None,
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: HashMap::new(),
+            })
+            .await?;
+
+        store
+            .insert_template_version(CreateTemplateVersionInput {
+                id: version_id,
+                template_id: Some(template_id),
+                organization_id: org_id,
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                created_by: Uuid::nil(),
+                name: "v1.0.0".to_owned(),
+                message: "Initial version".to_owned(),
+                readme: String::new(),
+                job_id,
+                source_example_id: None,
+            })
+            .await?;
+
+        // 1. GET template version by ID.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{version_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert_eq!(fetched.get("name").and_then(Value::as_str), Some("v1.0.0"));
+        assert_eq!(
+            fetched.get("id").and_then(Value::as_str),
+            Some(version_id.to_string().as_str())
+        );
+
+        // 2. List template versions.
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{template_id_str}/versions"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let versions = list_body.as_array().ok_or("expected array")?;
+        assert!(
+            versions
+                .iter()
+                .any(|v| v.get("name").and_then(Value::as_str) == Some("v1.0.0"))
+        );
+
+        // 3. Archive template version.
+        let archive_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{version_id}/archive"),
+                &session_token,
+                &json!({}),
+            )?,
+        )
+        .await?;
+        // Archive endpoint returns OK or NOT_FOUND if the route exists.
+        assert!(
+            archive_resp.status() == StatusCode::OK
+                || archive_resp.status() == StatusCode::NO_CONTENT
+        );
+
+        // 4. Unarchive template version.
+        let unarchive_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{version_id}/unarchive"),
+                &session_token,
+                &json!({}),
+            )?,
+        )
+        .await?;
+        assert!(
+            unarchive_resp.status() == StatusCode::OK
+                || unarchive_resp.status() == StatusCode::NO_CONTENT
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace ACL
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_acl_set_get_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace.
+        let ws = create_test_workspace(&app, &session_token, org_id, template_id, "acl-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // Get the owner's user id.
+        let owner_id = ws
+            .get("owner_id")
+            .and_then(Value::as_str)
+            .ok_or("missing owner_id")?;
+
+        // 1. Set ACL (PATCH).
+        let mut user_roles = HashMap::new();
+        user_roles.insert(owner_id.to_owned(), "admin".to_owned());
+        let set_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+                &json!({
+                    "user_roles": user_roles,
+                    "group_roles": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(set_resp.status(), StatusCode::NO_CONTENT);
+
+        // 2. Get ACL.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let acl_body = response_json(get_resp).await?;
+        let acl_users = acl_body
+            .get("users")
+            .and_then(Value::as_array)
+            .ok_or("expected users array")?;
+        assert_eq!(acl_users.len(), 1);
+        assert_eq!(
+            acl_users[0].get("role").and_then(Value::as_str),
+            Some("admin")
+        );
+
+        // 3. Delete ACL.
+        let delete_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify ACL is empty after deletion.
+        let get_resp2 = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/acl"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp2.status(), StatusCode::OK);
+        let acl_body2 = response_json(get_resp2).await?;
+        let acl_users2 = acl_body2
+            .get("users")
+            .and_then(Value::as_array)
+            .ok_or("expected users array")?;
+        assert!(acl_users2.is_empty());
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace port sharing
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_port_sharing_create_list_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        // Create workspace.
+        let ws = create_test_workspace(&app, &session_token, org_id, template_id, "port-share-ws")
+            .await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // 1. Create port share.
+        let share_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                    "share_level": "authenticated",
+                    "protocol": "http",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(share_resp.status(), StatusCode::OK);
+        let share = response_json(share_resp).await?;
+        assert_eq!(
+            share.get("agent_name").and_then(Value::as_str),
+            Some("main")
+        );
+        assert_eq!(share.get("port").and_then(Value::as_i64), Some(8080));
+        assert_eq!(
+            share.get("share_level").and_then(Value::as_str),
+            Some("authenticated")
+        );
+        assert_eq!(share.get("protocol").and_then(Value::as_str), Some("http"));
+
+        // Create a second port share.
+        let share2_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 3000,
+                    "share_level": "public",
+                    "protocol": "https",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(share2_resp.status(), StatusCode::OK);
+
+        // 2. List port shares.
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let shares = list_body
+            .get("shares")
+            .and_then(Value::as_array)
+            .ok_or("expected shares array")?;
+        assert_eq!(shares.len(), 2);
+
+        // 3. Delete port share.
+        let delete_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify only one share remains.
+        let list_resp2 = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{ws_id}/port-share"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_resp2.status(), StatusCode::OK);
+        let list_body2 = response_json(list_resp2).await?;
+        let shares2 = list_body2
+            .get("shares")
+            .and_then(Value::as_array)
+            .ok_or("expected shares array")?;
+        assert_eq!(shares2.len(), 1);
+        assert_eq!(shares2[0].get("port").and_then(Value::as_i64), Some(3000));
+
         Ok(())
     }
 }
