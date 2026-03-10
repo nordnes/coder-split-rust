@@ -2307,6 +2307,182 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     // -----------------------------------------------------------------------
+    // Workspace Agent storage methods
+    // -----------------------------------------------------------------------
+
+    /// Looks up a workspace agent by stable identifier.
+    async fn find_workspace_agent_by_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace agent by auth token.
+    async fn find_workspace_agent_by_auth_token(
+        &self,
+        auth_token: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        let _ = auth_token;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace agent by instance identity.
+    async fn find_workspace_agent_by_instance_id(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        let _ = instance_id;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Lists workspace agents for a given resource.
+    async fn list_workspace_agents_by_resource_ids(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+        let _ = resource_ids;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Lists workspace apps for a given agent.
+    async fn list_workspace_apps_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace apps are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent scripts for a given agent.
+    async fn list_workspace_agent_scripts(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent scripts are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent log sources for a given agent.
+    async fn list_workspace_agent_log_sources(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent log sources are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent logs for a given agent.
+    async fn list_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let _ = (agent_id, after_id, limit);
+        Err(StorageError::unavailable(
+            "workspace agent logs are not implemented",
+        ))
+    }
+
+    /// Inserts workspace agent logs.
+    async fn insert_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        log_source_id: Uuid,
+        logs: &[InsertAgentLogInput],
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let _ = (agent_id, log_source_id, logs);
+        Err(StorageError::unavailable(
+            "workspace agent logs are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent metadata for a given agent.
+    async fn list_workspace_agent_metadata(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent metadata are not implemented",
+        ))
+    }
+
+    /// Lists devcontainers for a given agent.
+    async fn list_workspace_agent_devcontainers(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentDevcontainerRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent devcontainers are not implemented",
+        ))
+    }
+
+    /// Creates a workspace agent log source.
+    async fn insert_workspace_agent_log_source(
+        &self,
+        agent_id: Uuid,
+        display_name: &str,
+        icon: &str,
+    ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
+        let _ = (agent_id, display_name, icon);
+        Err(StorageError::unavailable(
+            "workspace agent log sources are not implemented",
+        ))
+    }
+
+    /// Lists workspace app statuses for a given agent.
+    async fn list_workspace_app_statuses_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppStatusRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace app statuses are not implemented",
+        ))
+    }
+
+    /// Inserts a workspace app status.
+    async fn insert_workspace_app_status(
+        &self,
+        input: &InsertWorkspaceAppStatusInput,
+    ) -> Result<WorkspaceAppStatusRow, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "workspace app statuses are not implemented",
+        ))
+    }
+
+    /// Finds a workspace app by agent ID and slug.
+    async fn find_workspace_app_by_agent_and_slug(
+        &self,
+        agent_id: Uuid,
+        slug: &str,
+    ) -> Result<Option<WorkspaceAppRow>, StorageError> {
+        let _ = (agent_id, slug);
+        Err(StorageError::unavailable(
+            "workspace apps are not implemented",
+        ))
+    }
+
+    // -----------------------------------------------------------------------
     // Workspace domain methods
     // -----------------------------------------------------------------------
 
@@ -3286,6 +3462,268 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
             "notification messages are not implemented",
         ))
     }
+}
+
+/// Stored workspace agent row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Parent agent identifier for sub-agents.
+    pub parent_id: Option<Uuid>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+    /// Agent name.
+    pub name: String,
+    /// First connection time.
+    pub first_connected_at: Option<OffsetDateTime>,
+    /// Last connection time.
+    pub last_connected_at: Option<OffsetDateTime>,
+    /// Disconnection time.
+    pub disconnected_at: Option<OffsetDateTime>,
+    /// Owning resource identifier.
+    pub resource_id: Uuid,
+    /// Auth token.
+    pub auth_token: Uuid,
+    /// Instance identity string.
+    pub auth_instance_id: Option<String>,
+    /// Architecture.
+    pub architecture: String,
+    /// Environment variables as JSON.
+    pub environment_variables: Option<String>,
+    /// Operating system.
+    pub operating_system: String,
+    /// Working directory.
+    pub directory: String,
+    /// Expanded working directory.
+    pub expanded_directory: String,
+    /// Agent version.
+    pub version: String,
+    /// Agent API version.
+    pub api_version: String,
+    /// Connection timeout in seconds.
+    pub connection_timeout_seconds: i32,
+    /// Troubleshooting URL.
+    pub troubleshooting_url: String,
+    /// MOTD file path.
+    pub motd_file: String,
+    /// Lifecycle state.
+    pub lifecycle_state: String,
+    /// Total log length.
+    pub logs_length: i32,
+    /// Whether logs have overflowed.
+    pub logs_overflowed: bool,
+    /// Agent start time.
+    pub started_at: Option<OffsetDateTime>,
+    /// Agent ready time.
+    pub ready_at: Option<OffsetDateTime>,
+    /// Subsystems as string array.
+    pub subsystems: Vec<String>,
+    /// Display apps as string array.
+    pub display_apps: Vec<String>,
+    /// Display order.
+    pub display_order: i32,
+    /// API key scope.
+    pub api_key_scope: String,
+}
+
+/// Stored workspace app row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAppRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Owning agent identifier.
+    pub agent_id: Uuid,
+    /// Display name.
+    pub display_name: String,
+    /// Icon URL.
+    pub icon: String,
+    /// Command to execute.
+    pub command: Option<String>,
+    /// URL.
+    pub url: Option<String>,
+    /// Health check URL.
+    pub healthcheck_url: String,
+    /// Health check interval.
+    pub healthcheck_interval: i32,
+    /// Health check threshold.
+    pub healthcheck_threshold: i32,
+    /// Health status.
+    pub health: String,
+    /// Whether the app uses a subdomain.
+    pub subdomain: bool,
+    /// Sharing level.
+    pub sharing_level: String,
+    /// URL-safe slug.
+    pub slug: String,
+    /// Whether external.
+    pub external: bool,
+    /// Display order.
+    pub display_order: i32,
+    /// Whether hidden.
+    pub hidden: bool,
+    /// Where the app opens.
+    pub open_in: String,
+    /// Display group.
+    pub display_group: Option<String>,
+}
+
+/// Stored workspace agent script row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentScriptRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Owning agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Log source identifier.
+    pub log_source_id: Uuid,
+    /// Log path.
+    pub log_path: String,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Script content.
+    pub script: String,
+    /// Cron expression.
+    pub cron: String,
+    /// Whether start blocks login.
+    pub start_blocks_login: bool,
+    /// Whether runs on start.
+    pub run_on_start: bool,
+    /// Whether runs on stop.
+    pub run_on_stop: bool,
+    /// Timeout seconds.
+    pub timeout_seconds: i32,
+    /// Display name.
+    pub display_name: String,
+}
+
+/// Stored workspace agent log source row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentLogSourceRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Owning agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Display name.
+    pub display_name: String,
+    /// Icon.
+    pub icon: String,
+}
+
+/// Stored workspace agent log row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentLogRow {
+    /// Stable identifier.
+    pub id: i64,
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Log output.
+    pub output: String,
+    /// Log level.
+    pub level: String,
+    /// Source identifier.
+    pub log_source_id: Uuid,
+}
+
+/// Stored workspace agent metadata row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentMetadataRow {
+    /// Agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Display name.
+    pub display_name: String,
+    /// Key.
+    pub key: String,
+    /// Script.
+    pub script: String,
+    /// Value.
+    pub value: String,
+    /// Error.
+    pub error: String,
+    /// Timeout.
+    pub timeout: i64,
+    /// Interval.
+    pub interval: i64,
+    /// Collected at.
+    pub collected_at: OffsetDateTime,
+    /// Display order.
+    pub display_order: i32,
+}
+
+/// Stored workspace agent devcontainer row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentDevcontainerRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Owning agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Workspace folder path.
+    pub workspace_folder: String,
+    /// Config path.
+    pub config_path: String,
+    /// Name.
+    pub name: String,
+    /// Sub-agent identifier.
+    pub subagent_id: Option<Uuid>,
+}
+
+/// Stored workspace app status row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAppStatusRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// App identifier.
+    pub app_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// State.
+    pub state: String,
+    /// Message.
+    pub message: String,
+    /// URI.
+    pub uri: Option<String>,
+}
+
+/// Input for inserting agent logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertAgentLogInput {
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Log output.
+    pub output: String,
+    /// Log level.
+    pub level: String,
+}
+
+/// Input for inserting a workspace app status.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertWorkspaceAppStatusInput {
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// App identifier.
+    pub app_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// State.
+    pub state: String,
+    /// Message.
+    pub message: String,
+    /// URI.
+    pub uri: Option<String>,
 }
 
 /// Workspace-domain storage contract.
