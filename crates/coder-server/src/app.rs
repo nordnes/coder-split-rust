@@ -3957,7 +3957,9 @@ async fn upload_chat_file(
             let lower = cd.to_lowercase();
             if let Some(pos) = lower.find("filename=") {
                 let rest = &cd[pos + 9..];
-                let name = rest.trim_matches('"').trim_matches('\'');
+                // Take only the filename token (up to the next `;` or end of string).
+                let token = rest.split(';').next().unwrap_or(rest).trim();
+                let name = token.trim_matches('"').trim_matches('\'');
                 Some(name.to_string())
             } else {
                 None
