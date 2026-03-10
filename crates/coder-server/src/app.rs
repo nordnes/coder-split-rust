@@ -8485,7 +8485,7 @@ async fn post_custom_notification(
     }
 
     // Validate: title length
-    if content.title.len() > MAX_CUSTOM_NOTIFICATION_TITLE_LEN {
+    if content.title.chars().count() > MAX_CUSTOM_NOTIFICATION_TITLE_LEN {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
@@ -8500,7 +8500,7 @@ async fn post_custom_notification(
     }
 
     // Validate: message length
-    if content.message.len() > MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN {
+    if content.message.chars().count() > MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
