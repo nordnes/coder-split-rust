@@ -46,16 +46,16 @@ use coder_core::{
     SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
     TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateOAuth2ProviderAppInput,
     UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
-    UpsertProvisionerDaemonInput, UserAppearanceRecord, UserLinkRecord, UserListFilter,
-    UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
-    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
-    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
-    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
-    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
-    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
-    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    UpsertProvisionerDaemonInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
+    UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+    UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
+    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -677,6 +677,22 @@ struct StoredUserStatusChangeRow {
     old_status: String,
     changed_at: OffsetDateTime,
     changed_by: Option<Uuid>,
+    reason: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredUserConfigRow {
+    user_id: Uuid,
+    key: String,
+    value: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredUserDeletedRow {
+    id: Uuid,
+    user_id: Uuid,
+    deleted_at: OffsetDateTime,
+    deleted_by: Option<Uuid>,
     reason: String,
 }
 
@@ -1584,6 +1600,110 @@ impl AppStore for PostgresStore {
 
     // ----- User identity supplements -----
 
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn upsert_user_link(
+        &self,
+        user_id: Uuid,
+        input: &UpsertUserLinkInput,
+    ) -> Result<UserLinkRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredUserLinkRow>(
+            "INSERT INTO user_links (
+                user_id, login_type, linked_id,
+                oauth_access_token, oauth_refresh_token, oauth_expiry
+             ) VALUES ($1, $2::login_type, $3, $4, $5, $6)
+             ON CONFLICT (user_id, login_type) DO UPDATE SET
+                linked_id = EXCLUDED.linked_id,
+                oauth_access_token = EXCLUDED.oauth_access_token,
+                oauth_refresh_token = EXCLUDED.oauth_refresh_token,
+                oauth_expiry = EXCLUDED.oauth_expiry
+             RETURNING
+                user_id,
+                login_type::text AS login_type,
+                linked_id,
+                oauth_access_token,
+                oauth_refresh_token,
+                oauth_expiry",
+        )
+        .bind(user_id)
+        .bind(input.login_type.as_str())
+        .bind(&input.linked_id)
+        .bind(&input.oauth_access_token)
+        .bind(&input.oauth_refresh_token)
+        .bind(input.oauth_expiry)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        user_link_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_user_link(
+        &self,
+        user_id: Uuid,
+        login_type: LoginType,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM user_links WHERE user_id = $1 AND login_type = $2::login_type",
+        )
+        .bind(user_id)
+        .bind(login_type.as_str())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+    ) -> Result<Option<UserConfigRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredUserConfigRow>(
+            "SELECT user_id, key, value FROM user_configs WHERE user_id = $1 AND key = $2",
+        )
+        .bind(user_id)
+        .bind(key)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| UserConfigRecord {
+            user_id: r.user_id,
+            key: r.key,
+            value: r.value,
+        }))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn upsert_user_config(
+        &self,
+        user_id: Uuid,
+        key: &str,
+        value: &str,
+    ) -> Result<UserConfigRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredUserConfigRow>(
+            "INSERT INTO user_configs (user_id, key, value)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value
+             RETURNING user_id, key, value",
+        )
+        .bind(user_id)
+        .bind(key)
+        .bind(value)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(UserConfigRecord {
+            user_id: row.user_id,
+            key: row.key,
+            value: row.value,
+        })
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
         let result = sqlx::query("DELETE FROM user_configs WHERE user_id = $1 AND key = $2")
@@ -1592,6 +1712,78 @@ impl AppStore for PostgresStore {
             .execute(&self.pool)
             .await
             .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_user_deleted(
+        &self,
+        user_id: Uuid,
+        deleted_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserDeletedRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredUserDeletedRow>(
+            "INSERT INTO user_deleted (user_id, deleted_by, reason)
+             VALUES ($1, $2, $3)
+             RETURNING id, user_id, deleted_at, deleted_by, reason",
+        )
+        .bind(user_id)
+        .bind(deleted_by)
+        .bind(reason)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(UserDeletedRecord {
+            id: row.id,
+            user_id: row.user_id,
+            deleted_at: row.deleted_at,
+            deleted_by: row.deleted_by,
+            reason: row.reason,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_user_status_change(
+        &self,
+        user_id: Uuid,
+        old_status: UserStatus,
+        new_status: UserStatus,
+        changed_by: Option<Uuid>,
+        reason: &str,
+    ) -> Result<UserStatusChangeRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredUserStatusChangeRow>(
+            "INSERT INTO user_status_changes (user_id, old_status, new_status, changed_by, reason)
+             VALUES ($1, $2::user_status, $3::user_status, $4, $5)
+             RETURNING id, user_id, new_status::text AS new_status, old_status::text AS old_status, changed_at, changed_by, reason",
+        )
+        .bind(user_id)
+        .bind(old_status.as_str())
+        .bind(new_status.as_str())
+        .bind(changed_by)
+        .bind(reason)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        user_status_change_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM custom_roles WHERE name = lower($1) AND organization_id IS NOT DISTINCT FROM $2",
+        )
+        .bind(name)
+        .bind(organization_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
 
         Ok(result.rows_affected() > 0)
     }
@@ -3346,6 +3538,25 @@ impl AppStore for PostgresStore {
              FROM tasks WHERE id = $1 AND deleted_at IS NULL",
         )
         .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(task_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_task_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TaskRecord>, StorageError> {
+        let row: Option<StoredTaskRow> = sqlx::query_as(
+            "SELECT id, organization_id, owner_id, name, display_name, workspace_id, template_version_id, template_parameters, prompt, created_at, deleted_at
+             FROM tasks WHERE owner_id = $1 AND name = $2 AND deleted_at IS NULL ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(owner_id)
+        .bind(name)
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)?;
