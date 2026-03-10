@@ -87,6 +87,7 @@ use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
 use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
 use coder_workspaces::DeploymentStatsService;
+use futures_util::StreamExt;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -9815,12 +9816,7 @@ async fn debug_expvar(
     let memstats = read_proc_memstats();
     vars.insert("memstats".to_string(), json!(memstats));
 
-    Ok((
-        StatusCode::OK,
-        [(CONTENT_TYPE, HeaderValue::from_static("application/json"))],
-        Json(Value::Object(vars)),
-    )
-        .into_response())
+    Ok(Json(Value::Object(vars)).into_response())
 }
 
 /// Read basic memory statistics from `/proc/self/status`.
@@ -9907,8 +9903,6 @@ async fn debug_websocket(
 
 /// Run the WebSocket echo loop: read a message, send it back, repeat.
 async fn websocket_echo(mut socket: WebSocket) {
-    use futures_util::StreamExt;
-
     while let Some(Ok(msg)) = socket.next().await {
         match msg {
             Message::Text(text) => {
@@ -9965,6 +9959,9 @@ async fn debug_metrics(
     }
 
     // process_open_fds
+    // Note: `read_dir` itself opens an fd for the directory iterator,
+    // so the count is inflated by 1.  This matches the behavior of Go's
+    // `prometheus/procfs` collector.
     if let Ok(entries) = std::fs::read_dir("/proc/self/fd") {
         let count = entries.count();
         out.push_str("# HELP process_open_fds Number of open file descriptors.\n");
@@ -18237,9 +18234,19 @@ mod tests {
             vars.get("cmdline").is_some(),
             "expvar should contain cmdline"
         );
+        // cmdline should be a JSON array.
+        assert!(
+            vars.get("cmdline").and_then(|v| v.as_array()).is_some(),
+            "expvar cmdline should be an array",
+        );
         assert!(
             vars.get("memstats").is_some(),
             "expvar should contain memstats",
+        );
+        // memstats should be a JSON object.
+        assert!(
+            vars.get("memstats").and_then(|v| v.as_object()).is_some(),
+            "expvar memstats should be an object",
         );
         Ok(())
     }
@@ -18373,11 +18380,18 @@ mod tests {
 
         let body = to_bytes(resp.into_body(), usize::MAX).await?;
         let text = String::from_utf8_lossy(&body);
-        // Should contain at least a comment or a metric line.
+        // Should contain Prometheus exposition data.
         assert!(
-            text.contains('#') || text.contains("process_"),
-            "metrics body should contain Prometheus exposition data",
+            text.contains("process_") || text.contains("# No process metrics"),
+            "metrics body should contain process metrics or platform fallback",
         );
+        // Verify no lines have leading whitespace (invalid Prometheus format).
+        for line in text.lines() {
+            assert!(
+                !line.starts_with(' ') && !line.starts_with('\t'),
+                "Prometheus line must not start with whitespace: {line:?}",
+            );
+        }
         Ok(())
     }
 
