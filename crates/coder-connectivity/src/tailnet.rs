@@ -1057,6 +1057,8 @@ mod tests {
 
         let debug = coordinator.debug_json();
         assert_eq!(debug["total_peers"], 2);
+        assert_eq!(debug["agents"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(debug["clients"].as_array().map(|a| a.len()), Some(1));
 
         coordinator.remove_peer(agent_id);
         let debug = coordinator.debug_json();
@@ -1117,6 +1119,45 @@ mod tests {
     fn test_build_derp_map_from_config_empty() {
         let map = build_derp_map_from_config(&[]);
         assert!(map.regions.is_empty());
+    }
+
+    #[test]
+    fn update_derp_map_replaces_existing() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        assert!(coordinator.derp_map().regions.is_empty());
+
+        let mut new_map = DERPMap::default();
+        new_map.regions.insert(
+            "2".to_string(),
+            DERPMapRegion {
+                region_id: 2,
+                region_code: "eu-west".to_string(),
+                region_name: "EU West".to_string(),
+                avoid: false,
+                nodes: vec![],
+            },
+        );
+
+        coordinator.update_derp_map(new_map);
+        let map = coordinator.derp_map();
+        assert_eq!(map.regions.len(), 1);
+        assert!(map.regions.contains_key("2"));
+        assert_eq!(map.regions["2"].region_code, "eu-west");
+    }
+
+    #[test]
+    fn peer_kinds_separated_in_debug_json() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+
+        let agent_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+
+        coordinator.add_peer(agent_id, "agent".to_string(), PeerKind::Agent);
+        coordinator.add_peer(client_id, "client".to_string(), PeerKind::Client);
+
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["agents"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(debug["clients"].as_array().map(|a| a.len()), Some(1));
     }
 
     // --- Coordination protocol tests ---

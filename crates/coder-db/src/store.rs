@@ -9901,15 +9901,14 @@ mod tests {
     use coder_core::{
         AcquireProvisionerJobInput, AppStore, CreateGroupInput, CreateOAuth2ProviderAppInput,
         CreateOAuth2ProviderAppTokenInput, CreateUserInput, CreateWorkspaceBuildInput,
-        CreateWorkspaceInput, DatabaseConfig, GetJobsToBeReapedInput, LoginType, ProvisionerType,
-        UserListFilter, UserStatus, WorkspaceListFilter,
+        CreateWorkspaceInput, DatabaseConfig, GetJobsToBeReapedInput, LoginType, ProvisionerStore,
+        ProvisionerType, UserListFilter, UserStatus, WorkspaceListFilter,
     };
     use sqlx::PgPool;
     use time::OffsetDateTime;
     use uuid::Uuid;
 
     use super::PostgresStore;
-    use coder_core::ProvisionerStore;
     use coder_core::api::InsightsReportInterval;
     use serde_json::json;
     use time::macros::datetime;
@@ -12571,6 +12570,1216 @@ mod tests {
         );
 
         cleanup(&pool, &[user.id]).await;
+        Ok(())
+    }
+
+    // =========================================================================
+    // 8. User CRUD
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_create_find_update_delete() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let suffix = uniq();
+
+        // Create
+        let user = store
+            .create_user(CreateUserInput {
+                email: format!("crud-{suffix}@example.com"),
+                username: format!("cruduser-{suffix}"),
+                name: format!("CRUD User {suffix}"),
+                password_hash: Some("hashed".to_string()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+        assert_eq!(user.status, UserStatus::Active);
+        assert!(!user.deleted, "new user should not be deleted");
+
+        // Find by ID
+        let by_id = store.find_user_by_id(user.id).await?;
+        assert!(by_id.is_some(), "should find user by ID");
+        assert_eq!(by_id.as_ref().map(|u| &u.email), Some(&user.email));
+
+        // Find by username
+        let by_name = store.find_user_by_username(&user.username).await?;
+        assert!(by_name.is_some(), "should find user by username");
+        assert_eq!(by_name.as_ref().map(|u| u.id), Some(user.id));
+
+        // Find by email (via password user)
+        let by_email = store.find_password_user_by_email(&user.email).await?;
+        assert!(by_email.is_some(), "should find user by email");
+        assert_eq!(by_email.as_ref().map(|u| u.user.id), Some(user.id));
+
+        // Update profile
+        let new_username = format!("updated-{suffix}");
+        let updated = store
+            .update_user_profile(user.id, &new_username, "Updated Name")
+            .await?;
+        assert!(
+            updated.is_some(),
+            "update_user_profile should return updated user"
+        );
+        assert_eq!(
+            updated.as_ref().map(|u| u.username.as_str()),
+            Some(new_username.as_str())
+        );
+        assert_eq!(
+            updated.as_ref().map(|u| u.name.as_str()),
+            Some("Updated Name")
+        );
+
+        // Update status
+        let suspended = store
+            .update_user_status(user.id, UserStatus::Suspended)
+            .await?;
+        assert!(
+            suspended.is_some(),
+            "update_user_status should return updated user"
+        );
+        assert_eq!(
+            suspended.as_ref().map(|u| u.status),
+            Some(UserStatus::Suspended)
+        );
+
+        // Soft-delete
+        let deleted = store.soft_delete_user(user.id).await?;
+        assert!(deleted);
+
+        // Verify soft-deleted user is gone from find_user_by_id
+        let gone = store.find_user_by_id(user.id).await?;
+        assert!(gone.is_none(), "soft-deleted user should not be found");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_list_with_filters() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+
+        let tag = uniq();
+        // Create 3 users: 2 active, 1 suspended
+        let u1 = store
+            .create_user(CreateUserInput {
+                email: format!("list-a-{tag}@example.com"),
+                username: format!("lista-{tag}"),
+                name: format!("List A {tag}"),
+                password_hash: Some("h".to_string()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+        let u2 = store
+            .create_user(CreateUserInput {
+                email: format!("list-b-{tag}@example.com"),
+                username: format!("listb-{tag}"),
+                name: format!("List B {tag}"),
+                password_hash: Some("h".to_string()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+        let u3 = store
+            .create_user(CreateUserInput {
+                email: format!("list-c-{tag}@example.com"),
+                username: format!("listc-{tag}"),
+                name: format!("List C {tag}"),
+                password_hash: Some("h".to_string()),
+                login_type: LoginType::Password,
+                status: UserStatus::Suspended,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+
+        // Filter by search
+        let (users, total) = store
+            .list_users(coder_core::UserListFilter {
+                search: tag.clone(),
+                status: None,
+                limit: 50,
+                offset: 0,
+            })
+            .await?;
+        assert!(total >= 3, "should find at least 3 users with tag");
+        assert!(users.len() >= 3);
+        // Verify the created users are present in the result set.
+        let returned_ids: Vec<_> = users.iter().map(|u| u.id).collect();
+        assert!(returned_ids.contains(&u1.id), "u1 should be in results");
+        assert!(returned_ids.contains(&u2.id), "u2 should be in results");
+        assert!(returned_ids.contains(&u3.id), "u3 should be in results");
+        // Verify the search filter actually matched: every returned user
+        // must contain the unique tag in username, email, or name.
+        assert!(
+            users.iter().all(|u| {
+                u.username.contains(&tag) || u.email.contains(&tag) || u.name.contains(&tag)
+            }),
+            "all returned users should match the search tag"
+        );
+
+        // Filter by status=suspended
+        let (suspended, _) = store
+            .list_users(coder_core::UserListFilter {
+                search: tag.clone(),
+                status: Some(UserStatus::Suspended),
+                limit: 50,
+                offset: 0,
+            })
+            .await?;
+        assert!(
+            suspended.iter().all(|u| u.status == UserStatus::Suspended),
+            "all results should be suspended"
+        );
+        assert!(
+            !suspended.is_empty(),
+            "should find at least 1 suspended user"
+        );
+
+        // Pagination: limit 1, offset 0
+        let (page, _) = store
+            .list_users(coder_core::UserListFilter {
+                search: tag.clone(),
+                status: None,
+                limit: 1,
+                offset: 0,
+            })
+            .await?;
+        assert_eq!(page.len(), 1, "limit=1 should return exactly 1 user");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_appearance_and_preferences() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Get default appearance
+        let appearance = store.user_appearance(user_id).await?;
+        // Should return defaults (empty strings)
+        assert!(
+            appearance.theme_preference.is_empty(),
+            "default theme_preference should be empty"
+        );
+
+        // Update appearance
+        let updated = store
+            .update_user_appearance(user_id, "dark", "JetBrains Mono")
+            .await?;
+        assert!(
+            updated.is_some(),
+            "update_user_appearance should return result"
+        );
+        let upd = updated.as_ref().unwrap_or_else(|| panic!("no appearance"));
+        assert_eq!(upd.theme_preference, "dark");
+        assert_eq!(upd.terminal_font, "JetBrains Mono");
+
+        // Verify round-trip
+        let fetched = store.user_appearance(user_id).await?;
+        assert_eq!(fetched.theme_preference, "dark");
+        assert_eq!(fetched.terminal_font, "JetBrains Mono");
+
+        // Get default preferences
+        let prefs = store.user_preferences(user_id).await?;
+        assert!(!prefs.task_notification_alert_dismissed);
+
+        // Update preferences
+        let updated_prefs = store.update_user_preferences(user_id, true).await?;
+        let updated_prefs =
+            updated_prefs.unwrap_or_else(|| panic!("update_user_preferences should return result"));
+        assert!(
+            updated_prefs.task_notification_alert_dismissed,
+            "preference should be dismissed after update"
+        );
+
+        // Verify round-trip
+        let fetched_prefs = store.user_preferences(user_id).await?;
+        assert!(fetched_prefs.task_notification_alert_dismissed);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_roles_update() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Verify initial roles are empty
+        let user = store.find_user_by_id(user_id).await?;
+        let user = user.unwrap_or_else(|| panic!("user should exist"));
+        assert!(user.roles.is_empty(), "initial roles should be empty");
+
+        // Update roles
+        let updated = store
+            .update_user_roles(user_id, vec!["owner".to_string()])
+            .await?;
+        let updated =
+            updated.unwrap_or_else(|| panic!("update_user_roles should return updated user"));
+        assert_eq!(updated.roles.len(), 1);
+        assert_eq!(updated.roles[0].name, "owner");
+
+        // Update roles to multiple
+        let updated2 = store
+            .update_user_roles(user_id, vec!["owner".to_string(), "auditor".to_string()])
+            .await?;
+        let updated2 = updated2.unwrap_or_else(|| panic!("second role update should succeed"));
+        assert_eq!(updated2.roles.len(), 2);
+
+        // Clear roles
+        let cleared = store.update_user_roles(user_id, vec![]).await?;
+        let cleared = cleared.unwrap_or_else(|| panic!("clearing roles should succeed"));
+        assert!(
+            cleared.roles.is_empty(),
+            "roles should be empty after clear"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 9. API Keys
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_api_key_create_find_delete() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let key_id = format!("ak-{}", uniq());
+        let now = OffsetDateTime::now_utc();
+
+        // Create
+        let key = store
+            .create_api_key(coder_core::CreateApiKeyInput {
+                id: key_id.clone(),
+                hashed_secret: b"secret_hash".to_vec(),
+                user_id,
+                last_used: now,
+                expires_at: now + time::Duration::hours(24),
+                created_at: now,
+                updated_at: now,
+                login_type: LoginType::Password,
+                scopes: vec!["all".to_string()],
+                token_name: format!("test-token-{}", uniq()),
+                lifetime_seconds: 86400,
+                allow_list: vec![],
+            })
+            .await?;
+        assert_eq!(key.id, key_id);
+        assert_eq!(key.user_id, user_id);
+
+        // Find by ID
+        let found = store.find_api_key_by_id(&key_id).await?;
+        assert!(found.is_some(), "should find API key by ID");
+        assert_eq!(found.as_ref().map(|k| k.user_id), Some(user_id));
+
+        // Delete
+        let deleted = store.delete_api_key(&key_id).await?;
+        assert!(deleted, "delete_api_key should return true");
+
+        // Verify gone
+        let gone = store.find_api_key_by_id(&key_id).await?;
+        assert!(gone.is_none(), "deleted key should not be found");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_api_key_expiry() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let key_id = format!("ak-{}", uniq());
+        let now = OffsetDateTime::now_utc();
+
+        let _key = store
+            .create_api_key(coder_core::CreateApiKeyInput {
+                id: key_id.clone(),
+                hashed_secret: b"secret2".to_vec(),
+                user_id,
+                last_used: now,
+                expires_at: now + time::Duration::hours(24),
+                created_at: now,
+                updated_at: now,
+                login_type: LoginType::Password,
+                scopes: vec!["all".to_string()],
+                token_name: format!("expire-token-{}", uniq()),
+                lifetime_seconds: 86400,
+                allow_list: vec![],
+            })
+            .await?;
+
+        // Expire the key
+        let expire_time = OffsetDateTime::now_utc();
+        let expired = store.expire_api_key(&key_id, expire_time).await?;
+        assert!(expired, "expire_api_key should return true");
+
+        // Verify it's expired (expires_at <= now)
+        let found = store.find_api_key_by_id(&key_id).await?;
+        let found = found.unwrap_or_else(|| panic!("expired key should still be findable"));
+        assert!(
+            found.expires_at <= expire_time,
+            "key should be expired: expires_at={:?}, expire_time={:?}",
+            found.expires_at,
+            expire_time
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 10. Tasks
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_task_create_find_update_delete() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let now = OffsetDateTime::now_utc();
+
+        // We need a template version for the FK. Create one via helper.
+        let tmpl_name = format!("tmpl-task-{}", uniq());
+        let _template_id = create_test_template(&store, &pool, org_id, user_id, &tmpl_name).await?;
+
+        // Use the template version created by the helper. We need to look it up.
+        let tmpl = store
+            .find_template_by_org_and_name(org_id, &tmpl_name)
+            .await?
+            .ok_or("template not found")?;
+        let tv_id = tmpl.active_version_id;
+
+        let task_id = Uuid::new_v4();
+        let task_name = format!("task-{}", uniq());
+
+        // Create
+        let task = store
+            .insert_task(coder_core::InsertTaskInput {
+                id: task_id,
+                organization_id: org_id,
+                owner_id: user_id,
+                name: task_name.clone(),
+                display_name: "Test Task".to_string(),
+                template_version_id: tv_id,
+                template_parameters: serde_json::json!({}),
+                prompt: "do something".to_string(),
+                created_at: now,
+            })
+            .await?;
+        assert_eq!(task.id, task_id);
+        assert_eq!(task.name, task_name);
+        assert!(task.deleted_at.is_none());
+
+        // Find by ID
+        let found = store.find_task_by_id(task_id).await?;
+        assert!(found.is_some(), "should find task by ID");
+        assert_eq!(found.as_ref().map(|t| &t.name), Some(&task_name));
+
+        // Update prompt
+        let updated = store.update_task_prompt(task_id, "updated prompt").await?;
+        assert!(
+            updated.is_some(),
+            "update_task_prompt should return updated task"
+        );
+        assert_eq!(
+            updated.as_ref().map(|t| t.prompt.as_str()),
+            Some("updated prompt")
+        );
+
+        // Soft-delete
+        let delete_time = OffsetDateTime::now_utc();
+        let deleted = store.delete_task(task_id, delete_time).await?;
+        assert!(deleted, "delete_task should return true");
+
+        // find_task_by_id uses `WHERE deleted_at IS NULL`, so a soft-deleted
+        // task should no longer be found — matching the user soft-delete pattern.
+        let after_delete = store.find_task_by_id(task_id).await?;
+        assert!(
+            after_delete.is_none(),
+            "soft-deleted task should not be found via find_task_by_id"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_task_list_with_filters() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_name = format!("tmpl-tasklist-{}", uniq());
+        let _template_id = create_test_template(&store, &pool, org_id, user_id, &tmpl_name).await?;
+        let tmpl = store
+            .find_template_by_org_and_name(org_id, &tmpl_name)
+            .await?
+            .ok_or("template not found")?;
+        let tv_id = tmpl.active_version_id;
+
+        // Create 2 tasks for this user/org
+        for i in 0..2 {
+            store
+                .insert_task(coder_core::InsertTaskInput {
+                    id: Uuid::new_v4(),
+                    organization_id: org_id,
+                    owner_id: user_id,
+                    name: format!("listask-{}-{}", i, uniq()),
+                    display_name: format!("Task {i}"),
+                    template_version_id: tv_id,
+                    template_parameters: serde_json::json!({}),
+                    prompt: format!("prompt {i}"),
+                    created_at: now + time::Duration::seconds(i as i64),
+                })
+                .await?;
+        }
+
+        // List by owner_id
+        let tasks = store
+            .list_tasks(coder_core::TaskListFilter {
+                owner_id: Some(user_id),
+                organization_id: None,
+                status: None,
+            })
+            .await?;
+        assert!(tasks.len() >= 2, "should find at least 2 tasks for user");
+        assert!(
+            tasks.iter().all(|t| t.owner_id == user_id),
+            "all tasks should belong to user"
+        );
+
+        // List by organization_id
+        let by_org = store
+            .list_tasks(coder_core::TaskListFilter {
+                owner_id: None,
+                organization_id: Some(org_id),
+                status: None,
+            })
+            .await?;
+        assert!(
+            by_org.len() >= 2,
+            "should find at least 2 tasks for organization"
+        );
+        assert!(
+            by_org.iter().all(|t| t.organization_id == org_id),
+            "all tasks should belong to the queried organization"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 11. Chats
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_create_list_archive_unarchive() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // last_model_config_id has no FK constraint in the schema, so a random UUID is fine.
+        let model_config_id = Uuid::new_v4();
+
+        // Create chat
+        let chat = store
+            .insert_chat(coder_core::InsertChatInput {
+                owner_id: user_id,
+                workspace_id: None,
+                parent_chat_id: None,
+                root_chat_id: None,
+                last_model_config_id: model_config_id,
+                title: "Test Chat".to_string(),
+            })
+            .await?;
+        assert_eq!(chat.owner_id, user_id);
+        assert!(!chat.archived);
+
+        // List chats (non-archived)
+        let chats = store.list_chats_by_owner(user_id, Some(false)).await?;
+        assert!(
+            chats.iter().any(|c| c.id == chat.id),
+            "newly created chat should appear"
+        );
+
+        // Archive
+        store.archive_chat(chat.id).await?;
+
+        // Verify archived
+        let after_archive = store.find_chat_by_id(chat.id).await?;
+        let after_archive =
+            after_archive.unwrap_or_else(|| panic!("chat should exist after archive"));
+        assert!(after_archive.archived, "chat should be archived");
+
+        // Should not appear in non-archived list
+        let non_archived = store.list_chats_by_owner(user_id, Some(false)).await?;
+        assert!(
+            !non_archived.iter().any(|c| c.id == chat.id),
+            "archived chat should not appear in non-archived list"
+        );
+
+        // Unarchive
+        store.unarchive_chat(chat.id).await?;
+
+        // Verify unarchived
+        let after_unarchive = store.find_chat_by_id(chat.id).await?;
+        let after_unarchive =
+            after_unarchive.unwrap_or_else(|| panic!("chat should exist after unarchive"));
+        assert!(!after_unarchive.archived, "chat should be unarchived");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_messages_append_and_list() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // last_model_config_id has no FK constraint in the schema, so a random UUID is fine.
+        let model_config_id = Uuid::new_v4();
+
+        let chat = store
+            .insert_chat(coder_core::InsertChatInput {
+                owner_id: user_id,
+                workspace_id: None,
+                parent_chat_id: None,
+                root_chat_id: None,
+                last_model_config_id: model_config_id,
+                title: "Messages Chat".to_string(),
+            })
+            .await?;
+
+        // Insert messages
+        let msg1 = store
+            .insert_chat_message(coder_core::InsertChatMessageInput {
+                chat_id: chat.id,
+                model_config_id: Some(model_config_id),
+                role: "user".to_string(),
+                content: Some(serde_json::json!("Hello")),
+                visibility: coder_core::api::ChatMessageVisibility::User,
+            })
+            .await?;
+
+        let msg2 = store
+            .insert_chat_message(coder_core::InsertChatMessageInput {
+                chat_id: chat.id,
+                model_config_id: Some(model_config_id),
+                role: "assistant".to_string(),
+                content: Some(serde_json::json!("Hi there")),
+                visibility: coder_core::api::ChatMessageVisibility::Both,
+            })
+            .await?;
+
+        // List messages (after_id = 0 means all)
+        let messages = store.list_chat_messages(chat.id, 0).await?;
+        assert!(messages.len() >= 2, "should have at least 2 messages");
+
+        // Verify ordering (IDs are auto-incrementing)
+        assert!(msg1.id < msg2.id, "message IDs should be sequential");
+
+        // Verify content
+        let first = messages
+            .iter()
+            .find(|m| m.id == msg1.id)
+            .unwrap_or_else(|| panic!("msg1 not found"));
+        assert_eq!(first.role, "user");
+
+        let second = messages
+            .iter()
+            .find(|m| m.id == msg2.id)
+            .unwrap_or_else(|| panic!("msg2 not found"));
+        assert_eq!(second.role, "assistant");
+
+        // List after first message
+        let after_first = store.list_chat_messages(chat.id, msg1.id).await?;
+        assert!(
+            after_first.iter().all(|m| m.id > msg1.id),
+            "all messages should be after msg1"
+        );
+        assert!(
+            after_first.iter().any(|m| m.id == msg2.id),
+            "msg2 should appear after msg1"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 12. Provisioner Jobs
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_job_create_acquire_complete() -> TestResult {
+        use coder_core::{
+            AcquireProvisionerJobInput, CompleteProvisionerJobInput, InsertProvisionerJobInput,
+            ProvisionerJobStatus, ProvisionerJobType, ProvisionerStorageMethod, ProvisionerType,
+        };
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let job_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        // Create a file row for the FK (provisioner_jobs.file_id can be NULL
+        // in the raw SQL helper, but the typed input requires it).
+        let file_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO files (id, hash, created_by, created_at, mimetype, data)
+             VALUES ($1, $2, $3, NOW(), 'application/tar', $4)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(file_id)
+        .bind(format!("fakehash-{}", uniq()))
+        .bind(user_id)
+        .bind(b"fakedata".to_vec())
+        .execute(&pool)
+        .await?;
+
+        // Insert job
+        let job = store
+            .insert_provisioner_job(InsertProvisionerJobInput {
+                id: job_id,
+                created_at: now,
+                organization_id: org_id,
+                initiator_id: user_id,
+                provisioner: ProvisionerType::Echo,
+                storage_method: ProvisionerStorageMethod::File,
+                file_id,
+                job_type: ProvisionerJobType::TemplateVersionImport,
+                input: serde_json::json!({}),
+                tags: serde_json::json!({}),
+                trace_metadata: serde_json::json!({}),
+            })
+            .await?;
+        assert_eq!(job.id, job_id);
+        assert_eq!(job.job_status, ProvisionerJobStatus::Pending);
+
+        // Get by ID
+        let found = store.get_provisioner_job_by_id(job_id).await?;
+        assert!(found.is_some(), "should find provisioner job by ID");
+        assert_eq!(
+            found.as_ref().map(|j| j.job_status),
+            Some(ProvisionerJobStatus::Pending)
+        );
+
+        // Acquire
+        let worker_id = Uuid::new_v4();
+        let acquired = store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id,
+                started_at: OffsetDateTime::now_utc(),
+                organization_id: org_id,
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: serde_json::json!({}),
+            })
+            .await?;
+        // Within our unique org, the only pending Echo job is the one we just
+        // created, so acquire must return that specific job.
+        let acquired = acquired.unwrap_or_else(|| panic!("should acquire the pending job"));
+        assert_eq!(
+            acquired.id, job_id,
+            "acquired job should be the one we created"
+        );
+
+        // Complete the job
+        let complete_time = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: job_id,
+                updated_at: complete_time,
+                completed_at: complete_time,
+                error: String::new(),
+                error_code: String::new(),
+            })
+            .await?;
+
+        // Verify completed
+        let completed = store.get_provisioner_job_by_id(job_id).await?;
+        let completed = completed.unwrap_or_else(|| panic!("completed job should still be found"));
+        assert_eq!(completed.job_status, ProvisionerJobStatus::Succeeded);
+        assert!(completed.completed_at.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_job_logs_insert_and_list() -> TestResult {
+        use coder_core::provisioner::{LogLevel, LogSource};
+        use coder_core::{
+            InsertProvisionerJobInput, InsertProvisionerJobLogsInput, ProvisionerJobType,
+            ProvisionerStorageMethod, ProvisionerType,
+        };
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let now = OffsetDateTime::now_utc();
+
+        // Create file for FK
+        let file_id = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO files (id, hash, created_by, created_at, mimetype, data)
+             VALUES ($1, $2, $3, NOW(), 'application/tar', $4)
+             ON CONFLICT DO NOTHING",
+        )
+        .bind(file_id)
+        .bind(format!("loghash-{}", uniq()))
+        .bind(user_id)
+        .bind(b"logdata".to_vec())
+        .execute(&pool)
+        .await?;
+
+        let job_id = Uuid::new_v4();
+        store
+            .insert_provisioner_job(InsertProvisionerJobInput {
+                id: job_id,
+                created_at: now,
+                organization_id: org_id,
+                initiator_id: user_id,
+                provisioner: ProvisionerType::Echo,
+                storage_method: ProvisionerStorageMethod::File,
+                file_id,
+                job_type: ProvisionerJobType::TemplateVersionImport,
+                input: serde_json::json!({}),
+                tags: serde_json::json!({}),
+                trace_metadata: serde_json::json!({}),
+            })
+            .await?;
+
+        // Insert logs
+        let logs = store
+            .insert_provisioner_job_logs(InsertProvisionerJobLogsInput {
+                job_id,
+                created_at: vec![now, now + time::Duration::seconds(1)],
+                source: vec![LogSource::Provisioner, LogSource::ProvisionerDaemon],
+                level: vec![LogLevel::Info, LogLevel::Warn],
+                stage: vec!["init".to_string(), "plan".to_string()],
+                output: vec!["starting up".to_string(), "warning occurred".to_string()],
+            })
+            .await?;
+        assert_eq!(logs.len(), 2, "should insert 2 log entries");
+
+        // List logs (after_id = 0 means all)
+        let listed = store.get_provisioner_logs_after_id(job_id, 0).await?;
+        assert!(listed.len() >= 2, "should list at least 2 logs");
+        assert!(
+            listed.iter().all(|l| l.job_id == job_id),
+            "all logs should belong to our job"
+        );
+
+        // List after first log
+        let first_id = listed[0].id;
+        let after_first = store
+            .get_provisioner_logs_after_id(job_id, first_id)
+            .await?;
+        assert!(
+            after_first.iter().all(|l| l.id > first_id),
+            "all logs should be after first"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 13. Audit
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_audit_log_insert_and_list() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let audit_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let target = format!("audit-target-{}", uniq());
+
+        // Insert audit log
+        store
+            .insert_audit_log(coder_core::PersistAuditLogInput {
+                id: audit_id,
+                request_id: Some(Uuid::new_v4()),
+                time: now,
+                ip: "127.0.0.1".to_string(),
+                user_agent: "test-agent".to_string(),
+                resource_type: "user".to_string(),
+                resource_id: Some(user_id),
+                resource_target: target.clone(),
+                resource_icon: "".to_string(),
+                action: "create".to_string(),
+                diff: serde_json::json!({}),
+                status_code: 200,
+                additional_fields: serde_json::json!({}),
+                description: format!("test audit {target}"),
+                resource_link: "".to_string(),
+                is_deleted: false,
+                organization_id: Some(org_id),
+                user_id: Some(user_id),
+            })
+            .await?;
+
+        // List audit logs with search
+        let response = store
+            .list_audit_logs(coder_core::AuditLogListFilter {
+                search: target.clone(),
+                limit: 10,
+                offset: 0,
+            })
+            .await?;
+        assert!(response.count >= 1, "should find at least 1 audit log");
+        assert!(
+            response
+                .audit_logs
+                .iter()
+                .any(|l| l.resource_target == target),
+            "should find our specific audit entry"
+        );
+        // Verify the search filter actually works: every returned log must
+        // match the search term in resource_target or description.
+        assert!(
+            response.audit_logs.iter().all(|l| {
+                l.resource_target.contains(&target) || l.description.contains(&target)
+            }),
+            "all returned audit logs should match the search term"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 14. External Auth
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_external_auth_link_upsert_and_find() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let provider_id = format!("github-{}", uniq());
+        let now = OffsetDateTime::now_utc();
+
+        // Upsert
+        let link = store
+            .upsert_external_auth_link(
+                user_id,
+                &coder_core::UpsertExternalAuthLinkInput {
+                    provider_id: provider_id.clone(),
+                    access_token: "access-token-123".to_string(),
+                    refresh_token: "refresh-token-456".to_string(),
+                    token_type: "Bearer".to_string(),
+                    scopes: vec!["repo".to_string(), "user".to_string()],
+                    expires_at: now + time::Duration::hours(1),
+                    authenticated: true,
+                    validate_error: String::new(),
+                    refresh_error: String::new(),
+                    last_validated_at: Some(now),
+                    last_refreshed_at: None,
+                    user: None,
+                    installations: vec![],
+                    app_installable: false,
+                },
+            )
+            .await?;
+        assert_eq!(link.provider_id, provider_id);
+        assert!(link.authenticated, "link should be authenticated");
+        assert_eq!(link.access_token, "access-token-123");
+
+        // Find
+        let found = store.find_external_auth_link(user_id, &provider_id).await?;
+        let found = found.unwrap_or_else(|| panic!("should find external auth link"));
+        assert_eq!(found.provider_id, provider_id);
+        assert_eq!(found.access_token, "access-token-123");
+
+        // Update via upsert
+        let updated = store
+            .upsert_external_auth_link(
+                user_id,
+                &coder_core::UpsertExternalAuthLinkInput {
+                    provider_id: provider_id.clone(),
+                    access_token: "new-access-token".to_string(),
+                    refresh_token: "new-refresh-token".to_string(),
+                    token_type: "Bearer".to_string(),
+                    scopes: vec!["repo".to_string()],
+                    expires_at: now + time::Duration::hours(2),
+                    authenticated: true,
+                    validate_error: String::new(),
+                    refresh_error: String::new(),
+                    last_validated_at: Some(now),
+                    last_refreshed_at: Some(now),
+                    user: None,
+                    installations: vec![],
+                    app_installable: false,
+                },
+            )
+            .await?;
+        assert_eq!(updated.access_token, "new-access-token");
+
+        // List all links for user
+        let links = store.list_external_auth_links(user_id).await?;
+        assert!(
+            links.iter().any(|l| l.provider_id == provider_id),
+            "should find our provider in the list"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_external_auth_link_delete() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let provider_id = format!("gitlab-{}", uniq());
+        let now = OffsetDateTime::now_utc();
+
+        // Create
+        store
+            .upsert_external_auth_link(
+                user_id,
+                &coder_core::UpsertExternalAuthLinkInput {
+                    provider_id: provider_id.clone(),
+                    access_token: "token".to_string(),
+                    refresh_token: "refresh".to_string(),
+                    token_type: "Bearer".to_string(),
+                    scopes: vec![],
+                    expires_at: now + time::Duration::hours(1),
+                    authenticated: true,
+                    validate_error: String::new(),
+                    refresh_error: String::new(),
+                    last_validated_at: None,
+                    last_refreshed_at: None,
+                    user: None,
+                    installations: vec![],
+                    app_installable: false,
+                },
+            )
+            .await?;
+
+        // Delete
+        let deleted = store
+            .delete_external_auth_link(user_id, &provider_id)
+            .await?;
+        assert!(deleted, "delete should return true");
+
+        // Verify gone
+        let gone = store.find_external_auth_link(user_id, &provider_id).await?;
+        assert!(gone.is_none(), "deleted link should not be found");
+
+        // Delete again should return false
+        let deleted_again = store
+            .delete_external_auth_link(user_id, &provider_id)
+            .await?;
+        assert!(!deleted_again, "second delete should return false");
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 15. Custom Roles
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_custom_role_upsert_list_delete() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+
+        let role_name = format!("custom-role-{}", uniq());
+
+        // Upsert (create)
+        let role = store
+            .upsert_custom_role(&coder_core::UpsertCustomRoleInput {
+                name: role_name.clone(),
+                display_name: "Test Custom Role".to_string(),
+                organization_id: Some(org_id),
+                site_permissions: "[]".to_string(),
+                org_permissions: r#"[{"resource_type": "workspace", "action": "read"}]"#
+                    .to_string(),
+                user_permissions: "[]".to_string(),
+            })
+            .await?;
+        assert_eq!(role.name, role_name);
+        assert_eq!(role.display_name, "Test Custom Role");
+        assert_eq!(role.organization_id, Some(org_id));
+
+        // List by organization
+        let roles = store.list_custom_roles(Some(org_id)).await?;
+        assert!(
+            roles.iter().any(|r| r.name == role_name),
+            "should find our role in the org list"
+        );
+
+        // Upsert (update display name)
+        let updated = store
+            .upsert_custom_role(&coder_core::UpsertCustomRoleInput {
+                name: role_name.clone(),
+                display_name: "Updated Role Name".to_string(),
+                organization_id: Some(org_id),
+                site_permissions: "[]".to_string(),
+                org_permissions: "[]".to_string(),
+                user_permissions: "[]".to_string(),
+            })
+            .await?;
+        assert_eq!(updated.display_name, "Updated Role Name");
+
+        // Delete
+        let deleted = store.delete_custom_role(&role_name, Some(org_id)).await?;
+        assert!(deleted, "delete_custom_role should return true");
+
+        // Verify gone
+        let after_delete = store.list_custom_roles(Some(org_id)).await?;
+        assert!(
+            !after_delete.iter().any(|r| r.name == role_name),
+            "deleted role should not appear"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 16. Files
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_file_insert_and_find_by_hash() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let file_id = Uuid::new_v4();
+        let file_hash = format!("sha256-{}", uniq());
+        let file_data = b"hello world file content".to_vec();
+
+        // Insert
+        let result = store
+            .insert_file(coder_core::InsertFileInput {
+                id: file_id,
+                hash: file_hash.clone(),
+                created_by: user_id,
+                mimetype: "text/plain".to_string(),
+                data: file_data.clone(),
+            })
+            .await?;
+        assert_eq!(result.id, file_id);
+
+        // Find by ID
+        let found = store.get_file_by_id(file_id).await?;
+        let found = found.unwrap_or_else(|| panic!("should find file by ID"));
+        assert_eq!(found.hash, file_hash);
+        assert_eq!(found.data, file_data);
+        assert_eq!(found.mimetype, "text/plain");
+        assert_eq!(found.created_by, user_id);
+
+        // Find by hash and creator
+        let by_hash = store
+            .get_file_by_hash_and_creator(&file_hash, user_id)
+            .await?;
+        assert!(by_hash.is_some());
+        assert_eq!(by_hash.as_ref().map(|f| f.id), Some(file_id));
+
+        // Find by non-existent hash
+        let missing = store
+            .get_file_by_hash_and_creator("nonexistent-hash", user_id)
+            .await?;
+        assert!(missing.is_none());
+
         Ok(())
     }
 
