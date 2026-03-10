@@ -4617,6 +4617,85 @@ pub struct TemplateFilter {
     pub deleted: Option<bool>,
 }
 
+/// Matched provisioners information for a provisioner job.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct MatchedProvisioners {
+    /// Number of provisioner daemons that matched the requested tags.
+    pub count: i32,
+    /// Number of matched provisioners available to take jobs.
+    pub available: i32,
+    /// Most recently seen time of matched provisioners.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub most_recently_seen: Option<OffsetDateTime>,
+}
+
+/// Request to update the active template version.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct UpdateActiveTemplateVersionRequest {
+    /// The template version ID to promote.
+    pub id: Uuid,
+}
+
+/// Request to archive unused template versions.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct ArchiveTemplateVersionsRequest {
+    /// If true, archive all unused versions regardless of job status.
+    #[serde(default)]
+    pub all: bool,
+}
+
+/// Response from archiving unused template versions.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct ArchiveTemplateVersionsResponse {
+    /// Template identifier.
+    pub template_id: Uuid,
+    /// IDs of archived versions.
+    pub archived_ids: Vec<Uuid>,
+}
+
+/// Request to evaluate dynamic parameters for a template version.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct DynamicParametersRequest {
+    /// Request identifier for matching responses.
+    #[serde(default)]
+    pub id: i32,
+    /// Input parameter values.
+    #[serde(default)]
+    pub inputs: HashMap<String, String>,
+    /// Owner user ID.
+    #[serde(default)]
+    pub owner_id: Option<Uuid>,
+}
+
+/// Response from evaluating dynamic parameters.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct DynamicParametersResponse {
+    /// Matching request identifier.
+    pub id: i32,
+    /// Diagnostics from evaluation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub diagnostics: Vec<FriendlyDiagnostic>,
+    /// Evaluated parameters.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub parameters: Vec<Value>,
+}
+
+/// A diagnostic message from dynamic parameter evaluation.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct FriendlyDiagnostic {
+    /// Severity of the diagnostic.
+    pub severity: String,
+    /// Summary message.
+    pub summary: String,
+    /// Detailed message.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+}
+
 // ---------------------------------------------------------------------------
 // Authorization check (POST /api/v2/authcheck)
 // ---------------------------------------------------------------------------

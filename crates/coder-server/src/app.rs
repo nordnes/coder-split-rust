@@ -30,13 +30,15 @@ use coder_auth::{
 use coder_connectivity::{HealthService, generate_git_ssh_key};
 use coder_core::StorageError;
 use coder_core::api::{
-    CreateTemplateRequest, CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest,
-    DAUEntry, DAUsResponse, MinimalUser, PatchTemplateVersionRequest, ProvisionerJobLog,
-    ProvisionerJobResponse, ProvisionerJobStatus, ProvisionerTiming, TemplateExample,
-    TemplateFilter, TemplateResponse, TemplateVersionExternalAuth, TemplateVersionParameter,
-    TemplateVersionPreset, TemplateVersionPresetParameter, TemplateVersionResponse,
-    TemplateVersionVariable, UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceBuildTimings,
-    WorkspaceResource, WorkspaceResourceMetadata, WorkspaceResourceResponse,
+    ArchiveTemplateVersionsRequest, ArchiveTemplateVersionsResponse, CreateTemplateRequest,
+    CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest, DAUEntry, DAUsResponse,
+    DynamicParametersRequest, DynamicParametersResponse, MatchedProvisioners, MinimalUser,
+    PatchTemplateVersionRequest, ProvisionerJobLog, ProvisionerJobResponse, ProvisionerJobStatus,
+    ProvisionerTiming, TemplateExample, TemplateFilter, TemplateResponse,
+    TemplateVersionExternalAuth, TemplateVersionParameter, TemplateVersionPreset,
+    TemplateVersionPresetParameter, TemplateVersionResponse, TemplateVersionVariable,
+    UpdateActiveTemplateVersionRequest, UpdateTemplateMeta, WorkspaceBuildParameter,
+    WorkspaceBuildTimings, WorkspaceResource, WorkspaceResourceMetadata, WorkspaceResourceResponse,
 };
 use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
 use coder_core::api::{
@@ -725,7 +727,11 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/templates/{template}/versions",
-                    get(list_template_versions),
+                    get(list_template_versions).patch(patch_active_template_version),
+                )
+                .route(
+                    "/templates/{template}/versions/archive",
+                    post(post_archive_template_versions),
                 )
                 .route(
                     "/templates/{template}/versions/{templateversionname}",
@@ -741,7 +747,7 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/templateversions/{templateversion}/cancel",
-                    post(post_cancel_template_version),
+                    patch(patch_cancel_template_version),
                 )
                 .route(
                     "/templateversions/{templateversion}/dry-run",
@@ -753,15 +759,27 @@ pub fn build_router(state: AppState) -> Router {
                 )
                 .route(
                     "/templateversions/{templateversion}/dry-run/{jobid}/cancel",
-                    get(get_cancel_template_version_dry_run),
+                    patch(patch_cancel_template_version_dry_run),
                 )
                 .route(
                     "/templateversions/{templateversion}/dry-run/{jobid}/logs",
                     get(get_template_version_dry_run_logs),
                 )
                 .route(
+                    "/templateversions/{templateversion}/dry-run/{jobid}/matched-provisioners",
+                    get(get_template_version_dry_run_matched_provisioners),
+                )
+                .route(
                     "/templateversions/{templateversion}/dry-run/{jobid}/resources",
                     get(get_template_version_dry_run_resources),
+                )
+                .route(
+                    "/templateversions/{templateversion}/dynamic-parameters",
+                    get(get_template_version_dynamic_parameters),
+                )
+                .route(
+                    "/templateversions/{templateversion}/dynamic-parameters/evaluate",
+                    post(post_template_version_dynamic_parameters_evaluate),
                 )
                 .route(
                     "/templateversions/{templateversion}/external-auth",
@@ -5861,8 +5879,8 @@ async fn post_archive_template_version(
         .into_response())
 }
 
-/// POST /templateversions/{templateversion}/cancel
-async fn post_cancel_template_version(
+/// PATCH /templateversions/{templateversion}/cancel
+async fn patch_cancel_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
@@ -5991,8 +6009,8 @@ async fn patch_template_version_dry_run(
     }
 }
 
-/// GET /templateversions/{templateversion}/dry-run/{jobid}/cancel
-async fn get_cancel_template_version_dry_run(
+/// PATCH /templateversions/{templateversion}/dry-run/{jobid}/cancel
+async fn patch_cancel_template_version_dry_run(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
@@ -6058,6 +6076,180 @@ async fn get_template_version_dry_run_resources(
     // Resources are populated by the provisioner daemon. Return empty for stub.
     let resources: Vec<WorkspaceResource> = Vec::new();
     Ok((StatusCode::OK, Json(resources)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/dry-run/{jobid}/matched-provisioners
+async fn get_template_version_dry_run_matched_provisioners(
+    State(state): State<AppState>,
+    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _job = match state.store.find_provisioner_job(job_id).await? {
+        Some(j) => j,
+        None => return Ok(not_found_response("Dry-run job not found.")),
+    };
+
+    // Matched provisioners require daemon tag matching which is not yet implemented.
+    let response = MatchedProvisioners {
+        count: 0,
+        available: 0,
+        most_recently_seen: None,
+    };
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// GET /templateversions/{templateversion}/dynamic-parameters
+async fn get_template_version_dynamic_parameters(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
+
+    // Dynamic parameters are evaluated via the provisioner. Return empty stub.
+    let response = DynamicParametersResponse::default();
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// POST /templateversions/{templateversion}/dynamic-parameters/evaluate
+async fn post_template_version_dynamic_parameters_evaluate(
+    State(state): State<AppState>,
+    Path(version_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Result<Json<DynamicParametersRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
+
+    let req = match body {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid request body.", e.to_string())),
+            )
+                .into_response());
+        }
+    };
+
+    // Dynamic parameters are evaluated via the provisioner. Return stub response.
+    let response = DynamicParametersResponse {
+        id: req.id,
+        diagnostics: Vec::new(),
+        parameters: Vec::new(),
+    };
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// PATCH /templates/{template}/versions — update active template version
+async fn patch_active_template_version(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Result<Json<UpdateActiveTemplateVersionRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let template = match state.store.find_template_by_id(template_id).await? {
+        Some(t) => t,
+        None => return Ok(not_found_response("Template not found.")),
+    };
+
+    let req = match body {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid request body.", e.to_string())),
+            )
+                .into_response());
+        }
+    };
+
+    // Verify the version exists and belongs to this template.
+    let ver = match state.store.find_template_version_by_id(req.id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
+
+    if ver.template_id != Some(template.id) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Version does not belong to this template.",
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    let updated = state
+        .store
+        .update_template_active_version(template.id, req.id)
+        .await?;
+    if !updated {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    Ok(StatusCode::OK.into_response())
+}
+
+/// POST /templates/{template}/versions/archive — archive unused template versions
+async fn post_archive_template_versions(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+    body: Result<Json<ArchiveTemplateVersionsRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _template = match state.store.find_template_by_id(template_id).await? {
+        Some(t) => t,
+        None => return Ok(not_found_response("Template not found.")),
+    };
+
+    let req = match body {
+        Ok(Json(r)) => r,
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Invalid request body.", e.to_string())),
+            )
+                .into_response());
+        }
+    };
+
+    let archived_ids = state
+        .store
+        .archive_unused_template_versions(template_id, req.all)
+        .await?;
+
+    let response = ArchiveTemplateVersionsResponse {
+        template_id,
+        archived_ids,
+    };
+    Ok((StatusCode::OK, Json(response)).into_response())
 }
 
 /// GET /templateversions/{templateversion}/external-auth
@@ -14503,6 +14695,89 @@ mod tests {
                 })
         }
 
+        async fn archive_unused_template_versions(
+            &self,
+            template_id: Uuid,
+            all: bool,
+        ) -> Result<Vec<Uuid>, StorageError> {
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let active_version_id = templates.get(&template_id).map(|t| t.active_version_id);
+
+            let jobs = self
+                .provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+            let mut versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut archived = Vec::new();
+            for v in versions.values_mut() {
+                if v.template_id == Some(template_id)
+                    && !v.archived
+                    && Some(v.id) != active_version_id
+                {
+                    // When `all` is false, only archive versions whose job failed
+                    // (completed with an error and not canceled).
+                    if !all {
+                        let job_failed = jobs
+                            .get(&v.job_id)
+                            .map(|j| {
+                                j.completed_at.is_some()
+                                    && !j.error.is_empty()
+                                    && j.canceled_at.is_none()
+                            })
+                            .unwrap_or(false);
+                        if !job_failed {
+                            continue;
+                        }
+                    }
+                    v.archived = true;
+                    archived.push(v.id);
+                }
+            }
+            Ok(archived)
+        }
+
+        async fn get_previous_template_version(
+            &self,
+            organization_id: Uuid,
+            name: &str,
+            template_id: Option<Uuid>,
+        ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+            // Find the target version by name and org.
+            let target = versions.values().find(|v| {
+                v.organization_id == organization_id
+                    && v.name == name
+                    && (template_id.is_none() || v.template_id == template_id)
+            });
+            let target_created_at = match target {
+                Some(t) => t.created_at,
+                None => return Ok(None),
+            };
+
+            // Find the version created immediately before.
+            let mut candidates: Vec<&TemplateVersionRecord> = versions
+                .values()
+                .filter(|v| {
+                    v.organization_id == organization_id
+                        && v.created_at < target_created_at
+                        && (template_id.is_none() || v.template_id == template_id)
+                })
+                .collect();
+            candidates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(candidates.first().cloned().cloned())
+        }
+
         // ----- Agent storage methods -----
 
         async fn find_workspace_agent_by_id(
@@ -20693,6 +20968,235 @@ mod tests {
             "expected 101 or 426, got {}",
             response.status()
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Template version route tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn dynamic_parameters_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let version_id = Uuid::new_v4();
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{version_id}/dynamic-parameters"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dynamic_parameters_returns_ok_for_existing_version() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a provisioner job and template version in the store.
+        let job_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        store
+            .provisioner_jobs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                job_id,
+                TemplateProvisionerJobRecord {
+                    id: job_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    started_at: None,
+                    canceled_at: None,
+                    completed_at: None,
+                    error: String::new(),
+                    organization_id: org_id,
+                    initiator_id: Uuid::from_u128(1),
+                    provisioner: "echo".to_owned(),
+                    job_status: "succeeded".to_owned(),
+                    file_id: Some(Uuid::new_v4()),
+                    job_type: "template_version_import".to_owned(),
+                    input: Value::Null,
+                    worker_id: None,
+                    tags: HashMap::new(),
+                },
+            );
+        store
+            .template_versions
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                version_id,
+                TemplateVersionRecord {
+                    id: version_id,
+                    template_id: None,
+                    organization_id: org_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    name: "test-version".to_owned(),
+                    readme: String::new(),
+                    job_id,
+                    created_by: Uuid::from_u128(1),
+                    external_auth_providers: Value::Array(Vec::new()),
+                    message: String::new(),
+                    archived: false,
+                    source_example_id: None,
+                    has_ai_task: None,
+                    has_external_agent: None,
+                    created_by_avatar_url: String::new(),
+                    created_by_username: "owner".to_owned(),
+                    created_by_name: "Owner".to_owned(),
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{version_id}/dynamic-parameters"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("id").and_then(Value::as_i64), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dynamic_parameters_evaluate_returns_ok() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let job_id = Uuid::new_v4();
+        let version_id = Uuid::new_v4();
+        store
+            .provisioner_jobs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                job_id,
+                TemplateProvisionerJobRecord {
+                    id: job_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    started_at: None,
+                    canceled_at: None,
+                    completed_at: None,
+                    error: String::new(),
+                    organization_id: org_id,
+                    initiator_id: Uuid::from_u128(1),
+                    provisioner: "echo".to_owned(),
+                    job_status: "succeeded".to_owned(),
+                    file_id: Some(Uuid::new_v4()),
+                    job_type: "template_version_import".to_owned(),
+                    input: Value::Null,
+                    worker_id: None,
+                    tags: HashMap::new(),
+                },
+            );
+        store
+            .template_versions
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                version_id,
+                TemplateVersionRecord {
+                    id: version_id,
+                    template_id: None,
+                    organization_id: org_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    name: "test-version".to_owned(),
+                    readme: String::new(),
+                    job_id,
+                    created_by: Uuid::from_u128(1),
+                    external_auth_providers: Value::Array(Vec::new()),
+                    message: String::new(),
+                    archived: false,
+                    source_example_id: None,
+                    has_ai_task: None,
+                    has_external_agent: None,
+                    created_by_avatar_url: String::new(),
+                    created_by_username: "owner".to_owned(),
+                    created_by_name: "Owner".to_owned(),
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{version_id}/dynamic-parameters/evaluate"),
+                &session_token,
+                &json!({"id": 42, "inputs": {"key": "value"}}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("id").and_then(Value::as_i64), Some(42));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn matched_provisioners_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let version_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!(
+                    "/api/v2/templateversions/{version_id}/dry-run/{job_id}/matched-provisioners"
+                ),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archive_template_versions_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let template_id = Uuid::new_v4();
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                &format!("/api/v2/templates/{template_id}/versions/archive"),
+                &json!({"all": false}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_active_template_version_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let template_id = Uuid::new_v4();
+        let response = call(
+            app,
+            json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{template_id}/versions"),
+                &json!({"id": Uuid::new_v4()}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }
 
