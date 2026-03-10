@@ -3024,21 +3024,21 @@ mod tests {
             _id: Uuid,
             _updated_at: OffsetDateTime,
         ) -> Result<(), StorageError> {
-            Ok(())
+            Err(StorageError::unavailable("not implemented in FakeStore"))
         }
 
         async fn update_provisioner_job_with_complete_by_id(
             &self,
             _input: CompleteProvisionerJobInput,
         ) -> Result<(), StorageError> {
-            Ok(())
+            Err(StorageError::unavailable("not implemented in FakeStore"))
         }
 
         async fn update_provisioner_job_with_cancel_by_id(
             &self,
             _input: CancelProvisionerJobInput,
         ) -> Result<(), StorageError> {
-            Ok(())
+            Err(StorageError::unavailable("not implemented in FakeStore"))
         }
 
         async fn get_provisioner_jobs_to_be_reaped(
@@ -3089,7 +3089,7 @@ mod tests {
             _id: Uuid,
             _last_seen_at: OffsetDateTime,
         ) -> Result<(), StorageError> {
-            Ok(())
+            Err(StorageError::unavailable("not implemented in FakeStore"))
         }
 
         async fn get_provisioner_daemons_by_organization(
@@ -3100,7 +3100,7 @@ mod tests {
         }
 
         async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
-            Ok(())
+            Err(StorageError::unavailable("not implemented in FakeStore"))
         }
 
         async fn insert_provisioner_key(

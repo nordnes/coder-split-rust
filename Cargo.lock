@@ -395,9 +395,11 @@ dependencies = [
  "async-trait",
  "base64",
  "coder-core",
+ "serde_json",
  "sha2",
  "thiserror",
  "time",
+ "tokio",
  "tracing",
  "uuid",
 ]
