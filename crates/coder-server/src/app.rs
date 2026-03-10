@@ -8383,8 +8383,7 @@ async fn get_regions(
         .store
         .ensure_deployment_metadata()
         .await
-        .map(|m| m.deployment_id)
-        .unwrap_or_else(|_| Uuid::nil());
+        .map(|m| m.deployment_id)?;
 
     let access_url = state.config.access_url.clone();
 
