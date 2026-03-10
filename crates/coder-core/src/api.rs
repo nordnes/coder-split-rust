@@ -4614,3 +4614,50 @@ pub struct AuthorizationObject {
 
 /// Bulk authorization response: maps each request key to a boolean result.
 pub type AuthorizationResponse = HashMap<String, bool>;
+
+// ---------------------------------------------------------------------------
+// Regions
+// ---------------------------------------------------------------------------
+
+/// A workspace proxy region.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Region {
+    /// Region identifier.
+    pub id: Uuid,
+    /// Short machine-friendly name.
+    pub name: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Icon URL.
+    pub icon_url: String,
+    /// Whether this region is healthy.
+    pub healthy: bool,
+    /// Base URL for path-based apps.
+    pub path_app_url: String,
+    /// Wildcard hostname for subdomain apps.
+    pub wildcard_hostname: String,
+}
+
+/// Response containing a list of regions.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RegionsResponse {
+    pub regions: Vec<Region>,
+}
+
+// ---------------------------------------------------------------------------
+// Custom Notifications
+// ---------------------------------------------------------------------------
+
+/// Content payload for a custom notification.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomNotificationContent {
+    pub title: String,
+    pub message: String,
+}
+
+/// Request to send a custom notification.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CustomNotificationRequest {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub content: Option<CustomNotificationContent>,
+}
