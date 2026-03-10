@@ -11634,7 +11634,7 @@ async fn tailnet_rpc_conn(
     let coordinator = state.coordinator.clone();
 
     Ok(ws.on_upgrade(move |mut socket| async move {
-        use coder_connectivity::tailnet::{CoordinateRequest, PeerKind};
+        use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse, PeerKind};
 
         // Start a coordination session — this returns a handle with a
         // channel that receives responses pushed by the coordinator when
@@ -11669,10 +11669,11 @@ async fn tailnet_rpc_conn(
                                         error = %e,
                                         "invalid coordination request JSON",
                                     );
-                                    // Send an error response back to the peer.
-                                    let err_resp = serde_json::json!({
-                                        "error": format!("invalid request: {e}"),
-                                    });
+                                    // Send a proper CoordinateResponse error back to the peer.
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
                                     if let Ok(payload) = serde_json::to_string(&err_resp) {
                                         if socket.send(Message::Text(payload.into())).await.is_err() {
                                             break;
@@ -11699,6 +11700,16 @@ async fn tailnet_rpc_conn(
                                         error = %e,
                                         "invalid coordination request (binary)",
                                     );
+                                    // Send a proper CoordinateResponse error back to the peer.
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
                                 }
                             }
                         }

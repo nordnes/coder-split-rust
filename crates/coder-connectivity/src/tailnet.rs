@@ -648,74 +648,97 @@ impl TailnetCoordinator for InMemoryCoordinator {
 
         // ---- AddTunnel: register tunnel and exchange node info ----
         if let Some(dst_id) = request.add_tunnel {
-            inner.tunnels.add(peer_id, dst_id);
+            // Reject self-tunnels — a peer cannot tunnel to itself.
+            if dst_id == peer_id {
+                if let Some(src) = inner.peers.get(&peer_id) {
+                    Self::send_to_peer(
+                        src,
+                        CoordinateResponse {
+                            peer_updates: Vec::new(),
+                            error: Some("cannot add tunnel to self".to_string()),
+                        },
+                    );
+                }
+            } else {
+                inner.tunnels.add(peer_id, dst_id);
 
-            // Send dst's node to src.
-            let dst_node = inner.peers.get(&dst_id).and_then(|p| p.node.clone());
-            if let Some(dst_node) = dst_node {
+                // Send dst's node to src.
+                let dst_node = inner.peers.get(&dst_id).and_then(|p| p.node.clone());
+                if let Some(dst_node) = dst_node {
+                    if let Some(src) = inner.peers.get(&peer_id) {
+                        Self::send_to_peer(
+                            src,
+                            CoordinateResponse {
+                                peer_updates: vec![PeerUpdateMsg {
+                                    id: dst_id,
+                                    kind: PeerUpdateKind::Node,
+                                    node: Some(dst_node),
+                                }],
+                                error: None,
+                            },
+                        );
+                    }
+                }
+
+                // Send src's node to dst.
+                let src_node = inner.peers.get(&peer_id).and_then(|p| p.node.clone());
+                if let Some(src_node) = src_node {
+                    if let Some(dst) = inner.peers.get(&dst_id) {
+                        Self::send_to_peer(
+                            dst,
+                            CoordinateResponse {
+                                peer_updates: vec![PeerUpdateMsg {
+                                    id: peer_id,
+                                    kind: PeerUpdateKind::Node,
+                                    node: Some(src_node),
+                                }],
+                                error: None,
+                            },
+                        );
+                    }
+                }
+            } // end else (not self-tunnel)
+        }
+
+        // ---- RemoveTunnel: notify both peers and remove tunnel ----
+        if let Some(dst_id) = request.remove_tunnel {
+            if inner.tunnels.tunnel_exists(peer_id, dst_id) {
                 if let Some(src) = inner.peers.get(&peer_id) {
                     Self::send_to_peer(
                         src,
                         CoordinateResponse {
                             peer_updates: vec![PeerUpdateMsg {
                                 id: dst_id,
-                                kind: PeerUpdateKind::Node,
-                                node: Some(dst_node),
+                                kind: PeerUpdateKind::Disconnected,
+                                node: None,
                             }],
                             error: None,
                         },
                     );
                 }
-            }
-
-            // Send src's node to dst.
-            let src_node = inner.peers.get(&peer_id).and_then(|p| p.node.clone());
-            if let Some(src_node) = src_node {
                 if let Some(dst) = inner.peers.get(&dst_id) {
                     Self::send_to_peer(
                         dst,
                         CoordinateResponse {
                             peer_updates: vec![PeerUpdateMsg {
                                 id: peer_id,
-                                kind: PeerUpdateKind::Node,
-                                node: Some(src_node),
+                                kind: PeerUpdateKind::Disconnected,
+                                node: None,
                             }],
                             error: None,
                         },
                     );
                 }
-            }
-        }
-
-        // ---- RemoveTunnel: notify both peers and remove tunnel ----
-        if let Some(dst_id) = request.remove_tunnel {
-            if let Some(src) = inner.peers.get(&peer_id) {
+                inner.tunnels.remove(peer_id, dst_id);
+            } else if let Some(src) = inner.peers.get(&peer_id) {
                 Self::send_to_peer(
                     src,
                     CoordinateResponse {
-                        peer_updates: vec![PeerUpdateMsg {
-                            id: dst_id,
-                            kind: PeerUpdateKind::Disconnected,
-                            node: None,
-                        }],
-                        error: None,
+                        peer_updates: Vec::new(),
+                        error: Some(format!("no tunnel exists between you and \"{dst_id}\"")),
                     },
                 );
             }
-            if let Some(dst) = inner.peers.get(&dst_id) {
-                Self::send_to_peer(
-                    dst,
-                    CoordinateResponse {
-                        peer_updates: vec![PeerUpdateMsg {
-                            id: peer_id,
-                            kind: PeerUpdateKind::Disconnected,
-                            node: None,
-                        }],
-                        error: None,
-                    },
-                );
-            }
-            inner.tunnels.remove(peer_id, dst_id);
         }
 
         // ---- Disconnect: notify tunnel peers and remove peer ----
