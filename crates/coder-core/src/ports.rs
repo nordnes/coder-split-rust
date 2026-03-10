@@ -1,5 +1,6 @@
 //! Storage contracts for the Rust backend slice.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -473,7 +474,7 @@ pub struct ProvisionerDaemonHealthInput {
     /// Supported provisioner types.
     pub provisioners: Vec<String>,
     /// Free-form daemon tags.
-    pub tags: std::collections::HashMap<String, String>,
+    pub tags: HashMap<String, String>,
     /// Current daemon status.
     pub status: Option<String>,
 }
@@ -498,7 +499,7 @@ pub struct ProvisionerDaemonHealthRecord {
     /// Supported provisioner types.
     pub provisioners: Vec<String>,
     /// Free-form daemon tags.
-    pub tags: std::collections::HashMap<String, String>,
+    pub tags: HashMap<String, String>,
     /// Current daemon status.
     pub status: Option<String>,
 }
@@ -506,6 +507,24 @@ pub struct ProvisionerDaemonHealthRecord {
 // ---------------------------------------------------------------------------
 // Workspace domain records
 // ---------------------------------------------------------------------------
+
+/// Stored workspace ACL record.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceACLRecord {
+    /// User ACL: maps user UUID string to role string.
+    pub user_acl: HashMap<String, String>,
+    /// Group ACL: maps group UUID string to role string.
+    pub group_acl: HashMap<String, String>,
+}
+
+/// Input for updating workspace ACL.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpdateWorkspaceACLInput {
+    /// User role mapping (UUID string -> role).
+    pub user_roles: HashMap<String, String>,
+    /// Group role mapping (UUID string -> role).
+    pub group_roles: HashMap<String, String>,
+}
 
 /// Stored workspace record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -609,6 +628,19 @@ pub struct WorkspaceBuildParameterRecord {
     pub name: String,
     /// Parameter value.
     pub value: String,
+}
+
+/// Stored workspace resource metadata record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceResourceMetadataRecord {
+    /// Resource identifier.
+    pub workspace_resource_id: Uuid,
+    /// Metadata key.
+    pub key: String,
+    /// Metadata value.
+    pub value: String,
+    /// Whether the value is sensitive.
+    pub sensitive: bool,
 }
 
 /// Stored workspace agent port share record.
@@ -3027,6 +3059,43 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
+    /// Looks up a group by identifier.
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Returns the ACL for a workspace.
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable(
+            "workspace ACL is not implemented",
+        ))
+    }
+
+    /// Updates workspace ACL entries.
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError> {
+        let _ = (workspace_id, input);
+        Err(StorageError::unavailable(
+            "workspace ACL is not implemented",
+        ))
+    }
+
+    /// Clears all workspace ACL entries.
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable(
+            "workspace ACL is not implemented",
+        ))
+    }
+
     /// Lists workspace builds for a workspace.
     async fn list_workspace_builds(
         &self,
@@ -3172,6 +3241,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = job_id;
         Err(StorageError::unavailable(
             "workspace resources are not implemented",
+        ))
+    }
+
+    /// Lists metadata for a set of workspace resources.
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        let _ = resource_ids;
+        Err(StorageError::unavailable(
+            "workspace resource metadata is not implemented",
         ))
     }
 
@@ -4009,6 +4089,25 @@ pub trait WorkspaceStore: Send + Sync {
     /// Soft-deletes a workspace.
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
 
+    /// Looks up a group by identifier.
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
+
+    /// Returns the ACL for a workspace.
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError>;
+
+    /// Updates workspace ACL entries.
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError>;
+
+    /// Clears all workspace ACL entries.
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError>;
+
     /// Looks up a template by stable identifier.
     async fn find_template_by_id(
         &self,
@@ -4118,6 +4217,12 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError>;
+
+    /// Lists metadata for a set of workspace resources.
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError>;
 
     /// Lists port shares for a workspace.
     async fn list_workspace_port_shares(
@@ -5139,6 +5244,29 @@ where
         AppStore::soft_delete_workspace(self, workspace_id).await
     }
 
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        AppStore::find_group_by_id(self, group_id).await
+    }
+
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError> {
+        AppStore::get_workspace_acl(self, workspace_id).await
+    }
+
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError> {
+        AppStore::update_workspace_acl(self, workspace_id, input).await
+    }
+
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+        AppStore::delete_workspace_acl(self, workspace_id).await
+    }
+
     async fn find_template_by_id(
         &self,
         template_id: Uuid,
@@ -5265,6 +5393,13 @@ where
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
         AppStore::list_workspace_resources_by_job(self, job_id).await
+    }
+
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        AppStore::list_workspace_resource_metadata(self, resource_ids).await
     }
 
     async fn list_workspace_port_shares(
@@ -5413,6 +5548,29 @@ where
         (**self).soft_delete_workspace(workspace_id).await
     }
 
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        (**self).find_group_by_id(group_id).await
+    }
+
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError> {
+        (**self).get_workspace_acl(workspace_id).await
+    }
+
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError> {
+        (**self).update_workspace_acl(workspace_id, input).await
+    }
+
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+        (**self).delete_workspace_acl(workspace_id).await
+    }
+
     async fn find_template_by_id(
         &self,
         template_id: Uuid,
@@ -5551,6 +5709,15 @@ where
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
         (**self).list_workspace_resources_by_job(job_id).await
+    }
+
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        (**self)
+            .list_workspace_resource_metadata(resource_ids)
+            .await
     }
 
     async fn list_workspace_port_shares(

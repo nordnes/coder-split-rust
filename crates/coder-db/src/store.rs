@@ -5,6 +5,7 @@ use std::{str::FromStr, time::Duration};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
 use coder_core::provisioner::{
     LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord,
     ProvisionerJobTimingRecord as ProvisionerTimingRecord,
@@ -26,8 +27,8 @@ use coder_core::{
     CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
     CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
     DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser,
-    FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings,
-    InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
+    FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupRecord,
+    HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
     InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
     InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
     InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
@@ -46,7 +47,7 @@ use coder_core::{
     WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
     WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
-    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -603,6 +604,14 @@ struct StoredFullProvisionerDaemonRow {
     provisioners: Vec<String>,
     tags_json: String,
     key_id: Option<Uuid>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceResourceMetadataRow {
+    workspace_resource_id: Uuid,
+    key: String,
+    value: String,
+    sensitive: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -4370,6 +4379,119 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        let row: Option<(
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        )> = sqlx::query_as(
+            "SELECT id, name, display_name, organization_id, avatar_url,
+                        quota_allowance, source, created_at
+                 FROM groups WHERE id = $1",
+        )
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(
+            |(
+                id,
+                name,
+                display_name,
+                organization_id,
+                avatar_url,
+                quota_allowance,
+                source,
+                created_at,
+            )| {
+                GroupRecord {
+                    id,
+                    name,
+                    display_name,
+                    organization_id,
+                    avatar_url,
+                    quota_allowance,
+                    source,
+                    created_at,
+                }
+            },
+        ))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError> {
+        let row: Option<(Value, Value)> =
+            sqlx::query_as("SELECT group_acl, user_acl FROM workspaces WHERE id = $1")
+                .bind(workspace_id)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage_error)?;
+
+        match row {
+            Some((group_acl_val, user_acl_val)) => {
+                let group_acl: HashMap<String, String> =
+                    serde_json::from_value(group_acl_val).unwrap_or_default();
+                let user_acl: HashMap<String, String> =
+                    serde_json::from_value(user_acl_val).unwrap_or_default();
+                Ok(WorkspaceACLRecord {
+                    group_acl,
+                    user_acl,
+                })
+            }
+            None => Ok(WorkspaceACLRecord::default()),
+        }
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError> {
+        let user_acl_json =
+            serde_json::to_value(&input.user_roles).map_err(|e| StorageError::InvalidData {
+                message: format!("failed to serialize user_roles: {e}"),
+            })?;
+        let group_acl_json =
+            serde_json::to_value(&input.group_roles).map_err(|e| StorageError::InvalidData {
+                message: format!("failed to serialize group_roles: {e}"),
+            })?;
+        sqlx::query(
+            "UPDATE workspaces SET user_acl = user_acl || $2, group_acl = group_acl || $3
+             WHERE id = $1",
+        )
+        .bind(workspace_id)
+        .bind(user_acl_json)
+        .bind(group_acl_json)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE workspaces SET group_acl = '{}'::jsonb, user_acl = '{}'::jsonb
+             WHERE id = $1",
+        )
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_builds(
         &self,
         workspace_id: Uuid,
@@ -4540,7 +4662,7 @@ impl AppStore for PostgresStore {
         .fetch_one(&self.pool)
         .await
         .map_err(storage_error)?;
-        Ok(max.unwrap_or(0) + 1)
+        Ok(max.unwrap_or(0) + 1) // sqlx query_scalar returns Option for MAX
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -4654,6 +4776,35 @@ impl AppStore for PostgresStore {
         Ok(rows
             .into_iter()
             .map(workspace_resource_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        if resource_ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query_as::<_, StoredWorkspaceResourceMetadataRow>(
+            "SELECT workspace_resource_id, key, value, sensitive
+             FROM workspace_resource_metadata
+             WHERE workspace_resource_id = ANY($1)
+             ORDER BY workspace_resource_id, key",
+        )
+        .bind(resource_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkspaceResourceMetadataRecord {
+                workspace_resource_id: row.workspace_resource_id,
+                key: row.key,
+                value: row.value,
+                sensitive: row.sensitive,
+            })
             .collect())
     }
 
