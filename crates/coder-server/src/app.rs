@@ -3052,41 +3052,95 @@ async fn get_provisioner_job(
 
 // ---------------------------------------------------------------------------
 // PATCH /organizations/{org}/provisionerjobs/{job}/cancel — cancel a
-// provisioner job. Stub: always returns 404.
+// provisioner job.
 // ---------------------------------------------------------------------------
 async fn cancel_provisioner_job(
     State(state): State<AppState>,
-    Path((organization, _job)): Path<(String, String)>,
+    Path((organization, job)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
+        Ok(o) => o,
+        Err(error) => {
+            return handle_identity_error(error);
+        }
+    };
+
+    // Parse job UUID.
+    let job_id = match Uuid::from_str(&job) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Invalid provisioner job ID",
+                    "The job path parameter must be a valid UUID.",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Look up the provisioner job.
+    let Some(pj) = state.store.find_provisioner_job(job_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Verify the job belongs to the requested organization.
+    if pj.organization_id != org.id {
+        return Ok(resource_not_found_response());
     }
-    Ok((
-        StatusCode::NOT_FOUND,
-        Json(ApiResponse::error(
-            "Resource not found or you do not have access to this resource",
-            "The provisioner domain is not yet implemented in this backend slice.",
-        )),
-    )
-        .into_response())
+
+    // Check the job is not already completed or cancelled.
+    if pj.completed_at.is_some() || pj.canceled_at.is_some() {
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(ApiResponse::error(
+                "Job cannot be canceled",
+                "The provisioner job has already completed or been canceled.",
+            )),
+        )
+            .into_response());
+    }
+
+    // Cancel the job.
+    let updated = state.store.cancel_template_provisioner_job(job_id).await?;
+    if !updated {
+        // Race: someone else completed/cancelled it between our check and update.
+        return Ok((
+            StatusCode::PRECONDITION_FAILED,
+            Json(ApiResponse::error(
+                "Job cannot be canceled",
+                "The provisioner job has already completed or been canceled.",
+            )),
+        )
+            .into_response());
+    }
+
+    Ok(StatusCode::OK.into_response())
 }
 
 // ---------------------------------------------------------------------------
-// GET /organizations/{org}/provisionerjobs/{job}/logs — stream provisioner
-// job logs. Stub: returns 404 (consistent with get/cancel single-job stubs).
+// GET /organizations/{org}/provisionerjobs/{job}/logs — provisioner job logs.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+struct ProvisionerJobLogsQuery {
+    after: Option<i64>,
+}
+
 async fn get_provisioner_job_logs(
     State(state): State<AppState>,
-    Path((organization, _job)): Path<(String, String)>,
+    Path((organization, job)): Path<(String, String)>,
+    Query(query): Query<ProvisionerJobLogsQuery>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
@@ -3100,14 +3154,46 @@ async fn get_provisioner_job_logs(
     {
         return handle_identity_error(error);
     }
-    Ok((
-        StatusCode::NOT_FOUND,
-        Json(ApiResponse::error(
-            "Resource not found or you do not have access to this resource",
-            "The provisioner domain is not yet implemented in this backend slice.",
-        )),
-    )
-        .into_response())
+
+    // Parse job UUID.
+    let job_id = match Uuid::from_str(&job) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Invalid provisioner job ID",
+                    "The job path parameter must be a valid UUID.",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Look up the provisioner job to verify it exists.
+    let Some(_pj) = state.store.find_provisioner_job(job_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Fetch the logs.
+    let logs = state
+        .store
+        .list_provisioner_job_logs(job_id, query.after)
+        .await?;
+
+    let items: Vec<ProvisionerJobLog> = logs
+        .into_iter()
+        .map(|l| ProvisionerJobLog {
+            id: l.id,
+            created_at: l.created_at,
+            log_source: l.source,
+            log_level: l.level,
+            stage: l.stage,
+            output: l.output,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(items)).into_response())
 }
 
 // ---------------------------------------------------------------------------
