@@ -3164,11 +3164,20 @@ pub struct PatchAppStatusRequest {
     pub uri: Option<String>,
     /// State.
     pub state: WorkspaceAppStatusState,
+    /// Icon (deprecated, unused).
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// Needs user attention (deprecated, unused).
+    #[serde(default)]
+    pub needs_user_attention: Option<bool>,
 }
 
 /// Request to create an agent log source.
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
 pub struct CreateLogSourceRequest {
+    /// Unique identifier for the log source (scoped to an agent).
+    #[serde(default)]
+    pub id: Option<Uuid>,
     /// Display name.
     pub display_name: String,
     /// Icon URL or identifier.

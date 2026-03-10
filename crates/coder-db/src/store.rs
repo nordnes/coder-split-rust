@@ -3913,15 +3913,17 @@ impl AppStore for PostgresStore {
     async fn insert_workspace_agent_log_source(
         &self,
         agent_id: Uuid,
+        id: Option<Uuid>,
         display_name: &str,
         icon: &str,
     ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
+        let source_id = id.unwrap_or_else(Uuid::new_v4);
         let row = sqlx::query_as::<_, StoredWorkspaceAgentLogSourceRow>(
             "INSERT INTO workspace_agent_log_sources (id, workspace_agent_id, created_at, display_name, icon)
              VALUES ($1, $2, NOW(), $3, $4)
              RETURNING id, workspace_agent_id, created_at, display_name, icon",
         )
-        .bind(Uuid::new_v4())
+        .bind(source_id)
         .bind(agent_id)
         .bind(display_name)
         .bind(icon)
