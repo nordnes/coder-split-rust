@@ -3062,13 +3062,13 @@ impl AppStore for PostgresStore {
                 SELECT
                     d::timestamptz AS from_,
                     LEAST(
-                        (d::timestamptz + ($4::int || ' day')::interval)::timestamptz,
+                        (d::timestamptz + make_interval(days => $4))::timestamptz,
                         $2::timestamptz
                     )::timestamptz AS to_
                 FROM generate_series(
                     $1::timestamptz,
                     ($2::timestamptz) - '1 microsecond'::interval,
-                    ($4::int || ' day')::interval
+                    make_interval(days => $4)
                 ) AS d
             )
             SELECT
@@ -3084,6 +3084,7 @@ impl AppStore for PostgresStore {
                 AND tus.end_time <= ts.to_
                 AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN tus.template_id = ANY($3::uuid[]) ELSE TRUE END
             GROUP BY ts.from_, ts.to_
+            ORDER BY ts.from_ ASC
             "#,
         )
         .bind(start_time)
@@ -3114,7 +3115,6 @@ impl AppStore for PostgresStore {
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
     ) -> Result<TemplateInsightsResponse, StorageError> {
-        // ── 1. Main aggregation (matches Go GetTemplateInsights) ──────
         #[derive(sqlx::FromRow)]
         struct InsightsRow {
             template_ids: Vec<Uuid>,
@@ -3133,63 +3133,6 @@ impl AppStore for PostgresStore {
             usage_jetbrains_seconds: i64,
         }
 
-        let main_row = sqlx::query_as::<_, InsightsRow>(
-            r#"
-            WITH insights AS (
-                SELECT
-                    user_id,
-                    LEAST(SUM(usage_mins), 30) AS usage_mins,
-                    LEAST(SUM(ssh_mins), 30) AS ssh_mins,
-                    LEAST(SUM(sftp_mins), 30) AS sftp_mins,
-                    LEAST(SUM(reconnecting_pty_mins), 30) AS reconnecting_pty_mins,
-                    LEAST(SUM(vscode_mins), 30) AS vscode_mins,
-                    LEAST(SUM(jetbrains_mins), 30) AS jetbrains_mins
-                FROM template_usage_stats
-                WHERE
-                    start_time >= $1::timestamptz
-                    AND end_time <= $2::timestamptz
-                    AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN template_id = ANY($3::uuid[]) ELSE TRUE END
-                GROUP BY start_time, user_id
-            ),
-            templates AS (
-                SELECT
-                    array_agg(DISTINCT template_id) AS template_ids,
-                    array_agg(DISTINCT template_id) FILTER (WHERE ssh_mins > 0) AS ssh_template_ids,
-                    array_agg(DISTINCT template_id) FILTER (WHERE sftp_mins > 0) AS sftp_template_ids,
-                    array_agg(DISTINCT template_id) FILTER (WHERE reconnecting_pty_mins > 0) AS reconnecting_pty_template_ids,
-                    array_agg(DISTINCT template_id) FILTER (WHERE vscode_mins > 0) AS vscode_template_ids,
-                    array_agg(DISTINCT template_id) FILTER (WHERE jetbrains_mins > 0) AS jetbrains_template_ids
-                FROM template_usage_stats
-                WHERE
-                    start_time >= $1::timestamptz
-                    AND end_time <= $2::timestamptz
-                    AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN template_id = ANY($3::uuid[]) ELSE TRUE END
-            )
-            SELECT
-                COALESCE((SELECT template_ids FROM templates), '{}')::uuid[] AS template_ids,
-                COALESCE((SELECT ssh_template_ids FROM templates), '{}')::uuid[] AS ssh_template_ids,
-                COALESCE((SELECT sftp_template_ids FROM templates), '{}')::uuid[] AS sftp_template_ids,
-                COALESCE((SELECT reconnecting_pty_template_ids FROM templates), '{}')::uuid[] AS reconnecting_pty_template_ids,
-                COALESCE((SELECT vscode_template_ids FROM templates), '{}')::uuid[] AS vscode_template_ids,
-                COALESCE((SELECT jetbrains_template_ids FROM templates), '{}')::uuid[] AS jetbrains_template_ids,
-                COALESCE(COUNT(DISTINCT user_id), 0)::bigint AS active_users,
-                COALESCE(SUM(usage_mins) * 60, 0)::bigint AS usage_total_seconds,
-                COALESCE(SUM(ssh_mins) * 60, 0)::bigint AS usage_ssh_seconds,
-                COALESCE(SUM(sftp_mins) * 60, 0)::bigint AS usage_sftp_seconds,
-                COALESCE(SUM(reconnecting_pty_mins) * 60, 0)::bigint AS usage_reconnecting_pty_seconds,
-                COALESCE(SUM(vscode_mins) * 60, 0)::bigint AS usage_vscode_seconds,
-                COALESCE(SUM(jetbrains_mins) * 60, 0)::bigint AS usage_jetbrains_seconds
-            FROM insights
-            "#,
-        )
-        .bind(start_time)
-        .bind(end_time)
-        .bind(&template_ids)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(storage_error)?;
-
-        // ── 2. App insights (matches Go GetTemplateAppInsights) ──────
         #[derive(sqlx::FromRow)]
         struct AppInsightRow {
             template_ids: Vec<Uuid>,
@@ -3202,103 +3145,6 @@ impl AppStore for PostgresStore {
             times_used: i64,
         }
 
-        let app_rows = sqlx::query_as::<_, AppInsightRow>(
-            r#"
-            WITH apps AS (
-                SELECT DISTINCT ON (ws.template_id, app.slug)
-                    ws.template_id,
-                    app.slug,
-                    app.display_name,
-                    app.icon
-                FROM workspaces ws
-                JOIN workspace_builds AS build ON build.workspace_id = ws.id
-                JOIN workspace_resources AS resource ON resource.job_id = build.job_id
-                JOIN workspace_agents AS agent ON agent.resource_id = resource.id
-                JOIN workspace_apps AS app ON app.agent_id = agent.id
-                WHERE
-                    CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN ws.template_id = ANY($3::uuid[]) ELSE TRUE END
-                ORDER BY ws.template_id, app.slug, app.created_at DESC
-            ),
-            template_usage_stats_with_apps AS (
-                SELECT
-                    tus.start_time,
-                    tus.template_id,
-                    tus.user_id,
-                    apps.slug,
-                    apps.display_name,
-                    apps.icon,
-                    (tus.app_usage_mins -> apps.slug)::smallint AS usage_mins
-                FROM apps
-                JOIN template_usage_stats AS tus
-                ON
-                    tus.start_time >= $1::timestamptz
-                    AND tus.end_time <= $2::timestamptz
-                    AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN tus.template_id = ANY($3::uuid[]) ELSE TRUE END
-                    AND tus.template_id = apps.template_id
-                    AND tus.app_usage_mins ? apps.slug
-            ),
-            app_insights AS (
-                SELECT
-                    user_id,
-                    slug,
-                    display_name,
-                    icon,
-                    LEAST(SUM(usage_mins), 30) AS usage_mins
-                FROM template_usage_stats_with_apps
-                GROUP BY start_time, user_id, slug, display_name, icon
-            ),
-            times_used AS (
-                SELECT DISTINCT ON (user_id, slug, display_name, icon, uniq)
-                    slug,
-                    display_name,
-                    icon,
-                    start_time - (
-                        dense_rank() OVER (
-                            PARTITION BY user_id, slug, display_name, icon
-                            ORDER BY start_time
-                        ) * '30 minutes'::interval
-                    ) AS uniq
-                FROM template_usage_stats_with_apps
-            ),
-            templates AS (
-                SELECT
-                    slug,
-                    display_name,
-                    icon,
-                    array_agg(DISTINCT template_id)::uuid[] AS template_ids
-                FROM template_usage_stats_with_apps
-                GROUP BY slug, display_name, icon
-            )
-            SELECT
-                t.template_ids,
-                COUNT(DISTINCT ai.user_id)::bigint AS active_users,
-                ai.slug,
-                ai.display_name,
-                ai.icon,
-                (SUM(ai.usage_mins) * 60)::bigint AS usage_seconds,
-                COALESCE((
-                    SELECT COUNT(*)
-                    FROM times_used
-                    WHERE times_used.slug = ai.slug
-                        AND times_used.display_name = ai.display_name
-                        AND times_used.icon = ai.icon
-                ), 0)::bigint AS times_used
-            FROM app_insights AS ai
-            JOIN templates AS t
-            ON t.slug = ai.slug
-                AND t.display_name = ai.display_name
-                AND t.icon = ai.icon
-            GROUP BY t.template_ids, ai.slug, ai.display_name, ai.icon
-            "#,
-        )
-        .bind(start_time)
-        .bind(end_time)
-        .bind(&template_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_error)?;
-
-        // ── 3. Parameter insights (matches Go GetTemplateParameterInsights) ──
         #[derive(sqlx::FromRow)]
         struct ParamRow {
             num: i64,
@@ -3313,68 +3159,243 @@ impl AppStore for PostgresStore {
             count: i64,
         }
 
-        let param_rows = sqlx::query_as::<_, ParamRow>(
-            r#"
-            WITH latest_workspace_builds AS (
-                SELECT
-                    wb.id,
-                    wbmax.template_id,
-                    wb.template_version_id
-                FROM (
+        // Clone template_ids for the interval query since it will be moved.
+        let tids_for_interval = template_ids.clone();
+
+        // Run all 4 queries concurrently — they share no mutable state.
+        let (main_row, app_rows, param_rows, interval_reports) = tokio::try_join!(
+            // ── 1. Main aggregation (matches Go GetTemplateInsights) ──────
+            async {
+                sqlx::query_as::<_, InsightsRow>(
+                    r#"
+                    WITH insights AS (
+                        SELECT
+                            user_id,
+                            LEAST(SUM(usage_mins), 30) AS usage_mins,
+                            LEAST(SUM(ssh_mins), 30) AS ssh_mins,
+                            LEAST(SUM(sftp_mins), 30) AS sftp_mins,
+                            LEAST(SUM(reconnecting_pty_mins), 30) AS reconnecting_pty_mins,
+                            LEAST(SUM(vscode_mins), 30) AS vscode_mins,
+                            LEAST(SUM(jetbrains_mins), 30) AS jetbrains_mins
+                        FROM template_usage_stats
+                        WHERE
+                            start_time >= $1::timestamptz
+                            AND end_time <= $2::timestamptz
+                            AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN template_id = ANY($3::uuid[]) ELSE TRUE END
+                        GROUP BY start_time, user_id
+                    ),
+                    templates AS (
+                        SELECT
+                            array_agg(DISTINCT template_id) AS template_ids,
+                            array_agg(DISTINCT template_id) FILTER (WHERE ssh_mins > 0) AS ssh_template_ids,
+                            array_agg(DISTINCT template_id) FILTER (WHERE sftp_mins > 0) AS sftp_template_ids,
+                            array_agg(DISTINCT template_id) FILTER (WHERE reconnecting_pty_mins > 0) AS reconnecting_pty_template_ids,
+                            array_agg(DISTINCT template_id) FILTER (WHERE vscode_mins > 0) AS vscode_template_ids,
+                            array_agg(DISTINCT template_id) FILTER (WHERE jetbrains_mins > 0) AS jetbrains_template_ids
+                        FROM template_usage_stats
+                        WHERE
+                            start_time >= $1::timestamptz
+                            AND end_time <= $2::timestamptz
+                            AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN template_id = ANY($3::uuid[]) ELSE TRUE END
+                    )
                     SELECT
-                        tv.template_id,
-                        wbmax.workspace_id,
-                        MAX(wbmax.build_number) AS max_build_number
-                    FROM workspace_builds wbmax
-                    JOIN template_versions tv ON tv.id = wbmax.template_version_id
-                    WHERE
-                        wbmax.created_at >= $1::timestamptz
-                        AND wbmax.created_at < $2::timestamptz
-                        AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN tv.template_id = ANY($3::uuid[]) ELSE TRUE END
-                    GROUP BY tv.template_id, wbmax.workspace_id
-                ) wbmax
-                JOIN workspace_builds wb ON (
-                    wb.workspace_id = wbmax.workspace_id
-                    AND wb.build_number = wbmax.max_build_number
+                        COALESCE((SELECT template_ids FROM templates), '{}')::uuid[] AS template_ids,
+                        COALESCE((SELECT ssh_template_ids FROM templates), '{}')::uuid[] AS ssh_template_ids,
+                        COALESCE((SELECT sftp_template_ids FROM templates), '{}')::uuid[] AS sftp_template_ids,
+                        COALESCE((SELECT reconnecting_pty_template_ids FROM templates), '{}')::uuid[] AS reconnecting_pty_template_ids,
+                        COALESCE((SELECT vscode_template_ids FROM templates), '{}')::uuid[] AS vscode_template_ids,
+                        COALESCE((SELECT jetbrains_template_ids FROM templates), '{}')::uuid[] AS jetbrains_template_ids,
+                        COALESCE(COUNT(DISTINCT user_id), 0)::bigint AS active_users,
+                        COALESCE(SUM(usage_mins) * 60, 0)::bigint AS usage_total_seconds,
+                        COALESCE(SUM(ssh_mins) * 60, 0)::bigint AS usage_ssh_seconds,
+                        COALESCE(SUM(sftp_mins) * 60, 0)::bigint AS usage_sftp_seconds,
+                        COALESCE(SUM(reconnecting_pty_mins) * 60, 0)::bigint AS usage_reconnecting_pty_seconds,
+                        COALESCE(SUM(vscode_mins) * 60, 0)::bigint AS usage_vscode_seconds,
+                        COALESCE(SUM(jetbrains_mins) * 60, 0)::bigint AS usage_jetbrains_seconds
+                    FROM insights
+                    "#,
                 )
+                .bind(start_time)
+                .bind(end_time)
+                .bind(&template_ids)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(storage_error)
+            },
+            // ── 2. App insights (matches Go GetTemplateAppInsights) ──────
+            async {
+                sqlx::query_as::<_, AppInsightRow>(
+                    r#"
+                    WITH apps AS (
+                        SELECT DISTINCT ON (ws.template_id, app.slug)
+                            ws.template_id,
+                            app.slug,
+                            app.display_name,
+                            app.icon
+                        FROM workspaces ws
+                        JOIN workspace_builds AS build ON build.workspace_id = ws.id
+                        JOIN workspace_resources AS resource ON resource.job_id = build.job_id
+                        JOIN workspace_agents AS agent ON agent.resource_id = resource.id
+                        JOIN workspace_apps AS app ON app.agent_id = agent.id
+                        WHERE
+                                ws.deleted = FALSE
+                        AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN ws.template_id = ANY($3::uuid[]) ELSE TRUE END
+                            ORDER BY ws.template_id, app.slug, app.created_at DESC
+                    ),
+                    template_usage_stats_with_apps AS (
+                        SELECT
+                            tus.start_time,
+                            tus.template_id,
+                            tus.user_id,
+                            apps.slug,
+                            apps.display_name,
+                            apps.icon,
+                            (tus.app_usage_mins -> apps.slug)::smallint AS usage_mins
+                        FROM apps
+                        JOIN template_usage_stats AS tus
+                        ON
+                            tus.start_time >= $1::timestamptz
+                            AND tus.end_time <= $2::timestamptz
+                            AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN tus.template_id = ANY($3::uuid[]) ELSE TRUE END
+                            AND tus.template_id = apps.template_id
+                            AND tus.app_usage_mins ? apps.slug
+                    ),
+                    app_insights AS (
+                        SELECT
+                            user_id,
+                            slug,
+                            display_name,
+                            icon,
+                            LEAST(SUM(usage_mins), 30) AS usage_mins
+                        FROM template_usage_stats_with_apps
+                        GROUP BY start_time, user_id, slug, display_name, icon
+                    ),
+                    times_used AS (
+                        SELECT DISTINCT ON (user_id, slug, display_name, icon, uniq)
+                            slug,
+                            display_name,
+                            icon,
+                            start_time - (
+                                dense_rank() OVER (
+                                    PARTITION BY user_id, slug, display_name, icon
+                                    ORDER BY start_time
+                                ) * '30 minutes'::interval
+                            ) AS uniq
+                        FROM template_usage_stats_with_apps
+                    ),
+                    templates AS (
+                        SELECT
+                            slug,
+                            display_name,
+                            icon,
+                            array_agg(DISTINCT template_id)::uuid[] AS template_ids
+                        FROM template_usage_stats_with_apps
+                        GROUP BY slug, display_name, icon
+                    )
+                    SELECT
+                        t.template_ids,
+                        COUNT(DISTINCT ai.user_id)::bigint AS active_users,
+                        ai.slug,
+                        ai.display_name,
+                        ai.icon,
+                        (SUM(ai.usage_mins) * 60)::bigint AS usage_seconds,
+                        COALESCE((
+                            SELECT COUNT(*)
+                            FROM times_used
+                            WHERE times_used.slug = ai.slug
+                                AND times_used.display_name = ai.display_name
+                                AND times_used.icon = ai.icon
+                        ), 0)::bigint AS times_used
+                    FROM app_insights AS ai
+                    JOIN templates AS t
+                    ON t.slug = ai.slug
+                        AND t.display_name = ai.display_name
+                        AND t.icon = ai.icon
+                    GROUP BY t.template_ids, ai.slug, ai.display_name, ai.icon
+                    "#,
+                )
+                .bind(start_time)
+                .bind(end_time)
+                .bind(&template_ids)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage_error)
+            },
+            // ── 3. Parameter insights (matches Go GetTemplateParameterInsights) ──
+            async {
+                sqlx::query_as::<_, ParamRow>(
+                    r#"
+                    WITH latest_workspace_builds AS (
+                        SELECT
+                            wb.id,
+                            wbmax.template_id,
+                            wb.template_version_id
+                        FROM (
+                            SELECT
+                                tv.template_id,
+                                wbmax.workspace_id,
+                                MAX(wbmax.build_number) AS max_build_number
+                            FROM workspace_builds wbmax
+                            JOIN template_versions tv ON tv.id = wbmax.template_version_id
+                            WHERE
+                                wbmax.created_at >= $1::timestamptz
+                                AND wbmax.created_at < $2::timestamptz
+                                AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN tv.template_id = ANY($3::uuid[]) ELSE TRUE END
+                            GROUP BY tv.template_id, wbmax.workspace_id
+                        ) wbmax
+                        JOIN workspace_builds wb ON (
+                            wb.workspace_id = wbmax.workspace_id
+                            AND wb.build_number = wbmax.max_build_number
+                        )
+                    ),
+                    unique_template_params AS (
+                        SELECT
+                            ROW_NUMBER() OVER (
+                        ORDER BY tvp.name, tvp.type, tvp.display_name, tvp.description, tvp.options
+                    ) AS num,
+                            array_agg(DISTINCT wb.template_id)::uuid[] AS template_ids,
+                            array_agg(wb.id)::uuid[] AS workspace_build_ids,
+                            tvp.name,
+                            tvp.type,
+                            tvp.display_name,
+                            tvp.description,
+                            tvp.options
+                        FROM latest_workspace_builds wb
+                        JOIN template_version_parameters tvp ON tvp.template_version_id = wb.template_version_id
+                        GROUP BY tvp.name, tvp.type, tvp.display_name, tvp.description, tvp.options
+                    )
+                    SELECT
+                        utp.num,
+                        utp.template_ids,
+                        utp.name,
+                        utp.type,
+                        utp.display_name,
+                        utp.description,
+                        utp.options,
+                        wbp.value,
+                        COUNT(wbp.value) AS count
+                    FROM unique_template_params utp
+                    JOIN workspace_build_parameters wbp
+                        ON utp.workspace_build_ids @> ARRAY[wbp.workspace_build_id]
+                        AND utp.name = wbp.name
+                    GROUP BY utp.num, utp.template_ids, utp.name, utp.type, utp.display_name, utp.description, utp.options, wbp.value
+                    "#,
+                )
+                .bind(start_time)
+                .bind(end_time)
+                .bind(&template_ids)
+                .fetch_all(&self.pool)
+                .await
+                .map_err(storage_error)
+            },
+            // ── 4. Interval reports ───────────────────────────────────────
+            self.get_template_insights_by_interval(
+                start_time,
+                end_time,
+                interval,
+                tids_for_interval,
             ),
-            unique_template_params AS (
-                SELECT
-                    ROW_NUMBER() OVER () AS num,
-                    array_agg(DISTINCT wb.template_id)::uuid[] AS template_ids,
-                    array_agg(wb.id)::uuid[] AS workspace_build_ids,
-                    tvp.name,
-                    tvp.type,
-                    tvp.display_name,
-                    tvp.description,
-                    tvp.options
-                FROM latest_workspace_builds wb
-                JOIN template_version_parameters tvp ON tvp.template_version_id = wb.template_version_id
-                GROUP BY tvp.name, tvp.type, tvp.display_name, tvp.description, tvp.options
-            )
-            SELECT
-                utp.num,
-                utp.template_ids,
-                utp.name,
-                utp.type,
-                utp.display_name,
-                utp.description,
-                utp.options,
-                wbp.value,
-                COUNT(wbp.value) AS count
-            FROM unique_template_params utp
-            JOIN workspace_build_parameters wbp
-                ON utp.workspace_build_ids @> ARRAY[wbp.workspace_build_id]
-                AND utp.name = wbp.name
-            GROUP BY utp.num, utp.template_ids, utp.name, utp.type, utp.display_name, utp.description, utp.options, wbp.value
-            "#,
-        )
-        .bind(start_time)
-        .bind(end_time)
-        .bind(&template_ids)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_error)?;
+        )?;
 
         // Group parameter rows by num into TemplateParameterUsage entries.
         let mut param_map: HashMap<i64, TemplateParameterUsage> = HashMap::new();
@@ -3404,11 +3425,6 @@ impl AppStore for PostgresStore {
             entries.sort_by_key(|(k, _)| *k);
             entries.into_iter().map(|(_, v)| v).collect()
         };
-
-        // ── 4. Interval reports ───────────────────────────────────────
-        let interval_reports = self
-            .get_template_insights_by_interval(start_time, end_time, interval, template_ids)
-            .await?;
 
         // ── 5. Build apps_usage from built-in apps + custom apps ─────
         let mut apps_usage: Vec<TemplateAppUsage> = Vec::new();
@@ -9637,4 +9653,490 @@ fn user_status_change_record_from_row(
         changed_by: row.changed_by,
         reason: row.reason,
     })
+}
+
+#[cfg(test)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+    use coder_core::DatabaseConfig;
+    use coder_core::api::InsightsReportInterval;
+    use time::macros::datetime;
+
+    /// Helper: connect to a real Postgres instance and run migrations.
+    /// Returns `None` if `DATABASE_URL` is not set so tests are skipped.
+    async fn setup_store() -> Option<PostgresStore> {
+        let url = std::env::var("DATABASE_URL").ok()?;
+        let config = DatabaseConfig {
+            postgres_url: url,
+            max_connections: 5,
+            min_connections: 1,
+            acquire_timeout_secs: 10,
+        };
+        let store = PostgresStore::connect(&config).await.ok()?;
+        store.migrate().await.ok()?;
+        Some(store)
+    }
+
+    /// Insert a user row into the `users` table (minimal fields for joining).
+    async fn seed_user(pool: &PgPool, user_id: Uuid, username: &str) {
+        sqlx::query(
+            r#"
+            INSERT INTO users (id, email, username, hashed_password, created_at, updated_at, status, rbac_roles, login_type, avatar_url, deleted, last_seen_at, quiet_hours_schedule, name, github_com_user_id, hashed_one_time_passcode, one_time_passcode_expires_at, is_system)
+            VALUES ($1, $2, $3, '', now(), now(), 'active', '{}', 'password', '', false, now(), '', '', NULL, NULL, NULL, false)
+            ON CONFLICT (id) DO NOTHING
+            "#,
+        )
+        .bind(user_id)
+        .bind(format!("{username}@test.com"))
+        .bind(username)
+        .execute(pool)
+        .await
+        .ok();
+    }
+
+    /// Insert a row into template_usage_stats.
+    #[allow(clippy::too_many_arguments)]
+    async fn seed_usage_stats(
+        pool: &PgPool,
+        start: OffsetDateTime,
+        end: OffsetDateTime,
+        template_id: Uuid,
+        user_id: Uuid,
+        median_latency_ms: Option<f32>,
+        usage_mins: i16,
+        ssh_mins: i16,
+        sftp_mins: i16,
+        reconnecting_pty_mins: i16,
+        vscode_mins: i16,
+        jetbrains_mins: i16,
+        app_usage_mins: Option<serde_json::Value>,
+    ) {
+        sqlx::query(
+            r#"
+            INSERT INTO template_usage_stats
+                (start_time, end_time, template_id, user_id, median_latency_ms,
+                 usage_mins, ssh_mins, sftp_mins, reconnecting_pty_mins,
+                 vscode_mins, jetbrains_mins, app_usage_mins)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (start_time, template_id, user_id) DO NOTHING
+            "#,
+        )
+        .bind(start)
+        .bind(end)
+        .bind(template_id)
+        .bind(user_id)
+        .bind(median_latency_ms)
+        .bind(usage_mins)
+        .bind(ssh_mins)
+        .bind(sftp_mins)
+        .bind(reconnecting_pty_mins)
+        .bind(vscode_mins)
+        .bind(jetbrains_mins)
+        .bind(app_usage_mins)
+        .execute(pool)
+        .await
+        .ok();
+    }
+
+    /// Clean up test data after each test run.
+    async fn cleanup(pool: &PgPool, user_ids: &[Uuid]) {
+        for uid in user_ids {
+            let _ = sqlx::query("DELETE FROM template_usage_stats WHERE user_id = $1")
+                .bind(uid)
+                .execute(pool)
+                .await;
+            let _ = sqlx::query("DELETE FROM users WHERE id = $1")
+                .bind(uid)
+                .execute(pool)
+                .await;
+        }
+    }
+
+    // ── get_user_latency_insights ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_user_latency_insights_basic() {
+        let Some(store) = setup_store().await else {
+            return; // skip if no DATABASE_URL
+        };
+        let pool = store.pool();
+
+        let user1 = Uuid::new_v4();
+        let user2 = Uuid::new_v4();
+        let tmpl = Uuid::new_v4();
+        let start = datetime!(2026-01-01 00:00 UTC);
+        let end = datetime!(2026-01-01 00:30 UTC);
+
+        seed_user(&pool, user1, "latuser1").await;
+        seed_user(&pool, user2, "latuser2").await;
+
+        // user1: latency 10ms, user2: latency 50ms
+        seed_usage_stats(
+            &pool,
+            start,
+            end,
+            tmpl,
+            user1,
+            Some(10.0),
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+        )
+        .await;
+        seed_usage_stats(
+            &pool,
+            start,
+            end,
+            tmpl,
+            user2,
+            Some(50.0),
+            5,
+            0,
+            0,
+            0,
+            0,
+            0,
+            None,
+        )
+        .await;
+
+        let query_start = datetime!(2025-12-31 00:00 UTC);
+        let query_end = datetime!(2026-01-02 00:00 UTC);
+
+        let resp = store
+            .get_user_latency_insights(query_start, query_end, vec![])
+            .await;
+        assert!(resp.is_ok(), "query should succeed: {:?}", resp.err());
+
+        let resp = resp.unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        // Should contain at least our 2 test users
+        let our_users: Vec<_> = resp
+            .report
+            .users
+            .iter()
+            .filter(|u| u.user_id == user1 || u.user_id == user2)
+            .collect();
+        assert!(
+            our_users.len() >= 2,
+            "should find both test users, got {}",
+            our_users.len()
+        );
+
+        // Test with template_ids filter
+        let resp_filtered = store
+            .get_user_latency_insights(query_start, query_end, vec![tmpl])
+            .await;
+        assert!(resp_filtered.is_ok());
+
+        // Test with non-matching template_ids
+        let resp_empty = store
+            .get_user_latency_insights(query_start, query_end, vec![Uuid::new_v4()])
+            .await;
+        assert!(resp_empty.is_ok());
+        let resp_empty = resp_empty.unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let empty_users: Vec<_> = resp_empty
+            .report
+            .users
+            .iter()
+            .filter(|u| u.user_id == user1 || u.user_id == user2)
+            .collect();
+        assert_eq!(
+            empty_users.len(),
+            0,
+            "non-matching filter should exclude test users"
+        );
+
+        cleanup(&pool, &[user1, user2]).await;
+    }
+
+    // ── get_user_activity_insights ───────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_user_activity_insights_cap_per_slot() {
+        let Some(store) = setup_store().await else {
+            return;
+        };
+        let pool = store.pool();
+
+        let user1 = Uuid::new_v4();
+        let tmpl1 = Uuid::new_v4();
+        let tmpl2 = Uuid::new_v4();
+        let start = datetime!(2026-02-01 00:00 UTC);
+        let end = datetime!(2026-02-01 00:30 UTC);
+
+        seed_user(&pool, user1, "actuser1").await;
+
+        // Two rows for the same (start_time, user_id) but different templates.
+        // usage_mins=20 each → capped at 30 per slot → 30 minutes = 1800 seconds.
+        seed_usage_stats(
+            &pool, start, end, tmpl1, user1, None, 20, 0, 0, 0, 0, 0, None,
+        )
+        .await;
+        seed_usage_stats(
+            &pool, start, end, tmpl2, user1, None, 20, 0, 0, 0, 0, 0, None,
+        )
+        .await;
+
+        let query_start = datetime!(2026-01-31 00:00 UTC);
+        let query_end = datetime!(2026-02-02 00:00 UTC);
+
+        let resp = store
+            .get_user_activity_insights(query_start, query_end, vec![])
+            .await;
+        assert!(resp.is_ok(), "query should succeed: {:?}", resp.err());
+
+        let resp = resp.unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        let user_entry = resp.report.users.iter().find(|u| u.user_id == user1);
+        assert!(user_entry.is_some(), "should find test user");
+
+        let entry = user_entry.unwrap_or_else(|| panic!("user not found"));
+        // Cap is LEAST(SUM(usage_mins), 30) = LEAST(40, 30) = 30 → 30*60 = 1800 seconds
+        assert_eq!(
+            entry.seconds, 1800,
+            "usage should be capped at 30 minutes (1800s)"
+        );
+
+        // Verify template_ids includes both templates
+        assert!(
+            entry.template_ids.contains(&tmpl1) && entry.template_ids.contains(&tmpl2),
+            "should include both template_ids"
+        );
+
+        cleanup(&pool, &[user1]).await;
+    }
+
+    // ── get_template_insights_by_interval ────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_template_insights_by_interval_day() {
+        let Some(store) = setup_store().await else {
+            return;
+        };
+        let pool = store.pool();
+
+        let user1 = Uuid::new_v4();
+        let tmpl = Uuid::new_v4();
+
+        seed_user(&pool, user1, "intuser1").await;
+
+        // Seed data across 2 days
+        let day1_start = datetime!(2026-03-01 00:00 UTC);
+        let day1_end = datetime!(2026-03-01 00:30 UTC);
+        let day2_start = datetime!(2026-03-02 12:00 UTC);
+        let day2_end = datetime!(2026-03-02 12:30 UTC);
+
+        seed_usage_stats(
+            &pool, day1_start, day1_end, tmpl, user1, None, 10, 0, 0, 0, 0, 0, None,
+        )
+        .await;
+        seed_usage_stats(
+            &pool, day2_start, day2_end, tmpl, user1, None, 5, 0, 0, 0, 0, 0, None,
+        )
+        .await;
+
+        let query_start = datetime!(2026-03-01 00:00 UTC);
+        let query_end = datetime!(2026-03-04 00:00 UTC);
+
+        let reports = store
+            .get_template_insights_by_interval(
+                query_start,
+                query_end,
+                InsightsReportInterval::Day,
+                vec![],
+            )
+            .await;
+        assert!(reports.is_ok(), "query should succeed: {:?}", reports.err());
+
+        let reports = reports.unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        // Should have 3 day buckets (Mar 1, Mar 2, Mar 3)
+        assert_eq!(reports.len(), 3, "should have 3 day buckets");
+
+        // Verify ordering (ORDER BY ts.from_ ASC)
+        for i in 1..reports.len() {
+            assert!(
+                reports[i].start_time >= reports[i - 1].start_time,
+                "reports should be ordered by start_time"
+            );
+        }
+
+        // Day 1 bucket should have 1 active user
+        let day1_report = reports.iter().find(|r| r.start_time == query_start);
+        assert!(day1_report.is_some(), "should have day 1 bucket");
+        assert!(
+            day1_report
+                .unwrap_or_else(|| panic!("day1 not found"))
+                .active_users
+                >= 1,
+            "day 1 should have at least 1 active user"
+        );
+
+        // Day 3 bucket should have 0 active users (empty bucket)
+        let day3_start = datetime!(2026-03-03 00:00 UTC);
+        let day3_report = reports.iter().find(|r| r.start_time == day3_start);
+        assert!(day3_report.is_some(), "should have day 3 bucket");
+        assert_eq!(
+            day3_report
+                .unwrap_or_else(|| panic!("day3 not found"))
+                .active_users,
+            0,
+            "empty bucket should have 0 active users"
+        );
+
+        cleanup(&pool, &[user1]).await;
+    }
+
+    #[tokio::test]
+    async fn test_get_template_insights_by_interval_week() {
+        let Some(store) = setup_store().await else {
+            return;
+        };
+        let pool = store.pool();
+
+        let user1 = Uuid::new_v4();
+        let tmpl = Uuid::new_v4();
+
+        seed_user(&pool, user1, "weekuser1").await;
+
+        let start = datetime!(2026-03-01 00:00 UTC);
+        let end = datetime!(2026-03-01 00:30 UTC);
+        seed_usage_stats(
+            &pool, start, end, tmpl, user1, None, 10, 0, 0, 0, 0, 0, None,
+        )
+        .await;
+
+        let query_start = datetime!(2026-03-01 00:00 UTC);
+        let query_end = datetime!(2026-03-15 00:00 UTC);
+
+        let reports = store
+            .get_template_insights_by_interval(
+                query_start,
+                query_end,
+                InsightsReportInterval::Week,
+                vec![],
+            )
+            .await;
+        assert!(reports.is_ok(), "query should succeed: {:?}", reports.err());
+
+        let reports = reports.unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        // 14 days / 7 = 2 week buckets
+        assert_eq!(reports.len(), 2, "should have 2 week buckets");
+
+        cleanup(&pool, &[user1]).await;
+    }
+
+    // ── get_template_insights ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_get_template_insights_empty_data() {
+        let Some(store) = setup_store().await else {
+            return;
+        };
+
+        // Query a time range with no data — COALESCE wrappers should ensure
+        // fetch_one succeeds and returns zero-valued fields.
+        let query_start = datetime!(2099-01-01 00:00 UTC);
+        let query_end = datetime!(2099-01-02 00:00 UTC);
+
+        let resp = store
+            .get_template_insights(query_start, query_end, InsightsReportInterval::Day, vec![])
+            .await;
+        assert!(
+            resp.is_ok(),
+            "should succeed even with zero data: {:?}",
+            resp.err()
+        );
+
+        let resp = resp.unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        assert!(resp.report.is_some(), "report should be present");
+
+        let report = resp.report.unwrap_or_else(|| panic!("report missing"));
+        assert_eq!(report.active_users, 0, "active_users should be 0");
+        assert!(
+            report.template_ids.is_empty(),
+            "template_ids should be empty"
+        );
+        assert!(
+            report.apps_usage.is_empty(),
+            "apps_usage should be empty with no data"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_get_template_insights_builtin_apps() {
+        let Some(store) = setup_store().await else {
+            return;
+        };
+        let pool = store.pool();
+
+        let user1 = Uuid::new_v4();
+        let tmpl = Uuid::new_v4();
+
+        seed_user(&pool, user1, "insightuser1").await;
+
+        let start = datetime!(2026-04-01 00:00 UTC);
+        let end = datetime!(2026-04-01 00:30 UTC);
+        // Set ssh_mins=5 and vscode_mins=10, others=0
+        seed_usage_stats(
+            &pool,
+            start,
+            end,
+            tmpl,
+            user1,
+            Some(15.0),
+            15,
+            5,
+            0,
+            0,
+            10,
+            0,
+            None,
+        )
+        .await;
+
+        let query_start = datetime!(2026-03-31 00:00 UTC);
+        let query_end = datetime!(2026-04-02 00:00 UTC);
+
+        let resp = store
+            .get_template_insights(query_start, query_end, InsightsReportInterval::Day, vec![])
+            .await;
+        assert!(resp.is_ok(), "query should succeed: {:?}", resp.err());
+
+        let resp = resp.unwrap_or_else(|e| panic!("unexpected error: {e:?}"));
+        assert!(resp.report.is_some());
+
+        let report = resp.report.unwrap_or_else(|| panic!("report missing"));
+
+        // Should include SSH and VSCode built-in apps but NOT SFTP, JetBrains, or Terminal
+        let slugs: Vec<&str> = report.apps_usage.iter().map(|a| a.slug.as_str()).collect();
+        assert!(slugs.contains(&"ssh"), "should include SSH built-in app");
+        assert!(
+            slugs.contains(&"vscode"),
+            "should include VSCode built-in app"
+        );
+        assert!(
+            !slugs.contains(&"sftp"),
+            "should NOT include SFTP (0 usage)"
+        );
+        assert!(
+            !slugs.contains(&"jetbrains"),
+            "should NOT include JetBrains (0 usage)"
+        );
+        assert!(
+            !slugs.contains(&"reconnecting-pty"),
+            "should NOT include Terminal (0 usage)"
+        );
+
+        // Verify interval_reports are present
+        assert!(
+            !resp.interval_reports.is_empty(),
+            "should have interval reports"
+        );
+
+        cleanup(&pool, &[user1]).await;
+    }
 }
