@@ -14337,6 +14337,18 @@ mod tests {
         }
     }
 
+    /// Check if `inner` JSON object keys/values are all contained in `outer`.
+    /// Mirrors PostgreSQL `inner <@ outer` for JSONB objects (flat key-value maps).
+    fn json_tags_contained_by(inner: &Value, outer: &Value) -> bool {
+        match (inner, outer) {
+            (Value::Object(inner_map), Value::Object(outer_map)) => {
+                inner_map.iter().all(|(k, v)| outer_map.get(k) == Some(v))
+            }
+            // If both are equal scalars/arrays, containment holds.
+            _ => inner == outer,
+        }
+    }
+
     #[async_trait]
     impl DeploymentStore for FakeStore {
         async fn ping(&self) -> Result<(), StorageError> {
@@ -14360,55 +14372,57 @@ mod tests {
             &self,
             input: AcquireProvisionerJobInput,
         ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            // Match PostgresStore: filter by organization_id, provisioner type,
+            // and tag containment (job tags ⊆ daemon tags), then pick the
+            // oldest pending job (ORDER BY created_at ASC LIMIT 1).
             let mut jobs = self
                 .prov_jobs
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
 
-            // Filter by organization_id: job must belong to the requesting org.
-            // Filter by types: if the daemon advertises specific provisioner
-            // types, the job's provisioner type must be in that list.
-            // Filter by provisioner_tags: the daemon's tags must be a superset
-            // of the job's tags (every key in the job tags must exist in the
-            // daemon tags with the same value).
-            let daemon_tags: HashMap<String, String> =
-                serde_json::from_value(input.provisioner_tags.clone()).unwrap_or_default();
+            // Collect matching job ids first to avoid borrowing issues.
+            let mut candidates: Vec<(Uuid, OffsetDateTime)> = jobs
+                .values()
+                .filter(|j| {
+                    // Must be pending (started_at IS NULL, completed_at IS NULL,
+                    // canceled_at IS NULL).
+                    j.job_status == ProvisionerJobStatus::Pending
+                        && j.started_at.is_none()
+                        && j.completed_at.is_none()
+                        && j.canceled_at.is_none()
+                })
+                .filter(|j| {
+                    // organization_id must match.
+                    j.organization_id == Some(input.organization_id)
+                })
+                .filter(|j| {
+                    // Provisioner type must be in the daemon's supported types.
+                    input.types.contains(&j.provisioner)
+                })
+                .filter(|j| {
+                    // Tag containment: job tags must be a subset of daemon tags
+                    // (mirrors PostgreSQL `tags <@ $5::JSONB`).
+                    json_tags_contained_by(&j.tags, &input.provisioner_tags)
+                })
+                .map(|j| (j.id, j.created_at))
+                .collect();
 
-            let found = jobs.values_mut().find(|j| {
-                if j.job_status != ProvisionerJobStatus::Pending {
-                    return false;
-                }
-                // Organization filter.
-                if let Some(job_org) = j.organization_id {
-                    if job_org != input.organization_id {
-                        return false;
-                    }
-                }
-                // Provisioner type filter.
-                if !input.types.is_empty() && !input.types.contains(&j.provisioner) {
-                    return false;
-                }
-                // Tag superset filter: daemon tags must contain every job tag.
-                let job_tags: HashMap<String, String> =
-                    serde_json::from_value(j.tags.clone()).unwrap_or_default();
-                for (k, v) in &job_tags {
-                    match daemon_tags.get(k) {
-                        Some(dv) if dv == v => {}
-                        _ => return false,
-                    }
-                }
-                true
-            });
+            // ORDER BY created_at ASC — pick the oldest.
+            candidates.sort_by_key(|(_, created_at)| *created_at);
 
-            if let Some(job) = found {
-                job.job_status = ProvisionerJobStatus::Running;
-                job.started_at = Some(input.started_at);
-                job.updated_at = input.started_at;
-                job.worker_id = Some(input.worker_id);
-                Ok(Some(job.clone()))
-            } else {
-                Ok(None)
-            }
+            let job_id = match candidates.first() {
+                Some((id, _)) => *id,
+                None => return Ok(None),
+            };
+
+            let job = jobs
+                .get_mut(&job_id)
+                .ok_or_else(|| StorageError::unavailable("concurrent modification"))?;
+            job.job_status = ProvisionerJobStatus::Running;
+            job.started_at = Some(input.started_at);
+            job.updated_at = input.started_at;
+            job.worker_id = Some(input.worker_id);
+            Ok(Some(job.clone()))
         }
 
         async fn get_provisioner_job_by_id(
@@ -17904,25 +17918,60 @@ mod tests {
             &self,
             agent_id: Uuid,
         ) -> Result<Option<WorkspaceRecord>, StorageError> {
-            // In the fake store, we look up the agent to find the resource_id,
-            // but we don't have the full build chain. Instead we store
-            // workspaces keyed by their id and look up by iterating.
-            // For testing we rely on tests setting up workspace records with
-            // matching IDs.
+            // Match PostgresStore: agent -> resource -> build (via job_id) -> workspace.
             let agents = self
                 .workspace_agents
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let _agent = match agents.get(&agent_id) {
-                Some(a) => a,
+            let agent = match agents.get(&agent_id) {
+                Some(a) => a.clone(),
                 None => return Ok(None),
             };
-            // Return the first workspace (tests typically only have one).
+            drop(agents);
+
+            // Find which job_id owns the resource that this agent belongs to.
+            let resources = self
+                .workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let job_ids: Vec<Uuid> = resources
+                .iter()
+                .filter_map(|(job_id, rs)| {
+                    if rs.iter().any(|r| r.id == agent.resource_id) {
+                        Some(*job_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            drop(resources);
+
+            // Find the build that references one of these job_ids, pick the
+            // latest build (ORDER BY build_number DESC LIMIT 1).
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut matching_builds: Vec<&WorkspaceBuildRecord> = builds
+                .values()
+                .filter(|b| job_ids.contains(&b.job_id))
+                .collect();
+            matching_builds.sort_by(|a, b| b.build_number.cmp(&a.build_number));
+            let workspace_id = match matching_builds.first() {
+                Some(b) => b.workspace_id,
+                None => return Ok(None),
+            };
+            drop(builds);
+
+            // Look up the workspace, filter deleted = false.
             let workspaces = self
                 .workspaces
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(workspaces.values().next().cloned())
+            Ok(workspaces
+                .get(&workspace_id)
+                .filter(|w| !w.deleted)
+                .cloned())
         }
 
         async fn insert_workspace_agent_log_source(
@@ -18193,13 +18242,22 @@ mod tests {
         async fn list_provisioner_job_logs(
             &self,
             job_id: Uuid,
-            _after: Option<i64>,
+            after: Option<i64>,
         ) -> Result<Vec<PortsJobLogRecord>, StorageError> {
             let logs = self
                 .provisioner_job_logs
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(logs.get(&job_id).cloned().unwrap_or_default())
+            let mut result: Vec<PortsJobLogRecord> = logs
+                .get(&job_id)
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|l| after.is_none_or(|after_id| l.id > after_id))
+                .collect();
+            // Match PostgresStore: ORDER BY id ASC.
+            result.sort_by_key(|l| l.id);
+            Ok(result)
         }
 
         async fn list_workspace_resources_by_job(
@@ -18817,6 +18875,8 @@ mod tests {
                 })
                 .cloned()
                 .collect();
+            // Match PostgresStore: ORDER BY w.last_used_at DESC.
+            rows.sort_by(|a, b| b.last_used_at.cmp(&a.last_used_at));
             let count = i64::try_from(rows.len()).unwrap_or(0);
             let offset = usize::try_from(filter.offset).unwrap_or(0);
             let limit = usize::try_from(filter.limit).unwrap_or(25);
@@ -26740,6 +26800,9 @@ mod tests {
         let agent_token = Uuid::new_v4();
         let agent_id = Uuid::new_v4();
         let workspace_id = Uuid::new_v4();
+        let resource_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let build_id = Uuid::new_v4();
         let owner_id = Uuid::from_u128(100);
         let now = OffsetDateTime::now_utc();
 
@@ -26752,7 +26815,7 @@ mod tests {
             first_connected_at: None,
             last_connected_at: None,
             disconnected_at: None,
-            resource_id: Uuid::new_v4(),
+            resource_id,
             auth_token: agent_token,
             auth_instance_id: None,
             architecture: "amd64".to_owned(),
@@ -26776,6 +26839,49 @@ mod tests {
             api_key_scope: "all".to_owned(),
         };
         store.insert_agent(agent)?;
+
+        // Set up the full join chain: resource -> build -> workspace so that
+        // find_workspace_by_agent_id can traverse agent -> resource -> build -> workspace.
+        let resource = WorkspaceResourceRecord {
+            id: resource_id,
+            created_at: now,
+            job_id,
+            transition: "start".to_owned(),
+            resource_type: "docker_container".to_owned(),
+            name: "main".to_owned(),
+            hide: false,
+            icon: String::new(),
+            daily_cost: 0,
+        };
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .entry(job_id)
+            .or_default()
+            .push(resource);
+
+        let build = WorkspaceBuildRecord {
+            id: build_id,
+            created_at: now,
+            updated_at: now,
+            workspace_id,
+            build_number: 1,
+            transition: "start".to_owned(),
+            job_id,
+            template_version_id: Uuid::new_v4(),
+            initiator_id: owner_id,
+            provisioner_state: None,
+            deadline: None,
+            max_deadline: None,
+            reason: "initiator".to_owned(),
+            daily_cost: 0,
+        };
+        store
+            .workspace_builds
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(build_id, build);
 
         let workspace = WorkspaceRecord {
             id: workspace_id,
