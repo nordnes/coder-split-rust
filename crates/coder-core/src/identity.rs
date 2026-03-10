@@ -833,6 +833,7 @@ pub struct CreateOAuth2ProviderAppTokenInput {
 #[serde(rename_all = "snake_case")]
 pub enum NotificationMethod {
     /// SMTP email dispatch.
+    #[serde(rename = "smtp")]
     Email,
     /// HTTP webhook dispatch.
     Webhook,
@@ -848,7 +849,11 @@ pub enum NotificationMessageStatus {
     Pending,
     /// Successfully dispatched.
     Sent,
+    /// Dispatch temporarily failed (eligible for retry).
+    #[serde(rename = "temporary_failure")]
+    TemporaryFailure,
     /// Dispatch permanently failed.
+    #[serde(rename = "permanent_failure")]
     Failed,
 }
 

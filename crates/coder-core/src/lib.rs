@@ -80,12 +80,12 @@ pub use identity::{
     CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
     CreateOrganizationInput, CreateOrganizationStoreError, CreateUserInput, CreateUserStoreError,
     CustomRoleRecord, FirstUserRecord, GroupMemberRecord, GroupRecord,
-    InsertOrganizationMemberError, LoginType, OrganizationMemberListFilter,
-    OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, SlimRoleRecord,
-    TokenConfigRecord, UpdateOrganizationInput, UpdateOrganizationStoreError,
-    UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
-    UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
-    UserStatus, UserStatusChangeRecord,
+    InsertOrganizationMemberError, LoginType, NotificationMessageRecord, NotificationMessageStatus,
+    NotificationMethod, OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+    PasswordUserRecord, SlimRoleRecord, TokenConfigRecord, UpdateOrganizationInput,
+    UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
+    UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
+    UserRecord, UserStatus, UserStatusChangeRecord,
 };
 pub use password::{
     PasswordError, hash_password, hash_session_token, new_session_token, normalize_real_name,

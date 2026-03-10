@@ -26,31 +26,33 @@ use coder_core::{
     ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
     ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
     CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput, CreateUserInput,
-    CreateUserStoreError, CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig,
-    DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
-    ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput,
-    GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings, InsertAgentLogInput,
-    InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
-    InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
-    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
-    InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
-    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
-    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
-    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
-    ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
-    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
+    CreateUserStoreError, CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord,
+    DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse, DeploymentStore,
+    ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
+    FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
+    HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
+    InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+    InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+    InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
+    MinimalOrganization, MinimalUser, NotificationMessageRecord, NotificationMessageStatus,
+    NotificationMethod, OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+    PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
+    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
+    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
+    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
+    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
+    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpsertCustomRoleInput,
     UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-    UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
-    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
-    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
-    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
-    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
-    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    UserAppearanceRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+    UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
+    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -344,6 +346,32 @@ struct StoredWebpushSubscriptionRow {
     endpoint_auth_key: String,
 }
 
+#[derive(FromRow)]
+struct StoredNotificationMessageRow {
+    id: Uuid,
+    user_id: Uuid,
+    notification_template_id: Uuid,
+    method: String,
+    status: String,
+    attempt_count: Option<i32>,
+    payload: String,
+    targets_json: String,
+    created_at: OffsetDateTime,
+    updated_at: Option<OffsetDateTime>,
+}
+
+#[derive(FromRow)]
+struct StoredCustomRoleRow {
+    name: String,
+    display_name: String,
+    organization_id: Option<Uuid>,
+    site_permissions: String,
+    org_permissions: String,
+    user_permissions: String,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+}
+
 #[derive(Debug, FromRow)]
 struct StoredTaskRow {
     id: Uuid,
@@ -626,6 +654,27 @@ struct StoredWorkspaceResourceMetadataRow {
     key: String,
     value: String,
     sensitive: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredUserLinkRow {
+    user_id: Uuid,
+    login_type: String,
+    linked_id: String,
+    oauth_access_token: String,
+    oauth_refresh_token: String,
+    oauth_expiry: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredUserStatusChangeRow {
+    id: Uuid,
+    user_id: Uuid,
+    new_status: String,
+    old_status: String,
+    changed_at: OffsetDateTime,
+    changed_by: Option<Uuid>,
+    reason: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -1472,6 +1521,69 @@ impl AppStore for PostgresStore {
         Ok(row.map(|row| UserPreferenceRecord {
             task_notification_alert_dismissed: row.task_notification_alert_dismissed,
         }))
+    }
+
+    // ----- User identity supplements -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM user_configs WHERE user_id = $1 AND key = $2")
+            .bind(user_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredUserLinkRow>(
+            "SELECT
+                user_id,
+                login_type::text AS login_type,
+                linked_id,
+                oauth_access_token,
+                oauth_refresh_token,
+                oauth_expiry
+             FROM user_links
+             WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(user_link_record_from_row).collect()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredUserStatusChangeRow>(
+            "SELECT
+                id,
+                user_id,
+                new_status::text AS new_status,
+                old_status::text AS old_status,
+                changed_at,
+                changed_by,
+                reason
+             FROM user_status_changes
+             WHERE user_id = $1
+             ORDER BY changed_at ASC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(user_status_change_record_from_row)
+            .collect()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -3842,6 +3954,177 @@ impl AppStore for PostgresStore {
                 .map_err(storage_error)?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Notification message dispatch
+    // -----------------------------------------------------------------------
+
+    // TODO: Add row leasing (`FOR UPDATE SKIP LOCKED` or a CTE-based lease)
+    // to prevent concurrent dispatch loops from fetching the same messages.
+    // See Go reference: `AcquireNotificationMessages` in
+    // `coder/coderd/database/queries/notifications.sql`.
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn fetch_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredNotificationMessageRow>(
+            r#"SELECT id, user_id, notification_template_id,
+                      method::text AS method,
+                      status::text AS status,
+                      attempt_count,
+                      payload::text AS payload,
+                      COALESCE(to_json(COALESCE(targets, ARRAY[]::uuid[])), '[]'::json)::text AS targets_json,
+                      created_at,
+                      updated_at
+               FROM notification_messages
+               WHERE status IN ('pending', 'temporary_failure')
+                 AND (next_retry_after IS NULL OR next_retry_after < NOW())
+                 AND (attempt_count IS NULL OR attempt_count < $2)
+               ORDER BY created_at ASC
+               LIMIT $1"#,
+        )
+        .bind(limit as i64)
+        .bind(max_attempt_count as i32)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(notification_message_from_row)
+            .collect()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        let status_str = match status {
+            NotificationMessageStatus::Pending => "pending",
+            NotificationMessageStatus::Sent => "sent",
+            NotificationMessageStatus::TemporaryFailure => "temporary_failure",
+            NotificationMessageStatus::Failed => "permanent_failure",
+        };
+
+        let result = sqlx::query(
+            r#"UPDATE notification_messages
+               SET status = $2::notification_message_status,
+                   updated_at = NOW()
+               WHERE id = $1"#,
+        )
+        .bind(message_id)
+        .bind(status_str)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE notification_messages
+             SET attempt_count = COALESCE(attempt_count, 0) + 1,
+                 updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(message_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    // -----------------------------------------------------------------------
+    // Custom roles
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredCustomRoleRow>(
+            r#"SELECT name, display_name, organization_id,
+                      site_permissions::text AS site_permissions,
+                      org_permissions::text AS org_permissions,
+                      user_permissions::text AS user_permissions,
+                      created_at, updated_at
+               FROM custom_roles
+               WHERE ($1::uuid IS NULL OR organization_id = $1)
+               ORDER BY name ASC"#,
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| CustomRoleRecord {
+                name: r.name,
+                display_name: r.display_name,
+                organization_id: r.organization_id,
+                site_permissions: r.site_permissions,
+                org_permissions: r.org_permissions,
+                user_permissions: r.user_permissions,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredCustomRoleRow>(
+            r#"INSERT INTO custom_roles (name, display_name, organization_id,
+                                         site_permissions, org_permissions, user_permissions,
+                                         created_at, updated_at)
+               VALUES (LOWER($1), $2, $3, $4::jsonb, $5::jsonb, $6::jsonb, NOW(), NOW())
+               ON CONFLICT (name, organization_id) DO UPDATE
+               SET display_name = EXCLUDED.display_name,
+                   site_permissions = EXCLUDED.site_permissions,
+                   org_permissions = EXCLUDED.org_permissions,
+                   user_permissions = EXCLUDED.user_permissions,
+                   updated_at = NOW()
+               RETURNING name, display_name, organization_id,
+                         site_permissions::text AS site_permissions,
+                         org_permissions::text AS org_permissions,
+                         user_permissions::text AS user_permissions,
+                         created_at, updated_at"#,
+        )
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(input.organization_id)
+        .bind(&input.site_permissions)
+        .bind(&input.org_permissions)
+        .bind(&input.user_permissions)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(CustomRoleRecord {
+            name: row.name,
+            display_name: row.display_name,
+            organization_id: row.organization_id,
+            site_permissions: row.site_permissions,
+            org_permissions: row.org_permissions,
+            user_permissions: row.user_permissions,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        })
     }
 
     // -----------------------------------------------------------------------
@@ -7750,6 +8033,44 @@ fn inbox_notification_from_row(
     })
 }
 
+fn notification_message_from_row(
+    row: StoredNotificationMessageRow,
+) -> Result<NotificationMessageRecord, StorageError> {
+    let method = match row.method.as_str() {
+        "smtp" => NotificationMethod::Email,
+        "webhook" => NotificationMethod::Webhook,
+        "inbox" => NotificationMethod::Inbox,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown notification method: {other}"
+            )));
+        }
+    };
+    let status = match row.status.as_str() {
+        "pending" | "leased" => NotificationMessageStatus::Pending,
+        "sent" => NotificationMessageStatus::Sent,
+        "temporary_failure" => NotificationMessageStatus::TemporaryFailure,
+        "permanent_failure" => NotificationMessageStatus::Failed,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown notification message status: {other}"
+            )));
+        }
+    };
+    Ok(NotificationMessageRecord {
+        id: row.id,
+        user_id: row.user_id,
+        notification_template_id: row.notification_template_id,
+        method,
+        status,
+        attempt_count: row.attempt_count.unwrap_or(0),
+        input_json: row.payload,
+        targets_json: row.targets_json,
+        created_at: row.created_at,
+        updated_at: row.updated_at.unwrap_or(row.created_at),
+    })
+}
+
 // ---------------------------------------------------------------------------
 // Workspace domain StoredRow types
 // ---------------------------------------------------------------------------
@@ -8085,4 +8406,41 @@ fn workspace_app_status_row_from_stored(row: StoredWorkspaceAppStatusRow) -> Wor
         message: row.message,
         uri: row.uri,
     }
+}
+
+fn user_link_record_from_row(row: StoredUserLinkRow) -> Result<UserLinkRecord, StorageError> {
+    let login_type = row
+        .login_type
+        .parse::<LoginType>()
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    Ok(UserLinkRecord {
+        user_id: row.user_id,
+        login_type,
+        linked_id: row.linked_id,
+        oauth_access_token: row.oauth_access_token,
+        oauth_refresh_token: row.oauth_refresh_token,
+        oauth_expiry: row.oauth_expiry,
+    })
+}
+
+fn user_status_change_record_from_row(
+    row: StoredUserStatusChangeRow,
+) -> Result<UserStatusChangeRecord, StorageError> {
+    let new_status = row
+        .new_status
+        .parse::<UserStatus>()
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    let old_status = row
+        .old_status
+        .parse::<UserStatus>()
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    Ok(UserStatusChangeRecord {
+        id: row.id,
+        user_id: row.user_id,
+        new_status,
+        old_status,
+        changed_at: row.changed_at,
+        changed_by: row.changed_by,
+        reason: row.reason,
+    })
 }
