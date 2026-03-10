@@ -1860,8 +1860,10 @@ pub trait InsightsStore: Send + Sync {
     async fn get_user_status_counts(
         &self,
         timezone: &str,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = timezone;
+        let _ = (timezone, start_time, end_time);
         Err(StorageError::unavailable(
             "user status counts are not implemented",
         ))
@@ -2677,8 +2679,10 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn get_user_status_counts(
         &self,
         timezone: &str,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = timezone;
+        let _ = (timezone, start_time, end_time);
         Err(StorageError::unavailable(
             "user status counts are not implemented",
         ))
@@ -3148,6 +3152,55 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
         let _ = workspace_id;
         Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Creates a new group.
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Deletes a group.
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Lists groups for an organization.
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        let _ = organization_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
+    /// Adds a user to a group.
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        let _ = (group_id, user_id);
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    /// Lists members of a group.
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
+    }
+
+    /// Removes a user from a group.
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = (group_id, user_id);
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
     }
 
     /// Looks up a group by identifier.
@@ -4411,6 +4464,31 @@ pub trait WorkspaceStore: Send + Sync {
     /// Soft-deletes a workspace.
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
 
+    /// Creates a new group.
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError>;
+
+    /// Deletes a group.
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Lists groups for an organization.
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError>;
+
+    /// Adds a user to a group.
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError>;
+
+    /// Lists members of a group.
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError>;
+
+    /// Removes a user from a group.
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError>;
+
     /// Looks up a group by identifier.
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
 
@@ -5062,6 +5140,41 @@ where
         AppStore::update_organization_member_roles(self, organization_id, user_id, roles).await
     }
 
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        AppStore::list_groups(self, organization_id).await
+    }
+
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        AppStore::create_group(self, input).await
+    }
+
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        AppStore::find_group_by_id(self, group_id).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_group(self, group_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        AppStore::list_group_members(self, group_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        AppStore::insert_group_member(self, group_id, user_id).await
+    }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_group_member(self, group_id, user_id).await
+    }
+
     // ----- OAuth2 Provider delegations -----
 
     async fn list_oauth2_provider_apps(
@@ -5373,6 +5486,41 @@ where
         (**self)
             .update_organization_member_roles(organization_id, user_id, roles)
             .await
+    }
+
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        (**self).list_groups(organization_id).await
+    }
+
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        (**self).create_group(input).await
+    }
+
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        (**self).find_group_by_id(group_id).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_group(group_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        (**self).list_group_members(group_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        (**self).insert_group_member(group_id, user_id).await
+    }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_group_member(group_id, user_id).await
     }
 
     // ----- OAuth2 Provider delegations -----
@@ -5873,6 +6021,37 @@ where
         AppStore::soft_delete_workspace(self, workspace_id).await
     }
 
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        AppStore::create_group(self, input).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_group(self, group_id).await
+    }
+
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        AppStore::list_groups(self, organization_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        AppStore::insert_group_member(self, group_id, user_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        AppStore::list_group_members(self, group_id).await
+    }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_group_member(self, group_id, user_id).await
+    }
+
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
         AppStore::find_group_by_id(self, group_id).await
     }
@@ -6191,6 +6370,37 @@ where
         (**self).soft_delete_workspace(workspace_id).await
     }
 
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
+        (**self).create_group(input).await
+    }
+
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_group(group_id).await
+    }
+
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
+        (**self).list_groups(organization_id).await
+    }
+
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
+        (**self).insert_group_member(group_id, user_id).await
+    }
+
+    async fn list_group_members(
+        &self,
+        group_id: Uuid,
+    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+        (**self).list_group_members(group_id).await
+    }
+
+    async fn delete_group_member(
+        &self,
+        group_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self).delete_group_member(group_id, user_id).await
+    }
+
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
         (**self).find_group_by_id(group_id).await
     }
@@ -6473,8 +6683,10 @@ where
     async fn get_user_status_counts(
         &self,
         timezone: &str,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        AppStore::get_user_status_counts(self, timezone).await
+        AppStore::get_user_status_counts(self, timezone, start_time, end_time).await
     }
 }
 
@@ -6536,8 +6748,12 @@ where
     async fn get_user_status_counts(
         &self,
         timezone: &str,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
     ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        (**self).get_user_status_counts(timezone).await
+        (**self)
+            .get_user_status_counts(timezone, start_time, end_time)
+            .await
     }
 }
 
