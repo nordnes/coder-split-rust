@@ -3713,7 +3713,7 @@ impl AppStore for PostgresStore {
                       status::text AS status,
                       attempt_count,
                       payload::text AS payload,
-                      COALESCE(targets::text, '[]') AS targets_json,
+                      COALESCE(to_json(COALESCE(targets, ARRAY[]::uuid[])), '[]'::json)::text AS targets_json,
                       created_at,
                       updated_at
                FROM notification_messages
