@@ -3,6 +3,15 @@
 use std::{str::FromStr, time::Duration};
 
 use async_trait::async_trait;
+use std::collections::HashMap;
+
+use coder_core::template::{
+    CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
+    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
+    TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
+    TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
+    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
+};
 use coder_core::{
     ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AppStore, AuditDiff,
     AuditLog, AuditLogAction, AuditLogListFilter, AuditLogResponse, AuditResourceType,
@@ -3155,6 +3164,942 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)
         .map(|opt| opt.map(workspace_app_row_from_stored))
     }
+
+    // ----- Template Store Methods -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_templates(
+        &self,
+        filter: TemplateListFilter,
+    ) -> Result<Vec<TemplateRecord>, StorageError> {
+        // Escape LIKE metacharacters so user input is treated literally.
+        let escaped_search = filter.search.as_deref().map(escape_like);
+        let rows = sqlx::query_as::<_, StoredTemplateRow>(
+            r#"
+            SELECT t.id, t.created_at, t.updated_at, t.organization_id, t.deleted,
+                   t.name, t.provisioner::text AS provisioner, t.active_version_id,
+                   t.description, t.default_ttl, t.created_by, t.icon, t.user_acl,
+                   t.group_acl, t.display_name, t.allow_user_cancel_workspace_jobs,
+                   t.allow_user_autostart, t.allow_user_autostop, t.failure_ttl,
+                   t.time_til_dormant, t.time_til_dormant_autodelete,
+                   t.autostop_requirement_days_of_week, t.autostop_requirement_weeks,
+                   t.autostart_block_days_of_week, t.require_active_version,
+                   t.deprecated, t.activity_bump,
+                   t.max_port_sharing_level::text AS max_port_sharing_level,
+                   t.use_classic_parameter_flow,
+                   t.cors_behavior::text AS cors_behavior,
+                   t.disable_module_cache,
+                   COALESCE(o.name, '') AS organization_name,
+                   COALESCE(o.display_name, '') AS organization_display_name,
+                   COALESCE(o.icon, '') AS organization_icon,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM templates t
+            LEFT JOIN organizations o ON o.id = t.organization_id
+            LEFT JOIN users u ON u.id = t.created_by
+            WHERE ($1::uuid IS NULL OR t.organization_id = $1)
+              AND ($2::text IS NULL OR t.name = $2)
+              AND ($3::bool OR t.deleted = false)
+              AND ($4::text IS NULL OR t.name ILIKE '%' || $4 || '%' OR t.display_name ILIKE '%' || $4 || '%')
+            ORDER BY t.name ASC
+            "#,
+        )
+        .bind(filter.organization_id)
+        .bind(filter.exact_name.as_deref())
+        .bind(filter.deleted)
+        .bind(escaped_search.as_deref())
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(template_record_from_row).collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredTemplateRow>(
+            r#"
+            SELECT t.id, t.created_at, t.updated_at, t.organization_id, t.deleted,
+                   t.name, t.provisioner::text AS provisioner, t.active_version_id,
+                   t.description, t.default_ttl, t.created_by, t.icon, t.user_acl,
+                   t.group_acl, t.display_name, t.allow_user_cancel_workspace_jobs,
+                   t.allow_user_autostart, t.allow_user_autostop, t.failure_ttl,
+                   t.time_til_dormant, t.time_til_dormant_autodelete,
+                   t.autostop_requirement_days_of_week, t.autostop_requirement_weeks,
+                   t.autostart_block_days_of_week, t.require_active_version,
+                   t.deprecated, t.activity_bump,
+                   t.max_port_sharing_level::text AS max_port_sharing_level,
+                   t.use_classic_parameter_flow,
+                   t.cors_behavior::text AS cors_behavior,
+                   t.disable_module_cache,
+                   COALESCE(o.name, '') AS organization_name,
+                   COALESCE(o.display_name, '') AS organization_display_name,
+                   COALESCE(o.icon, '') AS organization_icon,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM templates t
+            LEFT JOIN organizations o ON o.id = t.organization_id
+            LEFT JOIN users u ON u.id = t.created_by
+            WHERE t.id = $1
+            "#,
+        )
+        .bind(template_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(template_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_template_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredTemplateRow>(
+            r#"
+            SELECT t.id, t.created_at, t.updated_at, t.organization_id, t.deleted,
+                   t.name, t.provisioner::text AS provisioner, t.active_version_id,
+                   t.description, t.default_ttl, t.created_by, t.icon, t.user_acl,
+                   t.group_acl, t.display_name, t.allow_user_cancel_workspace_jobs,
+                   t.allow_user_autostart, t.allow_user_autostop, t.failure_ttl,
+                   t.time_til_dormant, t.time_til_dormant_autodelete,
+                   t.autostop_requirement_days_of_week, t.autostop_requirement_weeks,
+                   t.autostart_block_days_of_week, t.require_active_version,
+                   t.deprecated, t.activity_bump,
+                   t.max_port_sharing_level::text AS max_port_sharing_level,
+                   t.use_classic_parameter_flow,
+                   t.cors_behavior::text AS cors_behavior,
+                   t.disable_module_cache,
+                   COALESCE(o.name, '') AS organization_name,
+                   COALESCE(o.display_name, '') AS organization_display_name,
+                   COALESCE(o.icon, '') AS organization_icon,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM templates t
+            LEFT JOIN organizations o ON o.id = t.organization_id
+            LEFT JOIN users u ON u.id = t.created_by
+            WHERE t.organization_id = $1 AND t.name = $2 AND t.deleted = false
+            "#,
+        )
+        .bind(organization_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(template_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_template(
+        &self,
+        input: CreateTemplateInput,
+    ) -> Result<TemplateRecord, CreateTemplateStoreError> {
+        let result = sqlx::query(
+            r#"
+            INSERT INTO templates (
+                id, created_at, updated_at, organization_id, name, display_name,
+                provisioner, active_version_id, description, default_ttl,
+                created_by, icon, allow_user_cancel_workspace_jobs,
+                allow_user_autostart, allow_user_autostop,
+                failure_ttl, time_til_dormant, time_til_dormant_autodelete,
+                require_active_version, activity_bump, max_port_sharing_level
+            ) VALUES (
+                $1, $2, $3, $4, $5, $6, $7::provisioner_type, $8, $9, $10, $11, $12, $13, $14, $15,
+                $16, $17, $18, $19, $20, $21::app_sharing_level
+            )
+            "#,
+        )
+        .bind(input.id)
+        .bind(input.created_at)
+        .bind(input.updated_at)
+        .bind(input.organization_id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.provisioner)
+        .bind(input.active_version_id)
+        .bind(&input.description)
+        .bind(input.default_ttl)
+        .bind(input.created_by)
+        .bind(&input.icon)
+        .bind(input.allow_user_cancel_workspace_jobs)
+        .bind(input.allow_user_autostart)
+        .bind(input.allow_user_autostop)
+        .bind(input.failure_ttl)
+        .bind(input.time_til_dormant)
+        .bind(input.time_til_dormant_autodelete)
+        .bind(input.require_active_version)
+        .bind(input.activity_bump)
+        .bind(&input.max_port_share_level)
+        .execute(&self.pool)
+        .await;
+
+        match result {
+            Ok(_) => {}
+            Err(e) if is_unique_violation(&e) => {
+                return Err(CreateTemplateStoreError::AlreadyExists);
+            }
+            Err(e) => return Err(CreateTemplateStoreError::Storage(storage_error(e))),
+        }
+
+        self.find_template_by_id(input.id)
+            .await
+            .map_err(CreateTemplateStoreError::Storage)?
+            .ok_or_else(|| {
+                CreateTemplateStoreError::Storage(StorageError::unavailable(
+                    "template not found after insert",
+                ))
+            })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_template_meta(
+        &self,
+        input: UpdateTemplateMetaInput,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        let result = sqlx::query(
+            r#"
+            UPDATE templates SET
+                name = $2,
+                display_name = $3,
+                description = $4,
+                icon = $5,
+                default_ttl = $6,
+                activity_bump = $7,
+                allow_user_autostart = $8,
+                allow_user_autostop = $9,
+                allow_user_cancel_workspace_jobs = $10,
+                failure_ttl = $11,
+                time_til_dormant = $12,
+                time_til_dormant_autodelete = $13,
+                require_active_version = $14,
+                deprecated = $15,
+                max_port_sharing_level = $16::app_sharing_level,
+                cors_behavior = $17::cors_behavior,
+                use_classic_parameter_flow = $18,
+                disable_module_cache = $19,
+                updated_at = NOW()
+            WHERE id = $1 AND deleted = false
+            "#,
+        )
+        .bind(input.template_id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.description)
+        .bind(&input.icon)
+        .bind(input.default_ttl)
+        .bind(input.activity_bump)
+        .bind(input.allow_user_autostart)
+        .bind(input.allow_user_autostop)
+        .bind(input.allow_user_cancel_workspace_jobs)
+        .bind(input.failure_ttl)
+        .bind(input.time_til_dormant)
+        .bind(input.time_til_dormant_autodelete)
+        .bind(input.require_active_version)
+        .bind(&input.deprecation_message)
+        .bind(&input.max_port_share_level)
+        .bind(&input.cors_behavior)
+        .bind(input.use_classic_parameter_flow)
+        .bind(input.disable_module_cache)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.find_template_by_id(input.template_id).await
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE templates SET deleted = true, updated_at = NOW() WHERE id = $1 AND deleted = false",
+        )
+        .bind(template_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_template_active_version(
+        &self,
+        template_id: Uuid,
+        active_version_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE templates SET active_version_id = $2, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(template_id)
+        .bind(active_version_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredDAURow>(
+            r#"
+            SELECT TO_CHAR(start_time::date, 'YYYY-MM-DD') AS date,
+                   CAST(COUNT(DISTINCT user_id) AS INT) AS amount
+            FROM template_usage_stats
+            WHERE template_id = $1
+            GROUP BY start_time::date
+            ORDER BY start_time::date ASC
+            "#,
+        )
+        .bind(template_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TemplateDAURow {
+                date: r.date,
+                amount: r.amount,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_template_versions(
+        &self,
+        filter: TemplateVersionListFilter,
+    ) -> Result<Vec<TemplateVersionRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredTemplateVersionRow>(
+            r#"
+            SELECT tv.*,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM template_versions tv
+            LEFT JOIN users u ON u.id = tv.created_by
+            WHERE tv.template_id = $1
+              AND ($2::bool OR tv.archived = false)
+            ORDER BY tv.created_at DESC
+            LIMIT $3 OFFSET $4
+            "#,
+        )
+        .bind(filter.template_id)
+        .bind(filter.include_archived)
+        .bind(if filter.limit == 0 {
+            i64::MAX
+        } else {
+            i64::from(filter.limit)
+        })
+        .bind(i64::from(filter.offset))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(template_version_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_template_version_by_id(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredTemplateVersionRow>(
+            r#"
+            SELECT tv.*,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM template_versions tv
+            LEFT JOIN users u ON u.id = tv.created_by
+            WHERE tv.id = $1
+            "#,
+        )
+        .bind(version_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(template_version_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_template_version_by_template_and_name(
+        &self,
+        template_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredTemplateVersionRow>(
+            r#"
+            SELECT tv.*,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM template_versions tv
+            LEFT JOIN users u ON u.id = tv.created_by
+            WHERE tv.template_id = $1 AND tv.name = $2
+            "#,
+        )
+        .bind(template_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(template_version_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_template_version_by_org_and_name(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredTemplateVersionRow>(
+            r#"
+            SELECT tv.*,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM template_versions tv
+            LEFT JOIN users u ON u.id = tv.created_by
+            JOIN templates t ON t.id = tv.template_id
+            WHERE t.organization_id = $1 AND t.name = $2 AND tv.name = $3
+            "#,
+        )
+        .bind(organization_id)
+        .bind(template_name)
+        .bind(version_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(template_version_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_template_version(
+        &self,
+        input: CreateTemplateVersionInput,
+    ) -> Result<TemplateVersionRecord, StorageError> {
+        sqlx::query(
+            r#"
+            INSERT INTO template_versions (
+                id, template_id, organization_id, created_at, updated_at,
+                name, message, readme, job_id, created_by, source_example_id
+            ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+            "#,
+        )
+        .bind(input.id)
+        .bind(input.template_id)
+        .bind(input.organization_id)
+        .bind(input.created_at)
+        .bind(input.updated_at)
+        .bind(&input.name)
+        .bind(&input.message)
+        .bind(&input.readme)
+        .bind(input.job_id)
+        .bind(input.created_by)
+        .bind(input.source_example_id.as_deref())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        self.find_template_version_by_id(input.id)
+            .await?
+            .ok_or_else(|| StorageError::unavailable("template version not found after insert"))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_template_version(
+        &self,
+        version_id: Uuid,
+        name: &str,
+        message: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let result = sqlx::query(
+            "UPDATE template_versions SET name = $2, message = $3, updated_at = NOW() WHERE id = $1",
+        )
+        .bind(version_id)
+        .bind(name)
+        .bind(message)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+        self.find_template_version_by_id(version_id).await
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE template_versions SET archived = true, updated_at = NOW() WHERE id = $1 AND archived = false",
+        )
+        .bind(version_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE template_versions SET archived = false, updated_at = NOW() WHERE id = $1 AND archived = true",
+        )
+        .bind(version_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_template_version_parameters(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredTemplateVersionParameterRow>(
+            "SELECT template_version_id, name, description, type, mutable, default_value, icon, options, validation_regex, validation_min, validation_max, validation_error, validation_monotonic, required, display_name, display_order, ephemeral, form_type::text AS form_type FROM template_version_parameters WHERE template_version_id = $1 ORDER BY display_order ASC",
+        )
+        .bind(version_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(template_version_parameter_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_template_version_variables(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredTemplateVersionVariableRow>(
+            "SELECT * FROM template_version_variables WHERE template_version_id = $1 ORDER BY name ASC",
+        )
+        .bind(version_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(template_version_variable_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_template_version_presets(
+        &self,
+        version_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredTemplateVersionPresetRow>(
+            "SELECT * FROM template_version_presets WHERE template_version_id = $1 ORDER BY name ASC",
+        )
+        .bind(version_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TemplateVersionPresetRecord {
+                id: r.id,
+                template_version_id: r.template_version_id,
+                name: r.name,
+                created_at: r.created_at,
+                is_default: r.is_default,
+                description: r.description,
+                icon: r.icon,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_template_version_preset_parameters(
+        &self,
+        preset_id: Uuid,
+    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredTemplateVersionPresetParameterRow>(
+            "SELECT * FROM template_version_preset_parameters WHERE template_version_preset_id = $1 ORDER BY name ASC",
+        )
+        .bind(preset_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|r| TemplateVersionPresetParameterRecord {
+                id: r.id,
+                template_version_preset_id: r.template_version_preset_id,
+                name: r.name,
+                value: r.value,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError> {
+        let tags_json = serde_json::to_value(&input.tags)
+            .map_err(|e| StorageError::unavailable(format!("serialize tags: {e}")))?;
+        sqlx::query(
+            r#"
+            INSERT INTO provisioner_jobs (
+                id, created_at, updated_at, organization_id, initiator_id,
+                provisioner, file_id, type, input, tags
+            ) VALUES ($1, $2, $3, $4, $5, $6::provisioner_type, $7, $8, $9, $10)
+            "#,
+        )
+        .bind(input.id)
+        .bind(input.created_at)
+        .bind(input.updated_at)
+        .bind(input.organization_id)
+        .bind(input.initiator_id)
+        .bind(&input.provisioner)
+        .bind(input.file_id)
+        .bind(&input.job_type)
+        .bind(&input.input)
+        .bind(&tags_json)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        self.find_provisioner_job_by_id(input.id)
+            .await?
+            .ok_or_else(|| StorageError::unavailable("provisioner job not found after insert"))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredProvisionerJobRow>(
+            r#"
+            SELECT id, created_at, updated_at, started_at, canceled_at, completed_at,
+                   error, organization_id, initiator_id, provisioner::text AS provisioner,
+                   CASE
+                       WHEN completed_at IS NOT NULL AND canceled_at IS NOT NULL THEN 'canceled'
+                       WHEN completed_at IS NOT NULL AND error != '' THEN 'failed'
+                       WHEN completed_at IS NOT NULL THEN 'succeeded'
+                       WHEN canceled_at IS NOT NULL THEN 'canceling'
+                       WHEN started_at IS NOT NULL THEN 'running'
+                       ELSE 'pending'
+                   END AS job_status,
+                   file_id, type, input, worker_id, tags
+            FROM provisioner_jobs
+            WHERE id = $1
+            "#,
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(provisioner_job_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE provisioner_jobs SET canceled_at = NOW(), updated_at = NOW() WHERE id = $1 AND canceled_at IS NULL AND completed_at IS NULL",
+        )
+        .bind(job_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Template & Template Version StoredRow types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+struct StoredTemplateRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    organization_id: Uuid,
+    deleted: bool,
+    name: String,
+    provisioner: String,
+    active_version_id: Uuid,
+    description: String,
+    default_ttl: i64,
+    created_by: Uuid,
+    icon: String,
+    user_acl: Value,
+    group_acl: Value,
+    display_name: String,
+    allow_user_cancel_workspace_jobs: bool,
+    allow_user_autostart: bool,
+    allow_user_autostop: bool,
+    failure_ttl: i64,
+    time_til_dormant: i64,
+    time_til_dormant_autodelete: i64,
+    autostop_requirement_days_of_week: i16,
+    autostop_requirement_weeks: i64,
+    autostart_block_days_of_week: i16,
+    require_active_version: bool,
+    deprecated: String,
+    activity_bump: i64,
+    max_port_sharing_level: String,
+    use_classic_parameter_flow: bool,
+    cors_behavior: String,
+    disable_module_cache: bool,
+    organization_name: String,
+    organization_display_name: String,
+    organization_icon: String,
+    created_by_username: String,
+    created_by_avatar_url: String,
+    created_by_name: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredProvisionerJobRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    started_at: Option<OffsetDateTime>,
+    canceled_at: Option<OffsetDateTime>,
+    completed_at: Option<OffsetDateTime>,
+    error: String,
+    organization_id: Uuid,
+    initiator_id: Uuid,
+    provisioner: String,
+    job_status: String,
+    file_id: Option<Uuid>,
+    #[sqlx(rename = "type")]
+    job_type: String,
+    input: Value,
+    worker_id: Option<Uuid>,
+    tags: Value,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredTemplateVersionRow {
+    id: Uuid,
+    template_id: Option<Uuid>,
+    organization_id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    name: String,
+    readme: String,
+    job_id: Uuid,
+    created_by: Uuid,
+    external_auth_providers: Value,
+    message: String,
+    archived: bool,
+    source_example_id: Option<String>,
+    has_ai_task: Option<bool>,
+    has_external_agent: Option<bool>,
+    created_by_avatar_url: String,
+    created_by_username: String,
+    created_by_name: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredTemplateVersionParameterRow {
+    template_version_id: Uuid,
+    name: String,
+    description: String,
+    #[sqlx(rename = "type")]
+    param_type: String,
+    mutable: bool,
+    default_value: String,
+    icon: String,
+    options: Value,
+    validation_regex: String,
+    validation_min: Option<i32>,
+    validation_max: Option<i32>,
+    validation_error: String,
+    validation_monotonic: String,
+    required: bool,
+    display_name: String,
+    display_order: i32,
+    ephemeral: bool,
+    form_type: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredTemplateVersionVariableRow {
+    template_version_id: Uuid,
+    name: String,
+    description: String,
+    #[sqlx(rename = "type")]
+    var_type: String,
+    value: String,
+    default_value: String,
+    required: bool,
+    sensitive: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredTemplateVersionPresetRow {
+    id: Uuid,
+    template_version_id: Uuid,
+    name: String,
+    created_at: OffsetDateTime,
+    is_default: bool,
+    description: String,
+    icon: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredTemplateVersionPresetParameterRow {
+    id: Uuid,
+    template_version_preset_id: Uuid,
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredDAURow {
+    date: String,
+    amount: i32,
+}
+
+fn template_record_from_row(row: StoredTemplateRow) -> TemplateRecord {
+    let user_acl: HashMap<String, Value> = serde_json::from_value(row.user_acl).unwrap_or_default();
+    let group_acl: HashMap<String, Value> =
+        serde_json::from_value(row.group_acl).unwrap_or_default();
+    TemplateRecord {
+        id: row.id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        organization_id: row.organization_id,
+        organization_name: row.organization_name,
+        organization_display_name: row.organization_display_name,
+        organization_icon: row.organization_icon,
+        deleted: row.deleted,
+        name: row.name,
+        provisioner: row.provisioner,
+        active_version_id: row.active_version_id,
+        description: row.description,
+        default_ttl: row.default_ttl,
+        created_by: row.created_by,
+        icon: row.icon,
+        user_acl,
+        group_acl,
+        display_name: row.display_name,
+        allow_user_cancel_workspace_jobs: row.allow_user_cancel_workspace_jobs,
+        allow_user_autostart: row.allow_user_autostart,
+        allow_user_autostop: row.allow_user_autostop,
+        failure_ttl: row.failure_ttl,
+        time_til_dormant: row.time_til_dormant,
+        time_til_dormant_autodelete: row.time_til_dormant_autodelete,
+        autostop_requirement_days_of_week: row.autostop_requirement_days_of_week,
+        autostop_requirement_weeks: row.autostop_requirement_weeks,
+        autostart_block_days_of_week: row.autostart_block_days_of_week,
+        require_active_version: row.require_active_version,
+        deprecated: row.deprecated,
+        activity_bump: row.activity_bump,
+        max_port_sharing_level: row.max_port_sharing_level,
+        use_classic_parameter_flow: row.use_classic_parameter_flow,
+        cors_behavior: row.cors_behavior,
+        disable_module_cache: row.disable_module_cache,
+        created_by_username: row.created_by_username,
+        created_by_avatar_url: row.created_by_avatar_url,
+        created_by_name: row.created_by_name,
+    }
+}
+
+fn provisioner_job_record_from_row(row: StoredProvisionerJobRow) -> ProvisionerJobRecord {
+    let tags: HashMap<String, String> = serde_json::from_value(row.tags).unwrap_or_default();
+    ProvisionerJobRecord {
+        id: row.id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        started_at: row.started_at,
+        canceled_at: row.canceled_at,
+        completed_at: row.completed_at,
+        error: row.error,
+        organization_id: row.organization_id,
+        initiator_id: row.initiator_id,
+        provisioner: row.provisioner,
+        job_status: row.job_status,
+        file_id: row.file_id,
+        job_type: row.job_type,
+        input: row.input,
+        worker_id: row.worker_id,
+        tags,
+    }
+}
+
+fn template_version_record_from_row(row: StoredTemplateVersionRow) -> TemplateVersionRecord {
+    TemplateVersionRecord {
+        id: row.id,
+        template_id: row.template_id,
+        organization_id: row.organization_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        name: row.name,
+        readme: row.readme,
+        job_id: row.job_id,
+        created_by: row.created_by,
+        external_auth_providers: row.external_auth_providers,
+        message: row.message,
+        archived: row.archived,
+        source_example_id: row.source_example_id,
+        has_ai_task: row.has_ai_task,
+        has_external_agent: row.has_external_agent,
+        created_by_avatar_url: row.created_by_avatar_url,
+        created_by_username: row.created_by_username,
+        created_by_name: row.created_by_name,
+    }
+}
+
+fn template_version_parameter_from_row(
+    row: StoredTemplateVersionParameterRow,
+) -> TemplateVersionParameterRecord {
+    TemplateVersionParameterRecord {
+        template_version_id: row.template_version_id,
+        name: row.name,
+        description: row.description,
+        param_type: row.param_type,
+        mutable: row.mutable,
+        default_value: row.default_value,
+        icon: row.icon,
+        options: row.options,
+        validation_regex: row.validation_regex,
+        validation_min: row.validation_min,
+        validation_max: row.validation_max,
+        validation_error: row.validation_error,
+        validation_monotonic: row.validation_monotonic,
+        required: row.required,
+        display_name: row.display_name,
+        display_order: row.display_order,
+        ephemeral: row.ephemeral,
+        form_type: row.form_type,
+    }
+}
+
+fn template_version_variable_from_row(
+    row: StoredTemplateVersionVariableRow,
+) -> TemplateVersionVariableRecord {
+    TemplateVersionVariableRecord {
+        template_version_id: row.template_version_id,
+        name: row.name,
+        description: row.description,
+        var_type: row.var_type,
+        value: row.value,
+        default_value: row.default_value,
+        required: row.required,
+        sensitive: row.sensitive,
+    }
 }
 
 async fn ensure_default_organization(
@@ -3544,6 +4489,22 @@ fn is_unique_violation(error: &sqlx::Error) -> bool {
         error,
         sqlx::Error::Database(database_error) if database_error.is_unique_violation()
     )
+}
+
+/// Escapes SQL LIKE metacharacters (`%`, `_`, `\`) so that user-supplied
+/// search strings are matched literally.
+fn escape_like(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for ch in input.chars() {
+        match ch {
+            '\\' | '%' | '_' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
+        }
+    }
+    out
 }
 
 fn storage_error(error: sqlx::Error) -> StorageError {
