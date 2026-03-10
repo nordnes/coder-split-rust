@@ -6990,14 +6990,17 @@ async fn post_template_version_dry_run(
         None => return Ok(not_found_response("Template version not found.")),
     };
 
-    // RBAC: verify the actor can create template version dry runs.
+    // RBAC: verify the actor can create workspaces in this org (dry runs simulate workspace builds).
+    // Mirrors Go: policy.ActionCreate on rbac.ResourceWorkspace.
     let authorizer = Authorizer::new();
-    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
-    if let Some(tid) = ver.template_id {
-        obj = obj.with_id(tid);
-    }
     if authorizer
-        .authorize(&context.actor, Action::Read, &obj)
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace)
+                .with_owner(context.user.id)
+                .in_org(ver.organization_id),
+        )
         .is_err()
     {
         return Ok(forbidden_response(
@@ -13646,12 +13649,14 @@ async fn post_file(
     };
 
     // RBAC: verify the actor can upload files.
+    // Note: Go reference has no explicit RBAC here (auth-only), but we add
+    // a permissive check with owner scoping so org-level roles pass.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
             Action::Create,
-            &Object::new(ResourceType::File),
+            &Object::new(ResourceType::File).with_owner(context.user.id),
         )
         .is_err()
     {
