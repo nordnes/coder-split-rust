@@ -1645,7 +1645,7 @@ impl AppStore for PostgresStore {
                          AND (
                              NOT EXISTS (SELECT 1 FROM user_deleted WHERE user_id = rscpupd.user_id)
                              OR
-                             rscpupd.date < (SELECT deleted_at FROM user_deleted WHERE user_id = rscpupd.user_id)
+                             rscpupd.date < (SELECT MIN(deleted_at) FROM user_deleted WHERE user_id = rscpupd.user_id)
                          )
                      )
                  ) AS count
