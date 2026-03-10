@@ -1916,6 +1916,674 @@ impl fmt::Display for ApiAllowListTarget {
 }
 
 // ---------------------------------------------------------------------------
+// Workspace Agent types
+// ---------------------------------------------------------------------------
+
+/// Status of a workspace agent's connection.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAgentStatus {
+    /// Agent has not yet connected.
+    #[default]
+    Connecting,
+    /// Agent is connected.
+    Connected,
+    /// Agent has disconnected.
+    Disconnected,
+    /// Agent connection has timed out.
+    Timeout,
+}
+
+/// Lifecycle state of a workspace agent.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAgentLifecycle {
+    /// Agent has been created.
+    #[default]
+    Created,
+    /// Agent is starting.
+    Starting,
+    /// Agent start has timed out.
+    StartTimeout,
+    /// Agent start encountered an error.
+    StartError,
+    /// Agent is ready.
+    Ready,
+    /// Agent is shutting down.
+    ShuttingDown,
+    /// Agent shutdown has timed out.
+    ShutdownTimeout,
+    /// Agent shutdown encountered an error.
+    ShutdownError,
+    /// Agent is off.
+    Off,
+}
+
+/// Agent subsystem markers.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentSubsystem {
+    /// Envbuilder subsystem.
+    Envbuilder,
+    /// Envbox subsystem.
+    Envbox,
+    /// Exectrace subsystem.
+    Exectrace,
+}
+
+/// Display app types available on an agent.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DisplayApp {
+    /// VS Code desktop.
+    Vscode,
+    /// VS Code Insiders.
+    VscodeInsiders,
+    /// Web terminal.
+    WebTerminal,
+    /// SSH helper.
+    SshHelper,
+    /// Port forwarding helper.
+    PortForwardingHelper,
+}
+
+/// Health status for a workspace agent.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentHealth {
+    /// Whether the agent is healthy.
+    pub healthy: bool,
+    /// Reason for unhealthy status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+}
+
+/// A workspace agent log source.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentLogSource {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Owning workspace agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Icon URL or identifier.
+    pub icon: String,
+}
+
+/// A workspace agent startup/shutdown script.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentScript {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Log source identifier for this script.
+    pub log_source_id: Uuid,
+    /// Path where log output is written.
+    pub log_path: String,
+    /// Script content.
+    pub script: String,
+    /// Cron expression for scheduled runs.
+    pub cron: String,
+    /// Whether this script blocks login during start.
+    pub start_blocks_login: bool,
+    /// Whether this script runs on agent start.
+    pub run_on_start: bool,
+    /// Whether this script runs on agent stop.
+    pub run_on_stop: bool,
+    /// Timeout in seconds.
+    pub timeout_seconds: i32,
+    /// Human-readable display name.
+    pub display_name: String,
+}
+
+/// App sharing level.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum AppSharingLevel {
+    /// Only the workspace owner.
+    #[default]
+    Owner,
+    /// Any authenticated user.
+    Authenticated,
+    /// Any organization member.
+    Organization,
+    /// Public access.
+    Public,
+}
+
+/// Where a workspace app opens.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub enum WorkspaceAppOpenIn {
+    /// New browser tab.
+    #[serde(rename = "tab")]
+    Tab,
+    /// New browser window.
+    #[serde(rename = "window")]
+    Window,
+    /// Slim window.
+    #[default]
+    #[serde(rename = "slim-window")]
+    SlimWindow,
+}
+
+/// Health state of a workspace app.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAppHealth {
+    /// Health checks are disabled.
+    #[default]
+    Disabled,
+    /// Health check is initializing.
+    Initializing,
+    /// App is healthy.
+    Healthy,
+    /// App is unhealthy.
+    Unhealthy,
+}
+
+/// A workspace app configured on an agent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceApp {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// URL-safe slug.
+    pub slug: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Command to execute when using the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub command: Option<String>,
+    /// URL for the app.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    /// Icon URL or identifier.
+    pub icon: String,
+    /// Whether this app uses a subdomain.
+    pub subdomain: bool,
+    /// Sharing level.
+    pub sharing_level: AppSharingLevel,
+    /// Health check URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub healthcheck_url: String,
+    /// Health check interval in seconds.
+    pub healthcheck_interval: i32,
+    /// Health check failure threshold.
+    pub healthcheck_threshold: i32,
+    /// Current health status.
+    pub health: WorkspaceAppHealth,
+    /// Whether this is an external app.
+    pub external: bool,
+    /// Display order.
+    pub display_order: i32,
+    /// Whether the app is hidden.
+    pub hidden: bool,
+    /// Where the app opens.
+    pub open_in: WorkspaceAppOpenIn,
+    /// Display group.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_group: Option<String>,
+}
+
+/// Full workspace agent representation.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct WorkspaceAgent {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Parent agent identifier for sub-agents.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<Uuid>,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Update time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+    /// First connection time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub first_connected_at: Option<OffsetDateTime>,
+    /// Last connection time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub last_connected_at: Option<OffsetDateTime>,
+    /// Disconnection time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub disconnected_at: Option<OffsetDateTime>,
+    /// Agent start time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub started_at: Option<OffsetDateTime>,
+    /// Agent ready time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub ready_at: Option<OffsetDateTime>,
+    /// Connection status.
+    pub status: WorkspaceAgentStatus,
+    /// Lifecycle state.
+    pub lifecycle_state: WorkspaceAgentLifecycle,
+    /// Agent name.
+    pub name: String,
+    /// Owning resource identifier.
+    pub resource_id: Uuid,
+    /// Instance identifier for cloud providers.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instance_id: String,
+    /// Agent architecture.
+    pub architecture: String,
+    /// Agent environment variables.
+    pub environment_variables: HashMap<String, String>,
+    /// Agent operating system.
+    pub operating_system: String,
+    /// Total log length.
+    pub logs_length: i32,
+    /// Whether logs have overflowed.
+    pub logs_overflowed: bool,
+    /// Working directory.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub directory: String,
+    /// Expanded working directory.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub expanded_directory: String,
+    /// Agent version.
+    pub version: String,
+    /// Agent API version.
+    pub api_version: String,
+    /// Installed apps.
+    pub apps: Vec<WorkspaceApp>,
+    /// DERP latency measurements.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub latency: HashMap<String, DERPRegion>,
+    /// Connection timeout in seconds.
+    pub connection_timeout_seconds: i32,
+    /// Troubleshooting URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub troubleshooting_url: String,
+    /// Active subsystems.
+    pub subsystems: Vec<AgentSubsystem>,
+    /// Agent health status.
+    pub health: WorkspaceAgentHealth,
+    /// Display apps.
+    pub display_apps: Vec<DisplayApp>,
+    /// Log sources.
+    pub log_sources: Vec<WorkspaceAgentLogSource>,
+    /// Scripts.
+    pub scripts: Vec<WorkspaceAgentScript>,
+}
+
+/// DERP region latency measurement.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct DERPRegion {
+    /// Whether this is the preferred region.
+    pub preferred: bool,
+    /// Latency in milliseconds.
+    #[serde(rename = "latency_ms")]
+    pub latency_milliseconds: f64,
+}
+
+/// A DERP map node.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DERPNode {
+    /// Node name.
+    pub name: String,
+    /// Region identifier.
+    pub region_id: i64,
+    /// Host address.
+    pub host_name: String,
+    /// IPv4 address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv4: Option<String>,
+    /// IPv6 address.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ipv6: Option<String>,
+    /// STUN port.
+    pub stun_port: i32,
+    /// Whether STUN is supported.
+    pub stun_only: bool,
+    /// DERP port.
+    pub derp_port: i32,
+    /// Whether to force HTTP.
+    pub force_http: bool,
+}
+
+/// A DERP map region.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DERPMapRegion {
+    /// Region identifier.
+    pub region_id: i64,
+    /// Region code.
+    pub region_code: String,
+    /// Region name.
+    pub region_name: String,
+    /// Whether to avoid this region.
+    pub avoid: bool,
+    /// Nodes in this region.
+    pub nodes: Vec<DERPNode>,
+}
+
+/// DERP map containing all regions.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct DERPMap {
+    /// Regions keyed by region identifier.
+    pub regions: HashMap<String, DERPMapRegion>,
+}
+
+/// Workspace agent connection info response.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct WorkspaceAgentConnectionInfo {
+    /// DERP map for the deployment.
+    pub derp_map: DERPMap,
+    /// Whether DERP force WebSocket is enabled.
+    pub derp_force_websockets: bool,
+    /// Whether direct connections are disabled.
+    pub disable_direct_connections: bool,
+}
+
+/// Log level for workspace agent logs.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum LogLevel {
+    /// Trace level.
+    Trace,
+    /// Debug level.
+    Debug,
+    /// Info level.
+    #[default]
+    Info,
+    /// Warn level.
+    Warn,
+    /// Error level.
+    Error,
+}
+
+/// A workspace agent log entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentLog {
+    /// Stable identifier.
+    pub id: i64,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Log output.
+    pub output: String,
+    /// Log level.
+    pub level: LogLevel,
+    /// Source identifier.
+    pub source_id: Uuid,
+}
+
+/// A listening port on a workspace agent.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentListeningPort {
+    /// Process name listening on this port.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub process_name: String,
+    /// Network type (tcp, udp).
+    pub network: String,
+    /// Port number.
+    pub port: u16,
+}
+
+/// Listening ports response.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentListeningPortsResponse {
+    /// List of listening ports.
+    pub ports: Vec<WorkspaceAgentListeningPort>,
+}
+
+/// Port share protocol.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PortShareProtocol {
+    /// HTTP protocol.
+    #[default]
+    Http,
+    /// HTTPS protocol.
+    Https,
+}
+
+/// A container port mapping.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentContainerPort {
+    /// Network type (tcp, udp).
+    pub network: String,
+    /// Port number.
+    pub port: u16,
+    /// Host port number.
+    pub host_port: u16,
+    /// Host IP address.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub host_ip: String,
+}
+
+/// A container running on a workspace agent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentContainer {
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Container identifier.
+    pub id: String,
+    /// Friendly name.
+    #[serde(rename = "name")]
+    pub friendly_name: String,
+    /// Container image.
+    pub image: String,
+    /// Labels.
+    pub labels: HashMap<String, String>,
+    /// Whether the container is running.
+    pub running: bool,
+    /// Port mappings.
+    pub ports: Vec<WorkspaceAgentContainerPort>,
+    /// Container status.
+    pub status: String,
+    /// Volume mounts.
+    pub volumes: HashMap<String, String>,
+}
+
+/// A devcontainer on a workspace agent.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentDevcontainer {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Workspace folder path.
+    pub workspace_folder: String,
+    /// Config file path.
+    pub config_path: String,
+    /// Devcontainer name.
+    pub name: String,
+    /// Container associated with this devcontainer.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container: Option<WorkspaceAgentContainer>,
+}
+
+/// Response for container listing.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentListContainersResponse {
+    /// Running containers.
+    pub containers: Vec<WorkspaceAgentContainer>,
+    /// Configured devcontainers.
+    pub devcontainers: Vec<WorkspaceAgentDevcontainer>,
+}
+
+/// Workspace agent metadata entry.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentMetadata {
+    /// Display name.
+    pub display_name: String,
+    /// Key.
+    pub key: String,
+    /// Script to execute.
+    pub script: String,
+    /// Collected value.
+    pub value: String,
+    /// Error message.
+    pub error: String,
+    /// Timeout in seconds.
+    pub timeout: i64,
+    /// Collection interval in seconds.
+    pub interval: i64,
+    /// Last collection time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub collected_at: OffsetDateTime,
+    /// Display order.
+    pub display_order: i32,
+}
+
+/// Status state for a workspace app.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceAppStatusState {
+    /// App is working.
+    Working,
+    /// App has completed.
+    Complete,
+    /// App has failed.
+    Failure,
+    /// App is idle.
+    #[default]
+    Idle,
+}
+
+/// Status of a workspace app.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAppStatus {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// App identifier.
+    pub app_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// State.
+    pub state: WorkspaceAppStatusState,
+    /// Status message.
+    pub message: String,
+    /// URI for the status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uri: Option<String>,
+}
+
+/// Request to update an app status.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct PatchAppStatusRequest {
+    /// App slug.
+    pub app_slug: String,
+    /// Status message.
+    pub message: String,
+    /// URI for the status.
+    #[serde(default)]
+    pub uri: Option<String>,
+    /// State.
+    pub state: WorkspaceAppStatusState,
+}
+
+/// Request to create an agent log source.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CreateLogSourceRequest {
+    /// Display name.
+    pub display_name: String,
+    /// Icon URL or identifier.
+    pub icon: String,
+}
+
+/// Request to patch agent logs.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct PatchAgentLogsRequest {
+    /// Log source identifier.
+    pub log_source_id: Uuid,
+    /// Log entries.
+    pub logs: Vec<AgentLogEntry>,
+}
+
+/// A single agent log entry in a patch request.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AgentLogEntry {
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Log output.
+    pub output: String,
+    /// Log level.
+    pub level: LogLevel,
+}
+
+/// Instance identity token for AWS.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AWSInstanceIdentityToken {
+    /// PKCS7 signature.
+    pub signature: String,
+    /// Instance identity document.
+    pub document: String,
+}
+
+/// Instance identity token for Azure.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct AzureInstanceIdentityToken {
+    /// Encoded JWT token.
+    pub signature: String,
+}
+
+/// Instance identity token for GCP.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct GCPInstanceIdentityToken {
+    /// Encoded JWT token.
+    pub json_web_token: String,
+}
+
+/// Agent auth token response from instance identity.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct WorkspaceAgentAuthenticateResponse {
+    /// Session token.
+    pub session_token: String,
+}
+
+/// External auth response for agents.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceAgentExternalAuthResponse {
+    /// Access token.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub access_token: String,
+    /// Token URL.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub url: String,
+    /// Auth type.
+    #[serde(rename = "type", default, skip_serializing_if = "String::is_empty")]
+    pub auth_type: String,
+    /// Whether the token is valid.
+    pub authenticated: bool,
+    /// Username if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// Password if available.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub password: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // Workspace domain types
 // ---------------------------------------------------------------------------
 
