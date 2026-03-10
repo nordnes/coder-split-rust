@@ -5398,6 +5398,109 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)?;
         Ok(result.rows_affected() > 0)
     }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn archive_unused_template_versions(
+        &self,
+        template_id: Uuid,
+        all: bool,
+    ) -> Result<Vec<Uuid>, StorageError> {
+        // Archive template versions that are not actively used.
+        // If `all` is false, only archive versions whose provisioner job failed.
+        let rows: Vec<(Uuid,)> = if all {
+            sqlx::query_as(
+                r#"
+                UPDATE template_versions
+                SET archived = true, updated_at = NOW()
+                WHERE template_id = $1
+                  AND archived = false
+                  AND id != (SELECT active_version_id FROM templates WHERE id = $1)
+                RETURNING id
+                "#,
+            )
+            .bind(template_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_error)?
+        } else {
+            sqlx::query_as(
+                r#"
+                UPDATE template_versions
+                SET archived = true, updated_at = NOW()
+                WHERE template_id = $1
+                  AND archived = false
+                  AND id != (SELECT active_version_id FROM templates WHERE id = $1)
+                  AND id IN (
+                      SELECT tv.id FROM template_versions tv
+                      JOIN provisioner_jobs pj ON pj.id = tv.job_id
+                      WHERE tv.template_id = $1
+                        AND pj.job_status = 'failed'
+                  )
+                RETURNING id
+                "#,
+            )
+            .bind(template_id)
+            .fetch_all(&self.pool)
+            .await
+            .map_err(storage_error)?
+        };
+        Ok(rows.into_iter().map(|(id,)| id).collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+        template_id: Option<Uuid>,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        // Find the template version with matching name, then get the one
+        // created immediately before it (by created_at).
+        let row = if let Some(tid) = template_id {
+            sqlx::query_as::<_, StoredTemplateVersionRow>(
+                r#"
+                SELECT tv.*
+                FROM template_versions tv
+                WHERE tv.organization_id = $1
+                  AND tv.template_id = $3
+                  AND tv.created_at < (
+                      SELECT created_at FROM template_versions
+                      WHERE organization_id = $1 AND name = $2 AND template_id = $3
+                      LIMIT 1
+                  )
+                ORDER BY tv.created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(organization_id)
+            .bind(name)
+            .bind(tid)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+        } else {
+            sqlx::query_as::<_, StoredTemplateVersionRow>(
+                r#"
+                SELECT tv.*
+                FROM template_versions tv
+                WHERE tv.organization_id = $1
+                  AND tv.created_at < (
+                      SELECT created_at FROM template_versions
+                      WHERE organization_id = $1 AND name = $2
+                      LIMIT 1
+                  )
+                ORDER BY tv.created_at DESC
+                LIMIT 1
+                "#,
+            )
+            .bind(organization_id)
+            .bind(name)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?
+        };
+        Ok(row.map(template_version_record_from_row))
+    }
 }
 
 // ---------------------------------------------------------------------------

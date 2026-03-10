@@ -2067,6 +2067,23 @@ pub trait TemplateStore: Send + Sync {
 
     /// Cancels a provisioner job (template workflow).
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Archives unused template versions for a template.
+    /// If `all` is true, archives all unused versions. Otherwise only failed ones.
+    /// Returns the list of archived version IDs.
+    async fn archive_unused_template_versions(
+        &self,
+        template_id: Uuid,
+        all: bool,
+    ) -> Result<Vec<Uuid>, StorageError>;
+
+    /// Returns the template version created immediately before the given one.
+    async fn get_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+        template_id: Option<Uuid>,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 }
 
 /// Aggregate store contract used by the current Rust backend slice.
@@ -3420,6 +3437,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = job_id;
         Err(StorageError::unavailable(
             "provisioner jobs are not implemented",
+        ))
+    }
+
+    /// Archives unused template versions for a template.
+    async fn archive_unused_template_versions(
+        &self,
+        template_id: Uuid,
+        all: bool,
+    ) -> Result<Vec<Uuid>, StorageError> {
+        let _ = (template_id, all);
+        Err(StorageError::unavailable(
+            "archive unused template versions is not implemented",
+        ))
+    }
+
+    /// Returns the template version created immediately before the given one.
+    async fn get_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+        template_id: Option<Uuid>,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let _ = (organization_id, name, template_id);
+        Err(StorageError::unavailable(
+            "get previous template version is not implemented",
         ))
     }
 
@@ -5988,6 +6030,23 @@ where
 
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
         AppStore::cancel_template_provisioner_job(self, job_id).await
+    }
+
+    async fn archive_unused_template_versions(
+        &self,
+        template_id: Uuid,
+        all: bool,
+    ) -> Result<Vec<Uuid>, StorageError> {
+        AppStore::archive_unused_template_versions(self, template_id, all).await
+    }
+
+    async fn get_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+        template_id: Option<Uuid>,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        AppStore::get_previous_template_version(self, organization_id, name, template_id).await
     }
 }
 
