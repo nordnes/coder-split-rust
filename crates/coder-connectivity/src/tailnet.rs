@@ -816,6 +816,8 @@ impl TailnetCoordinator for InMemoryCoordinator {
             }
             inner.tunnels.remove_all(peer_id);
             inner.peers.remove(&peer_id);
+            // Peer is gone — skip any remaining fields (e.g. ready_for_handshake).
+            return Ok(());
         }
 
         // ---- ReadyForHandshake: forward RFH to tunnel peers ----
