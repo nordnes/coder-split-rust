@@ -12107,6 +12107,7 @@ mod tests {
         let org_id = ensure_default_org(&pool).await?;
         let user_id = create_test_user(&store, org_id, &uniq()).await?;
 
+        // last_model_config_id has no FK constraint in the schema, so a random UUID is fine.
         let model_config_id = Uuid::new_v4();
 
         // Create chat
@@ -12179,6 +12180,7 @@ mod tests {
         let org_id = ensure_default_org(&pool).await?;
         let user_id = create_test_user(&store, org_id, &uniq()).await?;
 
+        // last_model_config_id has no FK constraint in the schema, so a random UUID is fine.
         let model_config_id = Uuid::new_v4();
 
         let chat = store
