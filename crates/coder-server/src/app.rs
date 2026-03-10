@@ -11634,47 +11634,97 @@ async fn tailnet_rpc_conn(
     let coordinator = state.coordinator.clone();
 
     Ok(ws.on_upgrade(move |mut socket| async move {
-        use coder_connectivity::tailnet::PeerKind;
+        use coder_connectivity::tailnet::{CoordinateRequest, PeerKind};
 
-        coordinator.add_peer(peer_id, peer_name, PeerKind::Client);
+        // Start a coordination session — this returns a handle with a
+        // channel that receives responses pushed by the coordinator when
+        // tunnel peers update their node info.
+        let mut handle =
+            coordinator.coordinate(peer_id, peer_name, PeerKind::Client);
 
-        // Keep the connection open, reading messages until the client disconnects.
-        // In a full implementation, this would handle the coordination protocol.
+        // Multiplex: read from WebSocket AND from the coordinator response
+        // channel simultaneously.  When the client sends a coordination
+        // request we process it; when the coordinator pushes a response we
+        // forward it over the WebSocket.
         loop {
-            match socket.next().await {
-                Some(Ok(Message::Text(text))) => {
-                    // Echo back an acknowledgement for now.  A real coordinator
-                    // would parse the coordination message and route node info.
-                    let ack = serde_json::json!({
-                        "type": "ack",
-                        "peer_id": peer_id.to_string(),
-                        "received": text.len(),
-                    });
-                    if let Ok(payload) = serde_json::to_string(&ack) {
-                        if socket.send(Message::Text(payload.into())).await.is_err() {
-                            break;
+            tokio::select! {
+                // --- Incoming WebSocket message from the client ---
+                ws_msg = socket.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            // Parse the JSON coordination request.
+                            match serde_json::from_str::<CoordinateRequest>(&text) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(peer_id, request) {
+                                        tracing::warn!(
+                                            peer_id = %peer_id,
+                                            error = %e,
+                                            "coordination request error",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        peer_id = %peer_id,
+                                        error = %e,
+                                        "invalid coordination request JSON",
+                                    );
+                                    // Send an error response back to the peer.
+                                    let err_resp = serde_json::json!({
+                                        "error": format!("invalid request: {e}"),
+                                    });
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                         }
+                        Some(Ok(Message::Binary(bin))) => {
+                            // Try to parse binary as JSON coordination request.
+                            match serde_json::from_slice::<CoordinateRequest>(&bin) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(peer_id, request) {
+                                        tracing::warn!(
+                                            peer_id = %peer_id,
+                                            error = %e,
+                                            "coordination request error (binary)",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        peer_id = %peer_id,
+                                        error = %e,
+                                        "invalid coordination request (binary)",
+                                    );
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
                     }
                 }
-                Some(Ok(Message::Binary(_))) => {
-                    // Binary coordination messages — acknowledge.
-                    let ack = serde_json::json!({
-                        "type": "ack",
-                        "peer_id": peer_id.to_string(),
-                    });
-                    if let Ok(payload) = serde_json::to_string(&ack) {
-                        if socket.send(Message::Text(payload.into())).await.is_err() {
-                            break;
+                // --- Outgoing coordination response from the coordinator ---
+                resp = handle.response_rx.recv() => {
+                    match resp {
+                        Some(coord_response) => {
+                            if let Ok(payload) = serde_json::to_string(&coord_response) {
+                                if socket.send(Message::Text(payload.into())).await.is_err() {
+                                    break;
+                                }
+                            }
                         }
+                        // Channel closed — coordinator shut down our session.
+                        None => break,
                     }
                 }
-                Some(Ok(Message::Close(_))) | None => break,
-                Some(Err(_)) => break,
-                _ => continue,
             }
         }
 
-        coordinator.remove_peer(peer_id);
+        coordinator.close_coordination(peer_id);
     }))
 }
 
