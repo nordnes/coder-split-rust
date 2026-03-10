@@ -2898,6 +2898,8 @@ impl AppStore for PostgresStore {
         log_source_id: Uuid,
         logs: &[InsertAgentLogInput],
     ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let log_count = logs.len() as i32;
+
         let mut created_ats = Vec::with_capacity(logs.len());
         let mut outputs = Vec::with_capacity(logs.len());
         let mut levels = Vec::with_capacity(logs.len());
@@ -2907,6 +2909,22 @@ impl AppStore for PostgresStore {
             outputs.push(log.output.as_str());
             levels.push(log.level.as_str());
         }
+
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        // Update logs_length and logs_overflowed on the workspace_agents row.
+        // The CHECK constraint max_logs_length ensures logs_length <= 1048576.
+        sqlx::query(
+            "UPDATE workspace_agents
+             SET logs_length = LEAST(logs_length + $2, 1048576),
+                 logs_overflowed = (logs_length + $2 > 1048576)
+             WHERE id = $1",
+        )
+        .bind(agent_id)
+        .bind(log_count)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
 
         let rows = sqlx::query_as::<_, StoredWorkspaceAgentLogRow>(
             "INSERT INTO workspace_agent_logs (agent_id, created_at, output, level, log_source_id)
@@ -2919,9 +2937,11 @@ impl AppStore for PostgresStore {
         .bind(&outputs)
         .bind(&levels)
         .bind(log_source_id)
-        .fetch_all(&self.pool)
+        .fetch_all(&mut *tx)
         .await
         .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
 
         Ok(rows
             .into_iter()
