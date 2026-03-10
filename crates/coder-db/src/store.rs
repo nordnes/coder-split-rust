@@ -27,8 +27,8 @@ use coder_core::{
     CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
     CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
     DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser,
-    FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings,
-    InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
+    FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupRecord,
+    HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
     InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
     InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
     InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
@@ -4371,6 +4371,52 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        let row: Option<(
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        )> = sqlx::query_as(
+            "SELECT id, name, display_name, organization_id, avatar_url,
+                        quota_allowance, source, created_at
+                 FROM groups WHERE id = $1",
+        )
+        .bind(group_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(
+            |(
+                id,
+                name,
+                display_name,
+                organization_id,
+                avatar_url,
+                quota_allowance,
+                source,
+                created_at,
+            )| {
+                GroupRecord {
+                    id,
+                    name,
+                    display_name,
+                    organization_id,
+                    avatar_url,
+                    quota_allowance,
+                    source,
+                    created_at,
+                }
+            },
+        ))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_workspace_acl(
         &self,
         workspace_id: Uuid,
@@ -4412,7 +4458,7 @@ impl AppStore for PostgresStore {
                 message: format!("failed to serialize group_roles: {e}"),
             })?;
         sqlx::query(
-            "UPDATE workspaces SET user_acl = $2, group_acl = $3
+            "UPDATE workspaces SET user_acl = user_acl || $2, group_acl = group_acl || $3
              WHERE id = $1",
         )
         .bind(workspace_id)

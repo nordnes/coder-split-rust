@@ -6773,13 +6773,18 @@ async fn get_workspace_acl(
         }
     }
 
-    // Build group ACL entries from stored data.
+    // Resolve group details for group ACL entries.
     let mut groups = Vec::new();
     for (group_id_str, role) in &acl_record.group_acl {
         if let Ok(gid) = Uuid::from_str(group_id_str) {
+            let name = if let Some(group) = state.store.find_group_by_id(gid).await? {
+                group.name
+            } else {
+                group_id_str.clone()
+            };
             groups.push(WorkspaceACLGroup {
                 id: gid,
-                name: group_id_str.clone(),
+                name,
                 role: role.clone(),
             });
         }

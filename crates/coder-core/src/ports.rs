@@ -3021,6 +3021,12 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
+    /// Looks up a group by identifier.
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        let _ = group_id;
+        Err(StorageError::unavailable("groups are not implemented"))
+    }
+
     /// Returns the ACL for a workspace.
     async fn get_workspace_acl(
         &self,
@@ -3995,6 +4001,9 @@ pub trait WorkspaceStore: Send + Sync {
 
     /// Soft-deletes a workspace.
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Looks up a group by identifier.
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
 
     /// Returns the ACL for a workspace.
     async fn get_workspace_acl(
@@ -5142,6 +5151,10 @@ where
         AppStore::soft_delete_workspace(self, workspace_id).await
     }
 
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        AppStore::find_group_by_id(self, group_id).await
+    }
+
     async fn get_workspace_acl(
         &self,
         workspace_id: Uuid,
@@ -5433,6 +5446,10 @@ where
 
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
         (**self).soft_delete_workspace(workspace_id).await
+    }
+
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
+        (**self).find_group_by_id(group_id).await
     }
 
     async fn get_workspace_acl(
