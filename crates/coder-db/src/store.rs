@@ -4019,31 +4019,36 @@ impl AppStore for PostgresStore {
     // Notification message dispatch
     // -----------------------------------------------------------------------
 
-    // TODO: Add row leasing (`FOR UPDATE SKIP LOCKED` or a CTE-based lease)
-    // to prevent concurrent dispatch loops from fetching the same messages.
-    // See Go reference: `AcquireNotificationMessages` in
-    // `coder/coderd/database/queries/notifications.sql`.
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn fetch_pending_notification_messages(
+    async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
         max_attempt_count: u32,
     ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredNotificationMessageRow>(
-            r#"SELECT id, user_id, notification_template_id,
-                      method::text AS method,
-                      status::text AS status,
-                      attempt_count,
-                      payload::text AS payload,
-                      COALESCE(to_json(COALESCE(targets, ARRAY[]::uuid[])), '[]'::json)::text AS targets_json,
-                      created_at,
-                      updated_at
-               FROM notification_messages
-               WHERE status IN ('pending', 'temporary_failure')
-                 AND (next_retry_after IS NULL OR next_retry_after < NOW())
-                 AND (attempt_count IS NULL OR attempt_count < $2)
-               ORDER BY created_at ASC
-               LIMIT $1"#,
+            r#"UPDATE notification_messages
+               SET status = 'leased'::notification_message_status,
+                   leased_until = NOW() + INTERVAL '30 seconds',
+                   updated_at = NOW()
+               WHERE id IN (
+                   SELECT id
+                   FROM notification_messages
+                   WHERE (status IN ('pending', 'temporary_failure')
+                          OR (status = 'leased' AND leased_until < NOW()))
+                     AND (next_retry_after IS NULL OR next_retry_after < NOW())
+                     AND (attempt_count IS NULL OR attempt_count < $2)
+                   ORDER BY created_at ASC
+                   LIMIT $1
+                   FOR UPDATE SKIP LOCKED
+               )
+               RETURNING id, user_id, notification_template_id,
+                         method::text AS method,
+                         status::text AS status,
+                         attempt_count,
+                         payload::text AS payload,
+                         COALESCE(to_json(COALESCE(targets, ARRAY[]::uuid[])), '[]'::json)::text AS targets_json,
+                         created_at,
+                         updated_at"#,
         )
         .bind(limit as i64)
         .bind(max_attempt_count as i32)
@@ -4064,6 +4069,7 @@ impl AppStore for PostgresStore {
     ) -> Result<bool, StorageError> {
         let status_str = match status {
             NotificationMessageStatus::Pending => "pending",
+            NotificationMessageStatus::Leased => "leased",
             NotificationMessageStatus::Sent => "sent",
             NotificationMessageStatus::TemporaryFailure => "temporary_failure",
             NotificationMessageStatus::Failed => "permanent_failure",
@@ -8546,7 +8552,8 @@ fn notification_message_from_row(
         }
     };
     let status = match row.status.as_str() {
-        "pending" | "leased" => NotificationMessageStatus::Pending,
+        "pending" => NotificationMessageStatus::Pending,
+        "leased" => NotificationMessageStatus::Leased,
         "sent" => NotificationMessageStatus::Sent,
         "temporary_failure" => NotificationMessageStatus::TemporaryFailure,
         "permanent_failure" => NotificationMessageStatus::Failed,
