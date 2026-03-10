@@ -13917,6 +13917,11 @@ mod tests {
     use super::{
         AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPES, SLIM_BUILD_MESSAGE, build_router,
     };
+    use coder_connectivity::tailnet::{
+        CoordinateRequest, CoordinateResponse, NodeInfo, PeerUpdateKind,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite;
 
     #[derive(Debug, Default)]
     struct MemoryAuditSink {
@@ -19723,7 +19728,7 @@ mod tests {
         ))
     }
 
-    pub(super) fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
+    fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
         test_state_with_store(health_ok).map(|(state, _)| state)
     }
 
@@ -19734,7 +19739,7 @@ mod tests {
             .body(Body::empty())
     }
 
-    pub(super) fn json_request<T: Serialize>(
+    fn json_request<T: Serialize>(
         method: Method,
         uri: &str,
         payload: &T,
@@ -19748,7 +19753,7 @@ mod tests {
         Ok(request)
     }
 
-    pub(super) fn authenticated_request(
+    fn authenticated_request(
         method: Method,
         uri: &str,
         session_token: &str,
@@ -19760,7 +19765,7 @@ mod tests {
             .body(Body::empty())
     }
 
-    pub(super) fn authenticated_json_request<T: Serialize>(
+    fn authenticated_json_request<T: Serialize>(
         method: Method,
         uri: &str,
         session_token: &str,
@@ -19793,10 +19798,7 @@ mod tests {
             .body(Body::empty())
     }
 
-    pub(super) async fn call(
-        app: Router,
-        request: Request<Body>,
-    ) -> Result<Response<Body>, Box<dyn Error>> {
+    async fn call(app: Router, request: Request<Body>) -> Result<Response<Body>, Box<dyn Error>> {
         let response = match app.oneshot(request).await {
             Ok(response) => response,
             Err(never) => match never {},
@@ -19810,7 +19812,7 @@ mod tests {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    pub(super) async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
+    async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
         let create_response = call(
             app.clone(),
             json_request(
@@ -19848,7 +19850,7 @@ mod tests {
             .to_owned())
     }
 
-    pub(super) async fn spawn_test_server(
+    async fn spawn_test_server(
         router: Router,
     ) -> Result<(Url, tokio::task::JoinHandle<()>), Box<dyn Error>> {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
@@ -37795,10 +37797,12 @@ mod tailnet_ws_tests {
     };
     use coder_core::LoginWithPasswordRequest;
 
+    // -----------------------------------------------------------------------
+    // Tailnet WebSocket integration tests
+    // -----------------------------------------------------------------------
     /// Helper: spin up a real TCP server backed by the test router and return
     /// the base URL together with a logged-in session token.
-    async fn setup_server()
-    -> Result<(url::Url, String, tokio::task::JoinHandle<()>), Box<dyn Error>> {
+    async fn setup_server() -> Result<(Url, String, tokio::task::JoinHandle<()>), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
         let (base_url, handle) = spawn_test_server(app).await?;
@@ -37806,7 +37810,7 @@ mod tailnet_ws_tests {
     }
 
     /// Build a WS URL from the HTTP base URL.
-    fn ws_url(base: &url::Url, path: &str) -> String {
+    fn ws_url(base: &Url, path: &str) -> String {
         let mut u = base.clone();
         u.set_scheme("ws").ok();
         u.set_path(path);
@@ -37815,7 +37819,7 @@ mod tailnet_ws_tests {
 
     /// Connect a WebSocket **with** an auth header.
     async fn connect_ws(
-        base: &url::Url,
+        base: &Url,
         session_token: &str,
     ) -> Result<
         tokio_tungstenite::WebSocketStream<
@@ -37824,7 +37828,7 @@ mod tailnet_ws_tests {
         Box<dyn Error>,
     > {
         let url = ws_url(base, "/api/v2/tailnet");
-        let req = http::Request::builder()
+        let req = Request::builder()
             .uri(&url)
             .header("Connection", "Upgrade")
             .header("Upgrade", "websocket")
@@ -37880,7 +37884,7 @@ mod tailnet_ws_tests {
     /// Helper to create a second user and return their session token.
     /// Must be called with an app that already has a first (owner) user.
     async fn create_second_user_and_login(
-        app: &axum::Router,
+        app: &Router,
         owner_token: &str,
     ) -> Result<String, Box<dyn Error>> {
         // Discover the default organization so the new user is a member.
@@ -37906,13 +37910,13 @@ mod tailnet_ws_tests {
                 Method::POST,
                 "/api/v2/users",
                 owner_token,
-                &coder_core::CreateUserRequestWithOrgs {
+                &CreateUserRequestWithOrgs {
                     email: "peer2@example.com".to_owned(),
                     username: "peer2".to_owned(),
                     name: "Peer Two".to_owned(),
                     password: "Password123".to_owned(),
-                    login_type: Some(coder_core::LoginType::Password),
-                    user_status: Some(coder_core::UserStatus::Active),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
                     organization_ids: vec![org_id],
                 },
             )?,
@@ -37946,7 +37950,7 @@ mod tailnet_ws_tests {
     }
 
     /// Helper to get the current user's UUID via the running test server.
-    async fn get_user_id(base_url: &url::Url, token: &str) -> Result<Uuid, Box<dyn Error>> {
+    async fn get_user_id(base_url: &Url, token: &str) -> Result<Uuid, Box<dyn Error>> {
         let client = reqwest::Client::new();
         let resp = client
             .get(format!("{}api/v2/users/me", base_url))
