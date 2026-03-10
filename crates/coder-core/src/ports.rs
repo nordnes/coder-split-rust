@@ -652,6 +652,19 @@ pub struct WorkspaceBuildParameterRecord {
     pub value: String,
 }
 
+/// Stored workspace resource metadata record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceResourceMetadataRecord {
+    /// Resource identifier.
+    pub workspace_resource_id: Uuid,
+    /// Metadata key.
+    pub key: String,
+    /// Metadata value.
+    pub value: String,
+    /// Whether the value is sensitive.
+    pub sensitive: bool,
+}
+
 /// Stored workspace agent port share record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceAgentPortShareRecord {
@@ -3261,6 +3274,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
+    /// Lists metadata for a set of workspace resources.
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        let _ = resource_ids;
+        Err(StorageError::unavailable(
+            "workspace resource metadata is not implemented",
+        ))
+    }
+
     /// Lists port shares for a workspace.
     async fn list_workspace_port_shares(
         &self,
@@ -4198,6 +4222,12 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError>;
+
+    /// Lists metadata for a set of workspace resources.
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError>;
 
     /// Lists port shares for a workspace.
     async fn list_workspace_port_shares(
@@ -5370,6 +5400,13 @@ where
         AppStore::list_workspace_resources_by_job(self, job_id).await
     }
 
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        AppStore::list_workspace_resource_metadata(self, resource_ids).await
+    }
+
     async fn list_workspace_port_shares(
         &self,
         workspace_id: Uuid,
@@ -5677,6 +5714,15 @@ where
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
         (**self).list_workspace_resources_by_job(job_id).await
+    }
+
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        (**self)
+            .list_workspace_resource_metadata(resource_ids)
+            .await
     }
 
     async fn list_workspace_port_shares(
