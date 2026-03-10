@@ -11566,6 +11566,12 @@ mod tests {
         template_version_preset_parameters:
             Mutex<HashMap<Uuid, Vec<TemplateVersionPresetParameterRecord>>>,
         files: Mutex<HashMap<Uuid, FileRecord>>,
+        // OAuth2 provider fields
+        oauth2_apps: Mutex<HashMap<Uuid, coder_core::identity::OAuth2ProviderAppRecord>>,
+        oauth2_app_secrets:
+            Mutex<HashMap<Uuid, coder_core::identity::OAuth2ProviderAppSecretRecord>>,
+        oauth2_app_codes: Mutex<HashMap<Uuid, coder_core::identity::OAuth2ProviderAppCodeRecord>>,
+        oauth2_app_tokens: Mutex<HashMap<Uuid, coder_core::identity::OAuth2ProviderAppTokenRecord>>,
         // Agent-related fields
         workspace_agents: Mutex<HashMap<Uuid, WorkspaceAgentRow>>,
         workspace_apps: Mutex<HashMap<Uuid, WorkspaceAppRow>>,
@@ -11627,6 +11633,10 @@ mod tests {
                 template_version_presets: Mutex::new(HashMap::new()),
                 template_version_preset_parameters: Mutex::new(HashMap::new()),
                 files: Mutex::new(HashMap::new()),
+                oauth2_apps: Mutex::new(HashMap::new()),
+                oauth2_app_secrets: Mutex::new(HashMap::new()),
+                oauth2_app_codes: Mutex::new(HashMap::new()),
+                oauth2_app_tokens: Mutex::new(HashMap::new()),
                 workspace_agents: Mutex::new(HashMap::new()),
                 workspace_apps: Mutex::new(HashMap::new()),
                 workspace_app_statuses: Mutex::new(Vec::new()),
@@ -15257,6 +15267,306 @@ mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(build_id, records);
             Ok(())
+        }
+
+        // ----- OAuth2 Provider -----
+
+        async fn list_oauth2_provider_apps(
+            &self,
+        ) -> Result<Vec<coder_core::identity::OAuth2ProviderAppRecord>, StorageError> {
+            let apps = self
+                .oauth2_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(apps.values().cloned().collect())
+        }
+
+        async fn create_oauth2_provider_app(
+            &self,
+            input: &coder_core::identity::CreateOAuth2ProviderAppInput,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, StorageError> {
+            let record = coder_core::identity::OAuth2ProviderAppRecord {
+                id: Uuid::new_v4(),
+                created_at: time::OffsetDateTime::now_utc(),
+                updated_at: time::OffsetDateTime::now_utc(),
+                name: input.name.clone(),
+                icon: input.icon.clone(),
+                callback_url: input.callback_url.clone(),
+                redirect_uris: Vec::new(),
+                created_by: input.created_by,
+            };
+            self.oauth2_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_oauth2_provider_app_by_id(
+            &self,
+            app_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppRecord>, StorageError> {
+            let apps = self
+                .oauth2_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(apps.get(&app_id).cloned())
+        }
+
+        async fn update_oauth2_provider_app(
+            &self,
+            input: &coder_core::identity::UpdateOAuth2ProviderAppInput,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppRecord>, StorageError> {
+            let mut apps = self
+                .oauth2_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(app) = apps.get_mut(&input.id) {
+                app.name = input.name.clone();
+                app.icon = input.icon.clone();
+                app.callback_url = input.callback_url.clone();
+                app.updated_at = time::OffsetDateTime::now_utc();
+                Ok(Some(app.clone()))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
+            let mut apps = self
+                .oauth2_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(apps.remove(&app_id).is_some())
+        }
+
+        async fn list_oauth2_provider_app_secrets(
+            &self,
+            app_id: Uuid,
+        ) -> Result<Vec<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError>
+        {
+            let secrets = self
+                .oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(secrets
+                .values()
+                .filter(|s| s.app_id == app_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn create_oauth2_provider_app_secret(
+            &self,
+            app_id: Uuid,
+            hashed_secret: &[u8],
+            display_secret: &str,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppSecretRecord, StorageError> {
+            let record = coder_core::identity::OAuth2ProviderAppSecretRecord {
+                id: Uuid::new_v4(),
+                created_at: time::OffsetDateTime::now_utc(),
+                hashed_secret: hashed_secret.to_vec(),
+                display_secret: display_secret.to_owned(),
+                app_id,
+            };
+            self.oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn delete_oauth2_provider_app_secret(
+            &self,
+            secret_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let mut secrets = self
+                .oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(secrets.remove(&secret_id).is_some())
+        }
+
+        async fn find_oauth2_provider_app_secret_by_id(
+            &self,
+            secret_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError>
+        {
+            let secrets = self
+                .oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(secrets.get(&secret_id).cloned())
+        }
+
+        async fn create_oauth2_provider_app_code(
+            &self,
+            app_id: Uuid,
+            user_id: Uuid,
+            secret_prefix: &[u8],
+            hashed_secret: &[u8],
+            expires_at: time::OffsetDateTime,
+            resource_uri: &str,
+            code_challenge: &str,
+            code_challenge_method: &str,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppCodeRecord, StorageError> {
+            let record = coder_core::identity::OAuth2ProviderAppCodeRecord {
+                id: Uuid::new_v4(),
+                created_at: time::OffsetDateTime::now_utc(),
+                expires_at,
+                secret_prefix: secret_prefix.to_vec(),
+                hashed_secret: hashed_secret.to_vec(),
+                app_id,
+                user_id,
+                resource_uri: resource_uri.to_owned(),
+                code_challenge: code_challenge.to_owned(),
+                code_challenge_method: code_challenge_method.to_owned(),
+            };
+            self.oauth2_app_codes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_oauth2_provider_app_code_by_prefix(
+            &self,
+            secret_prefix: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppCodeRecord>, StorageError>
+        {
+            let codes = self
+                .oauth2_app_codes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(codes
+                .values()
+                .find(|c| c.secret_prefix == secret_prefix)
+                .cloned())
+        }
+
+        async fn delete_oauth2_provider_app_code(
+            &self,
+            code_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let mut codes = self
+                .oauth2_app_codes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(codes.remove(&code_id).is_some())
+        }
+
+        async fn create_oauth2_provider_app_token(
+            &self,
+            input: &coder_core::identity::CreateOAuth2ProviderAppTokenInput,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppTokenRecord, StorageError> {
+            let record = coder_core::identity::OAuth2ProviderAppTokenRecord {
+                id: Uuid::new_v4(),
+                created_at: time::OffsetDateTime::now_utc(),
+                expires_at: input.expires_at,
+                hash_prefix: input.hash_prefix.clone(),
+                refresh_hash: input.refresh_hash.clone(),
+                app_secret_id: input.app_secret_id,
+                api_key_id: input.api_key_id.clone(),
+                audience: input.audience.clone(),
+                user_id: input.user_id,
+            };
+            self.oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_oauth2_provider_app_token_by_prefix(
+            &self,
+            hash_prefix: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError>
+        {
+            let tokens = self
+                .oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(tokens
+                .values()
+                .find(|t| t.hash_prefix == hash_prefix)
+                .cloned())
+        }
+
+        async fn find_oauth2_provider_app_token_by_refresh_hash(
+            &self,
+            refresh_hash: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError>
+        {
+            let tokens = self
+                .oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(tokens
+                .values()
+                .find(|t| t.refresh_hash == refresh_hash)
+                .cloned())
+        }
+
+        async fn delete_oauth2_provider_app_token(
+            &self,
+            token_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let mut tokens = self
+                .oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(tokens.remove(&token_id).is_some())
+        }
+
+        async fn list_oauth2_provider_app_tokens_by_app_and_user(
+            &self,
+            app_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<Vec<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError> {
+            let tokens = self
+                .oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let secrets = self
+                .oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let app_secret_ids: std::collections::HashSet<Uuid> = secrets
+                .values()
+                .filter(|s| s.app_id == app_id)
+                .map(|s| s.id)
+                .collect();
+            Ok(tokens
+                .values()
+                .filter(|t| t.user_id == user_id && app_secret_ids.contains(&t.app_secret_id))
+                .cloned()
+                .collect())
+        }
+
+        async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+            &self,
+            app_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<u64, StorageError> {
+            let secrets = self
+                .oauth2_app_secrets
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let app_secret_ids: std::collections::HashSet<Uuid> = secrets
+                .values()
+                .filter(|s| s.app_id == app_id)
+                .map(|s| s.id)
+                .collect();
+            let mut tokens = self
+                .oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let before = tokens.len();
+            tokens.retain(|_, t| {
+                !(t.user_id == user_id && app_secret_ids.contains(&t.app_secret_id))
+            });
+            let after = tokens.len();
+            Ok((before - after) as u64)
         }
     }
 
@@ -22496,6 +22806,840 @@ mod tests {
         let first = &users[0];
         assert!(first.get("id").is_some());
         assert!(first.get("username").is_some());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Notification handler happy-path tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_inbox_notifications_returns_empty_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/notifications/inbox", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let notifications = body
+            .get("notifications")
+            .and_then(Value::as_array)
+            .ok_or("missing notifications")?;
+        assert!(notifications.is_empty());
+        assert_eq!(body.get("unread_count").and_then(Value::as_i64), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_inbox_notifications_returns_seeded_notification() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Discover the user id from /api/v2/users/me
+        let me_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        let me_body = response_json(me_response).await?;
+        let user_id_str = me_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing user id")?;
+        let user_id = Uuid::parse_str(user_id_str)?;
+
+        let notif_id = Uuid::new_v4();
+        let template_id = Uuid::new_v4();
+        store
+            .inbox_notifications
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(
+                notif_id,
+                coder_core::InboxNotification {
+                    id: notif_id,
+                    user_id,
+                    template_id,
+                    targets: vec![],
+                    title: "Test notification".to_owned(),
+                    content: "Hello world".to_owned(),
+                    icon: String::new(),
+                    actions: vec![],
+                    read_at: None,
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/notifications/inbox", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let notifications = body
+            .get("notifications")
+            .and_then(Value::as_array)
+            .ok_or("missing notifications")?;
+        assert_eq!(notifications.len(), 1);
+        assert_eq!(
+            notifications[0].get("title").and_then(Value::as_str),
+            Some("Test notification")
+        );
+        assert_eq!(body.get("unread_count").and_then(Value::as_i64), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_inbox_notification_as_read() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let me_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        let me_body = response_json(me_response).await?;
+        let user_id = Uuid::parse_str(
+            me_body
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing user id")?,
+        )?;
+
+        let notif_id = Uuid::new_v4();
+        store
+            .inbox_notifications
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(
+                notif_id,
+                coder_core::InboxNotification {
+                    id: notif_id,
+                    user_id,
+                    template_id: Uuid::new_v4(),
+                    targets: vec![],
+                    title: "Unread".to_owned(),
+                    content: "Body".to_owned(),
+                    icon: String::new(),
+                    actions: vec![],
+                    read_at: None,
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/notifications/inbox/{notif_id}/read-status"),
+                &session_token,
+                &json!({"is_read": true}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("notification")
+                .and_then(|n| n.get("read_at"))
+                .is_some()
+        );
+        assert_eq!(body.get("unread_count").and_then(Value::as_i64), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mark_all_inbox_notifications_as_read() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let me_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        let me_body = response_json(me_response).await?;
+        let user_id = Uuid::parse_str(
+            me_body
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing user id")?,
+        )?;
+
+        // Seed two unread notifications
+        for _ in 0..2 {
+            let id = Uuid::new_v4();
+            store
+                .inbox_notifications
+                .lock()
+                .map_err(|e| e.to_string())?
+                .insert(
+                    id,
+                    coder_core::InboxNotification {
+                        id,
+                        user_id,
+                        template_id: Uuid::new_v4(),
+                        targets: vec![],
+                        title: "Notif".to_owned(),
+                        content: "Body".to_owned(),
+                        icon: String::new(),
+                        actions: vec![],
+                        read_at: None,
+                        created_at: OffsetDateTime::now_utc(),
+                    },
+                );
+        }
+
+        let mark_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/notifications/inbox/mark-all-as-read",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(mark_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify all are now read
+        let list_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/inbox?read_status=unread",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await?;
+        assert_eq!(
+            list_body.get("unread_count").and_then(Value::as_i64),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_notification_dispatch_returns_no_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &json!({
+                    "content": {
+                        "title": "Important Update",
+                        "message": "Something happened."
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // OAuth2 provider handler happy-path tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn oauth2_provider_app_crud_lifecycle() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // 1. Create an OAuth2 app
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Test OAuth2 App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body = response_json(create_response).await?;
+        let app_id = create_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing app id")?
+            .to_owned();
+        assert_eq!(
+            create_body.get("name").and_then(Value::as_str),
+            Some("Test OAuth2 App")
+        );
+        assert_eq!(
+            create_body.get("callback_url").and_then(Value::as_str),
+            Some("https://example.com/callback")
+        );
+
+        // 2. Get the app by ID
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = response_json(get_response).await?;
+        assert_eq!(
+            get_body.get("name").and_then(Value::as_str),
+            Some("Test OAuth2 App")
+        );
+
+        // 3. List apps
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/oauth2-provider/apps", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await?;
+        let apps_array = list_body.as_array().ok_or("expected array")?;
+        assert_eq!(apps_array.len(), 1);
+
+        // 4. Update the app
+        let update_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}"),
+                &session_token,
+                &json!({
+                    "name": "Updated App",
+                    "callback_url": "https://example.com/updated"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(update_response.status(), StatusCode::OK);
+        let update_body = response_json(update_response).await?;
+        assert_eq!(
+            update_body.get("name").and_then(Value::as_str),
+            Some("Updated App")
+        );
+        assert_eq!(
+            update_body.get("callback_url").and_then(Value::as_str),
+            Some("https://example.com/updated")
+        );
+
+        // 5. Delete the app
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        // 6. Verify it's gone
+        let list_after_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/oauth2-provider/apps", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_after_response.status(), StatusCode::OK);
+        let list_after_body = response_json(list_after_response).await?;
+        let apps_after = list_after_body.as_array().ok_or("expected array")?;
+        assert!(apps_after.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_provider_app_secrets_create_and_delete() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create an app first
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Secret Test App",
+                    "callback_url": "https://example.com/cb"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body = response_json(create_response).await?;
+        let app_id = create_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing app id")?
+            .to_owned();
+
+        // Create a secret
+        let secret_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(secret_response.status(), StatusCode::CREATED);
+        let secret_body = response_json(secret_response).await?;
+        let secret_id = secret_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing secret id")?
+            .to_owned();
+        assert!(
+            secret_body
+                .get("client_secret_full")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert!(
+            secret_body
+                .get("client_secret_truncated")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+
+        // List secrets
+        let list_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await?;
+        let secrets = list_body.as_array().ok_or("expected array")?;
+        assert_eq!(secrets.len(), 1);
+
+        // Delete secret
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets/{secret_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify it's gone
+        let list_after = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_after.status(), StatusCode::OK);
+        let list_after_body = response_json(list_after).await?;
+        let secrets_after = list_after_body.as_array().ok_or("expected array")?;
+        assert!(secrets_after.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_redirects_with_code() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create an OAuth2 app
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Auth Flow App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let create_body = response_json(create_response).await?;
+        let client_id = create_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing app id")?
+            .to_owned();
+
+        // Create a secret (needed for token exchange)
+        let secret_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/oauth2-provider/apps/{client_id}/secrets"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(secret_response.status(), StatusCode::CREATED);
+        let secret_body = response_json(secret_response).await?;
+        let client_secret = secret_body
+            .get("client_secret_full")
+            .and_then(Value::as_str)
+            .ok_or("missing client_secret_full")?
+            .to_owned();
+
+        // Authorize — should return 307 redirect with code
+        // Note: /oauth2/* routes are top-level, not under /api/v2
+        let authorize_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/oauth2/authorize?response_type=code&client_id={client_id}&state=mystate"
+                ),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(authorize_response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = authorize_response
+            .headers()
+            .get("location")
+            .ok_or("missing location header")?
+            .to_str()?;
+        assert!(location.starts_with("https://example.com/callback"));
+        assert!(location.contains("code="));
+        assert!(location.contains("state=mystate"));
+
+        // Extract the code from the redirect URL
+        let redirect_url = Url::parse(location)?;
+        let code = redirect_url
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.to_string())
+            .ok_or("missing code parameter")?;
+
+        // Token exchange
+        let token_response = call(
+            app,
+            {
+                let body = format!(
+                    "grant_type=authorization_code&code={code}&client_id={client_id}&client_secret={client_secret}"
+                );
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oauth2/tokens")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))?
+            },
+        )
+        .await?;
+        assert_eq!(token_response.status(), StatusCode::OK);
+        let token_body = response_json(token_response).await?;
+        assert!(
+            token_body
+                .get("access_token")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        assert_eq!(
+            token_body.get("token_type").and_then(Value::as_str),
+            Some("Bearer")
+        );
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // RBAC / Authcheck happy-path tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn authcheck_owner_can_create_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/authcheck",
+                &session_token,
+                &json!({
+                    "checks": {
+                        "createUser": {
+                            "object": {
+                                "resource_type": "user",
+                                "any_org": true
+                            },
+                            "action": "create"
+                        }
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("createUser").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authcheck_multiple_permissions() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/authcheck",
+                &session_token,
+                &json!({
+                    "checks": {
+                        "readWorkspace": {
+                            "object": {
+                                "resource_type": "workspace",
+                                "owner_id": "me"
+                            },
+                            "action": "read"
+                        },
+                        "readOwnUser": {
+                            "object": {
+                                "resource_type": "user",
+                                "owner_id": "me"
+                            },
+                            "action": "read"
+                        }
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Owner should have access to own workspaces and user info
+        assert_eq!(
+            body.get("readWorkspace").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(body.get("readOwnUser").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn authcheck_unknown_resource_type_returns_false() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/authcheck",
+                &session_token,
+                &json!({
+                    "checks": {
+                        "unknownCheck": {
+                            "object": {
+                                "resource_type": "nonexistent_type"
+                            },
+                            "action": "read"
+                        }
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("unknownCheck").and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Regions happy-path test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_regions_returns_primary_region() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/regions", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let regions = body
+            .get("regions")
+            .and_then(Value::as_array)
+            .ok_or("missing regions")?;
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            regions[0].get("name").and_then(Value::as_str),
+            Some("primary")
+        );
+        assert_eq!(
+            regions[0].get("display_name").and_then(Value::as_str),
+            Some("Default")
+        );
+        assert_eq!(
+            regions[0].get("healthy").and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Deployment config happy-path test
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn deployment_config_returns_config_and_options() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        // deployment_config does not require authentication
+        let response = call(app, request(Method::GET, "/api/v2/deployment/config")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("config").is_some());
+        assert!(body.get("options").is_some());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Files handler happy-path tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn upload_file_and_get_file_by_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Upload a tar file
+        let file_data = b"fake tar content for testing";
+        let upload_response = call(app.clone(), {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v2/files")
+                .header(CONTENT_TYPE, "application/x-tar")
+                .header(SESSION_TOKEN_HEADER, &session_token)
+                .body(Body::from(file_data.to_vec()))?
+        })
+        .await?;
+        assert_eq!(upload_response.status(), StatusCode::CREATED);
+        let upload_body = response_json(upload_response).await?;
+        let file_id = upload_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing file hash/id")?
+            .to_owned();
+
+        // Download the file
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/files/{file_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        assert_eq!(
+            get_response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-tar")
+        );
+        let body_bytes = to_bytes(get_response.into_body(), usize::MAX).await?;
+        assert_eq!(body_bytes.as_ref(), file_data);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_duplicate_file_returns_existing_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let file_data = b"duplicate test content";
+
+        // First upload
+        let first_response = call(app.clone(), {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v2/files")
+                .header(CONTENT_TYPE, "application/x-tar")
+                .header(SESSION_TOKEN_HEADER, &session_token)
+                .body(Body::from(file_data.to_vec()))?
+        })
+        .await?;
+        assert_eq!(first_response.status(), StatusCode::CREATED);
+        let first_body = response_json(first_response).await?;
+        let first_id = first_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash")?
+            .to_owned();
+
+        // Second upload (same data, same user)
+        let second_response = call(app, {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v2/files")
+                .header(CONTENT_TYPE, "application/x-tar")
+                .header(SESSION_TOKEN_HEADER, &session_token)
+                .body(Body::from(file_data.to_vec()))?
+        })
+        .await?;
+        // Duplicate returns 200 OK (not 201 Created)
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let second_body = response_json(second_response).await?;
+        let second_id = second_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash")?
+            .to_owned();
+
+        assert_eq!(first_id, second_id);
         Ok(())
     }
 }
