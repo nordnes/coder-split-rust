@@ -2975,13 +2975,23 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn insert_workspace_agent_log_source(
         &self,
         agent_id: Uuid,
+        id: Option<Uuid>,
         display_name: &str,
         icon: &str,
     ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
-        let _ = (agent_id, display_name, icon);
+        let _ = (agent_id, id, display_name, icon);
         Err(StorageError::unavailable(
             "workspace agent log sources are not implemented",
         ))
+    }
+
+    /// Finds a workspace by agent ID (looks up resource → build → workspace).
+    async fn find_workspace_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
     /// Lists workspace app statuses for a given agent.
