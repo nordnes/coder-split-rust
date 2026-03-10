@@ -81,7 +81,7 @@ where
         // excluded by the query itself via the max_attempt_count parameter.
         let messages = self
             .store
-            .fetch_pending_notification_messages(DISPATCH_BATCH_SIZE, MAX_DISPATCH_ATTEMPTS)
+            .acquire_pending_notification_messages(DISPATCH_BATCH_SIZE, MAX_DISPATCH_ATTEMPTS)
             .await?;
 
         let count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
