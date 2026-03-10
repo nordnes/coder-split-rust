@@ -1,14 +1,17 @@
 -- Tasks & Chats domain tables and enums
 
 -- Task status enum
-CREATE TYPE task_status AS ENUM (
-    'pending',
-    'initializing',
-    'active',
-    'paused',
-    'unknown',
-    'error'
-);
+DO $$ BEGIN
+    CREATE TYPE task_status AS ENUM (
+        'pending',
+        'initializing',
+        'active',
+        'paused',
+        'unknown',
+        'error'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END; $$;
 
 -- Tasks table
 CREATE TABLE tasks (
@@ -49,20 +52,26 @@ CREATE TABLE task_workspace_apps (
 );
 
 -- Chat enums
-CREATE TYPE chat_message_visibility AS ENUM (
-    'user',
-    'model',
-    'both'
-);
+DO $$ BEGIN
+    CREATE TYPE chat_message_visibility AS ENUM (
+        'user',
+        'model',
+        'both'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END; $$;
 
-CREATE TYPE chat_status AS ENUM (
-    'waiting',
-    'pending',
-    'running',
-    'paused',
-    'completed',
-    'error'
-);
+DO $$ BEGIN
+    CREATE TYPE chat_status AS ENUM (
+        'waiting',
+        'pending',
+        'running',
+        'paused',
+        'completed',
+        'error'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END; $$;
 
 -- Chats table
 CREATE TABLE chats (
