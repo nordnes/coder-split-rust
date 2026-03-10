@@ -3496,8 +3496,16 @@ async fn list_workspace_port_shares(
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
     };
 
     let shares = state.store.list_workspace_port_shares(workspace_id).await?;
@@ -3524,12 +3532,20 @@ async fn post_workspace_port_share(
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
     };
 
     let agent_name = body
@@ -3580,12 +3596,20 @@ async fn delete_workspace_port_share(
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
     };
 
     let agent_name = body
