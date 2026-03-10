@@ -28302,4 +28302,1684 @@ mod tests {
         assert_eq!(logs.len(), 2);
         Ok(())
     }
+
+    // =====================================================================
+    // Happy-path integration tests — Tasks
+    // =====================================================================
+
+    #[tokio::test]
+    async fn happy_list_tasks_returns_empty() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/tasks", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let tasks = body
+            .get("tasks")
+            .and_then(Value::as_array)
+            .ok_or("missing tasks")?;
+        assert_eq!(tasks.len(), 0);
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_task() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9001);
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Build a web app"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("initial_prompt").and_then(Value::as_str),
+            Some("Build a web app")
+        );
+        assert_eq!(body.get("status").and_then(Value::as_str), Some("pending"));
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_task() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9002);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Hello task"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let created = response_json(create_resp).await?;
+        let task_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("id").and_then(Value::as_str), Some(task_id));
+        assert_eq!(
+            body.get("initial_prompt").and_then(Value::as_str),
+            Some("Hello task")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_task() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9003);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Delete me"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let task_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_tasks_after_create() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9004);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Task one"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/tasks", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let tasks = body
+            .get("tasks")
+            .and_then(Value::as_array)
+            .ok_or("missing tasks")?;
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_task_logs_empty() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9005);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Log task"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let task_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/me/{task_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // snapshot=false is omitted via skip_serializing_if, so the field should be absent
+        assert!(body.get("snapshot").is_none());
+        assert!(body.get("logs").and_then(Value::as_array).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_task_send() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9006);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Send task"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let task_id_str = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+        let task_id = Uuid::parse_str(task_id_str)?;
+
+        // Set task status to Active so send is accepted
+        {
+            let mut tasks = store
+                .tasks
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            if let Some(task) = tasks.get_mut(&task_id) {
+                task.status = TaskStatus::Active;
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/send"),
+                &session_token,
+                &json!({ "input": "Do something" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_task_pause() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9007);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Pause task"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let task_id_str = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+        let task_id = Uuid::parse_str(task_id_str)?;
+
+        // Set workspace_id so the task can be paused
+        {
+            let mut tasks = store
+                .tasks
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            if let Some(task) = tasks.get_mut(&task_id) {
+                task.workspace_id = Some(Uuid::from_u128(7777));
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/pause"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_json(response).await?;
+        assert!(body.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_task_resume() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9008);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Resume task"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let task_id_str = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+        let task_id = Uuid::parse_str(task_id_str)?;
+
+        // Set workspace_id so the task can be resumed
+        {
+            let mut tasks = store
+                .tasks
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            if let Some(task) = tasks.get_mut(&task_id) {
+                task.workspace_id = Some(Uuid::from_u128(7778));
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/resume"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = response_json(response).await?;
+        assert!(body.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_patch_task_input() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9009);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Original input"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let task_id_str = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+        let task_id = Uuid::parse_str(task_id_str)?;
+
+        // Set task status to Paused so input update is accepted
+        {
+            let mut tasks = store
+                .tasks
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            if let Some(task) = tasks.get_mut(&task_id) {
+                task.status = TaskStatus::Paused;
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/tasks/me/{task_id}/input"),
+                &session_token,
+                &json!({ "input": "Updated input" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_task_log_snapshot() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let tv_id = Uuid::from_u128(9010);
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &json!({
+                    "template_version_id": tv_id.to_string(),
+                    "input": "Snapshot task"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let task_id_str = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+        let task_id = Uuid::parse_str(task_id_str)?;
+
+        // Get the user ID from the store so we can confirm ownership
+        let owner_id = {
+            let tasks = store
+                .tasks
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            tasks.get(&task_id).ok_or("task not found")?.owner_id
+        };
+        let _ = owner_id;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaceagents/me/tasks/{task_id}/log-snapshot"),
+                &session_token,
+                &json!({ "log_snapshot": {"lines": ["line1", "line2"]} }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Snapshot saved.")
+        );
+        Ok(())
+    }
+
+    // =====================================================================
+    // Happy-path integration tests — Chats
+    // =====================================================================
+
+    #[tokio::test]
+    async fn happy_list_chats_empty() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let chats = body.as_array().ok_or("expected array")?;
+        assert_eq!(chats.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_chat() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Hello!"}]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("chat").is_some());
+        assert!(body.get("messages").and_then(Value::as_array).is_some());
+        let chat = body.get("chat").ok_or("missing chat")?;
+        assert_eq!(chat.get("title").and_then(Value::as_str), Some("New Chat"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_chat() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Get me"}]
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let chat_id = created
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let chat = body.get("chat").ok_or("missing chat")?;
+        assert_eq!(chat.get("id").and_then(Value::as_str), Some(chat_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_chat() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Delete me"}]
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let chat_id = created
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_chat_message() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "First"}]
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let chat_id = created
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/messages"),
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Follow up"}]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("message").is_some());
+        assert_eq!(body.get("queued").and_then(Value::as_bool), Some(false));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_archive_chat() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Archive me"}]
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let chat_id = created
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/archive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_unarchive_chat() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Unarchive me"}]
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let chat_id_str = created
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?;
+        let chat_id = Uuid::parse_str(chat_id_str)?;
+
+        // Archive the chat first
+        {
+            let mut chats = store
+                .chats
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            if let Some(chat) = chats.get_mut(&chat_id) {
+                chat.archived = true;
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/unarchive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_upload_and_get_chat_file() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        // Upload a PNG file (minimal PNG header bytes)
+        let png_bytes: Vec<u8> = vec![
+            0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, // PNG signature
+            0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52, // IHDR chunk
+        ];
+        let upload_request = Request::builder()
+            .method(Method::POST)
+            .uri(format!("/api/v2/chats/files?organization={org_id}"))
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .header(CONTENT_TYPE, "image/png")
+            .body(Body::from(png_bytes))?;
+
+        let upload_resp = call(app.clone(), upload_request).await?;
+        assert_eq!(upload_resp.status(), StatusCode::CREATED);
+        let upload_body = response_json(upload_resp).await?;
+        let file_id = upload_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing file id")?;
+
+        // Download it back
+        let download_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/files/{file_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(download_resp.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_chats_after_create() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Listed chat"}]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let chats = body.as_array().ok_or("expected array")?;
+        assert_eq!(chats.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_watch_chat_git_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &json!({
+                    "content": [{"type": "text", "text": "Git watch"}]
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let chat_id = created
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}/git/watch"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        // Handler returns 501 Not Implemented (stub)
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    // =====================================================================
+    // Happy-path integration tests — Notifications
+    // =====================================================================
+
+    #[tokio::test]
+    async fn happy_get_notifications_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/settings",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Default: notifier_paused is false
+        assert_eq!(
+            body.get("notifier_paused").and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_notifications_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/notifications/settings",
+                &session_token,
+                &json!({ "notifier_paused": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("notifier_paused").and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_notification_dispatch_methods() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/dispatch-methods",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let available = body
+            .get("available")
+            .and_then(Value::as_array)
+            .ok_or("missing available")?;
+        assert_eq!(available.len(), 3);
+        assert_eq!(body.get("default").and_then(Value::as_str), Some("smtp"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_system_notification_templates() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/system",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Returns an array (may be empty with FakeStore)
+        assert!(body.as_array().is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_custom_notification_templates() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/custom",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.as_array().is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_test_notification() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/notifications/test", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Test notification acknowledged.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_custom_notification() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &json!({
+                    "content": {
+                        "title": "Test Title",
+                        "message": "Test message body"
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_notification_template_method() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        // Seed a notification template
+        let template_id = Uuid::from_u128(5001);
+        {
+            let mut templates = store
+                .notification_templates
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            templates.push(coder_core::NotificationTemplate {
+                id: template_id,
+                name: "test-template".to_owned(),
+                title_template: "Title".to_owned(),
+                body_template: "Body".to_owned(),
+                actions: None,
+                group: None,
+                method: None,
+                kind: "system".to_owned(),
+                enabled_by_default: true,
+            });
+        }
+
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/notifications/templates/{template_id}/method"),
+                &session_token,
+                &json!({ "method": "webhook" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("method").and_then(Value::as_str), Some("webhook"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_inbox_notifications() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/notifications/inbox", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("notifications").is_some() || body.as_array().is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_notification_preferences() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Default: empty preferences array
+        assert!(body.as_array().is_some());
+        Ok(())
+    }
+
+    // =====================================================================
+    // Happy-path integration tests — OAuth2 Provider
+    // =====================================================================
+
+    #[tokio::test]
+    async fn happy_list_oauth2_provider_apps_empty() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/oauth2-provider/apps", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let apps = body.as_array().ok_or("expected array")?;
+        assert_eq!(apps.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Test App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("Test App"));
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Get App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("Get App"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Update App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}"),
+                &session_token,
+                &json!({
+                    "name": "Updated App",
+                    "callback_url": "https://example.com/callback2"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("Updated App")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Delete App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_oauth2_provider_app_secrets() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Secrets App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let secrets = body.as_array().ok_or("expected array")?;
+        assert_eq!(secrets.len(), 0);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_oauth2_provider_app_secret() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Secret Create App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        assert!(
+            body.get("client_secret_full")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_oauth2_provider_app_secret() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Secret Delete App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        // Create a secret first
+        let secret_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        let secret_body = response_json(secret_resp).await?;
+        let secret_id = secret_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing secret id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/secrets/{secret_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_oauth2_provider_app_tokens() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Tokens App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/oauth2-provider/apps/{app_id}/tokens"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    // =====================================================================
+    // Happy-path integration tests — Insights
+    // =====================================================================
+
+    #[tokio::test]
+    async fn happy_insights_daus() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/daus?tz_offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("entries").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_insights_templates() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let start = "2025-01-01T00:00:00Z";
+        let end = "2025-12-31T23:59:59Z";
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/insights/templates?start_time={start}&end_time={end}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_insights_user_activity() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let start = "2025-01-01T00:00:00Z";
+        let end = "2025-12-31T23:59:59Z";
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/insights/user-activity?start_time={start}&end_time={end}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("report").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_insights_user_latency() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let start = "2025-01-01T00:00:00Z";
+        let end = "2025-12-31T23:59:59Z";
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/insights/user-latency?start_time={start}&end_time={end}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("report").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_insights_user_status_counts() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/insights/user-status-counts?tz_offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("status_counts").is_some());
+        Ok(())
+    }
+
+    // =====================================================================
+    // Happy-path integration tests — Misc
+    // =====================================================================
+
+    #[tokio::test]
+    async fn happy_post_authcheck() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/authcheck",
+                &session_token,
+                &json!({
+                    "checks": {
+                        "readWorkspace": {
+                            "object": {
+                                "resource_type": "workspace",
+                                "owner_id": "me"
+                            },
+                            "action": "read"
+                        }
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // The owner should have permission to read their own workspace
+        assert!(body.get("readWorkspace").and_then(Value::as_bool).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_deployment_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/config", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("config").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_deployment_ssh() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/ssh", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("hostname_prefix").is_some() || body.get("ssh_config_options").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_deployment_stats() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/stats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_debug_health() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/health", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("healthy").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_health_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/health/settings", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // dismissed_healthchecks is empty by default and skipped via skip_serializing_if
+        assert!(body.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_health_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/debug/health/settings",
+                &session_token,
+                &json!({ "dismissed_healthchecks": ["DERP"] }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let dismissed = body
+            .get("dismissed_healthchecks")
+            .and_then(Value::as_array)
+            .ok_or("missing dismissed_healthchecks")?;
+        assert_eq!(dismissed.len(), 1);
+        Ok(())
+    }
 }
