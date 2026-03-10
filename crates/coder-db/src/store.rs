@@ -11764,7 +11764,7 @@ mod tests {
             .update_user_appearance(user_id, "dark", "JetBrains Mono")
             .await?;
         assert!(updated.is_some(), "update_user_appearance should return result");
-        let upd = updated.as_ref().expect("no appearance");
+        let upd = updated.as_ref().unwrap_or_else(|| panic!("no appearance"));
         assert_eq!(upd.theme_preference, "dark");
         assert_eq!(upd.terminal_font, "JetBrains Mono");
 
@@ -11779,7 +11779,7 @@ mod tests {
 
         // Update preferences
         let updated_prefs = store.update_user_preferences(user_id, true).await?;
-        let updated_prefs = updated_prefs.expect("update_user_preferences should return result");
+        let updated_prefs = updated_prefs.unwrap_or_else(|| panic!("update_user_preferences should return result"));
         assert!(
             updated_prefs.task_notification_alert_dismissed,
             "preference should be dismissed after update"
@@ -11805,14 +11805,14 @@ mod tests {
 
         // Verify initial roles are empty
         let user = store.find_user_by_id(user_id).await?;
-        let user = user.expect("user should exist");
+        let user = user.unwrap_or_else(|| panic!("user should exist"));
         assert!(user.roles.is_empty(), "initial roles should be empty");
 
         // Update roles
         let updated = store
             .update_user_roles(user_id, vec!["owner".to_string()])
             .await?;
-        let updated = updated.expect("update_user_roles should return updated user");
+        let updated = updated.unwrap_or_else(|| panic!("update_user_roles should return updated user"));
         assert_eq!(updated.roles.len(), 1);
         assert_eq!(updated.roles[0].name, "owner");
 
@@ -11820,12 +11820,12 @@ mod tests {
         let updated2 = store
             .update_user_roles(user_id, vec!["owner".to_string(), "auditor".to_string()])
             .await?;
-        let updated2 = updated2.expect("second role update should succeed");
+        let updated2 = updated2.unwrap_or_else(|| panic!("second role update should succeed"));
         assert_eq!(updated2.roles.len(), 2);
 
         // Clear roles
         let cleared = store.update_user_roles(user_id, vec![]).await?;
-        let cleared = cleared.expect("clearing roles should succeed");
+        let cleared = cleared.unwrap_or_else(|| panic!("clearing roles should succeed"));
         assert!(
             cleared.roles.is_empty(),
             "roles should be empty after clear"
@@ -11926,7 +11926,7 @@ mod tests {
 
         // Verify it's expired (expires_at <= now)
         let found = store.find_api_key_by_id(&key_id).await?;
-        let found = found.expect("expired key should still be findable");
+        let found = found.unwrap_or_else(|| panic!("expired key should still be findable"));
         assert!(
             found.expires_at <= expire_time,
             "key should be expired: expires_at={:?}, expire_time={:?}",
@@ -12129,7 +12129,7 @@ mod tests {
 
         // Verify archived
         let after_archive = store.find_chat_by_id(chat.id).await?;
-        let after_archive = after_archive.expect("chat should exist after archive");
+        let after_archive = after_archive.unwrap_or_else(|| panic!("chat should exist after archive"));
         assert!(after_archive.archived, "chat should be archived");
 
         // Should not appear in non-archived list
@@ -12144,7 +12144,7 @@ mod tests {
 
         // Verify unarchived
         let after_unarchive = store.find_chat_by_id(chat.id).await?;
-        let after_unarchive = after_unarchive.expect("chat should exist after unarchive");
+        let after_unarchive = after_unarchive.unwrap_or_else(|| panic!("chat should exist after unarchive"));
         assert!(!after_unarchive.archived, "chat should be unarchived");
 
         Ok(())
@@ -12207,13 +12207,13 @@ mod tests {
         let first = messages
             .iter()
             .find(|m| m.id == msg1.id)
-            .expect("msg1 not found");
+            .unwrap_or_else(|| panic!("msg1 not found"));
         assert_eq!(first.role, "user");
 
         let second = messages
             .iter()
             .find(|m| m.id == msg2.id)
-            .expect("msg2 not found");
+            .unwrap_or_else(|| panic!("msg2 not found"));
         assert_eq!(second.role, "assistant");
 
         // List after first message
@@ -12308,7 +12308,7 @@ mod tests {
             .await?;
         // Within our unique org, the only pending Echo job is the one we just
         // created, so acquire must return that specific job.
-        let acquired = acquired.expect("should acquire the pending job");
+        let acquired = acquired.unwrap_or_else(|| panic!("should acquire the pending job"));
         assert_eq!(
             acquired.id, job_id,
             "acquired job should be the one we created"
@@ -12328,7 +12328,7 @@ mod tests {
 
         // Verify completed
         let completed = store.get_provisioner_job_by_id(job_id).await?;
-        let completed = completed.expect("completed job should still be found");
+        let completed = completed.unwrap_or_else(|| panic!("completed job should still be found"));
         assert_eq!(completed.job_status, ProvisionerJobStatus::Succeeded);
         assert!(completed.completed_at.is_some());
 
@@ -12535,7 +12535,7 @@ mod tests {
 
         // Find
         let found = store.find_external_auth_link(user_id, &provider_id).await?;
-        let found = found.expect("should find external auth link");
+        let found = found.unwrap_or_else(|| panic!("should find external auth link"));
         assert_eq!(found.provider_id, provider_id);
         assert_eq!(found.access_token, "access-token-123");
 
@@ -12728,7 +12728,7 @@ mod tests {
 
         // Find by ID
         let found = store.get_file_by_id(file_id).await?;
-        let found = found.expect("should find file by ID");
+        let found = found.unwrap_or_else(|| panic!("should find file by ID"));
         assert_eq!(found.hash, file_hash);
         assert_eq!(found.data, file_data);
         assert_eq!(found.mimetype, "text/plain");
