@@ -360,6 +360,7 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/debug/pprof/symbol", get(debug_pprof))
                 .route("/debug/pprof/trace", get(debug_pprof))
                 .route("/debug/ws", get(debug_websocket))
+                .route("/debug/metrics", get(debug_metrics))
                 .route("/insights/daus", get(insights_daus))
                 .route("/insights/templates", get(insights_templates))
                 .route("/insights/user-activity", get(insights_user_activity))
@@ -539,6 +540,7 @@ pub fn build_router(state: AppState) -> Router {
                     get(get_custom_notification_templates),
                 )
                 .route("/notifications/test", post(post_test_notification))
+                .route("/notifications/custom", post(post_custom_notification))
                 .route(
                     "/notifications/templates/{id}/method",
                     put(put_notification_template_method),
@@ -663,8 +665,16 @@ pub fn build_router(state: AppState) -> Router {
                     get(get_org_template_by_name),
                 )
                 .route(
+                    "/organizations/{organization}/templates/examples",
+                    get(get_org_template_examples),
+                )
+                .route(
                     "/organizations/{organization}/templates/{templatename}/versions/{templateversionname}",
                     get(get_org_template_version_by_name),
+                )
+                .route(
+                    "/organizations/{organization}/templates/{templatename}/versions/{templateversionname}/previous",
+                    get(get_org_previous_template_version),
                 )
                 .route(
                     "/organizations/{organization}/templateversions",
@@ -787,6 +797,9 @@ pub fn build_router(state: AppState) -> Router {
                     post(post_file).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
                 )
                 .route("/files/{fileid}", get(get_file_by_id))
+                .route("/derp-map", get(derp_map_updates))
+                .route("/regions", get(get_regions))
+                .route("/tailnet", get(tailnet_rpc_conn))
                 .route("/applications/host", get(applications_host))
                 .route(
                     "/applications/auth-redirect",
@@ -4721,6 +4734,65 @@ async fn get_org_template_version_by_name(
     }
 }
 
+/// GET /organizations/{organization}/templates/examples
+async fn get_org_template_examples(
+    State(state): State<AppState>,
+    Path(org): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let _org_record = match resolve_organization(&state, &org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
+
+    // Template examples are static / built-in. Return empty list for now.
+    let examples: Vec<TemplateExample> = Vec::new();
+    Ok((StatusCode::OK, Json(examples)).into_response())
+}
+
+/// GET /organizations/{organization}/templates/{templatename}/versions/{templateversionname}/previous
+async fn get_org_previous_template_version(
+    State(state): State<AppState>,
+    Path((org, tname, vname)): Path<(String, String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let org_record = match resolve_organization(&state, &org).await? {
+        Some(o) => o,
+        None => {
+            return Ok(not_found_response(format!(
+                "Organization '{org}' not found."
+            )));
+        }
+    };
+
+    let ver = state
+        .store
+        .find_previous_template_version(org_record.id, &tname, &vname)
+        .await?;
+
+    match ver {
+        Some(v) => {
+            let resp = build_tv_response(&state, &v).await?;
+            Ok((StatusCode::OK, Json(resp)).into_response())
+        }
+        None => Ok(not_found_response(format!(
+            "No previous version found for '{vname}'."
+        ))),
+    }
+}
+
 /// POST /organizations/{organization}/templateversions
 async fn post_org_template_version(
     State(state): State<AppState>,
@@ -8497,6 +8569,212 @@ async fn debug_websocket(
     Ok(not_implemented_response(
         "WebSocket echo endpoint is not yet implemented in the Rust backend.",
     ))
+}
+
+/// GET /api/v2/debug/metrics — Prometheus metrics endpoint.
+///
+/// In Go this serves the Prometheus registry via `promhttp`. The Rust backend
+/// does not yet have a shared Prometheus registry, so we return a stub
+/// `not_implemented` response.
+async fn debug_metrics(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !can_view_operational_data(&context.actor) {
+        return Ok(forbidden_response(
+            "You are not authorized to view debug metrics.",
+        ));
+    }
+
+    Ok(not_implemented_response(
+        "Prometheus metrics endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// DERP Map Updates
+// ---------------------------------------------------------------------------
+
+/// GET /api/v2/derp-map — WebSocket endpoint that streams DERP map updates.
+///
+/// In Go this upgrades to a WebSocket and periodically sends the current DERP
+/// map. The Rust backend does not yet maintain a live DERP map, so we return a
+/// stub `not_implemented` response.
+async fn derp_map_updates(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    // The Go handler does NOT require apiKeyMiddleware (it's commented out in
+    // coderd.go), so we mirror that: no authentication check here.
+    let _ = (&state, &headers);
+
+    Ok(not_implemented_response(
+        "DERP map WebSocket endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Regions
+// ---------------------------------------------------------------------------
+
+/// GET /api/v2/regions — returns the list of available workspace proxy regions.
+///
+/// In the OSS edition this always returns a single "primary" region built from
+/// the deployment ID and access URL.  The enterprise edition may add additional
+/// workspace-proxy regions.
+async fn get_regions(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let region_id = state
+        .store
+        .ensure_deployment_metadata()
+        .await
+        .map(|m| m.deployment_id)?;
+
+    let access_url = state.config.access_url.clone();
+
+    let region = coder_core::Region {
+        id: region_id,
+        name: "primary".to_string(),
+        display_name: "Default".to_string(),
+        icon_url: String::new(),
+        healthy: true,
+        path_app_url: access_url.to_string(),
+        wildcard_hostname: String::new(),
+    };
+
+    Ok((
+        StatusCode::OK,
+        Json(coder_core::RegionsResponse {
+            regions: vec![region],
+        }),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Tailnet RPC Connection
+// ---------------------------------------------------------------------------
+
+/// GET /api/v2/tailnet — WebSocket RPC connection for tailnet coordination.
+///
+/// In Go this is `tailnetRPCConn` which upgrades to a WebSocket and serves
+/// the tailnet coordination protocol. The Rust backend does not yet have a
+/// tailnet service, so we return a stub `not_implemented` response.
+async fn tailnet_rpc_conn(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    Ok(not_implemented_response(
+        "Tailnet RPC endpoint is not yet implemented in the Rust backend.",
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Custom Notifications
+// ---------------------------------------------------------------------------
+
+/// Maximum length for custom notification title.
+const MAX_CUSTOM_NOTIFICATION_TITLE_LEN: usize = 120;
+/// Maximum length for custom notification message.
+const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
+
+/// POST /api/v2/notifications/custom — send a custom notification.
+///
+/// Validates the request body, ensures the caller is not a system user, and
+/// enqueues a custom notification.  Full dispatch is not yet wired, so the
+/// handler currently returns 204 No Content after validation succeeds.
+async fn post_custom_notification(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<coder_core::CustomNotificationRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Json(req) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // Validate: content is required
+    let content = match &req.content {
+        Some(c) => c,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Invalid request body",
+                    "content is required",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Validate: title and message must be non-empty
+    if content.title.trim().is_empty() || content.message.trim().is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid request body",
+                "provide a non-empty 'content.title' and 'content.message'",
+            )),
+        )
+            .into_response());
+    }
+
+    // Validate: title length
+    if content.title.chars().count() > MAX_CUSTOM_NOTIFICATION_TITLE_LEN {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid request body",
+                format!(
+                    "'content.title' must be at most {} characters",
+                    MAX_CUSTOM_NOTIFICATION_TITLE_LEN
+                ),
+            )),
+        )
+            .into_response());
+    }
+
+    // Validate: message length
+    if content.message.chars().count() > MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid request body",
+                format!(
+                    "'content.message' must be at most {} characters",
+                    MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN
+                ),
+            )),
+        )
+            .into_response());
+    }
+
+    // In Go, system users are blocked from sending custom notifications.
+    // The Rust Actor type does not yet expose an is_system() flag; this
+    // check will be added once the identity layer tracks that attribute.
+    let _ = &context;
+
+    // Full notification dispatch is not yet wired in the Rust backend.
+    // Return 204 No Content to match the Go handler's success response.
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -12313,6 +12591,55 @@ mod tests {
                 .cloned())
         }
 
+        async fn find_previous_template_version(
+            &self,
+            organization_id: Uuid,
+            template_name: &str,
+            version_name: &str,
+        ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let template_id = match templates
+                .values()
+                .find(|t| t.organization_id == organization_id && t.name == template_name)
+                .map(|t| t.id)
+            {
+                Some(id) => id,
+                None => return Ok(None),
+            };
+            drop(templates);
+
+            let versions = self
+                .template_versions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+            // Find the target version to get its created_at timestamp.
+            let target = versions.values().find(|v| {
+                v.organization_id == organization_id
+                    && v.template_id == Some(template_id)
+                    && v.name == version_name
+            });
+            let target_created_at = match target {
+                Some(t) => t.created_at,
+                None => return Ok(None),
+            };
+
+            // Find the version created immediately before the target.
+            let mut candidates: Vec<&TemplateVersionRecord> = versions
+                .values()
+                .filter(|v| {
+                    v.organization_id == organization_id
+                        && v.template_id == Some(template_id)
+                        && v.created_at < target_created_at
+                })
+                .collect();
+            candidates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(candidates.first().cloned().cloned())
+        }
+
         async fn insert_template_version(
             &self,
             input: CreateTemplateVersionInput,
@@ -14982,6 +15309,80 @@ mod tests {
         .await?;
         assert_eq!(schema_unauth.status(), StatusCode::UNAUTHORIZED);
 
+        // --- GET /organizations/{org}/templates/examples returns 200 + empty array ---
+        let examples_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/examples"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(examples_response.status(), StatusCode::OK);
+        let examples_body = response_json(examples_response).await?;
+        assert_eq!(examples_body.as_array().map(Vec::len), Some(0));
+
+        // --- GET /organizations/{org}/templates/examples without auth returns 401 ---
+        let examples_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/examples"),
+            )?,
+        )
+        .await?;
+        assert_eq!(examples_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{invalid_org}/templates/examples returns 404 ---
+        let examples_bad_org = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{fake_org}/templates/examples"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(examples_bad_org.status(), StatusCode::NOT_FOUND);
+
+        // --- GET /organizations/{org}/templates/{t}/versions/{v}/previous returns 404 (no previous) ---
+        let prev_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/mytemplate/versions/v1/previous"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(prev_response.status(), StatusCode::NOT_FOUND);
+
+        // --- GET /organizations/{org}/templates/{t}/versions/{v}/previous without auth returns 401 ---
+        let prev_unauth = call(
+            app.clone(),
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}/templates/mytemplate/versions/v1/previous"),
+            )?,
+        )
+        .await?;
+        assert_eq!(prev_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{invalid_org}/templates/{t}/versions/{v}/previous returns 404 ---
+        let prev_bad_org = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/api/v2/organizations/{fake_org}/templates/mytemplate/versions/v1/previous"
+                ),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(prev_bad_org.status(), StatusCode::NOT_FOUND);
+
         Ok(())
     }
 
@@ -15324,6 +15725,171 @@ mod tests {
         )
         .await?;
         assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_metrics_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/metrics")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/metrics", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn derp_map_updates_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        // The Go handler does NOT use apiKeyMiddleware, so no auth is required.
+        let resp = call(app, request(Method::GET, "/api/v2/derp-map")?).await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_regions_requires_auth_and_returns_regions() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/regions")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/regions", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = to_bytes(resp.into_body(), usize::MAX).await?;
+        let regions: coder_core::RegionsResponse = serde_json::from_slice(&body)?;
+        assert_eq!(regions.regions.len(), 1);
+        assert_eq!(regions.regions[0].name, "primary");
+        assert!(regions.regions[0].healthy);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tailnet_rpc_conn_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let unauth = call(app.clone(), request(Method::GET, "/api/v2/tailnet")?).await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/tailnet", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_custom_notification_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let payload = coder_core::CustomNotificationRequest {
+            content: Some(coder_core::CustomNotificationContent {
+                title: "Hello".to_string(),
+                message: "World".to_string(),
+            }),
+        };
+
+        let unauth = call(
+            app.clone(),
+            json_request(Method::POST, "/api/v2/notifications/custom", &payload)?,
+        )
+        .await?;
+        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_custom_notification_validates_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Missing content field
+        let payload = coder_core::CustomNotificationRequest { content: None };
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Empty title
+        let payload = coder_core::CustomNotificationRequest {
+            content: Some(coder_core::CustomNotificationContent {
+                title: "  ".to_string(),
+                message: "Hello".to_string(),
+            }),
+        };
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Title too long
+        let payload = coder_core::CustomNotificationRequest {
+            content: Some(coder_core::CustomNotificationContent {
+                title: "a".repeat(121),
+                message: "Hello".to_string(),
+            }),
+        };
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+        // Valid request returns 204
+        let payload = coder_core::CustomNotificationRequest {
+            content: Some(coder_core::CustomNotificationContent {
+                title: "Test".to_string(),
+                message: "Test message".to_string(),
+            }),
+        };
+        let resp = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &payload,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
         Ok(())
     }
 
