@@ -40,11 +40,11 @@ use coder_core::api::{
     CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest, DAUEntry, DAUsResponse,
     DynamicParametersRequest, DynamicParametersResponse, MatchedProvisioners, MinimalUser,
     PatchTemplateVersionRequest, ProvisionerJobLog, ProvisionerJobResponse, ProvisionerJobStatus,
-    ProvisionerTiming, TemplateExample, TemplateFilter, TemplateResponse,
-    TemplateVersionExternalAuth, TemplateVersionParameter, TemplateVersionPreset,
-    TemplateVersionPresetParameter, TemplateVersionResponse, TemplateVersionVariable,
-    UpdateActiveTemplateVersionRequest, UpdateTemplateMeta, WorkspaceBuildParameter,
-    WorkspaceBuildTimings, WorkspaceResource, WorkspaceResourceMetadata, WorkspaceResourceResponse,
+    TemplateExample, TemplateFilter, TemplateResponse, TemplateVersionExternalAuth,
+    TemplateVersionParameter, TemplateVersionPreset, TemplateVersionPresetParameter,
+    TemplateVersionResponse, TemplateVersionVariable, UpdateActiveTemplateVersionRequest,
+    UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceResource, WorkspaceResourceMetadata,
+    WorkspaceResourceResponse,
 };
 use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
 use coder_core::api::{
@@ -4922,7 +4922,7 @@ async fn get_chat_file(
         builder = builder.header("content-disposition", "inline");
     } else {
         // Sanitize filename to prevent header injection via embedded quotes/backslashes.
-        let sanitized_name = file.name.replace('"', "").replace('\\', "");
+        let sanitized_name = file.name.replace(['"', '\\'], "");
         builder = builder.header(
             "content-disposition",
             format!("inline; filename=\"{}\"", sanitized_name),
@@ -9237,7 +9237,7 @@ async fn get_workspace_watch_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
-    ws: axum::extract::ws::WebSocketUpgrade,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     use axum::extract::ws::Message;
     use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
