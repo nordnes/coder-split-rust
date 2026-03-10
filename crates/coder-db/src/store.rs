@@ -9940,8 +9940,12 @@ mod tests {
             .await?;
         }
 
-        // Fetch with max_attempt_count = 3 -- should only get msg1
-        let pending = store.fetch_pending_notification_messages(10, 3).await?;
+        // Fetch with max_attempt_count = 3 and a large limit so stale rows
+        // from prior test runs don't push our newly-inserted message out of
+        // the result set (the query is global, ordered by created_at ASC).
+        let pending = store
+            .fetch_pending_notification_messages(10_000, 3)
+            .await?;
 
         let fetched_ids: Vec<_> = pending.iter().map(|m| m.id).collect();
         assert!(
