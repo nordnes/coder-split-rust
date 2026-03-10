@@ -10157,9 +10157,9 @@ mod tests {
         UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
         WorkspaceAgentLogSourceRow, WorkspaceAgentRow, WorkspaceAgentStatInput, WorkspaceAppRow,
         WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
-        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
-        WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
-        WorkspaceRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
+        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+        WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
