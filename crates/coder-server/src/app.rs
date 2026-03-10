@@ -18724,13 +18724,13 @@ mod tests {
             input: &UpsertCustomRoleInput,
         ) -> Result<CustomRoleRecord, StorageError> {
             let now = OffsetDateTime::now_utc();
-            let key = (input.name.clone(), input.organization_id);
+            let key = (input.name.to_lowercase(), input.organization_id);
             let mut roles = self
                 .custom_roles
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let record = roles.entry(key).or_insert_with(|| CustomRoleRecord {
-                name: input.name.clone(),
+                name: input.name.to_lowercase(),
                 display_name: input.display_name.clone(),
                 organization_id: input.organization_id,
                 site_permissions: input.site_permissions.clone(),
@@ -18927,6 +18927,16 @@ mod tests {
             group_id: Uuid,
             user_id: Uuid,
         ) -> Result<(), StorageError> {
+            // Validate that the group exists (mirrors FK constraint in PostgresStore).
+            {
+                let groups = self
+                    .groups
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                if !groups.contains_key(&group_id) {
+                    return Err(StorageError::invalid_data("group not found"));
+                }
+            }
             let mut members = self
                 .group_members
                 .lock()
@@ -18965,11 +18975,30 @@ mod tests {
                 .group_members
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(members
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // PostgresStore JOINs on users, filters u.deleted = false,
+            // and sorts by LOWER(u.username) ASC.
+            let mut result: Vec<GroupMemberRecord> = members
                 .iter()
                 .filter(|m| m.group_id == group_id)
+                .filter(|m| users.get(&m.user_id).is_some_and(|u| !u.deleted))
                 .cloned()
-                .collect())
+                .collect();
+            result.sort_by(|a, b| {
+                let a_name = users
+                    .get(&a.user_id)
+                    .map(|u| u.username.to_lowercase())
+                    .unwrap_or_default();
+                let b_name = users
+                    .get(&b.user_id)
+                    .map(|u| u.username.to_lowercase())
+                    .unwrap_or_default();
+                a_name.cmp(&b_name)
+            });
+            Ok(result)
         }
 
         // -----------------------------------------------------------------
@@ -19124,7 +19153,7 @@ mod tests {
                 .custom_roles
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
-                .remove(&(name.to_owned(), organization_id))
+                .remove(&(name.to_lowercase(), organization_id))
                 .is_some())
         }
 
@@ -19150,6 +19179,10 @@ mod tests {
                 .cloned())
         }
 
+        /// NOTE: PostgresStore filters `deleted = false` on workspace agents,
+        /// but `WorkspaceAgentRow` does not expose a `deleted` field in the
+        /// domain type, so FakeStore cannot replicate this filter. Tests that
+        /// insert soft-deleted agents will see them returned here.
         async fn list_workspace_agents_by_resource_ids(
             &self,
             resource_ids: &[Uuid],
@@ -19167,6 +19200,12 @@ mod tests {
             Ok(result)
         }
 
+        /// NOTE: FakeStore limitation — this method synthesizes timing rows from
+        /// the scripts themselves with hardcoded defaults (`exit_code: 0`,
+        /// `stage: "start"`, `status: "ok"`, `started_at == ended_at ==
+        /// script.created_at`). PostgresStore joins against a real
+        /// `workspace_agent_script_timings` table. Do not rely on realistic
+        /// timing values in tests that use FakeStore.
         async fn list_workspace_agent_script_timings_by_build_id(
             &self,
             build_id: Uuid,
@@ -19188,11 +19227,9 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let resource_ids: Vec<Uuid> = resources
-                .values()
-                .flatten()
-                .filter(|r| r.job_id == build.job_id)
-                .map(|r| r.id)
-                .collect();
+                .get(&build.job_id)
+                .map(|rs| rs.iter().map(|r| r.id).collect())
+                .unwrap_or_default();
             drop(resources);
 
             let agents = self
@@ -19254,7 +19291,6 @@ mod tests {
                 .unwrap_or(0);
             Ok(max + 1)
         }
-
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
