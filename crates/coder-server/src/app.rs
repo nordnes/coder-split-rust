@@ -3626,8 +3626,34 @@ async fn hsts_middleware(request: axum::extract::Request, next: Next) -> Respons
 /// Middleware: CSRF protection – require a non-empty X-CSRF-Token header on
 /// mutating requests (POST / PUT / DELETE / PATCH) that carry cookie-based
 /// authentication.
+///
+/// Pre-authentication endpoints are exempt because the browser may still hold
+/// an expired session cookie when the user tries to log in again, and there is
+/// no way for the client to obtain a CSRF token before authenticating.  CSP
+/// violation reports are also exempt because browsers send them automatically
+/// without custom headers.
 async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Response {
     use http::Method;
+
+    /// Paths that are exempt from CSRF validation.  These are either
+    /// pre-authentication endpoints or browser-initiated reports that cannot
+    /// carry custom headers.
+    const CSRF_EXEMPT_PATHS: &[&str] = &[
+        "/api/v2/users/login",
+        "/api/v2/users/first",
+        "/api/v2/users/otp/request",
+        "/api/v2/users/otp/change-password",
+        "/api/v2/csp/reports",
+        "/api/v2/oauth2/tokens",
+    ];
+
+    let path = request.uri().path();
+    let is_exempt = CSRF_EXEMPT_PATHS.contains(&path);
+
+    if is_exempt {
+        return next.run(request).await;
+    }
+
     let dominated_method = matches!(
         *request.method(),
         Method::POST | Method::PUT | Method::DELETE | Method::PATCH
@@ -7794,9 +7820,10 @@ mod tests {
     #[tokio::test]
     async fn csrf_rejects_mutating_cookie_request_without_token() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
+        // Use a non-exempt path so the CSRF middleware actually fires.
         let req = request_with_cookies(
             Method::POST,
-            "/api/v2/csp/reports",
+            "/api/v2/users",
             &[("coder_session_token", "fake")],
         )?;
         let response = call(app, req).await?;
@@ -7819,13 +7846,42 @@ mod tests {
         let app = build_router(test_state(true)?);
         let req = Request::builder()
             .method(Method::POST)
-            .uri("/api/v2/csp/reports")
+            .uri("/api/v2/users")
             .header(http::header::COOKIE, "coder_session_token=fake")
             .header("x-csrf-token", "some-token-value")
             .header(CONTENT_TYPE, "application/json")
             .body(Body::from("{}"))?;
         let response = call(app, req).await?;
         // Should pass CSRF check (might fail auth, but not CSRF)
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_exempts_login_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        // Login is exempt: even with a cookie and no CSRF token the
+        // middleware must not return 403.
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/users/login",
+            &[("coder_session_token", "expired")],
+        )?;
+        let response = call(app, req).await?;
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_exempts_csp_reports_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/csp/reports",
+            &[("coder_session_token", "expired")],
+        )?;
+        let response = call(app, req).await?;
+        // CSP reports are exempt from CSRF; should not get 403.
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
