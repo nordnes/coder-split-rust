@@ -1775,6 +1775,44 @@ where
     Ok(Duration::from_nanos(nanos))
 }
 
+/// Response for `GET /api/v2/applications/host`.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct AppHostResponse {
+    /// Wildcard hostname for workspace applications.
+    pub host: String,
+}
+
+/// Provisioner daemon response matching `codersdk.ProvisionerDaemon`.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisionerDaemonResponse {
+    /// Stable daemon identifier.
+    pub id: Uuid,
+    /// Organization that owns the daemon.
+    pub organization_id: Uuid,
+    /// When the daemon was created.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// When the daemon was last seen.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub last_seen_at: Option<OffsetDateTime>,
+    /// Daemon name.
+    pub name: String,
+    /// Daemon version.
+    pub version: String,
+    /// API version supported.
+    pub api_version: String,
+    /// Provisioner types supported.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub provisioners: Vec<String>,
+    /// Tags associated with the daemon.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tags: HashMap<String, String>,
+}
+
 // ---------------------------------------------------------------------------
 // Notifications domain
 // ---------------------------------------------------------------------------
