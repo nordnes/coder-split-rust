@@ -23226,7 +23226,7 @@ mod tests {
     #[tokio::test]
     async fn template_patch_preserves_fields() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
-        let (session_token, org_id, template) = create_test_template(&app).await?;
+        let (session_token, _org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
             .get("id")
@@ -23289,7 +23289,7 @@ mod tests {
     #[tokio::test]
     async fn template_delete() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
-        let (session_token, org_id, template) = create_test_template(&app).await?;
+        let (session_token, _org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
             .get("id")
@@ -23326,7 +23326,7 @@ mod tests {
     #[tokio::test]
     async fn template_versions_list() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
-        let (session_token, org_id, template) = create_test_template(&app).await?;
+        let (session_token, _org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
             .get("id")
@@ -36795,7 +36795,7 @@ mod tests {
                     readme: String::new(),
                     job_id: Uuid::new_v4(),
                     created_by: Uuid::nil(),
-                    external_auth_providers: serde_json::Value::Array(Vec::new()),
+                    external_auth_providers: Value::Array(Vec::new()),
                     message: String::new(),
                     archived: false,
                     source_example_id: None,
@@ -36849,7 +36849,7 @@ mod tests {
                     readme: String::new(),
                     job_id: Uuid::new_v4(),
                     created_by: Uuid::nil(),
-                    external_auth_providers: serde_json::Value::Array(Vec::new()),
+                    external_auth_providers: Value::Array(Vec::new()),
                     message: String::new(),
                     archived: false,
                     source_example_id: None,
