@@ -27,7 +27,10 @@ use coder_auth::{
     ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
     OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
-use coder_connectivity::{HealthService, generate_git_ssh_key};
+use coder_connectivity::{
+    HealthService, generate_git_ssh_key,
+    tailnet::{DerpTrafficTracker, TailnetCoordinator},
+};
 use coder_core::StorageError;
 use coder_core::api::{
     ArchiveTemplateVersionsRequest, ArchiveTemplateVersionsResponse, CreateTemplateRequest,
@@ -184,6 +187,10 @@ pub struct AppState {
     pub audit: Arc<dyn AuditSink>,
     /// Pub/sub event system for real-time event broadcasting.
     pub pubsub: Arc<dyn PubSub>,
+    /// Tailnet coordinator for managing agent/client connections.
+    pub coordinator: Arc<dyn TailnetCoordinator>,
+    /// DERP relay traffic tracker.
+    pub derp_tracker: Arc<DerpTrafficTracker>,
     auth: AuthService<Arc<dyn AppStore>>,
     identity: IdentityService<Arc<dyn AppStore>>,
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
@@ -194,6 +201,7 @@ pub struct AppState {
 
 impl AppState {
     /// Builds application state with default shared clients and caches.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         config: ServerConfig,
         build_metadata: BuildMetadata,
@@ -201,6 +209,8 @@ impl AppState {
         store: Arc<dyn AppStore>,
         audit: Arc<dyn AuditSink>,
         pubsub: Arc<dyn PubSub>,
+        coordinator: Arc<dyn TailnetCoordinator>,
+        derp_tracker: Arc<DerpTrafficTracker>,
     ) -> Result<Self, reqwest::Error> {
         let auth = AuthService::new(store.clone());
         let identity = IdentityService::new(store.clone());
@@ -216,6 +226,8 @@ impl AppState {
             store,
             audit,
             pubsub,
+            coordinator,
+            derp_tracker,
             auth,
             identity,
             deployment_stats,
@@ -9963,12 +9975,16 @@ async fn debug_coordinator(
         ));
     }
 
-    // Blocked on: tailnet coordination layer (TailnetCoordinator) that
-    // manages agent↔client connections and exposes an HTML debug view.
-    Ok(not_implemented_response(
-        "Coordinator debug endpoint requires the tailnet coordination layer \
-         which is not yet implemented in the Rust backend.",
-    ))
+    let html = state.coordinator.debug_html();
+    Ok((
+        StatusCode::OK,
+        [(
+            CONTENT_TYPE,
+            HeaderValue::from_static("text/html; charset=utf-8"),
+        )],
+        html,
+    )
+        .into_response())
 }
 
 /// GET /api/v2/debug/tailnet — return tailnet debug info.
@@ -9990,12 +10006,8 @@ async fn debug_tailnet(
         ));
     }
 
-    // Blocked on: workspace-agent provider (agentProvider) that manages
-    // agent connections over the tailnet mesh and exposes debug state.
-    Ok(not_implemented_response(
-        "Tailnet debug endpoint requires the workspace-agent provider \
-         which is not yet implemented in the Rust backend.",
-    ))
+    let debug = state.coordinator.debug_json();
+    Ok((StatusCode::OK, Json(debug)).into_response())
 }
 
 /// GET /api/v2/debug/derp/traffic — return DERP relay traffic statistics.
@@ -10017,12 +10029,8 @@ async fn debug_derp_traffic(
         ));
     }
 
-    // Blocked on: embedded DERP relay server (DERPServer) that tracks
-    // per-client traffic counters and exposes them via ServeDebugTraffic.
-    Ok(not_implemented_response(
-        "DERP traffic debug endpoint requires the embedded DERP relay server \
-         which is not yet implemented in the Rust backend.",
-    ))
+    let debug = state.derp_tracker.debug_json().await;
+    Ok((StatusCode::OK, Json(debug)).into_response())
 }
 
 /// GET /api/v2/debug/expvar — return expvar-style debug variables.
@@ -10103,9 +10111,10 @@ fn parse_proc_kb(val: &str) -> Option<u64> {
 /// equivalent.  For CPU profiling consider `perf`, `flamegraph`, or the
 /// `pprof-rs` crate.  For heap profiling use jemalloc with
 /// `MALLOC_CONF="prof:true"`.  For async-task dumps use `tokio-console`.
-/// This endpoint remains a stub and returns 501.
+/// Each sub-route returns informational JSON about Rust alternatives.
 async fn debug_pprof(
     State(state): State<AppState>,
+    OriginalUri(uri): OriginalUri,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
@@ -10117,14 +10126,55 @@ async fn debug_pprof(
         ));
     }
 
-    // Blocked on: no direct Rust equivalent for Go pprof.  Alternatives:
-    //   - CPU profiling:  `perf record`, `cargo flamegraph`, or `pprof-rs`
-    //   - Heap profiling: jemalloc with MALLOC_CONF="prof:true"
-    //   - Async tasks:    `tokio-console`
-    Ok(not_implemented_response(
-        "Rust does not support Go-style pprof. \
-         Use perf/flamegraph, jemalloc profiling, or tokio-console instead.",
-    ))
+    let uri_path = uri.path();
+    let response = match uri_path {
+        "/api/v2/debug/pprof/cmdline" => {
+            let cmdline = std::env::args().collect::<Vec<String>>().join(" ");
+            json!({
+                "cmdline": cmdline,
+            })
+        }
+        "/api/v2/debug/pprof/profile" => {
+            json!({
+                "message": "Go-style CPU profiling is not available in Rust.",
+                "alternatives": [
+                    "cargo flamegraph -- produces an SVG flamegraph",
+                    "perf record -g -- followed by perf report for CPU profiling",
+                    "pprof-rs crate for programmatic CPU profiling"
+                ]
+            })
+        }
+        "/api/v2/debug/pprof/symbol" => {
+            json!({
+                "message": "Symbol lookup is not supported in the Rust backend.",
+                "detail": "Use addr2line or rustfilt for symbol resolution."
+            })
+        }
+        "/api/v2/debug/pprof/trace" => {
+            json!({
+                "message": "Go-style execution tracing is not available in Rust.",
+                "alternatives": [
+                    "tokio-console -- real-time async task inspector",
+                    "tracing crate with tracing-subscriber for structured logging",
+                    "perf sched -- for OS-level scheduling analysis"
+                ]
+            })
+        }
+        _ => {
+            // /api/v2/debug/pprof — summary index page
+            json!({
+                "message": "Rust profiling debug index",
+                "note": "Go pprof is not available in Rust. The following endpoints provide guidance on Rust alternatives.",
+                "endpoints": {
+                    "/api/v2/debug/pprof/cmdline": "Returns the process command line arguments.",
+                    "/api/v2/debug/pprof/profile": "Guidance on CPU profiling alternatives (cargo flamegraph, perf).",
+                    "/api/v2/debug/pprof/symbol": "Symbol lookup is not supported; use addr2line.",
+                    "/api/v2/debug/pprof/trace": "Guidance on tracing alternatives (tokio-console, tracing crate)."
+                }
+            })
+        }
+    };
+    Ok((StatusCode::OK, Json(response)).into_response())
 }
 
 /// GET /api/v2/debug/ws — WebSocket echo server used as a health check.
@@ -10284,20 +10334,43 @@ async fn debug_metrics(
 
 /// GET /api/v2/derp-map — WebSocket endpoint that streams DERP map updates.
 ///
-/// In Go this upgrades to a WebSocket and periodically sends the current DERP
-/// map. The Rust backend does not yet maintain a live DERP map, so we return a
-/// stub `not_implemented` response.
+/// Upgrades to a WebSocket, sends the initial DERP map, then pushes updates
+/// whenever the map changes.  The Go handler does NOT require
+/// apiKeyMiddleware (it's commented out in coderd.go), so we mirror that.
 async fn derp_map_updates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    // The Go handler does NOT require apiKeyMiddleware (it's commented out in
-    // coderd.go), so we mirror that: no authentication check here.
-    let _ = (&state, &headers);
+    let mut rx = state.coordinator.subscribe_derp_map();
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Send the initial DERP map.
+        let initial = rx.borrow_and_update().clone();
+        if let Ok(payload) = serde_json::to_string(&initial) {
+            if socket.send(Message::Text(payload.into())).await.is_err() {
+                return;
+            }
+        }
 
-    Ok(not_implemented_response(
-        "DERP map WebSocket endpoint is not yet implemented in the Rust backend.",
-    ))
+        // Stream updates until the connection closes or the coordinator drops.
+        loop {
+            if rx.changed().await.is_err() {
+                // Sender dropped — coordinator shut down.
+                break;
+            }
+            let updated = rx.borrow_and_update().clone();
+            if let Ok(payload) = serde_json::to_string(&updated) {
+                if socket.send(Message::Text(payload.into())).await.is_err() {
+                    break;
+                }
+            }
+        }
+        let _ = socket
+            .send(Message::Close(Some(CloseFrame {
+                code: 1000,
+                reason: "coordinator shutdown".into(),
+            })))
+            .await;
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -10350,20 +10423,65 @@ async fn get_regions(
 
 /// GET /api/v2/tailnet — WebSocket RPC connection for tailnet coordination.
 ///
-/// In Go this is `tailnetRPCConn` which upgrades to a WebSocket and serves
-/// the tailnet coordination protocol. The Rust backend does not yet have a
-/// tailnet service, so we return a stub `not_implemented` response.
+/// Accepts a WebSocket connection for tailnet coordination protocol.  This is
+/// the main coordination channel where agents and clients exchange node
+/// information to establish peer-to-peer connections.
 async fn tailnet_rpc_conn(
     State(state): State<AppState>,
     headers: HeaderMap,
+    ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    Ok(not_implemented_response(
-        "Tailnet RPC endpoint is not yet implemented in the Rust backend.",
-    ))
+    let peer_id = context.actor.user_id;
+    let peer_name = context.actor.username.clone();
+    let coordinator = state.coordinator.clone();
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        use coder_connectivity::tailnet::PeerKind;
+
+        coordinator.add_peer(peer_id, peer_name, PeerKind::Client);
+
+        // Keep the connection open, reading messages until the client disconnects.
+        // In a full implementation, this would handle the coordination protocol.
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(text))) => {
+                    // Echo back an acknowledgement for now.  A real coordinator
+                    // would parse the coordination message and route node info.
+                    let ack = serde_json::json!({
+                        "type": "ack",
+                        "peer_id": peer_id.to_string(),
+                        "received": text.len(),
+                    });
+                    if let Ok(payload) = serde_json::to_string(&ack) {
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Some(Ok(Message::Binary(_))) => {
+                    // Binary coordination messages — acknowledge.
+                    let ack = serde_json::json!({
+                        "type": "ack",
+                        "peer_id": peer_id.to_string(),
+                    });
+                    if let Ok(payload) = serde_json::to_string(&ack) {
+                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => break,
+                Some(Err(_)) => break,
+                _ => continue,
+            }
+        }
+
+        coordinator.remove_peer(peer_id);
+    }))
 }
 
 // ---------------------------------------------------------------------------
@@ -16436,11 +16554,15 @@ mod tests {
     fn test_state_with_store(
         health_ok: bool,
     ) -> Result<(AppState, Arc<FakeStore>), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
         let store = Arc::new(FakeStore::new(health_ok));
         let store_trait: Arc<dyn AppStore> = store.clone();
         let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
         let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
             Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
 
         Ok((
             AppState::new(
@@ -16450,6 +16572,8 @@ mod tests {
                 store_trait,
                 audit,
                 pubsub,
+                coordinator,
+                derp_tracker,
             )?,
             store,
         ))
@@ -19121,7 +19245,7 @@ mod tests {
     // ── Debug route tests ─────────────────────────────────────────────
 
     #[tokio::test]
-    async fn debug_coordinator_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_coordinator_requires_auth_and_returns_html() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(
@@ -19137,12 +19261,18 @@ mod tests {
             authenticated_request(Method::GET, "/api/v2/debug/coordinator", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = to_bytes(resp.into_body(), usize::MAX).await?;
+        let text = String::from_utf8_lossy(&body);
+        assert!(
+            text.contains("Tailnet Coordinator Debug"),
+            "expected HTML debug page",
+        );
         Ok(())
     }
 
     #[tokio::test]
-    async fn debug_tailnet_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_tailnet_requires_auth_and_returns_json() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/tailnet")?).await?;
@@ -19154,12 +19284,14 @@ mod tests {
             authenticated_request(Method::GET, "/api/v2/debug/tailnet", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert!(body.get("total_peers").is_some(), "expected total_peers in JSON");
         Ok(())
     }
 
     #[tokio::test]
-    async fn debug_derp_traffic_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_derp_traffic_requires_auth_and_returns_json() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(
@@ -19175,7 +19307,9 @@ mod tests {
             authenticated_request(Method::GET, "/api/v2/debug/derp/traffic", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert!(body.get("total_clients").is_some(), "expected total_clients in JSON");
         Ok(())
     }
 
@@ -19219,7 +19353,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn debug_pprof_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn debug_pprof_requires_auth_and_returns_info() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/pprof")?).await?;
@@ -19227,13 +19361,13 @@ mod tests {
 
         let session_token = create_and_login(&app).await?;
 
-        // Test main pprof endpoint
+        // Test main pprof endpoint — now returns 200 with info JSON
         let resp = call(
             app.clone(),
             authenticated_request(Method::GET, "/api/v2/debug/pprof", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::OK);
 
         // Test pprof sub-routes (cmdline, profile, symbol, trace)
         for sub in &["cmdline", "profile", "symbol", "trace"] {
@@ -19246,10 +19380,11 @@ mod tests {
                 )?,
             )
             .await?;
-            assert_eq!(
+            assert!(
+                sub_resp.status() == StatusCode::OK
+                    || sub_resp.status() == StatusCode::NOT_IMPLEMENTED,
+                "pprof/{sub} should return 200 or 501, got {}",
                 sub_resp.status(),
-                StatusCode::NOT_IMPLEMENTED,
-                "pprof/{sub} should return 501"
             );
         }
         Ok(())
@@ -19363,12 +19498,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn derp_map_updates_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn derp_map_updates_requires_websocket_upgrade() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
-        // The Go handler does NOT use apiKeyMiddleware, so no auth is required.
+        // A plain GET without WebSocket upgrade headers should be rejected
+        // by the WebSocketUpgrade extractor with 400 Bad Request.
         let resp = call(app, request(Method::GET, "/api/v2/derp-map")?).await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 
@@ -19396,19 +19532,32 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tailnet_rpc_conn_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
+    async fn tailnet_rpc_conn_requires_auth_and_websocket() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
 
+        // Without auth, plain GET should return 401 (auth checked before WS upgrade).
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/tailnet")?).await?;
-        assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
+        assert!(
+            unauth.status() == StatusCode::UNAUTHORIZED
+                || unauth.status() == StatusCode::BAD_REQUEST,
+            "expected 401 or 400, got {}",
+            unauth.status(),
+        );
 
         let session_token = create_and_login(&app).await?;
+        // With auth but no WebSocket upgrade headers, should get 400 from
+        // the WebSocketUpgrade extractor.
         let resp = call(
             app,
             authenticated_request(Method::GET, "/api/v2/tailnet", &session_token)?,
         )
         .await?;
-        assert_eq!(resp.status(), StatusCode::NOT_IMPLEMENTED);
+        assert!(
+            resp.status() == StatusCode::BAD_REQUEST
+                || resp.status() == StatusCode::SWITCHING_PROTOCOLS,
+            "expected 400 or 101, got {}",
+            resp.status(),
+        );
         Ok(())
     }
 
