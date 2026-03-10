@@ -5,14 +5,30 @@
 //! [`DerpTrafficTracker`] for per-client DERP relay traffic statistics.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use serde::Serialize;
 use time::OffsetDateTime;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::watch;
 use uuid::Uuid;
 
+/// Async mutex for types that hold locks across `.await` points.
+type AsyncMutex<T> = tokio::sync::Mutex<T>;
+
 use coder_core::api::{DERPMap, DERPMapRegion, DERPNode};
+
+// ---------------------------------------------------------------------------
+// HTML escaping helper
+// ---------------------------------------------------------------------------
+
+/// Escapes HTML special characters to prevent XSS.
+fn html_escape(s: &str) -> String {
+    s.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
 
 // ---------------------------------------------------------------------------
 // TailnetCoordinator trait
@@ -104,10 +120,7 @@ impl InMemoryCoordinator {
 
 impl TailnetCoordinator for InMemoryCoordinator {
     fn debug_html(&self) -> String {
-        // We need to block on the async lock in a sync context.
-        // Since this is only used for debug pages, we use try_lock and
-        // fall back to an empty state if the lock is contended.
-        let peers: Vec<PeerInfo> = match self.peers.try_lock() {
+        let peers: Vec<PeerInfo> = match self.peers.lock() {
             Ok(guard) => guard.values().cloned().collect(),
             Err(_) => Vec::new(),
         };
@@ -156,7 +169,9 @@ impl TailnetCoordinator for InMemoryCoordinator {
                     .unwrap_or_default();
                 html.push_str(&format!(
                     "<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
-                    agent.id, agent.name, connected,
+                    html_escape(&agent.id.to_string()),
+                    html_escape(&agent.name),
+                    html_escape(&connected),
                 ));
             }
             html.push_str("</table>\n");
@@ -175,7 +190,9 @@ impl TailnetCoordinator for InMemoryCoordinator {
                     .unwrap_or_default();
                 html.push_str(&format!(
                     "<tr><td>{}</td><td>{}</td><td>{}</td></tr>\n",
-                    client.id, client.name, connected,
+                    html_escape(&client.id.to_string()),
+                    html_escape(&client.name),
+                    html_escape(&connected),
                 ));
             }
             html.push_str("</table>\n");
@@ -192,9 +209,9 @@ impl TailnetCoordinator for InMemoryCoordinator {
             for (key, region) in &derp_map.regions {
                 html.push_str(&format!(
                     "<tr><td>{}</td><td>{}</td><td>{}</td><td>{}</td></tr>\n",
-                    key,
-                    region.region_code,
-                    region.region_name,
+                    html_escape(key),
+                    html_escape(&region.region_code),
+                    html_escape(&region.region_name),
                     region.nodes.len(),
                 ));
             }
@@ -206,7 +223,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
     }
 
     fn debug_json(&self) -> serde_json::Value {
-        let peers: Vec<PeerInfo> = match self.peers.try_lock() {
+        let peers: Vec<PeerInfo> = match self.peers.lock() {
             Ok(guard) => guard.values().cloned().collect(),
             Err(_) => Vec::new(),
         };
@@ -236,7 +253,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
     }
 
     fn add_peer(&self, peer_id: Uuid, name: String, kind: PeerKind) {
-        if let Ok(mut peers) = self.peers.try_lock() {
+        if let Ok(mut peers) = self.peers.lock() {
             peers.insert(
                 peer_id,
                 PeerInfo {
@@ -250,7 +267,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
     }
 
     fn remove_peer(&self, peer_id: Uuid) {
-        if let Ok(mut peers) = self.peers.try_lock() {
+        if let Ok(mut peers) = self.peers.lock() {
             peers.remove(&peer_id);
         }
     }
@@ -284,7 +301,7 @@ pub struct DerpClientStats {
 /// for each connected DERP client.  In a full implementation, these
 /// counters would be updated by the actual DERP relay server.
 pub struct DerpTrafficTracker {
-    clients: Mutex<HashMap<String, DerpClientStats>>,
+    clients: AsyncMutex<HashMap<String, DerpClientStats>>,
 }
 
 impl DerpTrafficTracker {
@@ -292,7 +309,7 @@ impl DerpTrafficTracker {
     #[must_use]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
-            clients: Mutex::new(HashMap::new()),
+            clients: AsyncMutex::new(HashMap::new()),
         })
     }
 
@@ -365,8 +382,8 @@ impl DerpTrafficTracker {
 pub fn build_derp_map_from_config(regions: &[coder_core::config::DerpRegionConfig]) -> DERPMap {
     let mut map_regions = HashMap::new();
 
-    for (idx, region) in regions.iter().enumerate() {
-        let region_id = i64::try_from(idx.saturating_add(1)).unwrap_or(1);
+    for region in regions {
+        let region_id = i64::from(region.id);
         let nodes: Vec<DERPNode> = region
             .nodes
             .iter()

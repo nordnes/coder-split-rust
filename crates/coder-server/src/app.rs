@@ -19286,7 +19286,10 @@ mod tests {
         .await?;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_json(resp).await?;
-        assert!(body.get("total_peers").is_some(), "expected total_peers in JSON");
+        assert!(
+            body.get("total_peers").is_some(),
+            "expected total_peers in JSON"
+        );
         Ok(())
     }
 
@@ -19309,7 +19312,10 @@ mod tests {
         .await?;
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_json(resp).await?;
-        assert!(body.get("total_clients").is_some(), "expected total_clients in JSON");
+        assert!(
+            body.get("total_clients").is_some(),
+            "expected total_clients in JSON"
+        );
         Ok(())
     }
 
