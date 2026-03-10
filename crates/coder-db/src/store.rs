@@ -11711,11 +11711,13 @@ mod tests {
         )
         .await?;
 
-        // Create 5 workspaces
+        // Create 5 workspaces with distinct last_used_at for stable ordering
+        let mut ws_ids = Vec::new();
         for i in 0..5 {
+            let ws_id = Uuid::new_v4();
             store
                 .insert_workspace(CreateWorkspaceInput {
-                    id: Uuid::new_v4(),
+                    id: ws_id,
                     owner_id: user_id,
                     organization_id: org_id,
                     template_id: tmpl,
@@ -11725,6 +11727,18 @@ mod tests {
                     automatic_updates: "never".to_string(),
                 })
                 .await?;
+            ws_ids.push(ws_id);
+        }
+
+        // Set distinct last_used_at so ORDER BY last_used_at DESC is deterministic
+        for (idx, ws_id) in ws_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE workspaces SET last_used_at = NOW() + ($1 || ' seconds')::interval WHERE id = $2",
+            )
+            .bind(format!("{}", idx * 10))
+            .bind(ws_id)
+            .execute(&pool)
+            .await?;
         }
 
         // Page 1: limit=2, offset=0
@@ -12040,7 +12054,7 @@ mod tests {
             .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
                 pending_since: OffsetDateTime::now_utc() - time::Duration::minutes(30),
                 hung_since: OffsetDateTime::now_utc() - time::Duration::minutes(30),
-                max_jobs: 100,
+                max_jobs: 10_000,
             })
             .await?;
 
