@@ -11545,12 +11545,12 @@ mod tests {
     }
 
     // =========================================================================
-    // find_provisioner_job_by_id / cancel_provisioner_job
+    // find_provisioner_job / cancel_template_provisioner_job
     // =========================================================================
 
     #[tokio::test]
     #[ignore]
-    async fn test_find_provisioner_job_by_id_returns_some() -> TestResult {
+    async fn test_find_provisioner_job_returns_some() -> TestResult {
         let store = match setup_store().await? {
             Some(s) => s,
             None => return Ok(()),
@@ -11575,7 +11575,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_find_provisioner_job_by_id_returns_none_for_missing() -> TestResult {
+    async fn test_find_provisioner_job_returns_none_for_missing() -> TestResult {
         let store = match setup_store().await? {
             Some(s) => s,
             None => return Ok(()),
@@ -11590,7 +11590,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_cancel_provisioner_job_happy_path() -> TestResult {
+    async fn test_cancel_template_provisioner_job_happy_path() -> TestResult {
         let store = match setup_store().await? {
             Some(s) => s,
             None => return Ok(()),
@@ -11618,7 +11618,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_cancel_provisioner_job_already_canceled() -> TestResult {
+    async fn test_cancel_template_provisioner_job_already_canceled() -> TestResult {
         let store = match setup_store().await? {
             Some(s) => s,
             None => return Ok(()),
@@ -11641,7 +11641,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_cancel_provisioner_job_nonexistent() -> TestResult {
+    async fn test_cancel_template_provisioner_job_nonexistent() -> TestResult {
         let store = match setup_store().await? {
             Some(s) => s,
             None => return Ok(()),
@@ -11656,7 +11656,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_cancel_provisioner_job_already_completed() -> TestResult {
+    async fn test_cancel_template_provisioner_job_already_completed() -> TestResult {
         let store = match setup_store().await? {
             Some(s) => s,
             None => return Ok(()),

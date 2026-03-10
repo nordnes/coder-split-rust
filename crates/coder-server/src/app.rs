@@ -17244,6 +17244,7 @@ mod tests {
                     j.canceled_at = Some(now);
                     j.completed_at = Some(now);
                     j.job_status = "canceled".to_owned();
+                    j.updated_at = now;
                     Ok(true)
                 }
                 _ => Ok(false),
