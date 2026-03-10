@@ -104,13 +104,19 @@ where
                         "notification dispatch failed"
                     );
                 }
-                // Increment the attempt count so the MAX_DISPATCH_ATTEMPTS
-                // check above will eventually move the message to Failed.
+                // Increment the attempt count so exhausted messages can be
+                // identified and marked as permanently failed below.
                 let _ = self
                     .store
                     .increment_notification_message_attempt_count(message.id)
                     .await;
-                NotificationMessageStatus::Pending
+                // If this was the last allowed attempt, mark as permanent
+                // failure so the message is no longer eligible for retry.
+                if message.attempt_count + 1 >= MAX_DISPATCH_ATTEMPTS as i32 {
+                    NotificationMessageStatus::Failed
+                } else {
+                    NotificationMessageStatus::TemporaryFailure
+                }
             };
 
             let _ = self
