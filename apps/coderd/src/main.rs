@@ -5,12 +5,13 @@ use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 use async_trait::async_trait;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use coder_audit::{AuditEvent, AuditSink};
+use coder_core::pubsub::PubSub;
 use coder_core::{
     AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
     ExternalAuthLinkProvider, LogFormat, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError,
 };
-use coder_db::{DatabaseInitError, PostgresStore};
+use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
 use coder_server::{AppState, build_router};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -191,7 +192,14 @@ async fn run() -> Result<(), MainError> {
     let store = PostgresStore::connect(&config.database).await?;
     store.migrate().await?;
     let deployment_metadata = store.ensure_deployment_metadata().await?;
+    let pool = store.pool();
     let store: Arc<dyn AppStore> = Arc::new(store);
+
+    let pubsub: Arc<dyn PubSub> = Arc::new(
+        PostgresPubSub::new(pool)
+            .await
+            .map_err(|error| MainError::Config(format!("create pubsub: {error}")))?,
+    );
 
     let state = AppState::new(
         config.clone(),
@@ -199,6 +207,7 @@ async fn run() -> Result<(), MainError> {
         deployment_metadata.deployment_id,
         store.clone(),
         Arc::new(PersistingAuditSink::new(store)),
+        pubsub.clone(),
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
@@ -216,10 +225,18 @@ async fn run() -> Result<(), MainError> {
         "starting Rust coderd"
     );
 
-    axum::serve(listener, application.into_make_service())
+    let serve_result = axum::serve(listener, application.into_make_service())
         .with_graceful_shutdown(shutdown_signal())
         .await
-        .map_err(MainError::Serve)
+        .map_err(MainError::Serve);
+
+    // Shut down the pub/sub background listener task and release its dedicated
+    // PgListener database connection.
+    if let Err(close_err) = pubsub.close().await {
+        warn!(error = %close_err, "failed to close pubsub during shutdown");
+    }
+
+    serve_result
 }
 
 fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
@@ -314,12 +331,32 @@ async fn wait_for_shutdown_signal() -> Result<(), std::io::Error> {
 fn resource_kind_name(resource: coder_rbac::ResourceKind) -> &'static str {
     match resource {
         coder_rbac::ResourceKind::Authentication => "user",
-        coder_rbac::ResourceKind::User => "user",
-        coder_rbac::ResourceKind::Organization => "organization",
-        coder_rbac::ResourceKind::OrganizationMember => "organization_member",
-        coder_rbac::ResourceKind::ApiKey => "api_key",
-        coder_rbac::ResourceKind::GitSshKey => "git_ssh_key",
-        coder_rbac::ResourceKind::HealthSettings => "health_settings",
         coder_rbac::ResourceKind::ExternalAuth => "user",
+        coder_rbac::ResourceKind::Organization => "organization",
+        coder_rbac::ResourceKind::Template => "template",
+        coder_rbac::ResourceKind::TemplateVersion => "template_version",
+        coder_rbac::ResourceKind::User => "user",
+        coder_rbac::ResourceKind::Workspace => "workspace",
+        coder_rbac::ResourceKind::GitSshKey => "git_ssh_key",
+        coder_rbac::ResourceKind::ApiKey => "api_key",
+        coder_rbac::ResourceKind::Group => "group",
+        coder_rbac::ResourceKind::WorkspaceBuild => "workspace_build",
+        coder_rbac::ResourceKind::License => "license",
+        coder_rbac::ResourceKind::WorkspaceProxy => "workspace_proxy",
+        coder_rbac::ResourceKind::ConvertLogin => "convert_login",
+        coder_rbac::ResourceKind::HealthSettings => "health_settings",
+        coder_rbac::ResourceKind::Oauth2ProviderApp => "oauth2_provider_app",
+        coder_rbac::ResourceKind::Oauth2ProviderAppSecret => "oauth2_provider_app_secret",
+        coder_rbac::ResourceKind::CustomRole => "custom_role",
+        coder_rbac::ResourceKind::OrganizationMember => "organization_member",
+        coder_rbac::ResourceKind::NotificationsSettings => "notifications_settings",
+        coder_rbac::ResourceKind::NotificationTemplate => "notification_template",
+        coder_rbac::ResourceKind::IdpSyncSettingsOrganization => "idp_sync_settings_organization",
+        coder_rbac::ResourceKind::IdpSyncSettingsGroup => "idp_sync_settings_group",
+        coder_rbac::ResourceKind::IdpSyncSettingsRole => "idp_sync_settings_role",
+        coder_rbac::ResourceKind::WorkspaceAgent => "workspace_agent",
+        coder_rbac::ResourceKind::WorkspaceApp => "workspace_app",
+        coder_rbac::ResourceKind::PrebuildsSettings => "prebuilds_settings",
+        coder_rbac::ResourceKind::Task => "task",
     }
 }

@@ -22,12 +22,13 @@ use coder_auth::{
     supported_auth_methods,
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
+use coder_core::pubsub::PubSub;
 use coder_core::{
     ApiResponse, AppStore, AuditLogListFilter, AuthMethods, AuthenticatedUser,
-    AvailableExperiments, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
-    ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
-    CreateProvisionerJobInput, CreateTestAuditLogRequest, CreateTokenRequest,
-    CreateUserRequestWithOrgs, CreateWorkspaceBuildInput, CreateWorkspaceInput,
+    AuthorizationRequest, AvailableExperiments, BuildMetadata,
+    ChangePasswordWithOneTimePasscodeRequest, ConvertLoginRequest, CreateFirstUserRequest,
+    CreateFirstUserResponse, CreateProvisionerJobInput, CreateTestAuditLogRequest,
+    CreateTokenRequest, CreateUserRequestWithOrgs, CreateWorkspaceBuildInput, CreateWorkspaceInput,
     DeploymentConfigResponse, ExternalApiKeyScopes, ExternalAuthDeviceExchangeRequest,
     GetUsersResponse, HealthSettings, HealthcheckReport, LoginType, LoginWithPasswordRequest,
     OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
@@ -41,7 +42,7 @@ use coder_core::{
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
-use coder_rbac::{Actor, ROLE_AUDITOR, ResourceKind};
+use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
 use coder_workspaces::DeploymentStatsService;
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -135,6 +136,8 @@ pub struct AppState {
     pub store: Arc<dyn AppStore>,
     /// Structured audit sink for mutating and auth-related routes.
     pub audit: Arc<dyn AuditSink>,
+    /// Pub/sub event system for real-time event broadcasting.
+    pub pubsub: Arc<dyn PubSub>,
     auth: AuthService<Arc<dyn AppStore>>,
     identity: IdentityService<Arc<dyn AppStore>>,
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
@@ -150,6 +153,7 @@ impl AppState {
         deployment_id: Uuid,
         store: Arc<dyn AppStore>,
         audit: Arc<dyn AuditSink>,
+        pubsub: Arc<dyn PubSub>,
     ) -> Result<Self, reqwest::Error> {
         let auth = AuthService::new(store.clone());
         let identity = IdentityService::new(store.clone());
@@ -163,6 +167,7 @@ impl AppState {
             deployment_id,
             store,
             audit,
+            pubsub,
             auth,
             identity,
             deployment_stats,
@@ -458,7 +463,8 @@ pub fn build_router(state: AppState) -> Router {
                     "/users/{user}/workspace/{name}/builds/{number}",
                     get(get_user_workspace_build_by_number),
                 )
-                .route("/users/{user}/workspaces", post(post_user_workspace)),
+                .route("/users/{user}/workspaces", post(post_user_workspace))
+                .route("/authcheck", post(post_authcheck)),
         )
         .layer(
             TraceLayer::new_for_http()
@@ -2468,6 +2474,118 @@ async fn delete_user(
         .into_response())
 }
 
+async fn post_authcheck(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<AuthorizationRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // Limit the number of resource_id lookups to prevent abuse.
+    let max_id_fetch = 10;
+    let id_fetch_count = request
+        .checks
+        .values()
+        .filter(|c| !c.object.resource_id.is_empty())
+        .count();
+    if id_fetch_count > max_id_fetch {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                format!(
+                    "Endpoint only supports using \"resource_id\" field {max_id_fetch} times, found {id_fetch_count} usages. Remove {} objects with this field set.",
+                    id_fetch_count - max_id_fetch,
+                ),
+                "Too many resource_id lookups.",
+            )),
+        )
+            .into_response());
+    }
+
+    let authorizer = Authorizer::new();
+    let mut response = HashMap::new();
+
+    for (key, check) in &request.checks {
+        if check.object.resource_type.is_empty() {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    format!("Object's \"resource_type\" field must be defined for key \"{key}\"."),
+                    "Missing resource_type.",
+                )),
+            )
+                .into_response());
+        }
+
+        let resource_type = match ResourceType::from_str_opt(&check.object.resource_type) {
+            Some(rt) => rt,
+            None => {
+                response.insert(key.clone(), false);
+                continue;
+            }
+        };
+
+        let action = match serde_json::from_value::<Action>(Value::String(check.action.clone())) {
+            Ok(a) => a,
+            Err(_) => {
+                response.insert(key.clone(), false);
+                continue;
+            }
+        };
+
+        let mut obj = Object::new(resource_type);
+
+        // Parse owner_id.
+        if !check.object.owner_id.is_empty() {
+            let owner_str = if check.object.owner_id == "me" {
+                context.actor.user_id.to_string()
+            } else {
+                check.object.owner_id.clone()
+            };
+            if let Ok(owner_id) = Uuid::parse_str(&owner_str) {
+                obj = obj.with_owner(owner_id);
+            }
+        }
+
+        // Parse organization_id.
+        if !check.object.organization_id.is_empty() {
+            if let Ok(org_id) = Uuid::parse_str(&check.object.organization_id) {
+                obj = obj.in_org(org_id);
+            }
+        } else if check.object.any_org {
+            obj = obj.any_organization();
+        }
+
+        // Parse resource_id.
+        if !check.object.resource_id.is_empty() {
+            if let Ok(res_id) = Uuid::parse_str(&check.object.resource_id) {
+                obj = obj.with_id(res_id);
+            } else {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(
+                        format!("Object \"{key}\" resource_id is not a valid uuid.",),
+                        "Invalid resource_id.",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+
+        let result = authorizer.authorize(&context.actor, action, &obj).is_ok();
+        response.insert(key.clone(), result);
+    }
+
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
 async fn authenticate_request(
     state: &AppState,
     headers: &HeaderMap,
@@ -4377,10 +4495,25 @@ mod tests {
                 .get(&user_id)
                 .cloned()
                 .ok_or_else(|| StorageError::invalid_data("missing user for session"))?;
+            let mut auth_user = AuthenticatedUser::from(user);
+            // Populate org_roles from organization member records.
+            let members = self
+                .organization_members
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            for ((_, member_user_id), member) in members.iter() {
+                if *member_user_id == user_id {
+                    for role in &member.roles {
+                        auth_user
+                            .org_roles
+                            .push(format!("{}:{}", role.name, member.organization_id));
+                    }
+                }
+            }
             self.sessions
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?
-                .insert(token_hash.to_vec(), AuthenticatedUser::from(user));
+                .insert(token_hash.to_vec(), auth_user);
             Ok(())
         }
 
@@ -5783,6 +5916,8 @@ mod tests {
         let store = Arc::new(FakeStore::new(health_ok));
         let store_trait: Arc<dyn AppStore> = store.clone();
         let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
 
         Ok((
             AppState::new(
@@ -5791,6 +5926,7 @@ mod tests {
                 Uuid::nil(),
                 store_trait,
                 audit,
+                pubsub,
             )?,
             store,
         ))
@@ -7118,7 +7254,7 @@ mod tests {
         .await?;
         assert_eq!(site_roles_response.status(), StatusCode::OK);
         let site_roles_body = response_json(site_roles_response).await?;
-        assert_eq!(site_roles_body.as_array().map(Vec::len), Some(4));
+        assert_eq!(site_roles_body.as_array().map(Vec::len), Some(5));
 
         let update_roles_response = call(
             app.clone(),
@@ -7237,7 +7373,7 @@ mod tests {
         .await?;
         assert_eq!(org_roles_response.status(), StatusCode::OK);
         let org_roles_body = response_json(org_roles_response).await?;
-        assert_eq!(org_roles_body.as_array().map(Vec::len), Some(4));
+        assert_eq!(org_roles_body.as_array().map(Vec::len), Some(5));
 
         let update_member_roles_response = call(
             app.clone(),
