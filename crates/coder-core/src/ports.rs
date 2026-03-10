@@ -2286,6 +2286,33 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         task_notification_alert_dismissed: bool,
     ) -> Result<Option<UserPreferenceRecord>, StorageError>;
 
+    // ----- User identity supplements -----
+
+    /// Deletes a user configuration value.
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        let _ = (user_id, key);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Lists user links for a user.
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Lists status changes for a user.
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "user status changes are not implemented",
+        ))
+    }
+
     /// Lists organizations, optionally filtering by identifiers.
     async fn list_organizations(
         &self,
@@ -4965,6 +4992,21 @@ where
     ) -> Result<bool, StorageError> {
         AppStore::delete_group_member(self, group_id, user_id).await
     }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        AppStore::delete_user_config(self, user_id, key).await
+    }
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        AppStore::list_user_links(self, user_id).await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        AppStore::list_user_status_changes(self, user_id).await
+    }
 }
 
 #[async_trait]
@@ -5171,6 +5213,21 @@ where
         user_id: Uuid,
     ) -> Result<bool, StorageError> {
         (**self).delete_group_member(group_id, user_id).await
+    }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        (**self).delete_user_config(user_id, key).await
+    }
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        (**self).list_user_links(user_id).await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        (**self).list_user_status_changes(user_id).await
     }
 }
 

@@ -42,15 +42,15 @@ use coder_core::{
     ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
     StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
     UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-    UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-    WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
-    WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
-    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
-    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
-    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
-    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
-    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    UserAppearanceRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+    UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
+    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -626,6 +626,27 @@ struct StoredWorkspaceResourceMetadataRow {
     key: String,
     value: String,
     sensitive: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredUserLinkRow {
+    user_id: Uuid,
+    login_type: String,
+    linked_id: String,
+    oauth_access_token: String,
+    oauth_refresh_token: String,
+    oauth_expiry: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredUserStatusChangeRow {
+    id: Uuid,
+    user_id: Uuid,
+    new_status: String,
+    old_status: String,
+    changed_at: OffsetDateTime,
+    changed_by: Option<Uuid>,
+    reason: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -1472,6 +1493,69 @@ impl AppStore for PostgresStore {
         Ok(row.map(|row| UserPreferenceRecord {
             task_notification_alert_dismissed: row.task_notification_alert_dismissed,
         }))
+    }
+
+    // ----- User identity supplements -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM user_configs WHERE user_id = $1 AND key = $2")
+            .bind(user_id)
+            .bind(key)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredUserLinkRow>(
+            "SELECT
+                user_id,
+                login_type::text AS login_type,
+                linked_id,
+                oauth_access_token,
+                oauth_refresh_token,
+                oauth_expiry
+             FROM user_links
+             WHERE user_id = $1",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(user_link_record_from_row).collect()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredUserStatusChangeRow>(
+            "SELECT
+                id,
+                user_id,
+                new_status::text AS new_status,
+                old_status::text AS old_status,
+                changed_at,
+                changed_by,
+                reason
+             FROM user_status_changes
+             WHERE user_id = $1
+             ORDER BY changed_at ASC",
+        )
+        .bind(user_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(user_status_change_record_from_row)
+            .collect()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -8085,4 +8169,41 @@ fn workspace_app_status_row_from_stored(row: StoredWorkspaceAppStatusRow) -> Wor
         message: row.message,
         uri: row.uri,
     }
+}
+
+fn user_link_record_from_row(row: StoredUserLinkRow) -> Result<UserLinkRecord, StorageError> {
+    let login_type = row
+        .login_type
+        .parse::<LoginType>()
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    Ok(UserLinkRecord {
+        user_id: row.user_id,
+        login_type,
+        linked_id: row.linked_id,
+        oauth_access_token: row.oauth_access_token,
+        oauth_refresh_token: row.oauth_refresh_token,
+        oauth_expiry: row.oauth_expiry,
+    })
+}
+
+fn user_status_change_record_from_row(
+    row: StoredUserStatusChangeRow,
+) -> Result<UserStatusChangeRecord, StorageError> {
+    let new_status = row
+        .new_status
+        .parse::<UserStatus>()
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    let old_status = row
+        .old_status
+        .parse::<UserStatus>()
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    Ok(UserStatusChangeRecord {
+        id: row.id,
+        user_id: row.user_id,
+        new_status,
+        old_status,
+        changed_at: row.changed_at,
+        changed_by: row.changed_by,
+        reason: row.reason,
+    })
 }
