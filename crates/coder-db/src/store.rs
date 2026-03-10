@@ -11730,7 +11730,10 @@ mod tests {
         // Get default appearance
         let appearance = store.user_appearance(user_id).await?;
         // Should return defaults (empty strings)
-        assert!(appearance.theme_preference.is_empty() || !appearance.theme_preference.is_empty());
+        assert!(
+            appearance.theme_preference.is_empty(),
+            "default theme_preference should be empty"
+        );
 
         // Update appearance
         let updated = store
