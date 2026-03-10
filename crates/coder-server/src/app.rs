@@ -11462,25 +11462,25 @@ mod tests {
     use coder_core::{
         AcquireProvisionerJobInput, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord,
         AppStore, AuditLog, AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
-        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatMessageRecord,
-        ChatQueuedMessageRecord, ChatRecord, ChatStatus, CompleteProvisionerJobInput,
-        ConvertLoginRequest, CreateApiKeyInput, CreateApiKeyStoreError, CreateChatMessageRequest,
-        CreateChatRequest, CreateFirstUserInput, CreateFirstUserRequest, CreateFirstUserStoreError,
-        CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
-        CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
-        CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
-        CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
-        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertAgentLogInput,
-        InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult,
-        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
-        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, InsertTaskInput,
-        InsertWorkspaceAppStatusInput, LogFormat, LoginType, LoginWithPasswordRequest,
-        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
-        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
-        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatInputPart,
+        ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
+        CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
+        CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
+        CreateFirstUserRequest, CreateFirstUserStoreError, CreateProvisionerJobInput,
+        CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest, CreateTemplateStoreError,
+        CreateTemplateVersionInput, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
+        CreateUserRequestWithOrgs, CreateUserStoreError, CreateWorkspaceBuildInput,
+        CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
+        DeploymentStore, DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider,
+        ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, GetJobsToBeReapedInput,
+        GitSshKeyRecord, HealthSettings, InsertAgentLogInput, InsertChatInput,
+        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LogFormat,
+        LoginType, LoginWithPasswordRequest, OrganizationMemberListFilter,
+        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
+        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
+        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
@@ -11670,6 +11670,34 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(workspace.id, workspace);
+            Ok(())
+        }
+
+        /// Sets the status of a task in the fake store (for testing state transitions).
+        fn set_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<(), StorageError> {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(task) = tasks.get_mut(&task_id) {
+                task.status = status;
+            }
+            Ok(())
+        }
+
+        /// Sets the workspace_id of a task in the fake store (for testing pause/resume).
+        fn set_task_workspace_id(
+            &self,
+            task_id: Uuid,
+            workspace_id: Uuid,
+        ) -> Result<(), StorageError> {
+            let mut tasks = self
+                .tasks
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(task) = tasks.get_mut(&task_id) {
+                task.workspace_id = Some(workspace_id);
+            }
             Ok(())
         }
 
@@ -19057,6 +19085,324 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn task_send_input_active_task() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Build a dashboard".to_string(),
+                    name: Some("send-test".to_string()),
+                    display_name: Some("Send Test".to_string()),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+
+        // Transition task to active status so send is allowed.
+        store.set_task_status(task_id, TaskStatus::Active)?;
+
+        // Send input to the active task — should return 204 No Content.
+        let send_response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/send"),
+                &session_token,
+                &TaskSendRequest {
+                    input: "Add a dark-mode toggle".to_string(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(send_response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_pause_with_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Run a long build".to_string(),
+                    name: Some("pause-test".to_string()),
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+
+        // Assign a workspace so the pause check passes.
+        let workspace_id = Uuid::new_v4();
+        store.set_task_workspace_id(task_id, workspace_id)?;
+
+        // Pause the task — should return 202 Accepted.
+        let pause_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/pause"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(pause_response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(pause_response.into_body(), 1_000_000).await?;
+        let pause_body: Value = serde_json::from_slice(&body)?;
+        // workspace_build is None and skipped during serialisation,
+        // so the response body is an empty JSON object.
+        assert!(pause_body.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_resume_with_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Deploy the service".to_string(),
+                    name: Some("resume-test".to_string()),
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+
+        // Assign a workspace so the resume check passes.
+        let workspace_id = Uuid::new_v4();
+        store.set_task_workspace_id(task_id, workspace_id)?;
+
+        // Resume the task — should return 202 Accepted.
+        let resume_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/resume"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resume_response.status(), StatusCode::ACCEPTED);
+        let body = to_bytes(resume_response.into_body(), 1_000_000).await?;
+        let resume_body: Value = serde_json::from_slice(&body)?;
+        // workspace_build is None and skipped during serialisation,
+        // so the response body is an empty JSON object.
+        assert!(resume_body.is_object());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_patch_input_when_paused() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a task
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Original prompt".to_string(),
+                    name: Some("patch-input-test".to_string()),
+                    display_name: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+        assert_eq!(task["initial_prompt"], "Original prompt");
+
+        // Transition task to paused status so input update is allowed.
+        store.set_task_status(task_id, TaskStatus::Paused)?;
+
+        // Patch the task input — should return 204 No Content.
+        let patch_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/tasks/me/{task_id}/input"),
+                &session_token,
+                &json!({ "input": "Updated prompt with new requirements" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify the prompt was updated by fetching the task.
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(
+            fetched["initial_prompt"],
+            "Updated prompt with new requirements"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn task_full_lifecycle_with_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // 1. Create
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/tasks/me",
+                &session_token,
+                &CreateTaskRequest {
+                    template_version_id: Uuid::new_v4(),
+                    input: "Full lifecycle test".to_string(),
+                    name: Some("lifecycle-full".to_string()),
+                    display_name: Some("Full Lifecycle".to_string()),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let task: Value = serde_json::from_slice(&body)?;
+        let task_id_str = task["id"].as_str().ok_or("missing task id")?;
+        let task_id: Uuid = task_id_str.parse()?;
+        assert_eq!(task["name"], "lifecycle-full");
+        assert_eq!(task["status"], "pending");
+
+        // 2. Assign workspace and set active
+        let workspace_id = Uuid::new_v4();
+        store.set_task_workspace_id(task_id, workspace_id)?;
+        store.set_task_status(task_id, TaskStatus::Active)?;
+
+        // 3. Send input while active
+        let send_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/send"),
+                &session_token,
+                &TaskSendRequest {
+                    input: "Please also add tests".to_string(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(send_response.status(), StatusCode::NO_CONTENT);
+
+        // 4. Pause
+        let pause_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/pause"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(pause_response.status(), StatusCode::ACCEPTED);
+
+        // 5. Update status to paused in store and patch input
+        store.set_task_status(task_id, TaskStatus::Paused)?;
+        let patch_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/tasks/me/{task_id}/input"),
+                &session_token,
+                &json!({ "input": "Revised requirements after pause" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::NO_CONTENT);
+
+        // 6. Resume
+        let resume_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/tasks/me/{task_id}/resume"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resume_response.status(), StatusCode::ACCEPTED);
+
+        // 7. Delete
+        let delete_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/tasks/me/{task_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::ACCEPTED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn task_not_found_returns_404() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
@@ -19230,6 +19576,287 @@ mod tests {
         let body = to_bytes(msg_response.into_body(), 1_000_000).await?;
         let msg: Value = serde_json::from_slice(&body)?;
         assert!(!msg["queued"].as_bool().unwrap_or(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_create_with_text_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a chat with actual text content
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "Hello, I need help with my project".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+
+        // Validate the chat object
+        let chat = &chat_with_messages["chat"];
+        assert!(chat["id"].as_str().is_some());
+        assert_eq!(chat["title"], "New Chat");
+
+        // Validate the initial message was stored
+        let messages = chat_with_messages["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        assert_eq!(messages.len(), 1);
+        assert_eq!(messages[0]["role"], "user");
+
+        // Verify content is present in the message
+        let msg_content = &messages[0]["content"];
+        assert!(msg_content.is_array() || msg_content.is_string() || msg_content.is_object());
+
+        // Verify we can retrieve the chat and its messages
+        let chat_id = chat["id"].as_str().ok_or("missing chat id")?;
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        assert_eq!(fetched["chat"]["id"], chat_id);
+        let fetched_messages = fetched["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        assert_eq!(fetched_messages.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_post_message_with_text_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a chat first
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "Initial question".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        // Post a follow-up message with text content
+        let msg_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/messages"),
+                &session_token,
+                &CreateChatMessageRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "Can you elaborate on step 2?".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(msg_response.status(), StatusCode::OK);
+        let body = to_bytes(msg_response.into_body(), 1_000_000).await?;
+        let msg: Value = serde_json::from_slice(&body)?;
+        assert!(!msg["queued"].as_bool().unwrap_or(true));
+
+        // Verify message was persisted by getting the chat again
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        let messages = fetched["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        // Should have the initial message + the follow-up
+        assert_eq!(messages.len(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn chat_full_lifecycle_with_content() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // 1. Create chat with content
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &session_token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "How do I deploy my app?".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let body = to_bytes(create_response.into_body(), 1_000_000).await?;
+        let chat_with_messages: Value = serde_json::from_slice(&body)?;
+        let chat_id = chat_with_messages["chat"]["id"]
+            .as_str()
+            .ok_or("missing chat id")?;
+
+        // 2. List chats — should contain our new chat
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/chats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let body = to_bytes(list_response.into_body(), 1_000_000).await?;
+        let chats: Value = serde_json::from_slice(&body)?;
+        let chats_arr = chats.as_array().ok_or("expected array")?;
+        assert_eq!(chats_arr.len(), 1);
+        assert_eq!(chats_arr[0]["id"], chat_id);
+
+        // 3. Post a follow-up message
+        let msg_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/messages"),
+                &session_token,
+                &CreateChatMessageRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "What about Docker?".to_string(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(msg_response.status(), StatusCode::OK);
+
+        // 4. Get chat — should have 2 messages
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = to_bytes(get_response.into_body(), 1_000_000).await?;
+        let fetched: Value = serde_json::from_slice(&body)?;
+        let messages = fetched["messages"]
+            .as_array()
+            .ok_or("expected messages array")?;
+        assert_eq!(messages.len(), 2);
+
+        // 5. Archive the chat
+        let archive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/archive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_response.status(), StatusCode::NO_CONTENT);
+
+        // 6. Unarchive the chat
+        let unarchive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/unarchive"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_response.status(), StatusCode::NO_CONTENT);
+
+        // 7. Delete the chat
+        let delete_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/chats/{chat_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::OK);
         Ok(())
     }
 
