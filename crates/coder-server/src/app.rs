@@ -6864,41 +6864,48 @@ async fn get_workspace_watch(
     let viewer_id = context.user.id;
     tokio::spawn(async move {
         loop {
-            let msg: Result<Vec<u8>, _> = subscription.recv().await;
-            match msg {
-                Ok(bytes) => {
-                    // Parse the workspace event to filter by workspace_id.
-                    // Skip messages that fail to parse or belong to a different workspace.
-                    match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
-                        Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
-                        _ => continue,
-                    }
+            // Race pub/sub recv against client disconnect (rx dropped → tx.closed()).
+            tokio::select! {
+                msg = subscription.recv() => {
+                    match msg {
+                        Ok(bytes) => {
+                            // Skip messages that fail to parse or belong to a different workspace.
+                            match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
+                                Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
+                                _ => continue,
+                            }
 
-                    // Fetch fresh workspace state.
-                    match store
-                        .find_workspace_by_id(workspace_id, Some(viewer_id))
-                        .await
-                    {
-                        Ok(Some(w)) => {
-                            let data =
-                                serde_json::to_string(&workspace_to_json(&w)).unwrap_or_default();
-                            let sse = format!("event: data\ndata: {data}\n\n");
-                            if tx.send(sse).await.is_err() {
-                                break;
+                            // Fetch fresh workspace state.
+                            match store
+                                .find_workspace_by_id(workspace_id, Some(viewer_id))
+                                .await
+                            {
+                                Ok(Some(w)) => {
+                                    let data =
+                                        serde_json::to_string(&workspace_to_json(&w)).unwrap_or_default();
+                                    let sse = format!("event: data\ndata: {data}\n\n");
+                                    if tx.send(sse).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    let err_data = serde_json::to_string(&json!({
+                                        "message": "Internal error fetching workspace."
+                                    }))
+                                    .unwrap_or_default();
+                                    let sse = format!("event: error\ndata: {err_data}\n\n");
+                                    let _ = tx.send(sse).await;
+                                }
                             }
                         }
-                        Ok(None) => break,
-                        Err(_) => {
-                            let err_data = serde_json::to_string(&json!({
-                                "message": "Internal error fetching workspace."
-                            }))
-                            .unwrap_or_default();
-                            let sse = format!("event: error\ndata: {err_data}\n\n");
-                            let _ = tx.send(sse).await;
-                        }
+                        Err(_) => break,
                     }
                 }
-                Err(_) => break,
+                _ = tx.closed() => {
+                    // Client disconnected (rx was dropped).
+                    break;
+                }
             }
         }
     });
@@ -6968,37 +6975,48 @@ async fn get_workspace_watch_ws(
         };
 
         loop {
-            let msg: Result<Vec<u8>, _> = subscription.recv().await;
-            match msg {
-                Ok(bytes) => {
-                    // Skip messages that fail to parse or belong to a different workspace.
-                    match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
-                        Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
-                        _ => continue,
-                    }
+            // Race pub/sub recv against WebSocket client messages to detect disconnect.
+            tokio::select! {
+                msg = subscription.recv() => {
+                    match msg {
+                        Ok(bytes) => {
+                            // Skip messages that fail to parse or belong to a different workspace.
+                            match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
+                                Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
+                                _ => continue,
+                            }
 
-                    match store
-                        .find_workspace_by_id(workspace_id, Some(viewer_id))
-                        .await
-                    {
-                        Ok(Some(w)) => {
-                            let data =
-                                serde_json::to_string(&workspace_to_json(&w)).unwrap_or_default();
-                            if socket.send(Message::Text(data.into())).await.is_err() {
-                                break;
+                            match store
+                                .find_workspace_by_id(workspace_id, Some(viewer_id))
+                                .await
+                            {
+                                Ok(Some(w)) => {
+                                    let data =
+                                        serde_json::to_string(&workspace_to_json(&w)).unwrap_or_default();
+                                    if socket.send(Message::Text(data.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    let err = serde_json::to_string(&json!({
+                                        "message": "Internal error fetching workspace."
+                                    }))
+                                    .unwrap_or_default();
+                                    let _ = socket.send(Message::Text(err.into())).await;
+                                }
                             }
                         }
-                        Ok(None) => break,
-                        Err(_) => {
-                            let err = serde_json::to_string(&json!({
-                                "message": "Internal error fetching workspace."
-                            }))
-                            .unwrap_or_default();
-                            let _ = socket.send(Message::Text(err.into())).await;
-                        }
+                        Err(_) => break,
                     }
                 }
-                Err(_) => break,
+                ws_msg = socket.recv() => {
+                    // Client sent a close frame or disconnected.
+                    match ws_msg {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        _ => { /* ignore other client messages */ }
+                    }
+                }
             }
         }
     }))
