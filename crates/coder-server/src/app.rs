@@ -17239,12 +17239,21 @@ mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             match jobs.get_mut(&job_id) {
-                Some(j) => {
-                    j.canceled_at = Some(OffsetDateTime::now_utc());
-                    j.job_status = "canceling".to_owned();
+                Some(j) if j.canceled_at.is_none() && j.completed_at.is_none() => {
+                    let now = OffsetDateTime::now_utc();
+                    j.canceled_at = Some(now);
+                    // Only complete immediately if no worker has picked up the job
+                    // (matches Go semantics: !job.WorkerID.Valid)
+                    if j.worker_id.is_none() {
+                        j.completed_at = Some(now);
+                        j.job_status = "canceled".to_owned();
+                    } else {
+                        j.job_status = "canceling".to_owned();
+                    }
+                    j.updated_at = now;
                     Ok(true)
                 }
-                None => Ok(false),
+                _ => Ok(false),
             }
         }
 
