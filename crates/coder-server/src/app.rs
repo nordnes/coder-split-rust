@@ -3184,7 +3184,7 @@ async fn create_task(
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok((
             StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("User not found.", "")),
+            Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
     };
@@ -3193,7 +3193,7 @@ async fn create_task(
     if target_user.id != context.user.id {
         return Ok((
             StatusCode::NOT_FOUND,
-            Json(ApiResponse::error("User not found.", "")),
+            Json(ApiResponse::error("Task not found.", "")),
         )
             .into_response());
     }
@@ -3444,7 +3444,7 @@ async fn get_task_logs(
                 StatusCode::CONFLICT,
                 Json(ApiResponse::error(
                     "Cannot fetch logs for task in current state.",
-                    format!("Task status is {:?}.", record.status),
+                    format!("Task status is {}.", record.status),
                 )),
             )
                 .into_response());
@@ -3509,7 +3509,7 @@ async fn post_task_send(
     };
 
     // Validate non-empty input.
-    if request.input.is_empty() {
+    if request.input.trim().is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error("Task input is required.", "")),
@@ -3546,7 +3546,7 @@ async fn post_task_send(
                 Json(ApiResponse::error(
                     "Task must be active.",
                     format!(
-                        "Task status is {:?}, it must be \"active\" to interact with the task.",
+                        "Task status is {}, it must be \"active\" to interact with the task.",
                         record.status
                     ),
                 )),
