@@ -2303,15 +2303,22 @@ where
             .store
             .list_oauth2_provider_app_secrets(code_record.app_id)
             .await?;
-        // Iterate ALL secrets without short-circuiting so the total elapsed
-        // time does not reveal which position matched (prevents timing
-        // side-channel that `find()` would introduce).
-        let mut matched_secret = None;
-        for s in secrets {
-            if bool::from(s.hashed_secret.as_slice().ct_eq(secret_hash.as_slice())) {
-                matched_secret = Some(s);
-            }
-        }
+        // Iterate ALL secrets without short-circuiting so total elapsed time
+        // does not reveal which position matched (prevents timing side-channel).
+        // Use fold (like refresh_token) to avoid conditional struct moves that
+        // could leak timing via heap allocation differences.
+        let secret_valid = secrets.iter().fold(false, |acc, s| {
+            acc | bool::from(s.hashed_secret.as_slice().ct_eq(secret_hash.as_slice()))
+        });
+        // The second pass to find the matched secret is NOT timing-sensitive
+        // because the constant-time validity check above already completed.
+        let matched_secret = if secret_valid {
+            secrets
+                .into_iter()
+                .find(|s| bool::from(s.hashed_secret.as_slice().ct_eq(secret_hash.as_slice())))
+        } else {
+            None
+        };
         let matched_secret = match matched_secret {
             Some(s) => s,
             None => {

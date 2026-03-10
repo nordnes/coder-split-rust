@@ -44,6 +44,9 @@ CREATE TABLE IF NOT EXISTS oauth2_provider_app_codes (
 CREATE INDEX IF NOT EXISTS idx_oauth2_provider_app_codes_app_id
     ON oauth2_provider_app_codes (app_id);
 
+CREATE INDEX IF NOT EXISTS idx_oauth2_provider_app_codes_secret_prefix
+    ON oauth2_provider_app_codes (secret_prefix);
+
 CREATE INDEX IF NOT EXISTS idx_oauth2_provider_app_codes_user_id
     ON oauth2_provider_app_codes (user_id);
 
