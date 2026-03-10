@@ -20,6 +20,7 @@ coder-identity = { path = "../coder-identity" }
 coder-provisioner = { path = "../coder-provisioner" }
 coder-rbac = { path = "../coder-rbac" }
 coder-workspaces = { path = "../coder-workspaces" }
+futures-util.workspace = true
 http.workspace = true
 metrics.workspace = true
 reqwest.workspace = true
@@ -29,6 +30,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-stream.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
 url.workspace = true

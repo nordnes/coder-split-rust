@@ -85,6 +85,7 @@ pub struct InsertTaskInput {
 pub struct TaskListFilter {
     pub owner_id: Option<Uuid>,
     pub organization_id: Option<Uuid>,
+    pub status: Option<TaskStatus>,
 }
 
 /// A task log snapshot record.
@@ -630,6 +631,19 @@ pub struct WorkspaceBuildParameterRecord {
     pub value: String,
 }
 
+/// Stored workspace resource metadata record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceResourceMetadataRecord {
+    /// Resource identifier.
+    pub workspace_resource_id: Uuid,
+    /// Metadata key.
+    pub key: String,
+    /// Metadata value.
+    pub value: String,
+    /// Whether the value is sensitive.
+    pub sensitive: bool,
+}
+
 /// Stored workspace agent port share record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceAgentPortShareRecord {
@@ -681,6 +695,29 @@ pub struct ProvisionerJobTimingRecord {
     pub action: String,
     /// Resource.
     pub resource: String,
+}
+
+/// Stored workspace agent script timing row (joined from script timings + agents).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentScriptTimingRow {
+    /// Script identifier.
+    pub script_id: Uuid,
+    /// Start time.
+    pub started_at: OffsetDateTime,
+    /// End time.
+    pub ended_at: OffsetDateTime,
+    /// Exit code.
+    pub exit_code: i32,
+    /// Timing stage.
+    pub stage: String,
+    /// Timing status.
+    pub status: String,
+    /// Display name.
+    pub display_name: String,
+    /// Workspace agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Workspace agent name.
+    pub workspace_agent_name: String,
 }
 
 /// Filter for listing workspaces.
@@ -2624,6 +2661,16 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("tasks are not implemented"))
     }
 
+    /// Fetches a task by owner ID and name.
+    async fn find_task_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TaskRecord>, StorageError> {
+        let _ = (owner_id, name);
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
     /// Lists tasks matching the supplied filter.
     async fn list_tasks(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, StorageError> {
         let _ = filter;
@@ -3213,6 +3260,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
+    /// Lists workspace agent script timings for a build.
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        let _ = build_id;
+        Err(StorageError::unavailable(
+            "workspace agent script timings are not implemented",
+        ))
+    }
+
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
         &self,
@@ -3221,6 +3279,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = job_id;
         Err(StorageError::unavailable(
             "workspace resources are not implemented",
+        ))
+    }
+
+    /// Lists metadata for a set of workspace resources.
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        let _ = resource_ids;
+        Err(StorageError::unavailable(
+            "workspace resource metadata is not implemented",
         ))
     }
 
@@ -4156,11 +4225,23 @@ pub trait WorkspaceStore: Send + Sync {
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
 
+    /// Lists workspace agent script timings for a build.
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError>;
+
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
         &self,
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError>;
+
+    /// Lists metadata for a set of workspace resources.
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError>;
 
     /// Lists port shares for a workspace.
     async fn list_workspace_port_shares(
@@ -5326,11 +5407,25 @@ where
         AppStore::list_provisioner_job_timings(self, job_id).await
     }
 
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        AppStore::list_workspace_agent_script_timings_by_build_id(self, build_id).await
+    }
+
     async fn list_workspace_resources_by_job(
         &self,
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
         AppStore::list_workspace_resources_by_job(self, job_id).await
+    }
+
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        AppStore::list_workspace_resource_metadata(self, resource_ids).await
     }
 
     async fn list_workspace_port_shares(
@@ -5635,11 +5730,29 @@ where
         (**self).list_provisioner_job_timings(job_id).await
     }
 
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        (**self)
+            .list_workspace_agent_script_timings_by_build_id(build_id)
+            .await
+    }
+
     async fn list_workspace_resources_by_job(
         &self,
         job_id: Uuid,
     ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
         (**self).list_workspace_resources_by_job(job_id).await
+    }
+
+    async fn list_workspace_resource_metadata(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+        (**self)
+            .list_workspace_resource_metadata(resource_ids)
+            .await
     }
 
     async fn list_workspace_port_shares(

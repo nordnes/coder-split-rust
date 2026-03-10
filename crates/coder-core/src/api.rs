@@ -2339,6 +2339,22 @@ pub struct TaskLogSnapshotEnvelope {
     pub log_snapshot: Value,
 }
 
+/// PauseTaskResponse represents the response from pausing a task.
+#[derive(Clone, Debug, Serialize)]
+pub struct PauseTaskResponse {
+    /// Placeholder for the workspace build that was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_build: Option<Value>,
+}
+
+/// ResumeTaskResponse represents the response from resuming a task.
+#[derive(Clone, Debug, Serialize)]
+pub struct ResumeTaskResponse {
+    /// Placeholder for the workspace build that was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace_build: Option<Value>,
+}
+
 // ---------------------------------------------------------------------------
 // Chats
 // ---------------------------------------------------------------------------
@@ -3504,6 +3520,12 @@ pub struct WorkspaceResourceResponse {
     /// Daily cost.
     #[serde(default)]
     pub daily_cost: i32,
+    /// Agents running on this resource.
+    #[serde(default)]
+    pub agents: Vec<Value>,
+    /// Resource metadata annotations.
+    #[serde(default)]
+    pub metadata: Vec<WorkspaceResourceMetadata>,
 }
 
 /// Workspace resource metadata annotation.
@@ -3722,6 +3744,13 @@ pub struct CreateWorkspaceBuildRequest {
     /// Log level.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub log_level: Option<String>,
+}
+
+/// Request to update the provisioner state of a workspace build.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UpdateWorkspaceBuildStateRequest {
+    /// Raw provisioner state bytes (base64 encoded in JSON, matching Go []byte).
+    pub state: Vec<u8>,
 }
 
 /// Workspace quota information.
