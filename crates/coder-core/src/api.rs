@@ -2177,6 +2177,670 @@ pub struct CreateChatMessageApiResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Template & Template Version API types
+// ---------------------------------------------------------------------------
+
+/// Transition stats for build time aggregation.
+#[derive(Clone, Debug, Default, Serialize, PartialEq)]
+pub struct TransitionStats {
+    /// p50 build time in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p50: Option<i64>,
+    /// p95 build time in seconds.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub p95: Option<i64>,
+}
+
+/// Build time stats keyed by workspace transition (start/stop/delete).
+pub type TemplateBuildTimeStats = HashMap<String, TransitionStats>;
+
+/// Autostop requirement for a template (enterprise feature).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TemplateAutostopRequirement {
+    /// Days of the week on which restarts are required.
+    #[serde(default)]
+    pub days_of_week: Vec<String>,
+    /// Number of weeks between required restarts.
+    #[serde(default)]
+    pub weeks: i64,
+}
+
+/// Autostart requirement for a template (enterprise feature).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TemplateAutostartRequirement {
+    /// Days of the week on which autostart is allowed.
+    #[serde(default)]
+    pub days_of_week: Vec<String>,
+}
+
+/// A Coder template response.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct TemplateResponse {
+    /// Stable template identifier.
+    pub id: Uuid,
+    /// Template creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Last update time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+    /// Owning organization identifier.
+    pub organization_id: Uuid,
+    /// Organization name.
+    pub organization_name: String,
+    /// Organization display name.
+    pub organization_display_name: String,
+    /// Organization icon.
+    pub organization_icon: String,
+    /// Template slug name.
+    pub name: String,
+    /// Human-friendly display name.
+    pub display_name: String,
+    /// Provisioner type.
+    pub provisioner: String,
+    /// Active template version identifier.
+    pub active_version_id: Uuid,
+    /// Count of active users (-1 when loading).
+    pub active_user_count: i32,
+    /// Build time statistics.
+    pub build_time_stats: TemplateBuildTimeStats,
+    /// Template description.
+    pub description: String,
+    /// Whether the template is deprecated.
+    pub deprecated: bool,
+    /// Deprecation message when deprecated.
+    pub deprecation_message: String,
+    /// Deletion marker.
+    pub deleted: bool,
+    /// Icon URL or path.
+    pub icon: String,
+    /// Default TTL in milliseconds.
+    pub default_ttl_ms: i64,
+    /// Activity bump duration in milliseconds.
+    pub activity_bump_ms: i64,
+    /// Autostop requirement (enterprise).
+    pub autostop_requirement: TemplateAutostopRequirement,
+    /// Autostart requirement (enterprise).
+    pub autostart_requirement: TemplateAutostartRequirement,
+    /// Creator user identifier.
+    pub created_by_id: Uuid,
+    /// Creator username.
+    pub created_by_name: String,
+    /// Whether users can autostart.
+    pub allow_user_autostart: bool,
+    /// Whether users can autostop.
+    pub allow_user_autostop: bool,
+    /// Whether users can cancel workspace jobs.
+    pub allow_user_cancel_workspace_jobs: bool,
+    /// Failure TTL in milliseconds.
+    pub failure_ttl_ms: i64,
+    /// Time til dormant in milliseconds.
+    pub time_til_dormant_ms: i64,
+    /// Time til dormant auto-delete in milliseconds.
+    pub time_til_dormant_autodelete_ms: i64,
+    /// Whether active version is required for workspace builds.
+    pub require_active_version: bool,
+    /// Max port share level.
+    pub max_port_share_level: String,
+    /// CORS behavior.
+    pub cors_behavior: String,
+    /// Whether to use the classic parameter flow.
+    pub use_classic_parameter_flow: bool,
+    /// Whether the module cache is disabled.
+    pub disable_module_cache: bool,
+}
+
+/// Request to create a new template.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct CreateTemplateRequest {
+    /// Template name (slug).
+    pub name: String,
+    /// Human-friendly display name.
+    #[serde(default)]
+    pub display_name: String,
+    /// Template description.
+    #[serde(default)]
+    pub description: String,
+    /// Icon URL or path.
+    #[serde(default)]
+    pub icon: String,
+    /// ID of the template version to promote.
+    pub template_version_id: Uuid,
+    /// Default TTL in milliseconds.
+    #[serde(default)]
+    pub default_ttl_ms: i64,
+    /// Activity bump in milliseconds.
+    #[serde(default)]
+    pub activity_bump_ms: i64,
+    /// Whether users can cancel workspace jobs.
+    #[serde(default = "default_true")]
+    pub allow_user_cancel_workspace_jobs: bool,
+    /// Whether users can autostart.
+    #[serde(default = "default_true")]
+    pub allow_user_autostart: bool,
+    /// Whether users can autostop.
+    #[serde(default = "default_true")]
+    pub allow_user_autostop: bool,
+    /// Whether active version is required.
+    #[serde(default)]
+    pub require_active_version: bool,
+    /// Failure TTL in milliseconds.
+    #[serde(default)]
+    pub failure_ttl_ms: i64,
+    /// Time til dormant in milliseconds.
+    #[serde(default)]
+    pub time_til_dormant_ms: i64,
+    /// Time til dormant auto-delete in milliseconds.
+    #[serde(default)]
+    pub time_til_dormant_autodelete_ms: i64,
+    /// Disable everyone group access.
+    #[serde(default)]
+    pub disable_everyone_group_access: bool,
+    /// Max port share level.
+    #[serde(default)]
+    pub max_port_share_level: String,
+}
+
+fn default_true() -> bool {
+    true
+}
+
+/// Request to update template metadata.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct UpdateTemplateMeta {
+    /// New template name.
+    #[serde(default)]
+    pub name: String,
+    /// New display name.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// New description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// New icon.
+    #[serde(default)]
+    pub icon: Option<String>,
+    /// New default TTL in milliseconds.
+    #[serde(default)]
+    pub default_ttl_ms: Option<i64>,
+    /// New activity bump in milliseconds.
+    #[serde(default)]
+    pub activity_bump_ms: Option<i64>,
+    /// Allow user autostart.
+    #[serde(default)]
+    pub allow_user_autostart: Option<bool>,
+    /// Allow user autostop.
+    #[serde(default)]
+    pub allow_user_autostop: Option<bool>,
+    /// Allow user cancel workspace jobs.
+    #[serde(default)]
+    pub allow_user_cancel_workspace_jobs: Option<bool>,
+    /// Failure TTL in milliseconds.
+    #[serde(default)]
+    pub failure_ttl_ms: Option<i64>,
+    /// Time til dormant in milliseconds.
+    #[serde(default)]
+    pub time_til_dormant_ms: Option<i64>,
+    /// Time til dormant auto-delete in milliseconds.
+    #[serde(default)]
+    pub time_til_dormant_autodelete_ms: Option<i64>,
+    /// Require active version.
+    #[serde(default)]
+    pub require_active_version: Option<bool>,
+    /// Deprecation message.
+    #[serde(default)]
+    pub deprecation_message: Option<String>,
+    /// Max port share level.
+    #[serde(default)]
+    pub max_port_share_level: Option<String>,
+    /// CORS behavior.
+    #[serde(default)]
+    pub cors_behavior: Option<String>,
+    /// Use classic parameter flow.
+    #[serde(default)]
+    pub use_classic_parameter_flow: Option<bool>,
+    /// Disable module cache.
+    #[serde(default)]
+    pub disable_module_cache: Option<bool>,
+}
+
+/// A starter/example template.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct TemplateExample {
+    /// Example identifier.
+    pub id: String,
+    /// URL for the example.
+    pub url: String,
+    /// Human-readable name.
+    pub name: String,
+    /// Description.
+    pub description: String,
+    /// Icon URL.
+    pub icon: String,
+    /// Tags for the example.
+    pub tags: Vec<String>,
+    /// Markdown README.
+    pub markdown: String,
+}
+
+/// Provisioner job status.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvisionerJobStatus {
+    /// Job is pending.
+    #[default]
+    Pending,
+    /// Job is running.
+    Running,
+    /// Job succeeded.
+    Succeeded,
+    /// Job is being canceled.
+    Canceling,
+    /// Job was canceled.
+    Canceled,
+    /// Job failed.
+    Failed,
+}
+
+impl ProvisionerJobStatus {
+    /// Returns the canonical wire-format string.
+    #[must_use]
+    pub const fn as_str(&self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::Canceling => "canceling",
+            Self::Canceled => "canceled",
+            Self::Failed => "failed",
+        }
+    }
+
+    /// Parses a status string into the enum variant.
+    #[must_use]
+    pub fn from_str_opt(s: &str) -> Option<Self> {
+        match s {
+            "pending" => Some(Self::Pending),
+            "running" => Some(Self::Running),
+            "succeeded" => Some(Self::Succeeded),
+            "canceling" => Some(Self::Canceling),
+            "canceled" => Some(Self::Canceled),
+            "failed" => Some(Self::Failed),
+            _ => None,
+        }
+    }
+}
+
+/// A provisioner job response.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct ProvisionerJobResponse {
+    /// Job identifier.
+    pub id: Uuid,
+    /// Job creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Job start time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub started_at: Option<OffsetDateTime>,
+    /// Job completion time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub completed_at: Option<OffsetDateTime>,
+    /// Job cancellation time.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub canceled_at: Option<OffsetDateTime>,
+    /// Error text when the job failed.
+    #[serde(default)]
+    pub error: String,
+    /// Current job status.
+    pub status: ProvisionerJobStatus,
+    /// Worker identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub worker_id: Option<Uuid>,
+    /// File identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_id: Option<Uuid>,
+    /// Tags associated with the job.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub tags: HashMap<String, String>,
+    /// Queue position (0 when not queued).
+    #[serde(default)]
+    pub queue_position: i32,
+    /// Queue size.
+    #[serde(default)]
+    pub queue_size: i32,
+}
+
+/// A template version response.
+#[derive(Clone, Debug, Serialize, PartialEq)]
+pub struct TemplateVersionResponse {
+    /// Version identifier.
+    pub id: Uuid,
+    /// Owning template identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template_id: Option<Uuid>,
+    /// Organization identifier.
+    pub organization_id: Uuid,
+    /// Version creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Version update time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+    /// Version name (slug).
+    pub name: String,
+    /// Commit-style message.
+    pub message: String,
+    /// Provisioner job information.
+    pub job: ProvisionerJobResponse,
+    /// README content.
+    pub readme: String,
+    /// User who created the version.
+    pub created_by: MinimalUser,
+    /// Whether the version is archived.
+    pub archived: bool,
+    /// Warnings.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
+    /// Whether the version has an external agent.
+    #[serde(default)]
+    pub has_external_agent: bool,
+}
+
+/// Request to create a new template version.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CreateTemplateVersionRequest {
+    /// Template name.
+    #[serde(default)]
+    pub name: String,
+    /// Commit-style message.
+    #[serde(default)]
+    pub message: String,
+    /// Template ID to associate (optional for standalone versions).
+    #[serde(default)]
+    pub template_id: Option<Uuid>,
+    /// File reference ID.
+    #[serde(default)]
+    pub file_id: Option<Uuid>,
+    /// Source example ID.
+    #[serde(default)]
+    pub example_id: Option<String>,
+    /// Provisioner type.
+    #[serde(default)]
+    pub provisioner: String,
+    /// Workspace tags.
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
+    /// User-specified variable values.
+    #[serde(default)]
+    pub user_variable_values: Vec<VariableValue>,
+}
+
+/// A user-specified variable value for template version creation.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct VariableValue {
+    /// Variable name.
+    pub name: String,
+    /// Variable value.
+    pub value: String,
+}
+
+/// Request to update a template version.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq)]
+pub struct PatchTemplateVersionRequest {
+    /// New name.
+    #[serde(default)]
+    pub name: String,
+    /// New message.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
+/// A template version parameter option.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct TemplateVersionParameterOption {
+    /// Option name.
+    pub name: String,
+    /// Option description.
+    pub description: String,
+    /// Option value.
+    pub value: String,
+    /// Option icon.
+    pub icon: String,
+}
+
+/// A template version parameter.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct TemplateVersionParameter {
+    /// Parameter name.
+    pub name: String,
+    /// Display name.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub display_name: String,
+    /// Description.
+    pub description: String,
+    /// Plaintext description.
+    pub description_plaintext: String,
+    /// Parameter type.
+    #[serde(rename = "type")]
+    pub param_type: String,
+    /// Form type.
+    pub form_type: String,
+    /// Whether the parameter is mutable.
+    pub mutable: bool,
+    /// Default value.
+    pub default_value: String,
+    /// Icon.
+    pub icon: String,
+    /// Selectable options.
+    pub options: Vec<TemplateVersionParameterOption>,
+    /// Validation error.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub validation_error: String,
+    /// Validation regex.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub validation_regex: String,
+    /// Minimum validation value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_min: Option<i32>,
+    /// Maximum validation value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validation_max: Option<i32>,
+    /// Monotonic order validation.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub validation_monotonic: String,
+    /// Whether the parameter is required.
+    pub required: bool,
+    /// Whether the parameter is ephemeral.
+    pub ephemeral: bool,
+}
+
+/// A template version variable.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct TemplateVersionVariable {
+    /// Variable name.
+    pub name: String,
+    /// Variable description.
+    pub description: String,
+    /// Variable type.
+    #[serde(rename = "type")]
+    pub var_type: String,
+    /// Variable value.
+    pub value: String,
+    /// Default value.
+    pub default_value: String,
+    /// Whether the variable is required.
+    pub required: bool,
+    /// Whether the variable is sensitive.
+    pub sensitive: bool,
+}
+
+/// A template version preset.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct TemplateVersionPreset {
+    /// Preset identifier.
+    pub id: Uuid,
+    /// Template version identifier.
+    pub template_version_id: Uuid,
+    /// Preset name.
+    pub name: String,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Whether this is the default preset.
+    pub is_default: bool,
+    /// Description.
+    pub description: String,
+    /// Icon.
+    pub icon: String,
+}
+
+/// A template version preset parameter.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct TemplateVersionPresetParameter {
+    /// Preset parameter identifier.
+    pub id: Uuid,
+    /// Owning preset identifier.
+    pub template_version_preset_id: Uuid,
+    /// Parameter name.
+    pub name: String,
+    /// Parameter value.
+    pub value: String,
+}
+
+/// External auth requirement for a template version.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct TemplateVersionExternalAuth {
+    /// Provider identifier.
+    pub id: String,
+    /// Provider type.
+    #[serde(rename = "type")]
+    pub provider_type: String,
+    /// Display name.
+    pub display_name: String,
+    /// Display icon.
+    pub display_icon: String,
+    /// Authenticate URL.
+    pub authenticate_url: String,
+    /// Whether the user is authenticated.
+    pub authenticated: bool,
+    /// Whether the provider is optional.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub optional: bool,
+}
+
+/// Dry-run request for a template version.
+#[derive(Clone, Debug, Deserialize, PartialEq)]
+pub struct CreateTemplateVersionDryRunRequest {
+    /// Workspace name.
+    #[serde(default)]
+    pub workspace_name: String,
+    /// Parameter values.
+    #[serde(default)]
+    pub rich_parameter_values: Vec<WorkspaceBuildParameter>,
+    /// User variable values.
+    #[serde(default)]
+    pub user_variable_values: Vec<VariableValue>,
+}
+
+/// A workspace build parameter value.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WorkspaceBuildParameter {
+    /// Parameter name.
+    pub name: String,
+    /// Parameter value.
+    pub value: String,
+}
+
+/// DAU (Daily Active Users) response for a template.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct DAUsResponse {
+    /// Daily entries.
+    pub entries: Vec<DAUEntry>,
+    /// Timezone offset used for aggregation.
+    pub tz_hour_offset: i32,
+}
+
+/// A single day's active user count.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct DAUEntry {
+    /// Date in YYYY-MM-DD format.
+    pub date: String,
+    /// Number of active users.
+    pub amount: i32,
+}
+
+/// Provisioner job log entry.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisionerJobLog {
+    /// Log identifier.
+    pub id: i64,
+    /// Log creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Log source.
+    pub log_source: String,
+    /// Log level.
+    pub log_level: String,
+    /// Stage of provisioning.
+    pub stage: String,
+    /// Log output.
+    pub output: String,
+}
+
+/// Workspace resource returned by template version resources.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct WorkspaceResource {
+    /// Resource identifier.
+    pub id: Uuid,
+    /// Resource creation time.
+    pub created_at: String,
+    /// Job identifier.
+    pub job_id: Uuid,
+    /// Workspace transition.
+    pub transition: String,
+    /// Resource type.
+    #[serde(rename = "type")]
+    pub resource_type: String,
+    /// Resource name.
+    pub name: String,
+    /// Whether the resource should be hidden.
+    pub hide: bool,
+    /// Icon.
+    pub icon: String,
+    /// Daily cost.
+    pub daily_cost: i32,
+}
+
+/// Filter for listing templates.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct TemplateFilter {
+    /// Organization identifier filter.
+    #[serde(default)]
+    pub organization_id: Option<Uuid>,
+    /// Exact name filter.
+    #[serde(default)]
+    pub exact_name: Option<String>,
+    /// Fuzzy name filter.
+    #[serde(default, rename = "q")]
+    pub search: Option<String>,
+    /// Whether to include deleted templates.
+    #[serde(default)]
+    pub deleted: Option<bool>,
+}
+
+// ---------------------------------------------------------------------------
 // Authorization check (POST /api/v2/authcheck)
 // ---------------------------------------------------------------------------
 
