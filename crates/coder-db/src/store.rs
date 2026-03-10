@@ -5,29 +5,46 @@ use std::{str::FromStr, time::Duration};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
+use coder_core::provisioner::{
+    LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord,
+    ProvisionerJobTimingRecord as ProvisionerTimingRecord,
+};
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
-    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
-    TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
-    TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
-    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
+    CreateTemplateVersionInput, ProvisionerJobRecord as TemplateProvisionerJobRecord,
+    TemplateDAURow, TemplateListFilter, TemplateRecord, TemplateVersionListFilter,
+    TemplateVersionParameterRecord, TemplateVersionPresetParameterRecord,
+    TemplateVersionPresetRecord, TemplateVersionRecord, TemplateVersionVariableRecord,
+    UpdateTemplateMetaInput,
 };
 use coder_core::{
-    ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AppStore, AuditDiff,
-    AuditLog, AuditLogAction, AuditLogListFilter, AuditLogResponse, AuditResourceType,
-    AuthenticatedUser, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
-    CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, DatabaseConfig,
-    DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
-    ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord, GitSshKeyRecord,
-    HealthSettings, InsertFileInput, InsertFileResult, InsertOrganizationMemberError, LoginType,
-    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
-    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-    ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, SessionCountDeploymentStatsResponse,
-    SlimRoleRecord, StorageError, TokenConfigRecord, UpsertExternalAuthLinkInput,
+    AcquireProvisionerJobInput, ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord,
+    ApiKeyWithOwnerRecord, AppStore, AuditDiff, AuditLog, AuditLogAction, AuditLogListFilter,
+    AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
+    CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
+    CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
+    CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
+    DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser,
+    FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings,
+    InsertAgentLogInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+    InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+    InsertProvisionerKeyInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization,
+    MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+    PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
+    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
+    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
+    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
+    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TokenConfigRecord,
+    UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
     UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-    WorkspaceAgentStatInput, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
-    WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
-    WorkspaceStatsWorkspaceInput,
+    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
+    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
+    WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use serde_json::{Value, from_str};
 use sqlx::{FromRow, PgPool, Postgres, Transaction, postgres::PgPoolOptions};
@@ -266,6 +283,206 @@ struct StoredProvisionerDaemonRow {
     provisioners: Vec<String>,
     tags_json: String,
     status: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentRow {
+    id: Uuid,
+    parent_id: Option<Uuid>,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    name: String,
+    first_connected_at: Option<OffsetDateTime>,
+    last_connected_at: Option<OffsetDateTime>,
+    disconnected_at: Option<OffsetDateTime>,
+    resource_id: Uuid,
+    auth_token: Uuid,
+    auth_instance_id: Option<String>,
+    architecture: String,
+    environment_variables: Option<String>,
+    operating_system: String,
+    directory: String,
+    expanded_directory: String,
+    version: String,
+    api_version: String,
+    connection_timeout_seconds: i32,
+    troubleshooting_url: String,
+    motd_file: String,
+    lifecycle_state: String,
+    logs_length: i32,
+    logs_overflowed: bool,
+    started_at: Option<OffsetDateTime>,
+    ready_at: Option<OffsetDateTime>,
+    subsystems: Vec<String>,
+    display_apps: Vec<String>,
+    display_order: i32,
+    api_key_scope: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAppRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    agent_id: Uuid,
+    display_name: String,
+    icon: String,
+    command: Option<String>,
+    url: Option<String>,
+    healthcheck_url: String,
+    healthcheck_interval: i32,
+    healthcheck_threshold: i32,
+    health: String,
+    subdomain: bool,
+    sharing_level: String,
+    slug: String,
+    external: bool,
+    display_order: i32,
+    hidden: bool,
+    open_in: String,
+    display_group: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentScriptRow {
+    id: Uuid,
+    workspace_agent_id: Uuid,
+    log_source_id: Uuid,
+    log_path: String,
+    created_at: OffsetDateTime,
+    script: String,
+    cron: String,
+    start_blocks_login: bool,
+    run_on_start: bool,
+    run_on_stop: bool,
+    timeout_seconds: i32,
+    display_name: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentLogSourceRow {
+    id: Uuid,
+    workspace_agent_id: Uuid,
+    created_at: OffsetDateTime,
+    display_name: String,
+    icon: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentLogRow {
+    id: i64,
+    agent_id: Uuid,
+    created_at: OffsetDateTime,
+    output: String,
+    level: String,
+    log_source_id: Uuid,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentMetadataRow {
+    workspace_agent_id: Uuid,
+    display_name: String,
+    key: String,
+    script: String,
+    value: String,
+    error: String,
+    timeout: i64,
+    interval: i64,
+    collected_at: OffsetDateTime,
+    display_order: i32,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAgentDevcontainerRow {
+    id: Uuid,
+    workspace_agent_id: Uuid,
+    created_at: OffsetDateTime,
+    workspace_folder: String,
+    config_path: String,
+    name: String,
+    subagent_id: Option<Uuid>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceAppStatusRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    agent_id: Uuid,
+    app_id: Uuid,
+    workspace_id: Uuid,
+    state: String,
+    message: String,
+    uri: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredProvisionerJobRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    started_at: Option<OffsetDateTime>,
+    canceled_at: Option<OffsetDateTime>,
+    completed_at: Option<OffsetDateTime>,
+    error: String,
+    error_code: String,
+    organization_id: Option<Uuid>,
+    initiator_id: Option<Uuid>,
+    provisioner: String,
+    storage_method: String,
+    file_id: Option<Uuid>,
+    job_type: String,
+    input: Value,
+    tags: Value,
+    trace_metadata: Value,
+    worker_id: Option<Uuid>,
+    job_status: String,
+    logs_overflowed: bool,
+    logs_length: i32,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredProvisionerJobLogRow {
+    id: i64,
+    job_id: Uuid,
+    created_at: OffsetDateTime,
+    source: String,
+    level: String,
+    stage: String,
+    output: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredProvisionerJobTimingRow {
+    job_id: Uuid,
+    started_at: OffsetDateTime,
+    ended_at: OffsetDateTime,
+    stage: String,
+    source: String,
+    action: String,
+    resource: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredProvisionerKeyRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    organization_id: Uuid,
+    name: String,
+    hashed_secret: Vec<u8>,
+    tags: Value,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredFullProvisionerDaemonRow {
+    id: Uuid,
+    organization_id: Uuid,
+    created_at: OffsetDateTime,
+    last_seen_at: Option<OffsetDateTime>,
+    name: String,
+    version: String,
+    api_version: String,
+    provisioners: Vec<String>,
+    tags_json: String,
+    key_id: Option<Uuid>,
 }
 
 #[derive(Debug, FromRow)]
@@ -2609,6 +2826,1169 @@ impl AppStore for PostgresStore {
         .and_then(external_auth_link_record_from_row)
     }
 
+    // -----------------------------------------------------------------------
+    // Workspace Agent storage methods
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_agent_by_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables::text AS environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_agent_row_from_stored))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_agent_by_auth_token(
+        &self,
+        auth_token: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables::text AS environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE auth_token = $1 AND deleted = false",
+        )
+        .bind(auth_token)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_agent_row_from_stored))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_agent_by_instance_id(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables::text AS environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE auth_instance_id = $1 AND deleted = false
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind(instance_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_agent_row_from_stored))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agents_by_resource_ids(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentRow>(
+            "SELECT
+                id, parent_id, created_at, updated_at, name,
+                first_connected_at, last_connected_at, disconnected_at,
+                resource_id, auth_token, auth_instance_id,
+                architecture, environment_variables::text AS environment_variables, operating_system,
+                directory, expanded_directory, version, api_version,
+                connection_timeout_seconds, troubleshooting_url, motd_file,
+                lifecycle_state::text AS lifecycle_state, logs_length, logs_overflowed,
+                started_at, ready_at,
+                subsystems::text[] AS subsystems,
+                display_apps::text[] AS display_apps,
+                display_order, api_key_scope::text AS api_key_scope
+             FROM workspace_agents
+             WHERE resource_id = ANY($1) AND deleted = false
+             ORDER BY created_at ASC",
+        )
+        .bind(resource_ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_apps_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAppRow>(
+            "SELECT
+                id, created_at, agent_id, display_name, icon,
+                command, url, healthcheck_url, healthcheck_interval,
+                healthcheck_threshold, health::text AS health, subdomain,
+                sharing_level::text AS sharing_level, slug, external,
+                display_order, hidden, open_in::text AS open_in,
+                display_group
+             FROM workspace_apps
+             WHERE agent_id = $1
+             ORDER BY display_order ASC, slug ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_app_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_scripts(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentScriptRow>(
+            "SELECT
+                id, workspace_agent_id, log_source_id, log_path,
+                created_at, script, cron, start_blocks_login,
+                run_on_start, run_on_stop, timeout_seconds, display_name
+             FROM workspace_agent_scripts
+             WHERE workspace_agent_id = $1
+             ORDER BY display_name ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_script_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_log_sources(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentLogSourceRow>(
+            "SELECT id, workspace_agent_id, created_at, display_name, icon
+             FROM workspace_agent_log_sources
+             WHERE workspace_agent_id = $1
+             ORDER BY created_at ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_log_source_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentLogRow>(
+            "SELECT id, agent_id, created_at, output, level::text AS level, log_source_id
+             FROM workspace_agent_logs
+             WHERE agent_id = $1 AND id > $2
+             ORDER BY id ASC
+             LIMIT $3",
+        )
+        .bind(agent_id)
+        .bind(after_id)
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_log_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self, logs), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        log_source_id: Uuid,
+        logs: &[InsertAgentLogInput],
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let log_count = i32::try_from(logs.len())
+            .map_err(|_| StorageError::invalid_data("too many log entries"))?;
+
+        let mut created_ats = Vec::with_capacity(logs.len());
+        let mut outputs = Vec::with_capacity(logs.len());
+        let mut levels = Vec::with_capacity(logs.len());
+
+        for log in logs {
+            created_ats.push(log.created_at);
+            outputs.push(log.output.as_str());
+            levels.push(log.level.as_str());
+        }
+
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        // Update logs_length and logs_overflowed on the workspace_agents row.
+        // The CHECK constraint max_logs_length ensures logs_length <= 1048576.
+        sqlx::query(
+            "UPDATE workspace_agents
+             SET logs_length = LEAST(logs_length + $2, 1048576),
+                 logs_overflowed = logs_overflowed OR (logs_length + $2 > 1048576)
+             WHERE id = $1",
+        )
+        .bind(agent_id)
+        .bind(log_count)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentLogRow>(
+            "INSERT INTO workspace_agent_logs (agent_id, created_at, output, level, log_source_id)
+             SELECT $1, unnest($2::timestamptz[]), unnest($3::text[]),
+                    unnest($4::log_level[]), $5
+             RETURNING id, agent_id, created_at, output, level::text AS level, log_source_id",
+        )
+        .bind(agent_id)
+        .bind(&created_ats)
+        .bind(&outputs)
+        .bind(&levels)
+        .bind(log_source_id)
+        .fetch_all(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_log_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_metadata(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentMetadataRow>(
+            "SELECT workspace_agent_id, display_name, key, script,
+                    value, error, timeout, interval, collected_at, display_order
+             FROM workspace_agent_metadata
+             WHERE workspace_agent_id = $1
+             ORDER BY display_order ASC, key ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_metadata_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_devcontainers(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentDevcontainerRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAgentDevcontainerRow>(
+            "SELECT id, workspace_agent_id, created_at, workspace_folder,
+                    config_path, name, subagent_id
+             FROM workspace_agent_devcontainers
+             WHERE workspace_agent_id = $1
+             ORDER BY name ASC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_agent_devcontainer_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent_log_source(
+        &self,
+        agent_id: Uuid,
+        display_name: &str,
+        icon: &str,
+    ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
+        let row = sqlx::query_as::<_, StoredWorkspaceAgentLogSourceRow>(
+            "INSERT INTO workspace_agent_log_sources (id, workspace_agent_id, created_at, display_name, icon)
+             VALUES ($1, $2, NOW(), $3, $4)
+             RETURNING id, workspace_agent_id, created_at, display_name, icon",
+        )
+        .bind(Uuid::new_v4())
+        .bind(agent_id)
+        .bind(display_name)
+        .bind(icon)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(workspace_agent_log_source_row_from_stored(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_app_statuses_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppStatusRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAppStatusRow>(
+            "SELECT id, created_at, agent_id, app_id, workspace_id,
+                    state::text AS state, message, uri
+             FROM workspace_app_statuses
+             WHERE agent_id = $1
+             ORDER BY created_at DESC",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_app_status_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_app_status(
+        &self,
+        input: &InsertWorkspaceAppStatusInput,
+    ) -> Result<WorkspaceAppStatusRow, StorageError> {
+        let row = sqlx::query_as::<_, StoredWorkspaceAppStatusRow>(
+            "INSERT INTO workspace_app_statuses (id, created_at, agent_id, app_id, workspace_id, state, message, uri)
+             VALUES ($1, NOW(), $2, $3, $4, $5::workspace_app_status_state, $6, $7)
+             RETURNING id, created_at, agent_id, app_id, workspace_id, state::text AS state, message, uri",
+        )
+        .bind(Uuid::new_v4())
+        .bind(input.agent_id)
+        .bind(input.app_id)
+        .bind(input.workspace_id)
+        .bind(&input.state)
+        .bind(&input.message)
+        .bind(&input.uri)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(workspace_app_status_row_from_stored(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_app_by_agent_and_slug(
+        &self,
+        agent_id: Uuid,
+        slug: &str,
+    ) -> Result<Option<WorkspaceAppRow>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceAppRow>(
+            "SELECT
+                id, created_at, agent_id, display_name, icon,
+                command, url, healthcheck_url, healthcheck_interval,
+                healthcheck_threshold, health::text AS health, subdomain,
+                sharing_level::text AS sharing_level, slug, external,
+                display_order, hidden, open_in::text AS open_in,
+                display_group
+             FROM workspace_apps
+             WHERE agent_id = $1 AND slug = $2",
+        )
+        .bind(agent_id)
+        .bind(slug)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_app_row_from_stored))
+    }
+
+    // -------------------------------------------------------------------
+    // Workspace domain
+    // -------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspaces(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        let search = filter
+            .name
+            .as_deref()
+            .filter(|s| !s.trim().is_empty())
+            .map(|s| format!("%{}%", s.trim().replace('%', "\\%").replace('_', "\\_")));
+        let owner_username = filter.owner_username.clone();
+        let template_name = filter.template_name.clone();
+        let _status = filter.status.clone();
+        let _has_agent = filter.has_agent.clone();
+        let dormant = filter.dormant;
+        let template_ids: Vec<Uuid> = filter.template_ids.clone();
+
+        let total = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*)
+             FROM workspaces w
+             LEFT JOIN users u ON u.id = w.owner_id
+             LEFT JOIN templates t ON t.id = w.template_id
+             WHERE w.deleted = false
+               AND ($1::uuid IS NULL OR w.owner_id = $1)
+               AND ($2::text IS NULL OR u.username = $2)
+               AND ($3::text IS NULL OR w.name ILIKE $3)
+               AND ($4::text IS NULL OR t.name = $4)
+               AND ($5::uuid IS NULL OR w.organization_id = $5)
+               AND ($6::bool IS NULL OR ($6 = true AND w.dormant_at IS NOT NULL) OR ($6 = false AND w.dormant_at IS NULL))
+               AND (cardinality($7::uuid[]) = 0 OR w.template_id = ANY($7))",
+        )
+        .bind(filter.owner_id)
+        .bind(owner_username.as_deref())
+        .bind(search.as_deref())
+        .bind(template_name.as_deref())
+        .bind(filter.organization_id)
+        .bind(dormant)
+        .bind(&template_ids)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let viewer_id = filter.viewer_id;
+        let rows = sqlx::query_as::<_, StoredWorkspaceRow>(
+            "SELECT
+                w.id,
+                w.created_at,
+                w.updated_at,
+                w.deleted,
+                w.owner_id,
+                w.organization_id,
+                w.template_id,
+                w.name,
+                w.autostart_schedule,
+                w.ttl,
+                w.last_used_at,
+                w.dormant_at,
+                w.deleting_at,
+                w.automatic_updates,
+                COALESCE((wf.workspace_id IS NOT NULL), false) AS favorite,
+                w.next_start_at
+             FROM workspaces w
+             LEFT JOIN users u ON u.id = w.owner_id
+             LEFT JOIN templates t ON t.id = w.template_id
+             LEFT JOIN workspace_favorites wf ON wf.workspace_id = w.id AND wf.user_id = $10
+             WHERE w.deleted = false
+               AND ($1::uuid IS NULL OR w.owner_id = $1)
+               AND ($2::text IS NULL OR u.username = $2)
+               AND ($3::text IS NULL OR w.name ILIKE $3)
+               AND ($4::text IS NULL OR t.name = $4)
+               AND ($5::uuid IS NULL OR w.organization_id = $5)
+               AND ($6::bool IS NULL OR ($6 = true AND w.dormant_at IS NOT NULL) OR ($6 = false AND w.dormant_at IS NULL))
+               AND (cardinality($7::uuid[]) = 0 OR w.template_id = ANY($7))
+             ORDER BY w.last_used_at DESC
+             LIMIT $8 OFFSET $9",
+        )
+        .bind(filter.owner_id)
+        .bind(owner_username.as_deref())
+        .bind(search.as_deref())
+        .bind(template_name.as_deref())
+        .bind(filter.organization_id)
+        .bind(dormant)
+        .bind(&template_ids)
+        .bind(i64::from(filter.limit.min(1000)))
+        .bind(i64::from(filter.offset))
+        .bind(viewer_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let workspaces: Vec<WorkspaceRecord> =
+            rows.into_iter().map(workspace_record_from_row).collect();
+        Ok((workspaces, total))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "SELECT w.id, w.created_at, w.updated_at, w.deleted, w.owner_id, w.organization_id,
+                    w.template_id, w.name, w.autostart_schedule, w.ttl, w.last_used_at,
+                    w.dormant_at, w.deleting_at, w.automatic_updates,
+                    COALESCE((wf.workspace_id IS NOT NULL), false) AS favorite,
+                    w.next_start_at
+             FROM workspaces w
+             LEFT JOIN workspace_favorites wf ON wf.workspace_id = w.id AND wf.user_id = $2
+             WHERE w.id = $1 AND w.deleted = false",
+        )
+        .bind(workspace_id)
+        .bind(viewer_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "SELECT w.id, w.created_at, w.updated_at, w.deleted, w.owner_id, w.organization_id,
+                    w.template_id, w.name, w.autostart_schedule, w.ttl, w.last_used_at,
+                    w.dormant_at, w.deleting_at, w.automatic_updates,
+                    COALESCE((wf.workspace_id IS NOT NULL), false) AS favorite,
+                    w.next_start_at
+             FROM workspaces w
+             LEFT JOIN workspace_favorites wf ON wf.workspace_id = w.id AND wf.user_id = $3
+             WHERE w.owner_id = $1 AND LOWER(w.name) = LOWER($2) AND w.deleted = false",
+        )
+        .bind(owner_id)
+        .bind(name)
+        .bind(viewer_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_workspace(
+        &self,
+        input: CreateWorkspaceInput,
+    ) -> Result<WorkspaceRecord, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "INSERT INTO workspaces (
+                id, owner_id, organization_id, template_id, name,
+                autostart_schedule, ttl, automatic_updates,
+                created_at, updated_at, last_used_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NOW())
+             RETURNING id, created_at, updated_at, deleted, owner_id, organization_id,
+                       template_id, name, autostart_schedule, ttl, last_used_at,
+                       dormant_at, deleting_at, automatic_updates,
+                       false AS favorite, next_start_at",
+        )
+        .bind(input.id)
+        .bind(input.owner_id)
+        .bind(input.organization_id)
+        .bind(input.template_id)
+        .bind(&input.name)
+        .bind(input.autostart_schedule.as_deref())
+        .bind(input.ttl_ns)
+        .bind(&input.automatic_updates)
+        .fetch_one(&self.pool)
+        .await
+        .map(workspace_record_from_row)
+        .map_err(storage_error)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_name(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "WITH updated AS (
+                UPDATE workspaces
+                SET name = $2, updated_at = NOW()
+                WHERE id = $1 AND deleted = false
+                RETURNING *
+             )
+             SELECT u.id, u.created_at, u.updated_at, u.deleted, u.owner_id,
+                    u.organization_id, u.template_id, u.name, u.autostart_schedule,
+                    u.ttl, u.last_used_at, u.dormant_at, u.deleting_at,
+                    u.automatic_updates,
+                    COALESCE((wf.user_id IS NOT NULL), false) AS favorite,
+                    u.next_start_at
+             FROM updated u
+             LEFT JOIN workspace_favorites wf
+               ON wf.workspace_id = u.id AND wf.user_id = $3",
+        )
+        .bind(workspace_id)
+        .bind(name)
+        .bind(viewer_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_autostart(
+        &self,
+        workspace_id: Uuid,
+        schedule: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspaces SET autostart_schedule = $2, updated_at = NOW()
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(workspace_id)
+        .bind(schedule)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_ttl(
+        &self,
+        workspace_id: Uuid,
+        ttl_ns: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspaces SET ttl = $2, updated_at = NOW()
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(workspace_id)
+        .bind(ttl_ns)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_dormant_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "WITH updated AS (
+                UPDATE workspaces
+                SET dormant_at = $2, updated_at = NOW()
+                WHERE id = $1 AND deleted = false
+                RETURNING *
+             )
+             SELECT u.id, u.created_at, u.updated_at, u.deleted, u.owner_id,
+                    u.organization_id, u.template_id, u.name, u.autostart_schedule,
+                    u.ttl, u.last_used_at, u.dormant_at, u.deleting_at,
+                    u.automatic_updates,
+                    COALESCE((wf.user_id IS NOT NULL), false) AS favorite,
+                    u.next_start_at
+             FROM updated u
+             LEFT JOIN workspace_favorites wf
+               ON wf.workspace_id = u.id AND wf.user_id = $3",
+        )
+        .bind(workspace_id)
+        .bind(dormant_at)
+        .bind(viewer_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_automatic_updates(
+        &self,
+        workspace_id: Uuid,
+        automatic_updates: &str,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspaces SET automatic_updates = $2, updated_at = NOW()
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(workspace_id)
+        .bind(automatic_updates)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_last_used_at(
+        &self,
+        workspace_id: Uuid,
+        last_used_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspaces SET last_used_at = $2, updated_at = NOW()
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(workspace_id)
+        .bind(last_used_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn favorite_workspace(
+        &self,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        favorite: bool,
+    ) -> Result<bool, StorageError> {
+        if favorite {
+            // Insert into junction table (ignore conflict if already favorited).
+            sqlx::query(
+                "INSERT INTO workspace_favorites (workspace_id, user_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT (workspace_id, user_id) DO NOTHING",
+            )
+            .bind(workspace_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        } else {
+            // Remove from junction table.
+            sqlx::query(
+                "DELETE FROM workspace_favorites
+                 WHERE workspace_id = $1 AND user_id = $2",
+            )
+            .bind(workspace_id)
+            .bind(user_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        }
+        Ok(true)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspaces SET deleted = true, updated_at = NOW()
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(workspace_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_builds(
+        &self,
+        workspace_id: Uuid,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<WorkspaceBuildRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceBuildRow>(
+            "SELECT id, created_at, updated_at, workspace_id, build_number, transition,
+                    job_id, template_version_id, initiator_id, provisioner_state,
+                    deadline, max_deadline, reason, daily_cost
+             FROM workspace_builds
+             WHERE workspace_id = $1
+             ORDER BY build_number DESC
+             LIMIT $2 OFFSET $3",
+        )
+        .bind(workspace_id)
+        .bind(i64::from(limit.min(1000)))
+        .bind(i64::from(offset))
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(workspace_build_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceBuildRow>(
+            "SELECT id, created_at, updated_at, workspace_id, build_number, transition,
+                    job_id, template_version_id, initiator_id, provisioner_state,
+                    deadline, max_deadline, reason, daily_cost
+             FROM workspace_builds
+             WHERE workspace_id = $1
+             ORDER BY build_number DESC
+             LIMIT 1",
+        )
+        .bind(workspace_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_build_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_build_by_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceBuildRow>(
+            "SELECT id, created_at, updated_at, workspace_id, build_number, transition,
+                    job_id, template_version_id, initiator_id, provisioner_state,
+                    deadline, max_deadline, reason, daily_cost
+             FROM workspace_builds
+             WHERE id = $1",
+        )
+        .bind(build_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_build_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_build_by_number(
+        &self,
+        workspace_id: Uuid,
+        build_number: i64,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceBuildRow>(
+            "SELECT id, created_at, updated_at, workspace_id, build_number, transition,
+                    job_id, template_version_id, initiator_id, provisioner_state,
+                    deadline, max_deadline, reason, daily_cost
+             FROM workspace_builds
+             WHERE workspace_id = $1 AND build_number = $2",
+        )
+        .bind(workspace_id)
+        .bind(build_number)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_build_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_build(
+        &self,
+        input: CreateWorkspaceBuildInput,
+    ) -> Result<WorkspaceBuildRecord, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceBuildRow>(
+            "INSERT INTO workspace_builds (
+                id, workspace_id, template_version_id, build_number, transition,
+                initiator_id, job_id, reason, deadline, max_deadline,
+                created_at, updated_at
+             )
+             VALUES ($1, $2, $3,
+                     (SELECT COALESCE(MAX(build_number), 0) + 1 FROM workspace_builds WHERE workspace_id = $2),
+                     $4, $5, $6, $7, $8, $9, NOW(), NOW())
+             RETURNING id, created_at, updated_at, workspace_id, build_number, transition,
+                       job_id, template_version_id, initiator_id, provisioner_state,
+                       deadline, max_deadline, reason, daily_cost",
+        )
+        .bind(input.id)
+        .bind(input.workspace_id)
+        .bind(input.template_version_id)
+        .bind(&input.transition)
+        .bind(input.initiator_id)
+        .bind(input.job_id)
+        .bind(&input.reason)
+        .bind(input.deadline)
+        .bind(input.max_deadline)
+        .fetch_one(&self.pool)
+        .await
+        .map(workspace_build_record_from_row)
+        .map_err(storage_error)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspace_builds
+             SET deadline = $2, max_deadline = $3, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(build_id)
+        .bind(deadline)
+        .bind(max_deadline)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self, state), err(level = tracing::Level::WARN))]
+    async fn update_workspace_build_provisioner_state(
+        &self,
+        build_id: Uuid,
+        state: &[u8],
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspace_builds
+             SET provisioner_state = $2, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(build_id)
+        .bind(state)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
+        let max: Option<i64> = sqlx::query_scalar(
+            "SELECT MAX(build_number) FROM workspace_builds WHERE workspace_id = $1",
+        )
+        .bind(workspace_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(max.unwrap_or(0) + 1)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceBuildParameterRow>(
+            "SELECT workspace_build_id, name, value
+             FROM workspace_build_parameters
+             WHERE workspace_build_id = $1
+             ORDER BY name",
+        )
+        .bind(build_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(|row| WorkspaceBuildParameterRecord {
+                workspace_build_id: row.workspace_build_id,
+                name: row.name,
+                value: row.value,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, params), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+        params: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        for (name, value) in params {
+            sqlx::query(
+                "INSERT INTO workspace_build_parameters (workspace_build_id, name, value)
+                 VALUES ($1, $2, $3)",
+            )
+            .bind(build_id)
+            .bind(name)
+            .bind(value)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_provisioner_job_logs(
+        &self,
+        job_id: Uuid,
+        after: Option<i64>,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerJobLogRow>(
+            "SELECT id, job_id, created_at, source, level, stage, output
+             FROM provisioner_job_logs
+             WHERE job_id = $1 AND ($2::bigint IS NULL OR id > $2)
+             ORDER BY id ASC",
+        )
+        .bind(job_id)
+        .bind(after)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(provisioner_job_log_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_provisioner_job_timings(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerJobTimingRow>(
+            "SELECT job_id, started_at, ended_at, stage, source, action, resource
+             FROM provisioner_job_timings
+             WHERE job_id = $1
+             ORDER BY started_at ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(provisioner_job_timing_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_resources_by_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceResourceRow>(
+            "SELECT id, created_at, job_id, transition, type AS resource_type,
+                    name, hide, icon, daily_cost
+             FROM workspace_resources
+             WHERE job_id = $1
+             ORDER BY name ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(workspace_resource_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_port_shares(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredPortShareRow>(
+            "SELECT workspace_id, agent_name, port, share_level, protocol
+             FROM workspace_agent_port_shares
+             WHERE workspace_id = $1
+             ORDER BY agent_name, port",
+        )
+        .bind(workspace_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows.into_iter().map(port_share_record_from_row).collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn upsert_workspace_port_share(
+        &self,
+        input: UpsertPortShareInput,
+    ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
+        sqlx::query_as::<_, StoredPortShareRow>(
+            "INSERT INTO workspace_agent_port_shares (
+                workspace_id, agent_name, port, share_level, protocol
+             )
+             VALUES ($1, $2, $3, $4, $5)
+             ON CONFLICT (workspace_id, agent_name, port) DO UPDATE
+             SET share_level = EXCLUDED.share_level,
+                 protocol = EXCLUDED.protocol
+             RETURNING workspace_id, agent_name, port, share_level, protocol",
+        )
+        .bind(input.workspace_id)
+        .bind(&input.agent_name)
+        .bind(input.port)
+        .bind(&input.share_level)
+        .bind(&input.protocol)
+        .fetch_one(&self.pool)
+        .await
+        .map(port_share_record_from_row)
+        .map_err(storage_error)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
+        sqlx::query_as::<_, StoredPortShareRow>(
+            "SELECT workspace_id, agent_name, port, share_level, protocol
+             FROM workspace_agent_port_shares
+             WHERE workspace_id = $1 AND agent_name = $2 AND port = $3",
+        )
+        .bind(workspace_id)
+        .bind(agent_name)
+        .bind(port)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(port_share_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "DELETE FROM workspace_agent_port_shares
+             WHERE workspace_id = $1 AND agent_name = $2 AND port = $3",
+        )
+        .bind(workspace_id)
+        .bind(agent_name)
+        .bind(port)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
     // ----- Template Store Methods -----
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -3192,10 +4572,10 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn insert_provisioner_job(
+    async fn create_provisioner_job(
         &self,
         input: CreateProvisionerJobInput,
-    ) -> Result<ProvisionerJobRecord, StorageError> {
+    ) -> Result<TemplateProvisionerJobRecord, StorageError> {
         let tags_json = serde_json::to_value(&input.tags)
             .map_err(|e| StorageError::unavailable(format!("serialize tags: {e}")))?;
         sqlx::query(
@@ -3220,17 +4600,17 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        self.find_provisioner_job_by_id(input.id)
+        self.find_provisioner_job(input.id)
             .await?
             .ok_or_else(|| StorageError::unavailable("provisioner job not found after insert"))
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn find_provisioner_job_by_id(
+    async fn find_provisioner_job(
         &self,
         job_id: Uuid,
-    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-        let row = sqlx::query_as::<_, StoredProvisionerJobRow>(
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredTemplateProvisionerJobRow>(
             r#"
             SELECT id, created_at, updated_at, started_at, canceled_at, completed_at,
                    error, organization_id, initiator_id, provisioner::text AS provisioner,
@@ -3251,11 +4631,11 @@ impl AppStore for PostgresStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)?;
-        Ok(row.map(provisioner_job_record_from_row))
+        Ok(row.map(template_provisioner_job_record_from_row))
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+    async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
         let result = sqlx::query(
             "UPDATE provisioner_jobs SET canceled_at = NOW(), updated_at = NOW() WHERE id = $1 AND canceled_at IS NULL AND completed_at IS NULL",
         )
@@ -3313,7 +4693,7 @@ struct StoredTemplateRow {
 }
 
 #[derive(Debug, FromRow)]
-struct StoredProvisionerJobRow {
+struct StoredTemplateProvisionerJobRow {
     id: Uuid,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
@@ -3461,9 +4841,11 @@ fn template_record_from_row(row: StoredTemplateRow) -> TemplateRecord {
     }
 }
 
-fn provisioner_job_record_from_row(row: StoredProvisionerJobRow) -> ProvisionerJobRecord {
+fn template_provisioner_job_record_from_row(
+    row: StoredTemplateProvisionerJobRow,
+) -> TemplateProvisionerJobRecord {
     let tags: HashMap<String, String> = serde_json::from_value(row.tags).unwrap_or_default();
-    ProvisionerJobRecord {
+    TemplateProvisionerJobRecord {
         id: row.id,
         created_at: row.created_at,
         updated_at: row.updated_at,
@@ -3543,6 +4925,593 @@ fn template_version_variable_from_row(
         default_value: row.default_value,
         required: row.required,
         sensitive: row.sensitive,
+    }
+}
+
+#[async_trait]
+impl ProvisionerStore for PostgresStore {
+    // ── Jobs ──────────────────────────────────────────────────
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn acquire_provisioner_job(
+        &self,
+        input: AcquireProvisionerJobInput,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        let provisioner_types: Vec<String> = input.types.iter().map(|t| t.to_string()).collect();
+
+        // Atomically find and lock one pending job using FOR UPDATE SKIP LOCKED.
+        // Tag matching: the job's tags must be a subset of the daemon's tags.
+        let row = sqlx::query_as::<_, StoredProvisionerJobRow>(
+            "UPDATE provisioner_jobs
+             SET started_at = $1,
+                 updated_at = $1,
+                 worker_id = $2
+             WHERE id = (
+                 SELECT id
+                 FROM provisioner_jobs
+                 WHERE started_at IS NULL
+                   AND completed_at IS NULL
+                   AND canceled_at IS NULL
+                   AND organization_id = $3
+                   AND provisioner::TEXT = ANY($4)
+                   AND tags <@ $5::JSONB
+                 ORDER BY created_at ASC
+                 LIMIT 1
+                 FOR UPDATE SKIP LOCKED
+             )
+             RETURNING id, created_at, updated_at, started_at, canceled_at,
+                       completed_at, error, error_code, organization_id,
+                       initiator_id, provisioner::TEXT, storage_method::TEXT,
+                       file_id, \"type\"::TEXT AS job_type, input, tags,
+                       trace_metadata, worker_id, job_status::TEXT,
+                       logs_overflowed, logs_length",
+        )
+        .bind(input.started_at)
+        .bind(input.worker_id)
+        .bind(input.organization_id)
+        .bind(&provisioner_types)
+        .bind(&input.provisioner_tags)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        row.map(provisioner_job_from_row).transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredProvisionerJobRow>(
+            "SELECT id, created_at, updated_at, started_at, canceled_at,
+                    completed_at, error, error_code, organization_id,
+                    initiator_id, provisioner::TEXT, storage_method::TEXT,
+                    file_id, \"type\"::TEXT AS job_type, input, tags,
+                    trace_metadata, worker_id, job_status::TEXT,
+                    logs_overflowed, logs_length
+             FROM provisioner_jobs
+             WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        row.map(provisioner_job_from_row).transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_jobs_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerJobRow>(
+            "SELECT id, created_at, updated_at, started_at, canceled_at,
+                    completed_at, error, error_code, organization_id,
+                    initiator_id, provisioner::TEXT, storage_method::TEXT,
+                    file_id, \"type\"::TEXT AS job_type, input, tags,
+                    trace_metadata, worker_id, job_status::TEXT,
+                    logs_overflowed, logs_length
+             FROM provisioner_jobs
+             WHERE id = ANY($1)
+             ORDER BY created_at ASC",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(provisioner_job_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_provisioner_job(
+        &self,
+        input: InsertProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredProvisionerJobRow>(
+            "INSERT INTO provisioner_jobs (
+                 id, created_at, updated_at, organization_id, initiator_id,
+                 provisioner, storage_method, file_id, \"type\", input,
+                 tags, trace_metadata
+             ) VALUES (
+                 $1, $2, $2, $3, $4,
+                 $5::provisioner_type, $6::provisioner_storage_method,
+                 $7, $8::provisioner_job_type, $9, $10, $11
+             )
+             RETURNING id, created_at, updated_at, started_at, canceled_at,
+                       completed_at, error, error_code, organization_id,
+                       initiator_id, provisioner::TEXT, storage_method::TEXT,
+                       file_id, \"type\"::TEXT AS job_type, input, tags,
+                       trace_metadata, worker_id, job_status::TEXT,
+                       logs_overflowed, logs_length",
+        )
+        .bind(input.id)
+        .bind(input.created_at)
+        .bind(input.organization_id)
+        .bind(input.initiator_id)
+        .bind(input.provisioner.as_str())
+        .bind(input.storage_method.as_str())
+        .bind(input.file_id)
+        .bind(input.job_type.as_str())
+        .bind(&input.input)
+        .bind(&input.tags)
+        .bind(&input.trace_metadata)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        provisioner_job_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE provisioner_jobs SET updated_at = $1 WHERE id = $2")
+            .bind(updated_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_provisioner_job_with_complete_by_id(
+        &self,
+        input: CompleteProvisionerJobInput,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE provisioner_jobs
+             SET updated_at = $1,
+                 completed_at = $2,
+                 error = $3,
+                 error_code = $4
+             WHERE id = $5",
+        )
+        .bind(input.updated_at)
+        .bind(input.completed_at)
+        .bind(&input.error)
+        .bind(&input.error_code)
+        .bind(input.id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_provisioner_job_with_cancel_by_id(
+        &self,
+        input: CancelProvisionerJobInput,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE provisioner_jobs
+             SET canceled_at = $1,
+                 completed_at = COALESCE($2, completed_at),
+                 updated_at = $1
+             WHERE id = $3",
+        )
+        .bind(input.canceled_at)
+        .bind(input.completed_at)
+        .bind(input.id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_jobs_to_be_reaped(
+        &self,
+        input: GetJobsToBeReapedInput,
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerJobRow>(
+            "SELECT id, created_at, updated_at, started_at, canceled_at,
+                    completed_at, error, error_code, organization_id,
+                    initiator_id, provisioner::TEXT, storage_method::TEXT,
+                    file_id, \"type\"::TEXT AS job_type, input, tags,
+                    trace_metadata, worker_id, job_status::TEXT,
+                    logs_overflowed, logs_length
+             FROM provisioner_jobs
+             WHERE (
+                 -- Pending too long
+                 (started_at IS NULL AND completed_at IS NULL AND created_at < $1)
+                 OR
+                 -- Running but no heartbeat (hung)
+                 (started_at IS NOT NULL AND completed_at IS NULL AND updated_at < $2)
+             )
+             ORDER BY created_at ASC
+             LIMIT $3",
+        )
+        .bind(input.pending_since)
+        .bind(input.hung_since)
+        .bind(input.max_jobs)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(provisioner_job_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    // ── Logs ─────────────────────────────────────────────────
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_provisioner_job_logs(
+        &self,
+        input: InsertProvisionerJobLogsInput,
+    ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
+        let n = input.created_at.len();
+        if input.source.len() != n
+            || input.level.len() != n
+            || input.stage.len() != n
+            || input.output.len() != n
+        {
+            return Err(StorageError::invalid_data(
+                "all log input vectors must have the same length".to_string(),
+            ));
+        }
+        let job_ids: Vec<Uuid> = vec![input.job_id; n];
+        let sources: Vec<String> = input.source.iter().map(|s| s.to_string()).collect();
+        let levels: Vec<String> = input.level.iter().map(|l| l.to_string()).collect();
+
+        let mut transaction = self.pool.begin().await.map_err(storage_error)?;
+
+        let rows = sqlx::query_as::<_, StoredProvisionerJobLogRow>(
+            "INSERT INTO provisioner_job_logs (job_id, created_at, source, level, stage, output)
+             SELECT * FROM UNNEST($1::UUID[], $2::TIMESTAMPTZ[], $3::log_source[], $4::log_level[], $5::VARCHAR[], $6::VARCHAR[])
+             RETURNING id, job_id, created_at, source::TEXT, level::TEXT, stage, output",
+        )
+        .bind(&job_ids)
+        .bind(&input.created_at)
+        .bind(&sources)
+        .bind(&levels)
+        .bind(&input.stage)
+        .bind(&input.output)
+        .fetch_all(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+
+        // Update logs_length on the parent job (tracks total bytes, not entry count).
+        let total_bytes: usize = input.output.iter().map(|o| o.len()).sum();
+        let log_bytes = i32::try_from(total_bytes).unwrap_or(i32::MAX);
+        sqlx::query(
+            "UPDATE provisioner_jobs
+             SET logs_length = logs_length + $1
+             WHERE id = $2",
+        )
+        .bind(log_bytes)
+        .bind(input.job_id)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+
+        transaction.commit().await.map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(provisioner_job_log_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_logs_after_id(
+        &self,
+        job_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerJobLogRow>(
+            "SELECT id, job_id, created_at, source::TEXT, level::TEXT, stage, output
+             FROM provisioner_job_logs
+             WHERE job_id = $1 AND id > $2
+             ORDER BY id ASC",
+        )
+        .bind(job_id)
+        .bind(after_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(provisioner_job_log_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    // ── Timings ──────────────────────────────────────────────
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_provisioner_job_timings(
+        &self,
+        input: InsertProvisionerJobTimingsInput,
+    ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
+        let n = input.started_at.len();
+        if input.ended_at.len() != n
+            || input.stage.len() != n
+            || input.source.len() != n
+            || input.action.len() != n
+            || input.resource.len() != n
+        {
+            return Err(StorageError::invalid_data(
+                "all timing input vectors must have the same length".to_string(),
+            ));
+        }
+        let job_ids: Vec<Uuid> = vec![input.job_id; n];
+        let stages: Vec<String> = input.stage.iter().map(|s| s.to_string()).collect();
+
+        let rows = sqlx::query_as::<_, StoredProvisionerJobTimingRow>(
+            "INSERT INTO provisioner_job_timings (job_id, started_at, ended_at, stage, source, action, resource)
+             SELECT * FROM UNNEST($1::UUID[], $2::TIMESTAMPTZ[], $3::TIMESTAMPTZ[], $4::provisioner_job_timing_stage[], $5::TEXT[], $6::TEXT[], $7::TEXT[])
+             RETURNING job_id, started_at, ended_at, stage::TEXT, source, action, resource",
+        )
+        .bind(&job_ids)
+        .bind(&input.started_at)
+        .bind(&input.ended_at)
+        .bind(&stages)
+        .bind(&input.source)
+        .bind(&input.action)
+        .bind(&input.resource)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(provisioner_job_timing_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_job_timings_by_job_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerJobTimingRow>(
+            "SELECT job_id, started_at, ended_at, stage::TEXT, source, action, resource
+             FROM provisioner_job_timings
+             WHERE job_id = $1
+             ORDER BY started_at ASC",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(provisioner_job_timing_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    // ── Daemons ──────────────────────────────────────────────
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn upsert_provisioner_daemon(
+        &self,
+        input: UpsertProvisionerDaemonInput,
+    ) -> Result<ProvisionerDaemonRecord, StorageError> {
+        let tags_json = serde_json::to_string(&input.tags)
+            .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+
+        let row = sqlx::query_as::<_, StoredFullProvisionerDaemonRow>(
+            "INSERT INTO provisioner_daemons (
+                 name, provisioners, tags_json, last_seen_at, version,
+                 organization_id, api_version, key_id
+             ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             ON CONFLICT (organization_id, name) DO UPDATE SET
+                 provisioners = EXCLUDED.provisioners,
+                 tags_json = EXCLUDED.tags_json,
+                 last_seen_at = EXCLUDED.last_seen_at,
+                 version = EXCLUDED.version,
+                 api_version = EXCLUDED.api_version,
+                 key_id = EXCLUDED.key_id
+             RETURNING id, organization_id, created_at, last_seen_at,
+                       name, version, api_version, provisioners,
+                       tags_json, key_id",
+        )
+        .bind(&input.name)
+        .bind(&input.provisioners)
+        .bind(&tags_json)
+        .bind(input.last_seen_at)
+        .bind(&input.version)
+        .bind(input.organization_id)
+        .bind(&input.api_version)
+        .bind(input.key_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        full_provisioner_daemon_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_provisioner_daemon_last_seen_at(
+        &self,
+        id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE provisioner_daemons SET last_seen_at = $1 WHERE id = $2")
+            .bind(last_seen_at)
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_daemons_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredFullProvisionerDaemonRow>(
+            "SELECT id, organization_id, created_at, last_seen_at,
+                    name, version, api_version, provisioners,
+                    tags_json, key_id
+             FROM provisioner_daemons
+             WHERE organization_id = $1
+             ORDER BY created_at ASC",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter()
+            .map(full_provisioner_daemon_from_row)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "DELETE FROM provisioner_daemons
+             WHERE last_seen_at IS NOT NULL AND last_seen_at < NOW() - INTERVAL '7 days'",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    // ── Keys ─────────────────────────────────────────────────
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_provisioner_key(
+        &self,
+        input: InsertProvisionerKeyInput,
+    ) -> Result<ProvisionerKeyRecord, StorageError> {
+        let row = sqlx::query_as::<_, StoredProvisionerKeyRow>(
+            "INSERT INTO provisioner_keys (id, created_at, organization_id, name, hashed_secret, tags)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, created_at, organization_id, name, hashed_secret, tags",
+        )
+        .bind(input.id)
+        .bind(input.created_at)
+        .bind(input.organization_id)
+        .bind(&input.name)
+        .bind(&input.hashed_secret)
+        .bind(&input.tags)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(provisioner_key_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_key_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredProvisionerKeyRow>(
+            "SELECT id, created_at, organization_id, name, hashed_secret, tags
+             FROM provisioner_keys
+             WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(provisioner_key_from_row))
+    }
+
+    #[instrument(skip(self, hashed_secret), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_key_by_hashed_secret(
+        &self,
+        hashed_secret: &[u8],
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredProvisionerKeyRow>(
+            "SELECT id, created_at, organization_id, name, hashed_secret, tags
+             FROM provisioner_keys
+             WHERE hashed_secret = $1",
+        )
+        .bind(hashed_secret)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(provisioner_key_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_provisioner_key_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredProvisionerKeyRow>(
+            "SELECT id, created_at, organization_id, name, hashed_secret, tags
+             FROM provisioner_keys
+             WHERE organization_id = $1 AND name = $2",
+        )
+        .bind(organization_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(provisioner_key_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_provisioner_keys_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerKeyRow>(
+            "SELECT id, created_at, organization_id, name, hashed_secret, tags
+             FROM provisioner_keys
+             WHERE organization_id = $1
+             ORDER BY name ASC",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows.into_iter().map(provisioner_key_from_row).collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM provisioner_keys WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
     }
 }
 
@@ -3890,6 +5859,164 @@ fn provisioner_daemon_record_from_row(
     })
 }
 
+fn provisioner_job_from_row(
+    row: StoredProvisionerJobRow,
+) -> Result<ProvisionerJobRecord, StorageError> {
+    let provisioner = match row.provisioner.as_str() {
+        "terraform" => ProvisionerType::Terraform,
+        "echo" => ProvisionerType::Echo,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown provisioner type: {other}"
+            )));
+        }
+    };
+    let storage_method = match row.storage_method.as_str() {
+        "file" => ProvisionerStorageMethod::File,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown storage method: {other}"
+            )));
+        }
+    };
+    let job_type = match row.job_type.as_str() {
+        "template_version_import" => ProvisionerJobType::TemplateVersionImport,
+        "template_version_dry_run" => ProvisionerJobType::TemplateVersionDryRun,
+        "workspace_build" => ProvisionerJobType::WorkspaceBuild,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown job type: {other}"
+            )));
+        }
+    };
+    let job_status = match row.job_status.as_str() {
+        "pending" => ProvisionerJobStatus::Pending,
+        "running" => ProvisionerJobStatus::Running,
+        "succeeded" => ProvisionerJobStatus::Succeeded,
+        "failed" => ProvisionerJobStatus::Failed,
+        "canceling" => ProvisionerJobStatus::Canceling,
+        "canceled" => ProvisionerJobStatus::Canceled,
+        _ => ProvisionerJobStatus::Unknown,
+    };
+
+    Ok(ProvisionerJobRecord {
+        id: row.id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        started_at: row.started_at,
+        canceled_at: row.canceled_at,
+        completed_at: row.completed_at,
+        error: row.error,
+        error_code: row.error_code,
+        organization_id: row.organization_id,
+        initiator_id: row.initiator_id,
+        provisioner,
+        storage_method,
+        file_id: row.file_id,
+        job_type,
+        input: row.input,
+        tags: row.tags,
+        trace_metadata: row.trace_metadata,
+        worker_id: row.worker_id,
+        job_status,
+        logs_overflowed: row.logs_overflowed,
+        logs_length: row.logs_length,
+    })
+}
+
+fn provisioner_job_log_from_row(
+    row: StoredProvisionerJobLogRow,
+) -> Result<ProvisionerLogRecord, StorageError> {
+    let source = match row.source.as_str() {
+        "provisioner_daemon" => LogSource::ProvisionerDaemon,
+        "provisioner" => LogSource::Provisioner,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown log source: {other}"
+            )));
+        }
+    };
+    let level = match row.level.as_str() {
+        "trace" => LogLevel::Trace,
+        "debug" => LogLevel::Debug,
+        "info" => LogLevel::Info,
+        "warn" => LogLevel::Warn,
+        "error" => LogLevel::Error,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown log level: {other}"
+            )));
+        }
+    };
+
+    Ok(ProvisionerLogRecord {
+        id: row.id,
+        job_id: row.job_id,
+        created_at: row.created_at,
+        source,
+        level,
+        stage: row.stage,
+        output: row.output,
+    })
+}
+
+fn provisioner_job_timing_from_row(
+    row: StoredProvisionerJobTimingRow,
+) -> Result<ProvisionerTimingRecord, StorageError> {
+    let stage = match row.stage.as_str() {
+        "init" => ProvisionerJobTimingStage::Init,
+        "plan" => ProvisionerJobTimingStage::Plan,
+        "graph" => ProvisionerJobTimingStage::Graph,
+        "apply" => ProvisionerJobTimingStage::Apply,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown timing stage: {other}"
+            )));
+        }
+    };
+
+    Ok(ProvisionerTimingRecord {
+        job_id: row.job_id,
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        stage,
+        source: row.source,
+        action: row.action,
+        resource: row.resource,
+    })
+}
+
+fn provisioner_key_from_row(row: StoredProvisionerKeyRow) -> ProvisionerKeyRecord {
+    ProvisionerKeyRecord {
+        id: row.id,
+        created_at: row.created_at,
+        organization_id: row.organization_id,
+        name: row.name,
+        hashed_secret: row.hashed_secret,
+        tags: row.tags,
+    }
+}
+
+fn full_provisioner_daemon_from_row(
+    row: StoredFullProvisionerDaemonRow,
+) -> Result<ProvisionerDaemonRecord, StorageError> {
+    let tags: HashMap<String, String> =
+        from_str(&row.tags_json).map_err(|e| StorageError::invalid_data(e.to_string()))?;
+
+    Ok(ProvisionerDaemonRecord {
+        id: row.id,
+        organization_id: row.organization_id,
+        created_at: row.created_at,
+        last_seen_at: row.last_seen_at,
+        name: row.name,
+        version: row.version,
+        api_version: row.api_version,
+        provisioners: row.provisioners,
+        tags,
+        key_id: row.key_id,
+    })
+}
+
 fn file_record_from_row(row: StoredFileRow) -> FileRecord {
     FileRecord {
         id: row.id,
@@ -3928,6 +6055,171 @@ fn title_case(value: &str) -> String {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Workspace domain StoredRow types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    deleted: bool,
+    owner_id: Uuid,
+    organization_id: Uuid,
+    template_id: Uuid,
+    name: String,
+    autostart_schedule: Option<String>,
+    ttl: Option<i64>,
+    last_used_at: OffsetDateTime,
+    dormant_at: Option<OffsetDateTime>,
+    deleting_at: Option<OffsetDateTime>,
+    automatic_updates: String,
+    favorite: bool,
+    next_start_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceBuildRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+    workspace_id: Uuid,
+    build_number: i64,
+    transition: String,
+    job_id: Uuid,
+    template_version_id: Uuid,
+    initiator_id: Uuid,
+    provisioner_state: Option<Vec<u8>>,
+    deadline: Option<OffsetDateTime>,
+    max_deadline: Option<OffsetDateTime>,
+    reason: String,
+    daily_cost: i32,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceResourceRow {
+    id: Uuid,
+    created_at: OffsetDateTime,
+    job_id: Uuid,
+    transition: String,
+    resource_type: String,
+    name: String,
+    hide: bool,
+    icon: String,
+    daily_cost: i32,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceBuildParameterRow {
+    workspace_build_id: Uuid,
+    name: String,
+    value: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredPortShareRow {
+    workspace_id: Uuid,
+    agent_name: String,
+    port: i32,
+    share_level: String,
+    protocol: String,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace domain conversion helpers
+// ---------------------------------------------------------------------------
+
+fn workspace_record_from_row(row: StoredWorkspaceRow) -> WorkspaceRecord {
+    WorkspaceRecord {
+        id: row.id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        deleted: row.deleted,
+        owner_id: row.owner_id,
+        organization_id: row.organization_id,
+        template_id: row.template_id,
+        name: row.name,
+        autostart_schedule: row.autostart_schedule,
+        ttl_ns: row.ttl,
+        last_used_at: row.last_used_at,
+        dormant_at: row.dormant_at,
+        deleting_at: row.deleting_at,
+        automatic_updates: row.automatic_updates,
+        favorite: row.favorite,
+        next_start_at: row.next_start_at,
+    }
+}
+
+fn workspace_build_record_from_row(row: StoredWorkspaceBuildRow) -> WorkspaceBuildRecord {
+    WorkspaceBuildRecord {
+        id: row.id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        workspace_id: row.workspace_id,
+        build_number: row.build_number,
+        transition: row.transition,
+        job_id: row.job_id,
+        template_version_id: row.template_version_id,
+        initiator_id: row.initiator_id,
+        provisioner_state: row.provisioner_state,
+        deadline: row.deadline,
+        max_deadline: row.max_deadline,
+        reason: row.reason,
+        daily_cost: row.daily_cost,
+    }
+}
+
+fn workspace_resource_record_from_row(row: StoredWorkspaceResourceRow) -> WorkspaceResourceRecord {
+    WorkspaceResourceRecord {
+        id: row.id,
+        created_at: row.created_at,
+        job_id: row.job_id,
+        transition: row.transition,
+        resource_type: row.resource_type,
+        name: row.name,
+        hide: row.hide,
+        icon: row.icon,
+        daily_cost: row.daily_cost,
+    }
+}
+
+fn port_share_record_from_row(row: StoredPortShareRow) -> WorkspaceAgentPortShareRecord {
+    WorkspaceAgentPortShareRecord {
+        workspace_id: row.workspace_id,
+        agent_name: row.agent_name,
+        port: row.port,
+        share_level: row.share_level,
+        protocol: row.protocol,
+    }
+}
+
+fn provisioner_job_log_record_from_row(row: StoredProvisionerJobLogRow) -> ProvisionerJobLogRecord {
+    ProvisionerJobLogRecord {
+        id: row.id,
+        job_id: row.job_id,
+        created_at: row.created_at,
+        source: row.source,
+        level: row.level,
+        stage: row.stage,
+        output: row.output,
+    }
+}
+
+fn provisioner_job_timing_record_from_row(
+    row: StoredProvisionerJobTimingRow,
+) -> ProvisionerJobTimingRecord {
+    ProvisionerJobTimingRecord {
+        job_id: row.job_id,
+        started_at: row.started_at,
+        ended_at: row.ended_at,
+        stage: row.stage,
+        source: row.source,
+        action: row.action,
+        resource: row.resource,
+    }
+}
+
 fn is_unique_violation(error: &sqlx::Error) -> bool {
     matches!(
         error,
@@ -3953,4 +6245,149 @@ fn escape_like(input: &str) -> String {
 
 fn storage_error(error: sqlx::Error) -> StorageError {
     StorageError::unavailable(error.to_string())
+}
+
+fn workspace_agent_row_from_stored(row: StoredWorkspaceAgentRow) -> WorkspaceAgentRow {
+    WorkspaceAgentRow {
+        id: row.id,
+        parent_id: row.parent_id,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+        name: row.name,
+        first_connected_at: row.first_connected_at,
+        last_connected_at: row.last_connected_at,
+        disconnected_at: row.disconnected_at,
+        resource_id: row.resource_id,
+        auth_token: row.auth_token,
+        auth_instance_id: row.auth_instance_id,
+        architecture: row.architecture,
+        environment_variables: row.environment_variables,
+        operating_system: row.operating_system,
+        directory: row.directory,
+        expanded_directory: row.expanded_directory,
+        version: row.version,
+        api_version: row.api_version,
+        connection_timeout_seconds: row.connection_timeout_seconds,
+        troubleshooting_url: row.troubleshooting_url,
+        motd_file: row.motd_file,
+        lifecycle_state: row.lifecycle_state,
+        logs_length: row.logs_length,
+        logs_overflowed: row.logs_overflowed,
+        started_at: row.started_at,
+        ready_at: row.ready_at,
+        subsystems: row.subsystems,
+        display_apps: row.display_apps,
+        display_order: row.display_order,
+        api_key_scope: row.api_key_scope,
+    }
+}
+
+fn workspace_app_row_from_stored(row: StoredWorkspaceAppRow) -> WorkspaceAppRow {
+    WorkspaceAppRow {
+        id: row.id,
+        created_at: row.created_at,
+        agent_id: row.agent_id,
+        display_name: row.display_name,
+        icon: row.icon,
+        command: row.command,
+        url: row.url,
+        healthcheck_url: row.healthcheck_url,
+        healthcheck_interval: row.healthcheck_interval,
+        healthcheck_threshold: row.healthcheck_threshold,
+        health: row.health,
+        subdomain: row.subdomain,
+        sharing_level: row.sharing_level,
+        slug: row.slug,
+        external: row.external,
+        display_order: row.display_order,
+        hidden: row.hidden,
+        open_in: row.open_in,
+        display_group: row.display_group,
+    }
+}
+
+fn workspace_agent_script_row_from_stored(
+    row: StoredWorkspaceAgentScriptRow,
+) -> WorkspaceAgentScriptRow {
+    WorkspaceAgentScriptRow {
+        id: row.id,
+        workspace_agent_id: row.workspace_agent_id,
+        log_source_id: row.log_source_id,
+        log_path: row.log_path,
+        created_at: row.created_at,
+        script: row.script,
+        cron: row.cron,
+        start_blocks_login: row.start_blocks_login,
+        run_on_start: row.run_on_start,
+        run_on_stop: row.run_on_stop,
+        timeout_seconds: row.timeout_seconds,
+        display_name: row.display_name,
+    }
+}
+
+fn workspace_agent_log_source_row_from_stored(
+    row: StoredWorkspaceAgentLogSourceRow,
+) -> WorkspaceAgentLogSourceRow {
+    WorkspaceAgentLogSourceRow {
+        id: row.id,
+        workspace_agent_id: row.workspace_agent_id,
+        created_at: row.created_at,
+        display_name: row.display_name,
+        icon: row.icon,
+    }
+}
+
+fn workspace_agent_log_row_from_stored(row: StoredWorkspaceAgentLogRow) -> WorkspaceAgentLogRow {
+    WorkspaceAgentLogRow {
+        id: row.id,
+        agent_id: row.agent_id,
+        created_at: row.created_at,
+        output: row.output,
+        level: row.level,
+        log_source_id: row.log_source_id,
+    }
+}
+
+fn workspace_agent_metadata_row_from_stored(
+    row: StoredWorkspaceAgentMetadataRow,
+) -> WorkspaceAgentMetadataRow {
+    WorkspaceAgentMetadataRow {
+        workspace_agent_id: row.workspace_agent_id,
+        display_name: row.display_name,
+        key: row.key,
+        script: row.script,
+        value: row.value,
+        error: row.error,
+        timeout: row.timeout,
+        interval: row.interval,
+        collected_at: row.collected_at,
+        display_order: row.display_order,
+    }
+}
+
+fn workspace_agent_devcontainer_row_from_stored(
+    row: StoredWorkspaceAgentDevcontainerRow,
+) -> WorkspaceAgentDevcontainerRow {
+    WorkspaceAgentDevcontainerRow {
+        id: row.id,
+        workspace_agent_id: row.workspace_agent_id,
+        created_at: row.created_at,
+        workspace_folder: row.workspace_folder,
+        config_path: row.config_path,
+        name: row.name,
+        subagent_id: row.subagent_id,
+    }
+}
+
+fn workspace_app_status_row_from_stored(row: StoredWorkspaceAppStatusRow) -> WorkspaceAppStatusRow {
+    WorkspaceAppStatusRow {
+        id: row.id,
+        created_at: row.created_at,
+        agent_id: row.agent_id,
+        app_id: row.app_id,
+        workspace_id: row.workspace_id,
+        state: row.state,
+        message: row.message,
+        uri: row.uri,
+    }
 }

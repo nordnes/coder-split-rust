@@ -21,12 +21,21 @@ use crate::identity::{
     UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter,
     UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
 };
+use crate::provisioner::{
+    AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
+    GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+    InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, ProvisionerDaemonRecord,
+    ProvisionerJobLogRecord as ProvisionerLogRecord, ProvisionerJobRecord,
+    ProvisionerJobTimingRecord as ProvisionerTimingRecord, ProvisionerKeyRecord,
+    UpsertProvisionerDaemonInput,
+};
 use crate::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
-    CreateTemplateVersionInput, ProvisionerJobRecord, TemplateDAURow, TemplateListFilter,
-    TemplateRecord, TemplateVersionListFilter, TemplateVersionParameterRecord,
-    TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
-    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
+    CreateTemplateVersionInput, ProvisionerJobRecord as TemplateProvisionerJobRecord,
+    TemplateDAURow, TemplateListFilter, TemplateRecord, TemplateVersionListFilter,
+    TemplateVersionParameterRecord, TemplateVersionPresetParameterRecord,
+    TemplateVersionPresetRecord, TemplateVersionRecord, TemplateVersionVariableRecord,
+    UpdateTemplateMetaInput,
 };
 
 /// Deployment metadata required by the HTTP layer.
@@ -369,6 +378,261 @@ pub struct ProvisionerDaemonHealthRecord {
     pub tags: std::collections::HashMap<String, String>,
     /// Current daemon status.
     pub status: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace domain records
+// ---------------------------------------------------------------------------
+
+/// Stored workspace record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceRecord {
+    /// Workspace identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+    /// Soft-delete flag.
+    pub deleted: bool,
+    /// Owner identifier.
+    pub owner_id: Uuid,
+    /// Organization identifier.
+    pub organization_id: Uuid,
+    /// Template identifier.
+    pub template_id: Uuid,
+    /// Workspace name.
+    pub name: String,
+    /// Autostart cron schedule.
+    pub autostart_schedule: Option<String>,
+    /// TTL in nanoseconds.
+    pub ttl_ns: Option<i64>,
+    /// Last used time.
+    pub last_used_at: OffsetDateTime,
+    /// Dormant timestamp.
+    pub dormant_at: Option<OffsetDateTime>,
+    /// Scheduled deletion time.
+    pub deleting_at: Option<OffsetDateTime>,
+    /// Automatic updates setting.
+    pub automatic_updates: String,
+    /// Favorite flag.
+    pub favorite: bool,
+    /// Next start time.
+    pub next_start_at: Option<OffsetDateTime>,
+}
+
+/// Stored workspace build record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceBuildRecord {
+    /// Build identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+    /// Parent workspace identifier.
+    pub workspace_id: Uuid,
+    /// Build sequence number.
+    pub build_number: i64,
+    /// Transition: start, stop, delete.
+    pub transition: String,
+    /// Provisioner job identifier.
+    pub job_id: Uuid,
+    /// Template version identifier.
+    pub template_version_id: Uuid,
+    /// User who initiated the build.
+    pub initiator_id: Uuid,
+    /// Provisioner state blob.
+    pub provisioner_state: Option<Vec<u8>>,
+    /// Build deadline.
+    pub deadline: Option<OffsetDateTime>,
+    /// Maximum deadline.
+    pub max_deadline: Option<OffsetDateTime>,
+    /// Build reason.
+    pub reason: String,
+    /// Daily cost in credits.
+    pub daily_cost: i32,
+}
+
+/// Stored workspace resource record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceResourceRecord {
+    /// Resource identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Job identifier.
+    pub job_id: Uuid,
+    /// Workspace transition.
+    pub transition: String,
+    /// Resource type.
+    pub resource_type: String,
+    /// Resource name.
+    pub name: String,
+    /// Whether to hide.
+    pub hide: bool,
+    /// Resource icon.
+    pub icon: String,
+    /// Daily cost.
+    pub daily_cost: i32,
+}
+
+/// Stored workspace build parameter record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceBuildParameterRecord {
+    /// Build identifier.
+    pub workspace_build_id: Uuid,
+    /// Parameter name.
+    pub name: String,
+    /// Parameter value.
+    pub value: String,
+}
+
+/// Stored workspace agent port share record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentPortShareRecord {
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// Agent name.
+    pub agent_name: String,
+    /// Port number.
+    pub port: i32,
+    /// Share level.
+    pub share_level: String,
+    /// Protocol.
+    pub protocol: String,
+}
+
+/// Stored provisioner job log record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvisionerJobLogRecord {
+    /// Log identifier.
+    pub id: i64,
+    /// Job identifier.
+    pub job_id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Source.
+    pub source: String,
+    /// Level.
+    pub level: String,
+    /// Stage.
+    pub stage: String,
+    /// Output.
+    pub output: String,
+}
+
+/// Stored provisioner job timing record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProvisionerJobTimingRecord {
+    /// Job identifier.
+    pub job_id: Uuid,
+    /// Start time.
+    pub started_at: OffsetDateTime,
+    /// End time.
+    pub ended_at: OffsetDateTime,
+    /// Stage.
+    pub stage: String,
+    /// Source.
+    pub source: String,
+    /// Action.
+    pub action: String,
+    /// Resource.
+    pub resource: String,
+}
+
+/// Filter for listing workspaces.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceListFilter {
+    /// Owner identifier (empty = all).
+    pub owner_id: Option<Uuid>,
+    /// Owner username (empty = all).
+    pub owner_username: Option<String>,
+    /// Template name filter.
+    pub template_name: Option<String>,
+    /// Template IDs filter.
+    pub template_ids: Vec<Uuid>,
+    /// Name search (partial match).
+    pub name: Option<String>,
+    /// Status filter.
+    pub status: Option<String>,
+    /// Has agent filter.
+    pub has_agent: Option<String>,
+    /// Dormant filter.
+    pub dormant: Option<bool>,
+    /// Last used before.
+    pub last_used_before: Option<OffsetDateTime>,
+    /// Last used after.
+    pub last_used_after: Option<OffsetDateTime>,
+    /// Organization ID.
+    pub organization_id: Option<Uuid>,
+    /// Page limit.
+    pub limit: u32,
+    /// Page offset.
+    pub offset: u32,
+    /// Viewer user ID for computing per-user fields (e.g. favorite).
+    pub viewer_id: Option<Uuid>,
+}
+
+/// Input for creating a workspace.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateWorkspaceInput {
+    /// Workspace identifier.
+    pub id: Uuid,
+    /// Owner identifier.
+    pub owner_id: Uuid,
+    /// Organization identifier.
+    pub organization_id: Uuid,
+    /// Template identifier.
+    pub template_id: Uuid,
+    /// Workspace name.
+    pub name: String,
+    /// Autostart schedule.
+    pub autostart_schedule: Option<String>,
+    /// TTL in nanoseconds.
+    pub ttl_ns: Option<i64>,
+    /// Automatic updates.
+    pub automatic_updates: String,
+}
+
+/// Input for creating a workspace build.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreateWorkspaceBuildInput {
+    /// Build identifier.
+    pub id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// Template version identifier.
+    pub template_version_id: Uuid,
+    /// Build number (auto-increment based on workspace).
+    pub build_number: i64,
+    /// Transition: start, stop, delete.
+    pub transition: String,
+    /// Initiator identifier.
+    pub initiator_id: Uuid,
+    /// Job identifier.
+    pub job_id: Uuid,
+    /// Build reason.
+    pub reason: String,
+    /// Deadline.
+    pub deadline: Option<OffsetDateTime>,
+    /// Max deadline.
+    pub max_deadline: Option<OffsetDateTime>,
+}
+
+/// Input for upserting a port share.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpsertPortShareInput {
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// Agent name.
+    pub agent_name: String,
+    /// Port number.
+    pub port: i32,
+    /// Share level.
+    pub share_level: String,
+    /// Protocol.
+    pub protocol: String,
 }
 
 /// Stored file record.
@@ -1326,6 +1590,151 @@ pub trait OperationalStore: Send + Sync {
     }
 }
 
+/// Storage contract for provisioner job lifecycle, daemons, keys, logs, and timings.
+#[async_trait]
+pub trait ProvisionerStore: Send + Sync {
+    // ── Jobs ──────────────────────────────────────────────────
+
+    /// Atomically acquires a pending job matching the daemon's capabilities.
+    /// Uses `FOR UPDATE SKIP LOCKED` to prevent double-assignment.
+    async fn acquire_provisioner_job(
+        &self,
+        input: AcquireProvisionerJobInput,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError>;
+
+    /// Looks up a single provisioner job by identifier.
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError>;
+
+    /// Looks up multiple provisioner jobs by identifiers.
+    async fn get_provisioner_jobs_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError>;
+
+    /// Inserts a new provisioner job.
+    async fn insert_provisioner_job(
+        &self,
+        input: InsertProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError>;
+
+    /// Updates the heartbeat timestamp for a running job.
+    async fn update_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Marks a job as completed (successfully or with error).
+    async fn update_provisioner_job_with_complete_by_id(
+        &self,
+        input: CompleteProvisionerJobInput,
+    ) -> Result<(), StorageError>;
+
+    /// Marks a job as canceled.
+    async fn update_provisioner_job_with_cancel_by_id(
+        &self,
+        input: CancelProvisionerJobInput,
+    ) -> Result<(), StorageError>;
+
+    /// Returns stale jobs that should be reaped (pending too long or hung).
+    async fn get_provisioner_jobs_to_be_reaped(
+        &self,
+        input: GetJobsToBeReapedInput,
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError>;
+
+    // ── Logs ─────────────────────────────────────────────────
+
+    /// Inserts a batch of log entries for a job.
+    async fn insert_provisioner_job_logs(
+        &self,
+        input: InsertProvisionerJobLogsInput,
+    ) -> Result<Vec<ProvisionerLogRecord>, StorageError>;
+
+    /// Returns log entries for a job after the given log-line identifier.
+    async fn get_provisioner_logs_after_id(
+        &self,
+        job_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<ProvisionerLogRecord>, StorageError>;
+
+    // ── Timings ──────────────────────────────────────────────
+
+    /// Inserts a batch of timing entries for a job.
+    async fn insert_provisioner_job_timings(
+        &self,
+        input: InsertProvisionerJobTimingsInput,
+    ) -> Result<Vec<ProvisionerTimingRecord>, StorageError>;
+
+    /// Returns all timing entries for a job.
+    async fn get_provisioner_job_timings_by_job_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerTimingRecord>, StorageError>;
+
+    // ── Daemons ──────────────────────────────────────────────
+
+    /// Registers or updates a provisioner daemon.
+    async fn upsert_provisioner_daemon(
+        &self,
+        input: UpsertProvisionerDaemonInput,
+    ) -> Result<ProvisionerDaemonRecord, StorageError>;
+
+    /// Updates the last-seen heartbeat time for a daemon.
+    async fn update_provisioner_daemon_last_seen_at(
+        &self,
+        id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Lists daemons for an organization.
+    async fn get_provisioner_daemons_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError>;
+
+    /// Deletes provisioner daemons that have not been seen in over 7 days.
+    async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError>;
+
+    // ── Keys ─────────────────────────────────────────────────
+
+    /// Inserts a new provisioner key.
+    async fn insert_provisioner_key(
+        &self,
+        input: InsertProvisionerKeyInput,
+    ) -> Result<ProvisionerKeyRecord, StorageError>;
+
+    /// Looks up a provisioner key by identifier.
+    async fn get_provisioner_key_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError>;
+
+    /// Looks up a provisioner key by hashed secret.
+    async fn get_provisioner_key_by_hashed_secret(
+        &self,
+        hashed_secret: &[u8],
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError>;
+
+    /// Looks up a provisioner key by organization and name.
+    async fn get_provisioner_key_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError>;
+
+    /// Lists provisioner keys for an organization.
+    async fn list_provisioner_keys_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError>;
+
+    /// Deletes a provisioner key by identifier.
+    async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError>;
+}
+
 /// Narrow storage contract for template and template-version domain logic.
 #[async_trait]
 pub trait TemplateStore: Send + Sync {
@@ -1444,25 +1853,26 @@ pub trait TemplateStore: Send + Sync {
         preset_id: Uuid,
     ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError>;
 
-    /// Creates a provisioner job.
-    async fn insert_provisioner_job(
+    /// Creates a provisioner job (template workflow).
+    async fn create_provisioner_job(
         &self,
         input: CreateProvisionerJobInput,
-    ) -> Result<ProvisionerJobRecord, StorageError>;
+    ) -> Result<TemplateProvisionerJobRecord, StorageError>;
 
-    /// Finds a provisioner job by identifier.
-    async fn find_provisioner_job_by_id(
+    /// Finds a provisioner job by identifier (template workflow).
+    async fn find_provisioner_job(
         &self,
         job_id: Uuid,
-    ) -> Result<Option<ProvisionerJobRecord>, StorageError>;
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError>;
 
-    /// Cancels a provisioner job.
-    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
+    /// Cancels a provisioner job (template workflow).
+    async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
 }
 
 /// Aggregate store contract used by the current Rust backend slice.
+#[allow(clippy::too_many_arguments)]
 #[async_trait]
-pub trait AppStore: DeploymentStore + Send + Sync {
+pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Returns whether a non-system first user exists.
     async fn first_user_exists(&self) -> Result<bool, StorageError>;
 
@@ -1896,6 +2306,492 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         ))
     }
 
+    // -----------------------------------------------------------------------
+    // Workspace Agent storage methods
+    // -----------------------------------------------------------------------
+
+    /// Looks up a workspace agent by stable identifier.
+    async fn find_workspace_agent_by_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace agent by auth token.
+    async fn find_workspace_agent_by_auth_token(
+        &self,
+        auth_token: Uuid,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        let _ = auth_token;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace agent by instance identity.
+    async fn find_workspace_agent_by_instance_id(
+        &self,
+        instance_id: &str,
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+        let _ = instance_id;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Lists workspace agents for a given resource.
+    async fn list_workspace_agents_by_resource_ids(
+        &self,
+        resource_ids: &[Uuid],
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+        let _ = resource_ids;
+        Err(StorageError::unavailable(
+            "workspace agents are not implemented",
+        ))
+    }
+
+    /// Lists workspace apps for a given agent.
+    async fn list_workspace_apps_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace apps are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent scripts for a given agent.
+    async fn list_workspace_agent_scripts(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent scripts are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent log sources for a given agent.
+    async fn list_workspace_agent_log_sources(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent log sources are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent logs for a given agent.
+    async fn list_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        after_id: i64,
+        limit: i64,
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let _ = (agent_id, after_id, limit);
+        Err(StorageError::unavailable(
+            "workspace agent logs are not implemented",
+        ))
+    }
+
+    /// Inserts workspace agent logs.
+    async fn insert_workspace_agent_logs(
+        &self,
+        agent_id: Uuid,
+        log_source_id: Uuid,
+        logs: &[InsertAgentLogInput],
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+        let _ = (agent_id, log_source_id, logs);
+        Err(StorageError::unavailable(
+            "workspace agent logs are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent metadata for a given agent.
+    async fn list_workspace_agent_metadata(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent metadata are not implemented",
+        ))
+    }
+
+    /// Lists devcontainers for a given agent.
+    async fn list_workspace_agent_devcontainers(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentDevcontainerRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace agent devcontainers are not implemented",
+        ))
+    }
+
+    /// Creates a workspace agent log source.
+    async fn insert_workspace_agent_log_source(
+        &self,
+        agent_id: Uuid,
+        display_name: &str,
+        icon: &str,
+    ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
+        let _ = (agent_id, display_name, icon);
+        Err(StorageError::unavailable(
+            "workspace agent log sources are not implemented",
+        ))
+    }
+
+    /// Lists workspace app statuses for a given agent.
+    async fn list_workspace_app_statuses_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAppStatusRow>, StorageError> {
+        let _ = agent_id;
+        Err(StorageError::unavailable(
+            "workspace app statuses are not implemented",
+        ))
+    }
+
+    /// Inserts a workspace app status.
+    async fn insert_workspace_app_status(
+        &self,
+        input: &InsertWorkspaceAppStatusInput,
+    ) -> Result<WorkspaceAppStatusRow, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "workspace app statuses are not implemented",
+        ))
+    }
+
+    /// Finds a workspace app by agent ID and slug.
+    async fn find_workspace_app_by_agent_and_slug(
+        &self,
+        agent_id: Uuid,
+        slug: &str,
+    ) -> Result<Option<WorkspaceAppRow>, StorageError> {
+        let _ = (agent_id, slug);
+        Err(StorageError::unavailable(
+            "workspace apps are not implemented",
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace domain methods
+    // -----------------------------------------------------------------------
+
+    /// Lists workspaces matching the supplied filter.
+    async fn list_workspaces(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        let _ = filter;
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Looks up a workspace by stable identifier.
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        let _ = (workspace_id, viewer_id);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Looks up a workspace by owner and name.
+    async fn find_workspace_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        let _ = (owner_id, name, viewer_id);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Creates a new workspace.
+    async fn insert_workspace(
+        &self,
+        input: CreateWorkspaceInput,
+    ) -> Result<WorkspaceRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Updates a workspace name.
+    async fn update_workspace_name(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        let _ = (workspace_id, name, viewer_id);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Updates a workspace autostart schedule.
+    async fn update_workspace_autostart(
+        &self,
+        workspace_id: Uuid,
+        schedule: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        let _ = (workspace_id, schedule);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Updates a workspace TTL.
+    async fn update_workspace_ttl(
+        &self,
+        workspace_id: Uuid,
+        ttl_ns: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        let _ = (workspace_id, ttl_ns);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Updates workspace dormancy.
+    async fn update_workspace_dormant_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        let _ = (workspace_id, dormant_at, viewer_id);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Updates workspace automatic updates.
+    async fn update_workspace_automatic_updates(
+        &self,
+        workspace_id: Uuid,
+        automatic_updates: &str,
+    ) -> Result<bool, StorageError> {
+        let _ = (workspace_id, automatic_updates);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Updates workspace last used time.
+    async fn update_workspace_last_used_at(
+        &self,
+        workspace_id: Uuid,
+        last_used_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let _ = (workspace_id, last_used_at);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Sets workspace favorite status.
+    async fn favorite_workspace(
+        &self,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        favorite: bool,
+    ) -> Result<bool, StorageError> {
+        let _ = (workspace_id, user_id, favorite);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Soft-deletes a workspace.
+    async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
+    /// Lists workspace builds for a workspace.
+    async fn list_workspace_builds(
+        &self,
+        workspace_id: Uuid,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<WorkspaceBuildRecord>, StorageError> {
+        let _ = (workspace_id, limit, offset);
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Returns the latest build for a workspace.
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace build by stable identifier.
+    async fn find_workspace_build_by_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        let _ = build_id;
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace build by workspace and build number.
+    async fn find_workspace_build_by_number(
+        &self,
+        workspace_id: Uuid,
+        build_number: i64,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        let _ = (workspace_id, build_number);
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Creates a new workspace build.
+    async fn insert_workspace_build(
+        &self,
+        input: CreateWorkspaceBuildInput,
+    ) -> Result<WorkspaceBuildRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Updates the build deadline.
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        let _ = (build_id, deadline, max_deadline);
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Updates the provisioner state blob for a build.
+    async fn update_workspace_build_provisioner_state(
+        &self,
+        build_id: Uuid,
+        state: &[u8],
+    ) -> Result<bool, StorageError> {
+        let _ = (build_id, state);
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Returns the next build number for a workspace.
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable(
+            "workspace builds are not implemented",
+        ))
+    }
+
+    /// Lists build parameters for a workspace build.
+    async fn list_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError> {
+        let _ = build_id;
+        Err(StorageError::unavailable(
+            "workspace build parameters are not implemented",
+        ))
+    }
+
+    /// Inserts build parameters.
+    async fn insert_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+        params: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        let _ = (build_id, params);
+        Err(StorageError::unavailable(
+            "workspace build parameters are not implemented",
+        ))
+    }
+
+    /// Lists provisioner job logs.
+    async fn list_provisioner_job_logs(
+        &self,
+        job_id: Uuid,
+        after: Option<i64>,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+        let _ = (job_id, after);
+        Err(StorageError::unavailable(
+            "provisioner job logs are not implemented",
+        ))
+    }
+
+    /// Lists provisioner job timings.
+    async fn list_provisioner_job_timings(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+        let _ = job_id;
+        Err(StorageError::unavailable(
+            "provisioner job timings are not implemented",
+        ))
+    }
+
+    /// Lists workspace resources for a job.
+    async fn list_workspace_resources_by_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
+        let _ = job_id;
+        Err(StorageError::unavailable(
+            "workspace resources are not implemented",
+        ))
+    }
+
+    /// Lists port shares for a workspace.
+    async fn list_workspace_port_shares(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable("port shares are not implemented"))
+    }
+
+    /// Upserts a port share.
+    async fn upsert_workspace_port_share(
+        &self,
+        input: UpsertPortShareInput,
+    ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("port shares are not implemented"))
+    }
+
+    /// Finds a port share.
+    async fn find_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
+        let _ = (workspace_id, agent_name, port);
+        Err(StorageError::unavailable("port shares are not implemented"))
+    }
+
+    /// Deletes a port share.
+    async fn delete_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<bool, StorageError> {
+        let _ = (workspace_id, agent_name, port);
+        Err(StorageError::unavailable("port shares are not implemented"))
+    }
+
     // ----- Template Store Methods -----
 
     /// Lists templates matching the supplied filter.
@@ -2099,30 +2995,30 @@ pub trait AppStore: DeploymentStore + Send + Sync {
         ))
     }
 
-    /// Creates a provisioner job.
-    async fn insert_provisioner_job(
+    /// Creates a provisioner job (template workflow).
+    async fn create_provisioner_job(
         &self,
         input: CreateProvisionerJobInput,
-    ) -> Result<ProvisionerJobRecord, StorageError> {
+    ) -> Result<TemplateProvisionerJobRecord, StorageError> {
         let _ = input;
         Err(StorageError::unavailable(
             "provisioner jobs are not implemented",
         ))
     }
 
-    /// Finds a provisioner job by identifier.
-    async fn find_provisioner_job_by_id(
+    /// Finds a provisioner job by identifier (template workflow).
+    async fn find_provisioner_job(
         &self,
         job_id: Uuid,
-    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
         let _ = job_id;
         Err(StorageError::unavailable(
             "provisioner jobs are not implemented",
         ))
     }
 
-    /// Cancels a provisioner job.
-    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+    /// Cancels a provisioner job (template workflow).
+    async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
         let _ = job_id;
         Err(StorageError::unavailable(
             "provisioner jobs are not implemented",
@@ -2566,6 +3462,492 @@ pub trait AppStore: DeploymentStore + Send + Sync {
             "notification messages are not implemented",
         ))
     }
+}
+
+/// Stored workspace agent row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Parent agent identifier for sub-agents.
+    pub parent_id: Option<Uuid>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+    /// Agent name.
+    pub name: String,
+    /// First connection time.
+    pub first_connected_at: Option<OffsetDateTime>,
+    /// Last connection time.
+    pub last_connected_at: Option<OffsetDateTime>,
+    /// Disconnection time.
+    pub disconnected_at: Option<OffsetDateTime>,
+    /// Owning resource identifier.
+    pub resource_id: Uuid,
+    /// Auth token.
+    pub auth_token: Uuid,
+    /// Instance identity string.
+    pub auth_instance_id: Option<String>,
+    /// Architecture.
+    pub architecture: String,
+    /// Environment variables as JSON.
+    pub environment_variables: Option<String>,
+    /// Operating system.
+    pub operating_system: String,
+    /// Working directory.
+    pub directory: String,
+    /// Expanded working directory.
+    pub expanded_directory: String,
+    /// Agent version.
+    pub version: String,
+    /// Agent API version.
+    pub api_version: String,
+    /// Connection timeout in seconds.
+    pub connection_timeout_seconds: i32,
+    /// Troubleshooting URL.
+    pub troubleshooting_url: String,
+    /// MOTD file path.
+    pub motd_file: String,
+    /// Lifecycle state.
+    pub lifecycle_state: String,
+    /// Total log length.
+    pub logs_length: i32,
+    /// Whether logs have overflowed.
+    pub logs_overflowed: bool,
+    /// Agent start time.
+    pub started_at: Option<OffsetDateTime>,
+    /// Agent ready time.
+    pub ready_at: Option<OffsetDateTime>,
+    /// Subsystems as string array.
+    pub subsystems: Vec<String>,
+    /// Display apps as string array.
+    pub display_apps: Vec<String>,
+    /// Display order.
+    pub display_order: i32,
+    /// API key scope.
+    pub api_key_scope: String,
+}
+
+/// Stored workspace app row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAppRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Owning agent identifier.
+    pub agent_id: Uuid,
+    /// Display name.
+    pub display_name: String,
+    /// Icon URL.
+    pub icon: String,
+    /// Command to execute.
+    pub command: Option<String>,
+    /// URL.
+    pub url: Option<String>,
+    /// Health check URL.
+    pub healthcheck_url: String,
+    /// Health check interval.
+    pub healthcheck_interval: i32,
+    /// Health check threshold.
+    pub healthcheck_threshold: i32,
+    /// Health status.
+    pub health: String,
+    /// Whether the app uses a subdomain.
+    pub subdomain: bool,
+    /// Sharing level.
+    pub sharing_level: String,
+    /// URL-safe slug.
+    pub slug: String,
+    /// Whether external.
+    pub external: bool,
+    /// Display order.
+    pub display_order: i32,
+    /// Whether hidden.
+    pub hidden: bool,
+    /// Where the app opens.
+    pub open_in: String,
+    /// Display group.
+    pub display_group: Option<String>,
+}
+
+/// Stored workspace agent script row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentScriptRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Owning agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Log source identifier.
+    pub log_source_id: Uuid,
+    /// Log path.
+    pub log_path: String,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Script content.
+    pub script: String,
+    /// Cron expression.
+    pub cron: String,
+    /// Whether start blocks login.
+    pub start_blocks_login: bool,
+    /// Whether runs on start.
+    pub run_on_start: bool,
+    /// Whether runs on stop.
+    pub run_on_stop: bool,
+    /// Timeout seconds.
+    pub timeout_seconds: i32,
+    /// Display name.
+    pub display_name: String,
+}
+
+/// Stored workspace agent log source row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentLogSourceRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Owning agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Display name.
+    pub display_name: String,
+    /// Icon.
+    pub icon: String,
+}
+
+/// Stored workspace agent log row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentLogRow {
+    /// Stable identifier.
+    pub id: i64,
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Log output.
+    pub output: String,
+    /// Log level.
+    pub level: String,
+    /// Source identifier.
+    pub log_source_id: Uuid,
+}
+
+/// Stored workspace agent metadata row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentMetadataRow {
+    /// Agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Display name.
+    pub display_name: String,
+    /// Key.
+    pub key: String,
+    /// Script.
+    pub script: String,
+    /// Value.
+    pub value: String,
+    /// Error.
+    pub error: String,
+    /// Timeout.
+    pub timeout: i64,
+    /// Interval.
+    pub interval: i64,
+    /// Collected at.
+    pub collected_at: OffsetDateTime,
+    /// Display order.
+    pub display_order: i32,
+}
+
+/// Stored workspace agent devcontainer row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentDevcontainerRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Owning agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Workspace folder path.
+    pub workspace_folder: String,
+    /// Config path.
+    pub config_path: String,
+    /// Name.
+    pub name: String,
+    /// Sub-agent identifier.
+    pub subagent_id: Option<Uuid>,
+}
+
+/// Stored workspace app status row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAppStatusRow {
+    /// Stable identifier.
+    pub id: Uuid,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// App identifier.
+    pub app_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// State.
+    pub state: String,
+    /// Message.
+    pub message: String,
+    /// URI.
+    pub uri: Option<String>,
+}
+
+/// Input for inserting agent logs.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertAgentLogInput {
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Log output.
+    pub output: String,
+    /// Log level.
+    pub level: String,
+}
+
+/// Input for inserting a workspace app status.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertWorkspaceAppStatusInput {
+    /// Agent identifier.
+    pub agent_id: Uuid,
+    /// App identifier.
+    pub app_id: Uuid,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// State.
+    pub state: String,
+    /// Message.
+    pub message: String,
+    /// URI.
+    pub uri: Option<String>,
+}
+
+/// Workspace-domain storage contract.
+#[async_trait]
+pub trait WorkspaceStore: Send + Sync {
+    /// Lists workspaces matching the supplied filter.
+    async fn list_workspaces(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError>;
+
+    /// Looks up a workspace by stable identifier.
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
+
+    /// Looks up a workspace by owner and name.
+    async fn find_workspace_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
+
+    /// Creates a new workspace.
+    async fn insert_workspace(
+        &self,
+        input: CreateWorkspaceInput,
+    ) -> Result<WorkspaceRecord, StorageError>;
+
+    /// Updates a workspace name.
+    async fn update_workspace_name(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
+
+    /// Updates a workspace autostart schedule.
+    async fn update_workspace_autostart(
+        &self,
+        workspace_id: Uuid,
+        schedule: Option<&str>,
+    ) -> Result<bool, StorageError>;
+
+    /// Updates a workspace TTL.
+    async fn update_workspace_ttl(
+        &self,
+        workspace_id: Uuid,
+        ttl_ns: Option<i64>,
+    ) -> Result<bool, StorageError>;
+
+    /// Updates workspace dormancy.
+    async fn update_workspace_dormant_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
+
+    /// Updates workspace automatic updates.
+    async fn update_workspace_automatic_updates(
+        &self,
+        workspace_id: Uuid,
+        automatic_updates: &str,
+    ) -> Result<bool, StorageError>;
+
+    /// Updates workspace last used time.
+    async fn update_workspace_last_used_at(
+        &self,
+        workspace_id: Uuid,
+        last_used_at: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+
+    /// Sets workspace favorite status.
+    async fn favorite_workspace(
+        &self,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        favorite: bool,
+    ) -> Result<bool, StorageError>;
+
+    /// Soft-deletes a workspace.
+    async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Looks up a template by stable identifier.
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError>;
+
+    /// Looks up a template version by stable identifier.
+    async fn find_template_version_by_id(
+        &self,
+        template_version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
+    /// Lists workspace builds for a workspace.
+    async fn list_workspace_builds(
+        &self,
+        workspace_id: Uuid,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<WorkspaceBuildRecord>, StorageError>;
+
+    /// Returns the latest build for a workspace.
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError>;
+
+    /// Looks up a workspace build by stable identifier.
+    async fn find_workspace_build_by_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError>;
+
+    /// Looks up a workspace build by workspace and build number.
+    async fn find_workspace_build_by_number(
+        &self,
+        workspace_id: Uuid,
+        build_number: i64,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError>;
+
+    /// Creates a new workspace build.
+    async fn insert_workspace_build(
+        &self,
+        input: CreateWorkspaceBuildInput,
+    ) -> Result<WorkspaceBuildRecord, StorageError>;
+
+    /// Updates the build deadline.
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError>;
+
+    /// Updates the provisioner state blob for a build.
+    async fn update_workspace_build_provisioner_state(
+        &self,
+        build_id: Uuid,
+        state: &[u8],
+    ) -> Result<bool, StorageError>;
+
+    /// Returns the next build number for a workspace.
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError>;
+
+    /// Lists build parameters for a workspace build.
+    async fn list_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError>;
+
+    /// Inserts build parameters.
+    async fn insert_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+        params: &[(String, String)],
+    ) -> Result<(), StorageError>;
+
+    /// Looks up a provisioner job by stable identifier.
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError>;
+
+    /// Creates a new provisioner job.
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<TemplateProvisionerJobRecord, StorageError>;
+
+    /// Cancels a provisioner job.
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Lists provisioner job logs.
+    async fn list_provisioner_job_logs(
+        &self,
+        job_id: Uuid,
+        after: Option<i64>,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError>;
+
+    /// Lists provisioner job timings.
+    async fn list_provisioner_job_timings(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
+
+    /// Lists workspace resources for a job.
+    async fn list_workspace_resources_by_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<WorkspaceResourceRecord>, StorageError>;
+
+    /// Lists port shares for a workspace.
+    async fn list_workspace_port_shares(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError>;
+
+    /// Upserts a port share.
+    async fn upsert_workspace_port_share(
+        &self,
+        input: UpsertPortShareInput,
+    ) -> Result<WorkspaceAgentPortShareRecord, StorageError>;
+
+    /// Finds a port share.
+    async fn find_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError>;
+
+    /// Deletes a port share.
+    async fn delete_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<bool, StorageError>;
 }
 
 #[async_trait]
@@ -3042,297 +4424,6 @@ where
     ) -> Result<Option<OrganizationMemberRecord>, StorageError> {
         AppStore::update_organization_member_roles(self, organization_id, user_id, roles).await
     }
-
-    // ----- Forwarded user identity supplements -----
-
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        AppStore::list_user_links(self, user_id).await
-    }
-
-    async fn upsert_user_link(
-        &self,
-        user_id: Uuid,
-        input: &UpsertUserLinkInput,
-    ) -> Result<UserLinkRecord, StorageError> {
-        AppStore::upsert_user_link(self, user_id, input).await
-    }
-
-    async fn delete_user_link(
-        &self,
-        user_id: Uuid,
-        login_type: crate::identity::LoginType,
-    ) -> Result<bool, StorageError> {
-        AppStore::delete_user_link(self, user_id, login_type).await
-    }
-
-    async fn get_user_config(
-        &self,
-        user_id: Uuid,
-        key: &str,
-    ) -> Result<Option<UserConfigRecord>, StorageError> {
-        AppStore::get_user_config(self, user_id, key).await
-    }
-
-    async fn upsert_user_config(
-        &self,
-        user_id: Uuid,
-        key: &str,
-        value: &str,
-    ) -> Result<UserConfigRecord, StorageError> {
-        AppStore::upsert_user_config(self, user_id, key, value).await
-    }
-
-    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
-        AppStore::delete_user_config(self, user_id, key).await
-    }
-
-    async fn insert_user_deleted(
-        &self,
-        user_id: Uuid,
-        deleted_by: Option<Uuid>,
-        reason: &str,
-    ) -> Result<UserDeletedRecord, StorageError> {
-        AppStore::insert_user_deleted(self, user_id, deleted_by, reason).await
-    }
-
-    async fn insert_user_status_change(
-        &self,
-        user_id: Uuid,
-        old_status: UserStatus,
-        new_status: UserStatus,
-        changed_by: Option<Uuid>,
-        reason: &str,
-    ) -> Result<UserStatusChangeRecord, StorageError> {
-        AppStore::insert_user_status_change(
-            self, user_id, old_status, new_status, changed_by, reason,
-        )
-        .await
-    }
-
-    async fn list_user_status_changes(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
-        AppStore::list_user_status_changes(self, user_id).await
-    }
-
-    async fn list_custom_roles(
-        &self,
-        organization_id: Option<Uuid>,
-    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
-        AppStore::list_custom_roles(self, organization_id).await
-    }
-
-    async fn upsert_custom_role(
-        &self,
-        input: &UpsertCustomRoleInput,
-    ) -> Result<CustomRoleRecord, StorageError> {
-        AppStore::upsert_custom_role(self, input).await
-    }
-
-    async fn delete_custom_role(
-        &self,
-        name: &str,
-        organization_id: Option<Uuid>,
-    ) -> Result<bool, StorageError> {
-        AppStore::delete_custom_role(self, name, organization_id).await
-    }
-
-    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
-        AppStore::list_groups(self, organization_id).await
-    }
-
-    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
-        AppStore::create_group(self, input).await
-    }
-
-    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
-        AppStore::find_group_by_id(self, group_id).await
-    }
-
-    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
-        AppStore::delete_group(self, group_id).await
-    }
-
-    async fn list_group_members(
-        &self,
-        group_id: Uuid,
-    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
-        AppStore::list_group_members(self, group_id).await
-    }
-
-    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
-        AppStore::insert_group_member(self, group_id, user_id).await
-    }
-
-    async fn delete_group_member(
-        &self,
-        group_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        AppStore::delete_group_member(self, group_id, user_id).await
-    }
-
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
-        AppStore::list_oauth2_provider_apps(self).await
-    }
-
-    async fn create_oauth2_provider_app(
-        &self,
-        input: &CreateOAuth2ProviderAppInput,
-    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
-        AppStore::create_oauth2_provider_app(self, input).await
-    }
-
-    async fn find_oauth2_provider_app_by_id(
-        &self,
-        app_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        AppStore::find_oauth2_provider_app_by_id(self, app_id).await
-    }
-
-    async fn update_oauth2_provider_app(
-        &self,
-        input: &UpdateOAuth2ProviderAppInput,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        AppStore::update_oauth2_provider_app(self, input).await
-    }
-
-    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
-        AppStore::delete_oauth2_provider_app(self, app_id).await
-    }
-
-    async fn list_oauth2_provider_app_secrets(
-        &self,
-        app_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
-        AppStore::list_oauth2_provider_app_secrets(self, app_id).await
-    }
-
-    async fn create_oauth2_provider_app_secret(
-        &self,
-        app_id: Uuid,
-        hashed_secret: &[u8],
-        display_secret: &str,
-    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
-        AppStore::create_oauth2_provider_app_secret(self, app_id, hashed_secret, display_secret)
-            .await
-    }
-
-    async fn delete_oauth2_provider_app_secret(
-        &self,
-        secret_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        AppStore::delete_oauth2_provider_app_secret(self, secret_id).await
-    }
-
-    async fn find_oauth2_provider_app_secret_by_id(
-        &self,
-        secret_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        AppStore::find_oauth2_provider_app_secret_by_id(self, secret_id).await
-    }
-
-    async fn create_oauth2_provider_app_code(
-        &self,
-        app_id: Uuid,
-        user_id: Uuid,
-        secret_prefix: &[u8],
-        hashed_secret: &[u8],
-        expires_at: OffsetDateTime,
-        resource_uri: &str,
-        code_challenge: &str,
-        code_challenge_method: &str,
-    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
-        AppStore::create_oauth2_provider_app_code(
-            self,
-            app_id,
-            user_id,
-            secret_prefix,
-            hashed_secret,
-            expires_at,
-            resource_uri,
-            code_challenge,
-            code_challenge_method,
-        )
-        .await
-    }
-
-    async fn find_oauth2_provider_app_code_by_prefix(
-        &self,
-        secret_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
-        AppStore::find_oauth2_provider_app_code_by_prefix(self, secret_prefix).await
-    }
-
-    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
-        AppStore::delete_oauth2_provider_app_code(self, code_id).await
-    }
-
-    async fn create_oauth2_provider_app_token(
-        &self,
-        input: &CreateOAuth2ProviderAppTokenInput,
-    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
-        AppStore::create_oauth2_provider_app_token(self, input).await
-    }
-
-    async fn find_oauth2_provider_app_token_by_prefix(
-        &self,
-        hash_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        AppStore::find_oauth2_provider_app_token_by_prefix(self, hash_prefix).await
-    }
-
-    async fn find_oauth2_provider_app_token_by_refresh_hash(
-        &self,
-        refresh_hash: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        AppStore::find_oauth2_provider_app_token_by_refresh_hash(self, refresh_hash).await
-    }
-
-    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
-        AppStore::delete_oauth2_provider_app_token(self, token_id).await
-    }
-
-    async fn list_oauth2_provider_app_tokens_by_app_and_user(
-        &self,
-        app_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
-        AppStore::list_oauth2_provider_app_tokens_by_app_and_user(self, app_id, user_id).await
-    }
-
-    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
-        &self,
-        app_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<u64, StorageError> {
-        AppStore::delete_oauth2_provider_app_tokens_by_app_and_user(self, app_id, user_id).await
-    }
-
-    async fn fetch_pending_notification_messages(
-        &self,
-        limit: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        AppStore::fetch_pending_notification_messages(self, limit).await
-    }
-
-    async fn update_notification_message_status(
-        &self,
-        message_id: Uuid,
-        status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        AppStore::update_notification_message_status(self, message_id, status).await
-    }
-
-    async fn increment_notification_message_attempt_count(
-        &self,
-        message_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        AppStore::increment_notification_message_attempt_count(self, message_id).await
-    }
 }
 
 #[async_trait]
@@ -3503,315 +4594,6 @@ where
     ) -> Result<Option<OrganizationMemberRecord>, StorageError> {
         (**self)
             .update_organization_member_roles(organization_id, user_id, roles)
-            .await
-    }
-
-    // ----- Forwarded user identity supplements -----
-
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        (**self).list_user_links(user_id).await
-    }
-
-    async fn upsert_user_link(
-        &self,
-        user_id: Uuid,
-        input: &UpsertUserLinkInput,
-    ) -> Result<UserLinkRecord, StorageError> {
-        (**self).upsert_user_link(user_id, input).await
-    }
-
-    async fn delete_user_link(
-        &self,
-        user_id: Uuid,
-        login_type: crate::identity::LoginType,
-    ) -> Result<bool, StorageError> {
-        (**self).delete_user_link(user_id, login_type).await
-    }
-
-    async fn get_user_config(
-        &self,
-        user_id: Uuid,
-        key: &str,
-    ) -> Result<Option<UserConfigRecord>, StorageError> {
-        (**self).get_user_config(user_id, key).await
-    }
-
-    async fn upsert_user_config(
-        &self,
-        user_id: Uuid,
-        key: &str,
-        value: &str,
-    ) -> Result<UserConfigRecord, StorageError> {
-        (**self).upsert_user_config(user_id, key, value).await
-    }
-
-    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
-        (**self).delete_user_config(user_id, key).await
-    }
-
-    async fn insert_user_deleted(
-        &self,
-        user_id: Uuid,
-        deleted_by: Option<Uuid>,
-        reason: &str,
-    ) -> Result<UserDeletedRecord, StorageError> {
-        (**self)
-            .insert_user_deleted(user_id, deleted_by, reason)
-            .await
-    }
-
-    async fn insert_user_status_change(
-        &self,
-        user_id: Uuid,
-        old_status: UserStatus,
-        new_status: UserStatus,
-        changed_by: Option<Uuid>,
-        reason: &str,
-    ) -> Result<UserStatusChangeRecord, StorageError> {
-        (**self)
-            .insert_user_status_change(user_id, old_status, new_status, changed_by, reason)
-            .await
-    }
-
-    async fn list_user_status_changes(
-        &self,
-        user_id: Uuid,
-    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
-        (**self).list_user_status_changes(user_id).await
-    }
-
-    async fn list_custom_roles(
-        &self,
-        organization_id: Option<Uuid>,
-    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
-        (**self).list_custom_roles(organization_id).await
-    }
-
-    async fn upsert_custom_role(
-        &self,
-        input: &UpsertCustomRoleInput,
-    ) -> Result<CustomRoleRecord, StorageError> {
-        (**self).upsert_custom_role(input).await
-    }
-
-    async fn delete_custom_role(
-        &self,
-        name: &str,
-        organization_id: Option<Uuid>,
-    ) -> Result<bool, StorageError> {
-        (**self).delete_custom_role(name, organization_id).await
-    }
-
-    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
-        (**self).list_groups(organization_id).await
-    }
-
-    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
-        (**self).create_group(input).await
-    }
-
-    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
-        (**self).find_group_by_id(group_id).await
-    }
-
-    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
-        (**self).delete_group(group_id).await
-    }
-
-    async fn list_group_members(
-        &self,
-        group_id: Uuid,
-    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
-        (**self).list_group_members(group_id).await
-    }
-
-    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
-        (**self).insert_group_member(group_id, user_id).await
-    }
-
-    async fn delete_group_member(
-        &self,
-        group_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        (**self).delete_group_member(group_id, user_id).await
-    }
-
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
-        (**self).list_oauth2_provider_apps().await
-    }
-
-    async fn create_oauth2_provider_app(
-        &self,
-        input: &CreateOAuth2ProviderAppInput,
-    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
-        (**self).create_oauth2_provider_app(input).await
-    }
-
-    async fn find_oauth2_provider_app_by_id(
-        &self,
-        app_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        (**self).find_oauth2_provider_app_by_id(app_id).await
-    }
-
-    async fn update_oauth2_provider_app(
-        &self,
-        input: &UpdateOAuth2ProviderAppInput,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        (**self).update_oauth2_provider_app(input).await
-    }
-
-    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
-        (**self).delete_oauth2_provider_app(app_id).await
-    }
-
-    async fn list_oauth2_provider_app_secrets(
-        &self,
-        app_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
-        (**self).list_oauth2_provider_app_secrets(app_id).await
-    }
-
-    async fn create_oauth2_provider_app_secret(
-        &self,
-        app_id: Uuid,
-        hashed_secret: &[u8],
-        display_secret: &str,
-    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
-        (**self)
-            .create_oauth2_provider_app_secret(app_id, hashed_secret, display_secret)
-            .await
-    }
-
-    async fn delete_oauth2_provider_app_secret(
-        &self,
-        secret_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        (**self).delete_oauth2_provider_app_secret(secret_id).await
-    }
-
-    async fn find_oauth2_provider_app_secret_by_id(
-        &self,
-        secret_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        (**self)
-            .find_oauth2_provider_app_secret_by_id(secret_id)
-            .await
-    }
-
-    async fn create_oauth2_provider_app_code(
-        &self,
-        app_id: Uuid,
-        user_id: Uuid,
-        secret_prefix: &[u8],
-        hashed_secret: &[u8],
-        expires_at: OffsetDateTime,
-        resource_uri: &str,
-        code_challenge: &str,
-        code_challenge_method: &str,
-    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
-        (**self)
-            .create_oauth2_provider_app_code(
-                app_id,
-                user_id,
-                secret_prefix,
-                hashed_secret,
-                expires_at,
-                resource_uri,
-                code_challenge,
-                code_challenge_method,
-            )
-            .await
-    }
-
-    async fn find_oauth2_provider_app_code_by_prefix(
-        &self,
-        secret_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
-        (**self)
-            .find_oauth2_provider_app_code_by_prefix(secret_prefix)
-            .await
-    }
-
-    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
-        (**self).delete_oauth2_provider_app_code(code_id).await
-    }
-
-    async fn create_oauth2_provider_app_token(
-        &self,
-        input: &CreateOAuth2ProviderAppTokenInput,
-    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
-        (**self).create_oauth2_provider_app_token(input).await
-    }
-
-    async fn find_oauth2_provider_app_token_by_prefix(
-        &self,
-        hash_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        (**self)
-            .find_oauth2_provider_app_token_by_prefix(hash_prefix)
-            .await
-    }
-
-    async fn find_oauth2_provider_app_token_by_refresh_hash(
-        &self,
-        refresh_hash: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        (**self)
-            .find_oauth2_provider_app_token_by_refresh_hash(refresh_hash)
-            .await
-    }
-
-    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
-        (**self).delete_oauth2_provider_app_token(token_id).await
-    }
-
-    async fn list_oauth2_provider_app_tokens_by_app_and_user(
-        &self,
-        app_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
-        (**self)
-            .list_oauth2_provider_app_tokens_by_app_and_user(app_id, user_id)
-            .await
-    }
-
-    async fn delete_oauth2_provider_app_tokens_by_app_and_user(
-        &self,
-        app_id: Uuid,
-        user_id: Uuid,
-    ) -> Result<u64, StorageError> {
-        (**self)
-            .delete_oauth2_provider_app_tokens_by_app_and_user(app_id, user_id)
-            .await
-    }
-
-    async fn fetch_pending_notification_messages(
-        &self,
-        limit: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        (**self).fetch_pending_notification_messages(limit).await
-    }
-
-    async fn update_notification_message_status(
-        &self,
-        message_id: Uuid,
-        status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        (**self)
-            .update_notification_message_status(message_id, status)
-            .await
-    }
-
-    async fn increment_notification_message_attempt_count(
-        &self,
-        message_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        (**self)
-            .increment_notification_message_attempt_count(message_id)
             .await
     }
 }
@@ -4056,6 +4838,734 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// WorkspaceStore blanket impls
+// ---------------------------------------------------------------------------
+
+#[async_trait]
+impl<T> WorkspaceStore for T
+where
+    T: AppStore + ?Sized,
+{
+    async fn list_workspaces(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        AppStore::list_workspaces(self, filter).await
+    }
+
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::find_workspace_by_id(self, workspace_id, viewer_id).await
+    }
+
+    async fn find_workspace_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::find_workspace_by_owner_and_name(self, owner_id, name, viewer_id).await
+    }
+
+    async fn insert_workspace(
+        &self,
+        input: CreateWorkspaceInput,
+    ) -> Result<WorkspaceRecord, StorageError> {
+        AppStore::insert_workspace(self, input).await
+    }
+
+    async fn update_workspace_name(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::update_workspace_name(self, workspace_id, name, viewer_id).await
+    }
+
+    async fn update_workspace_autostart(
+        &self,
+        workspace_id: Uuid,
+        schedule: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_workspace_autostart(self, workspace_id, schedule).await
+    }
+
+    async fn update_workspace_ttl(
+        &self,
+        workspace_id: Uuid,
+        ttl_ns: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_workspace_ttl(self, workspace_id, ttl_ns).await
+    }
+
+    async fn update_workspace_dormant_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::update_workspace_dormant_at(self, workspace_id, dormant_at, viewer_id).await
+    }
+
+    async fn update_workspace_automatic_updates(
+        &self,
+        workspace_id: Uuid,
+        automatic_updates: &str,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_workspace_automatic_updates(self, workspace_id, automatic_updates).await
+    }
+
+    async fn update_workspace_last_used_at(
+        &self,
+        workspace_id: Uuid,
+        last_used_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_workspace_last_used_at(self, workspace_id, last_used_at).await
+    }
+
+    async fn favorite_workspace(
+        &self,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        favorite: bool,
+    ) -> Result<bool, StorageError> {
+        AppStore::favorite_workspace(self, workspace_id, user_id, favorite).await
+    }
+
+    async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::soft_delete_workspace(self, workspace_id).await
+    }
+
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        AppStore::find_template_by_id(self, template_id).await
+    }
+
+    async fn find_template_version_by_id(
+        &self,
+        template_version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        AppStore::find_template_version_by_id(self, template_version_id).await
+    }
+
+    async fn list_workspace_builds(
+        &self,
+        workspace_id: Uuid,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<WorkspaceBuildRecord>, StorageError> {
+        AppStore::list_workspace_builds(self, workspace_id, limit, offset).await
+    }
+
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        AppStore::find_latest_workspace_build(self, workspace_id).await
+    }
+
+    async fn find_workspace_build_by_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        AppStore::find_workspace_build_by_id(self, build_id).await
+    }
+
+    async fn find_workspace_build_by_number(
+        &self,
+        workspace_id: Uuid,
+        build_number: i64,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        AppStore::find_workspace_build_by_number(self, workspace_id, build_number).await
+    }
+
+    async fn insert_workspace_build(
+        &self,
+        input: CreateWorkspaceBuildInput,
+    ) -> Result<WorkspaceBuildRecord, StorageError> {
+        AppStore::insert_workspace_build(self, input).await
+    }
+
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_workspace_build_deadline(self, build_id, deadline, max_deadline).await
+    }
+
+    async fn update_workspace_build_provisioner_state(
+        &self,
+        build_id: Uuid,
+        state: &[u8],
+    ) -> Result<bool, StorageError> {
+        AppStore::update_workspace_build_provisioner_state(self, build_id, state).await
+    }
+
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
+        AppStore::next_workspace_build_number(self, workspace_id).await
+    }
+
+    async fn list_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError> {
+        AppStore::list_workspace_build_parameters(self, build_id).await
+    }
+
+    async fn insert_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+        params: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        AppStore::insert_workspace_build_parameters(self, build_id, params).await
+    }
+
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
+        AppStore::find_provisioner_job(self, job_id).await
+    }
+
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<TemplateProvisionerJobRecord, StorageError> {
+        AppStore::create_provisioner_job(self, input).await
+    }
+
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::cancel_template_provisioner_job(self, job_id).await
+    }
+
+    async fn list_provisioner_job_logs(
+        &self,
+        job_id: Uuid,
+        after: Option<i64>,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+        AppStore::list_provisioner_job_logs(self, job_id, after).await
+    }
+
+    async fn list_provisioner_job_timings(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+        AppStore::list_provisioner_job_timings(self, job_id).await
+    }
+
+    async fn list_workspace_resources_by_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
+        AppStore::list_workspace_resources_by_job(self, job_id).await
+    }
+
+    async fn list_workspace_port_shares(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
+        AppStore::list_workspace_port_shares(self, workspace_id).await
+    }
+
+    async fn upsert_workspace_port_share(
+        &self,
+        input: UpsertPortShareInput,
+    ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
+        AppStore::upsert_workspace_port_share(self, input).await
+    }
+
+    async fn find_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
+        AppStore::find_workspace_port_share(self, workspace_id, agent_name, port).await
+    }
+
+    async fn delete_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<bool, StorageError> {
+        AppStore::delete_workspace_port_share(self, workspace_id, agent_name, port).await
+    }
+}
+
+#[async_trait]
+impl<T> WorkspaceStore for Arc<T>
+where
+    T: WorkspaceStore + ?Sized,
+{
+    async fn list_workspaces(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        (**self).list_workspaces(filter).await
+    }
+
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: Uuid,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self).find_workspace_by_id(workspace_id, viewer_id).await
+    }
+
+    async fn find_workspace_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self)
+            .find_workspace_by_owner_and_name(owner_id, name, viewer_id)
+            .await
+    }
+
+    async fn insert_workspace(
+        &self,
+        input: CreateWorkspaceInput,
+    ) -> Result<WorkspaceRecord, StorageError> {
+        (**self).insert_workspace(input).await
+    }
+
+    async fn update_workspace_name(
+        &self,
+        workspace_id: Uuid,
+        name: &str,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self)
+            .update_workspace_name(workspace_id, name, viewer_id)
+            .await
+    }
+
+    async fn update_workspace_autostart(
+        &self,
+        workspace_id: Uuid,
+        schedule: Option<&str>,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_workspace_autostart(workspace_id, schedule)
+            .await
+    }
+
+    async fn update_workspace_ttl(
+        &self,
+        workspace_id: Uuid,
+        ttl_ns: Option<i64>,
+    ) -> Result<bool, StorageError> {
+        (**self).update_workspace_ttl(workspace_id, ttl_ns).await
+    }
+
+    async fn update_workspace_dormant_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+        viewer_id: Option<Uuid>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self)
+            .update_workspace_dormant_at(workspace_id, dormant_at, viewer_id)
+            .await
+    }
+
+    async fn update_workspace_automatic_updates(
+        &self,
+        workspace_id: Uuid,
+        automatic_updates: &str,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_workspace_automatic_updates(workspace_id, automatic_updates)
+            .await
+    }
+
+    async fn update_workspace_last_used_at(
+        &self,
+        workspace_id: Uuid,
+        last_used_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_workspace_last_used_at(workspace_id, last_used_at)
+            .await
+    }
+
+    async fn favorite_workspace(
+        &self,
+        workspace_id: Uuid,
+        user_id: Uuid,
+        favorite: bool,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .favorite_workspace(workspace_id, user_id, favorite)
+            .await
+    }
+
+    async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
+        (**self).soft_delete_workspace(workspace_id).await
+    }
+
+    async fn find_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<TemplateRecord>, StorageError> {
+        (**self).find_template_by_id(template_id).await
+    }
+
+    async fn find_template_version_by_id(
+        &self,
+        template_version_id: Uuid,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        (**self)
+            .find_template_version_by_id(template_version_id)
+            .await
+    }
+
+    async fn list_workspace_builds(
+        &self,
+        workspace_id: Uuid,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<WorkspaceBuildRecord>, StorageError> {
+        (**self)
+            .list_workspace_builds(workspace_id, limit, offset)
+            .await
+    }
+
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        (**self).find_latest_workspace_build(workspace_id).await
+    }
+
+    async fn find_workspace_build_by_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        (**self).find_workspace_build_by_id(build_id).await
+    }
+
+    async fn find_workspace_build_by_number(
+        &self,
+        workspace_id: Uuid,
+        build_number: i64,
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+        (**self)
+            .find_workspace_build_by_number(workspace_id, build_number)
+            .await
+    }
+
+    async fn insert_workspace_build(
+        &self,
+        input: CreateWorkspaceBuildInput,
+    ) -> Result<WorkspaceBuildRecord, StorageError> {
+        (**self).insert_workspace_build(input).await
+    }
+
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_workspace_build_deadline(build_id, deadline, max_deadline)
+            .await
+    }
+
+    async fn update_workspace_build_provisioner_state(
+        &self,
+        build_id: Uuid,
+        state: &[u8],
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_workspace_build_provisioner_state(build_id, state)
+            .await
+    }
+
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
+        (**self).next_workspace_build_number(workspace_id).await
+    }
+
+    async fn list_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError> {
+        (**self).list_workspace_build_parameters(build_id).await
+    }
+
+    async fn insert_workspace_build_parameters(
+        &self,
+        build_id: Uuid,
+        params: &[(String, String)],
+    ) -> Result<(), StorageError> {
+        (**self)
+            .insert_workspace_build_parameters(build_id, params)
+            .await
+    }
+
+    async fn find_provisioner_job_by_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
+        (**self).find_provisioner_job_by_id(job_id).await
+    }
+
+    async fn insert_provisioner_job(
+        &self,
+        input: CreateProvisionerJobInput,
+    ) -> Result<TemplateProvisionerJobRecord, StorageError> {
+        (**self).insert_provisioner_job(input).await
+    }
+
+    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        (**self).cancel_provisioner_job(job_id).await
+    }
+
+    async fn list_provisioner_job_logs(
+        &self,
+        job_id: Uuid,
+        after: Option<i64>,
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+        (**self).list_provisioner_job_logs(job_id, after).await
+    }
+
+    async fn list_provisioner_job_timings(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+        (**self).list_provisioner_job_timings(job_id).await
+    }
+
+    async fn list_workspace_resources_by_job(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
+        (**self).list_workspace_resources_by_job(job_id).await
+    }
+
+    async fn list_workspace_port_shares(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
+        (**self).list_workspace_port_shares(workspace_id).await
+    }
+
+    async fn upsert_workspace_port_share(
+        &self,
+        input: UpsertPortShareInput,
+    ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
+        (**self).upsert_workspace_port_share(input).await
+    }
+
+    async fn find_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
+        (**self)
+            .find_workspace_port_share(workspace_id, agent_name, port)
+            .await
+    }
+
+    async fn delete_workspace_port_share(
+        &self,
+        workspace_id: Uuid,
+        agent_name: &str,
+        port: i32,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .delete_workspace_port_share(workspace_id, agent_name, port)
+            .await
+    }
+}
+
+#[async_trait]
+impl<T> ProvisionerStore for Arc<T>
+where
+    T: ProvisionerStore + ?Sized,
+{
+    async fn acquire_provisioner_job(
+        &self,
+        input: AcquireProvisionerJobInput,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        (**self).acquire_provisioner_job(input).await
+    }
+
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+        (**self).get_provisioner_job_by_id(id).await
+    }
+
+    async fn get_provisioner_jobs_by_ids(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+        (**self).get_provisioner_jobs_by_ids(ids).await
+    }
+
+    async fn insert_provisioner_job(
+        &self,
+        input: InsertProvisionerJobInput,
+    ) -> Result<ProvisionerJobRecord, StorageError> {
+        (**self).insert_provisioner_job(input).await
+    }
+
+    async fn update_provisioner_job_by_id(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self).update_provisioner_job_by_id(id, updated_at).await
+    }
+
+    async fn update_provisioner_job_with_complete_by_id(
+        &self,
+        input: CompleteProvisionerJobInput,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_provisioner_job_with_complete_by_id(input)
+            .await
+    }
+
+    async fn update_provisioner_job_with_cancel_by_id(
+        &self,
+        input: CancelProvisionerJobInput,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_provisioner_job_with_cancel_by_id(input)
+            .await
+    }
+
+    async fn get_provisioner_jobs_to_be_reaped(
+        &self,
+        input: GetJobsToBeReapedInput,
+    ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+        (**self).get_provisioner_jobs_to_be_reaped(input).await
+    }
+
+    async fn insert_provisioner_job_logs(
+        &self,
+        input: InsertProvisionerJobLogsInput,
+    ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
+        (**self).insert_provisioner_job_logs(input).await
+    }
+
+    async fn get_provisioner_logs_after_id(
+        &self,
+        job_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
+        (**self)
+            .get_provisioner_logs_after_id(job_id, after_id)
+            .await
+    }
+
+    async fn insert_provisioner_job_timings(
+        &self,
+        input: InsertProvisionerJobTimingsInput,
+    ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
+        (**self).insert_provisioner_job_timings(input).await
+    }
+
+    async fn get_provisioner_job_timings_by_job_id(
+        &self,
+        job_id: Uuid,
+    ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
+        (**self).get_provisioner_job_timings_by_job_id(job_id).await
+    }
+
+    async fn upsert_provisioner_daemon(
+        &self,
+        input: UpsertProvisionerDaemonInput,
+    ) -> Result<ProvisionerDaemonRecord, StorageError> {
+        (**self).upsert_provisioner_daemon(input).await
+    }
+
+    async fn update_provisioner_daemon_last_seen_at(
+        &self,
+        id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_provisioner_daemon_last_seen_at(id, last_seen_at)
+            .await
+    }
+
+    async fn get_provisioner_daemons_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
+        (**self)
+            .get_provisioner_daemons_by_organization(organization_id)
+            .await
+    }
+
+    async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
+        (**self).delete_old_provisioner_daemons().await
+    }
+
+    async fn insert_provisioner_key(
+        &self,
+        input: InsertProvisionerKeyInput,
+    ) -> Result<ProvisionerKeyRecord, StorageError> {
+        (**self).insert_provisioner_key(input).await
+    }
+
+    async fn get_provisioner_key_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        (**self).get_provisioner_key_by_id(id).await
+    }
+
+    async fn get_provisioner_key_by_hashed_secret(
+        &self,
+        hashed_secret: &[u8],
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        (**self)
+            .get_provisioner_key_by_hashed_secret(hashed_secret)
+            .await
+    }
+
+    async fn get_provisioner_key_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+        (**self)
+            .get_provisioner_key_by_name(organization_id, name)
+            .await
+    }
+
+    async fn list_provisioner_keys_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+        (**self)
+            .list_provisioner_keys_by_organization(organization_id)
+            .await
+    }
+
+    async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_provisioner_key(id).await
+    }
+}
+
 #[async_trait]
 impl<T> TemplateStore for T
 where
@@ -4202,192 +5712,25 @@ where
         AppStore::list_template_version_preset_parameters(self, preset_id).await
     }
 
-    async fn insert_provisioner_job(
+    async fn create_provisioner_job(
         &self,
         input: CreateProvisionerJobInput,
-    ) -> Result<ProvisionerJobRecord, StorageError> {
-        AppStore::insert_provisioner_job(self, input).await
+    ) -> Result<TemplateProvisionerJobRecord, StorageError> {
+        AppStore::create_provisioner_job(self, input).await
     }
 
-    async fn find_provisioner_job_by_id(
+    async fn find_provisioner_job(
         &self,
         job_id: Uuid,
-    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-        AppStore::find_provisioner_job_by_id(self, job_id).await
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
+        AppStore::find_provisioner_job(self, job_id).await
     }
 
-    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
-        AppStore::cancel_provisioner_job(self, job_id).await
+    async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::cancel_template_provisioner_job(self, job_id).await
     }
 }
 
-#[async_trait]
-impl<T> TemplateStore for Arc<T>
-where
-    T: TemplateStore + ?Sized,
-{
-    async fn list_templates(
-        &self,
-        filter: TemplateListFilter,
-    ) -> Result<Vec<TemplateRecord>, StorageError> {
-        (**self).list_templates(filter).await
-    }
-
-    async fn find_template_by_id(
-        &self,
-        template_id: Uuid,
-    ) -> Result<Option<TemplateRecord>, StorageError> {
-        (**self).find_template_by_id(template_id).await
-    }
-
-    async fn find_template_by_org_and_name(
-        &self,
-        organization_id: Uuid,
-        name: &str,
-    ) -> Result<Option<TemplateRecord>, StorageError> {
-        (**self)
-            .find_template_by_org_and_name(organization_id, name)
-            .await
-    }
-
-    async fn insert_template(
-        &self,
-        input: CreateTemplateInput,
-    ) -> Result<TemplateRecord, CreateTemplateStoreError> {
-        (**self).insert_template(input).await
-    }
-
-    async fn update_template_meta(
-        &self,
-        input: UpdateTemplateMetaInput,
-    ) -> Result<Option<TemplateRecord>, StorageError> {
-        (**self).update_template_meta(input).await
-    }
-
-    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError> {
-        (**self).soft_delete_template(template_id).await
-    }
-
-    async fn update_template_active_version(
-        &self,
-        template_id: Uuid,
-        active_version_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        (**self)
-            .update_template_active_version(template_id, active_version_id)
-            .await
-    }
-
-    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError> {
-        (**self).template_daus(template_id).await
-    }
-
-    async fn list_template_versions(
-        &self,
-        filter: TemplateVersionListFilter,
-    ) -> Result<Vec<TemplateVersionRecord>, StorageError> {
-        (**self).list_template_versions(filter).await
-    }
-
-    async fn find_template_version_by_id(
-        &self,
-        version_id: Uuid,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        (**self).find_template_version_by_id(version_id).await
-    }
-
-    async fn find_template_version_by_template_and_name(
-        &self,
-        template_id: Uuid,
-        name: &str,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        (**self)
-            .find_template_version_by_template_and_name(template_id, name)
-            .await
-    }
-
-    async fn find_template_version_by_org_and_name(
-        &self,
-        organization_id: Uuid,
-        template_name: &str,
-        version_name: &str,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        (**self)
-            .find_template_version_by_org_and_name(organization_id, template_name, version_name)
-            .await
-    }
-
-    async fn insert_template_version(
-        &self,
-        input: CreateTemplateVersionInput,
-    ) -> Result<TemplateVersionRecord, StorageError> {
-        (**self).insert_template_version(input).await
-    }
-
-    async fn update_template_version(
-        &self,
-        version_id: Uuid,
-        name: &str,
-        message: &str,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        (**self)
-            .update_template_version(version_id, name, message)
-            .await
-    }
-
-    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
-        (**self).archive_template_version(version_id).await
-    }
-
-    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
-        (**self).unarchive_template_version(version_id).await
-    }
-
-    async fn list_template_version_parameters(
-        &self,
-        version_id: Uuid,
-    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
-        (**self).list_template_version_parameters(version_id).await
-    }
-
-    async fn list_template_version_variables(
-        &self,
-        version_id: Uuid,
-    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError> {
-        (**self).list_template_version_variables(version_id).await
-    }
-
-    async fn list_template_version_presets(
-        &self,
-        version_id: Uuid,
-    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError> {
-        (**self).list_template_version_presets(version_id).await
-    }
-
-    async fn list_template_version_preset_parameters(
-        &self,
-        preset_id: Uuid,
-    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError> {
-        (**self)
-            .list_template_version_preset_parameters(preset_id)
-            .await
-    }
-
-    async fn insert_provisioner_job(
-        &self,
-        input: CreateProvisionerJobInput,
-    ) -> Result<ProvisionerJobRecord, StorageError> {
-        (**self).insert_provisioner_job(input).await
-    }
-
-    async fn find_provisioner_job_by_id(
-        &self,
-        job_id: Uuid,
-    ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
-        (**self).find_provisioner_job_by_id(job_id).await
-    }
-
-    async fn cancel_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
-        (**self).cancel_provisioner_job(job_id).await
-    }
-}
+// Note: TemplateStore for Arc<T> is not needed — the blanket
+// `impl<T: AppStore> TemplateStore for T` already covers `Arc<T>` when
+// `Arc<T>: AppStore`, which is provided by the `AppStore for Arc<T>` impl.
