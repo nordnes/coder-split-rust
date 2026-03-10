@@ -7761,7 +7761,7 @@ impl AppStore for PostgresStore {
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
         let result = sqlx::query(
-            "UPDATE provisioner_jobs SET canceled_at = NOW(), completed_at = NOW(), updated_at = NOW() WHERE id = $1 AND canceled_at IS NULL AND completed_at IS NULL",
+            "UPDATE provisioner_jobs SET canceled_at = NOW(), completed_at = CASE WHEN worker_id IS NULL THEN NOW() ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND canceled_at IS NULL AND completed_at IS NULL",
         )
         .bind(job_id)
         .execute(&self.pool)
@@ -11604,14 +11604,58 @@ mod tests {
         let canceled = store.cancel_template_provisioner_job(job_id).await?;
         assert!(canceled, "cancel should return true for a pending job");
 
-        // Verify the job now has canceled_at and completed_at set
+        // Pending job (no worker) should have both canceled_at and completed_at set
         let job = store
             .find_provisioner_job(job_id)
             .await?
             .unwrap_or_else(|| panic!("job should still exist"));
         assert!(job.canceled_at.is_some(), "canceled_at should be set");
-        assert!(job.completed_at.is_some(), "completed_at should be set");
+        assert!(
+            job.completed_at.is_some(),
+            "completed_at should be set for pending (no worker) job"
+        );
         assert_eq!(job.job_status, "canceled");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_cancel_template_provisioner_job_running() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let job_id = create_provisioner_job(&pool, org_id, user_id).await?;
+
+        // Simulate a worker picking up the job (set worker_id and started_at)
+        let worker_id = Uuid::new_v4();
+        sqlx::query(
+            "UPDATE provisioner_jobs SET worker_id = $1, started_at = NOW(), updated_at = NOW() WHERE id = $2",
+        )
+        .bind(worker_id)
+        .bind(job_id)
+        .execute(&pool)
+        .await?;
+
+        // Cancel should succeed
+        let canceled = store.cancel_template_provisioner_job(job_id).await?;
+        assert!(canceled, "cancel should return true for a running job");
+
+        // Running job should have canceled_at set but NOT completed_at (enters "canceling" state)
+        let job = store
+            .find_provisioner_job(job_id)
+            .await?
+            .unwrap_or_else(|| panic!("job should still exist"));
+        assert!(job.canceled_at.is_some(), "canceled_at should be set");
+        assert!(
+            job.completed_at.is_none(),
+            "completed_at should NOT be set for running job (enters canceling state)"
+        );
+        assert_eq!(job.job_status, "canceling");
 
         Ok(())
     }

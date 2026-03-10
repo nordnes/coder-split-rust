@@ -17242,8 +17242,14 @@ mod tests {
                 Some(j) if j.canceled_at.is_none() && j.completed_at.is_none() => {
                     let now = OffsetDateTime::now_utc();
                     j.canceled_at = Some(now);
-                    j.completed_at = Some(now);
-                    j.job_status = "canceled".to_owned();
+                    // Only complete immediately if no worker has picked up the job
+                    // (matches Go semantics: !job.WorkerID.Valid)
+                    if j.worker_id.is_none() {
+                        j.completed_at = Some(now);
+                        j.job_status = "canceled".to_owned();
+                    } else {
+                        j.job_status = "canceling".to_owned();
+                    }
                     j.updated_at = now;
                     Ok(true)
                 }
