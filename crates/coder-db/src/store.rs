@@ -4515,7 +4515,15 @@ impl AppStore for PostgresStore {
         .bind(input.quota_allowance)
         .fetch_one(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                StorageError::invalid_data(
+                    "group with this name already exists in the organization",
+                )
+            } else {
+                storage_error(e)
+            }
+        })?;
 
         let (
             id,
@@ -4565,7 +4573,7 @@ impl AppStore for PostgresStore {
                     quota_allowance, source, created_at
              FROM groups
              WHERE organization_id = $1
-             ORDER BY name ASC",
+             ORDER BY LOWER(name) ASC",
         )
         .bind(organization_id)
         .fetch_all(&self.pool)
@@ -4610,7 +4618,13 @@ impl AppStore for PostgresStore {
         .bind(user_id)
         .execute(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                StorageError::invalid_data("user is already a member of this group")
+            } else {
+                storage_error(e)
+            }
+        })?;
         Ok(())
     }
 
@@ -4625,7 +4639,7 @@ impl AppStore for PostgresStore {
              JOIN users u ON u.id = gm.user_id
              WHERE gm.group_id = $1
                AND u.deleted = false
-             ORDER BY u.username ASC",
+             ORDER BY LOWER(u.username) ASC",
         )
         .bind(group_id)
         .fetch_all(&self.pool)

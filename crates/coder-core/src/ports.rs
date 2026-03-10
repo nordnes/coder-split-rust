@@ -3171,7 +3171,9 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Adds a user to a group.
     async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
         let _ = (group_id, user_id);
-        Err(StorageError::unavailable("groups are not implemented"))
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
     }
 
     /// Lists members of a group.
@@ -3180,7 +3182,9 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         group_id: Uuid,
     ) -> Result<Vec<GroupMemberRecord>, StorageError> {
         let _ = group_id;
-        Err(StorageError::unavailable("groups are not implemented"))
+        Err(StorageError::unavailable(
+            "group members are not implemented",
+        ))
     }
 
     /// Looks up a group by identifier.
