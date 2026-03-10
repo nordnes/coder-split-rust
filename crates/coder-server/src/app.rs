@@ -15333,23 +15333,27 @@ mod tests {
         }
 
         async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
-            let mut apps = self
+            let removed = self
                 .oauth2_apps
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let removed = apps.remove(&app_id).is_some();
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&app_id)
+                .is_some();
             if removed {
-                // Cascade: collect secret IDs for this app, then remove secrets, codes, and tokens
-                let mut secrets = self
-                    .oauth2_app_secrets
-                    .lock()
-                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
-                let secret_ids: std::collections::HashSet<Uuid> = secrets
-                    .values()
-                    .filter(|s| s.app_id == app_id)
-                    .map(|s| s.id)
-                    .collect();
-                secrets.retain(|_, s| s.app_id != app_id);
+                // Cascade: collect secret IDs then remove secrets (scoped to drop lock early)
+                let secret_ids: std::collections::HashSet<Uuid> = {
+                    let mut secrets = self
+                        .oauth2_app_secrets
+                        .lock()
+                        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                    let ids = secrets
+                        .values()
+                        .filter(|s| s.app_id == app_id)
+                        .map(|s| s.id)
+                        .collect();
+                    secrets.retain(|_, s| s.app_id != app_id);
+                    ids
+                };
                 self.oauth2_app_codes
                     .lock()
                     .map_err(|e| StorageError::unavailable(e.to_string()))?
@@ -15402,11 +15406,12 @@ mod tests {
             &self,
             secret_id: Uuid,
         ) -> Result<bool, StorageError> {
-            let mut secrets = self
+            let removed = self
                 .oauth2_app_secrets
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let removed = secrets.remove(&secret_id).is_some();
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&secret_id)
+                .is_some();
             if removed {
                 // Cascade: remove tokens that reference this secret
                 self.oauth2_app_tokens
