@@ -2844,9 +2844,7 @@ async fn create_session_api_key(
         .authorize(
             &context.actor,
             Action::Create,
-            &Object::new(ResourceType::ApiKey)
-                .with_id(target_user.id)
-                .with_owner(target_user.id),
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
         )
         .is_err()
     {
@@ -2896,9 +2894,7 @@ async fn create_token_api_key(
         .authorize(
             &context.actor,
             Action::Create,
-            &Object::new(ResourceType::ApiKey)
-                .with_id(target_user.id)
-                .with_owner(target_user.id),
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
         )
         .is_err()
     {
@@ -3018,9 +3014,7 @@ async fn delete_api_key(
         .authorize(
             &context.actor,
             Action::Delete,
-            &Object::new(ResourceType::ApiKey)
-                .with_id(target_user.id)
-                .with_owner(target_user.id),
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
         )
         .is_err()
     {
@@ -3069,9 +3063,7 @@ async fn expire_api_key(
         .authorize(
             &context.actor,
             Action::Update,
-            &Object::new(ResourceType::ApiKey)
-                .with_id(target_user.id)
-                .with_owner(target_user.id),
+            &Object::new(ResourceType::ApiKey).with_owner(target_user.id),
         )
         .is_err()
     {
