@@ -3718,6 +3718,7 @@ impl AppStore for PostgresStore {
                       updated_at
                FROM notification_messages
                WHERE status IN ('pending', 'temporary_failure')
+                 AND (next_retry_after IS NULL OR next_retry_after < NOW())
                ORDER BY created_at ASC
                LIMIT $1"#,
         )
