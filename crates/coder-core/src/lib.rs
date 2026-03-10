@@ -11,6 +11,7 @@ pub mod password;
 pub mod ports;
 pub mod provisioner;
 pub mod pubsub;
+pub mod template;
 
 pub use api::{
     AccessUrlHealthReport, ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse,
@@ -19,27 +20,28 @@ pub use api::{
     AuthorizationObject, AuthorizationRequest, AuthorizationResponse, AvailableExperiments,
     BaseHealthReport, BuildInfoResponse, ChangePasswordWithOneTimePasscodeRequest, ConfigOption,
     ConvertLoginRequest, CreateFirstUserRequest, CreateFirstUserResponse,
-    CreateOrganizationRequest, CreateTestAuditLogRequest, CreateTokenRequest,
-    CreateUserRequestWithOrgs, DatabaseHealthReport, DeleteExternalAuthByIdResponse,
-    DeploymentConfigResponse, DeploymentStatsResponse, DerpHealthReport, ExternalApiKeyScopes,
-    ExternalAuthAppInstallation, ExternalAuthDevice, ExternalAuthDeviceExchangeRequest,
-    ExternalAuthLink, ExternalAuthLinkProvider, ExternalAuthResponse, ExternalAuthUser,
-    GenerateApiKeyResponse, GetUsersResponse, GitSshKeyResponse, GithubAuthMethod, HealthSettings,
-    HealthSeverity, HealthcheckReport, ListUserExternalAuthResponse, LoginWithPasswordRequest,
-    LoginWithPasswordResponse, MinimalOrganization, MinimalUser, OAuth2AuthorizeRequest,
-    OAuth2ProviderAppEndpoints, OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
+    CreateOrganizationRequest, CreateTemplateRequest, CreateTestAuditLogRequest,
+    CreateTokenRequest, CreateUserRequestWithOrgs, DatabaseHealthReport,
+    DeleteExternalAuthByIdResponse, DeploymentConfigResponse, DeploymentStatsResponse,
+    DerpHealthReport, ExternalApiKeyScopes, ExternalAuthAppInstallation, ExternalAuthDevice,
+    ExternalAuthDeviceExchangeRequest, ExternalAuthLink, ExternalAuthLinkProvider,
+    ExternalAuthResponse, ExternalAuthUser, GenerateApiKeyResponse, GetUsersResponse,
+    GitSshKeyResponse, GithubAuthMethod, HealthSettings, HealthSeverity, HealthcheckReport,
+    ListUserExternalAuthResponse, LoginWithPasswordRequest, LoginWithPasswordResponse,
+    MinimalOrganization, MinimalUser, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
+    OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
     OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse,
     OAuthConversionResponse, OidcAuthMethod, OrganizationMember, OrganizationMemberWithUserData,
     OrganizationResponse, PaginatedMembersResponse, PermissionResponse,
     PostOAuth2ProviderAppRequest, ProvisionerDaemonsHealthReport, PutOAuth2ProviderAppRequest,
     ReducedUser, RequestOneTimePasscodeRequest, RoleResponse, SessionCountDeploymentStatsResponse,
     SlimRole, SshConfigResponse, TokenConfig, UpdateCheckResponse, UpdateOrganizationRequest,
-    UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UploadFileResponse,
-    UserAppearanceSettings, UserLoginType, UserParameter, UserPreferenceSettings, UserResponse,
-    UserRolesResponse, ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
-    WebsocketHealthReport, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceProxyHealthReport,
+    UpdateRolesRequest, UpdateTemplateMeta, UpdateUserAppearanceSettingsRequest,
+    UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
+    UploadFileResponse, UserAppearanceSettings, UserLoginType, UserParameter,
+    UserPreferenceSettings, UserResponse, UserRolesResponse, ValidateUserPasswordRequest,
+    ValidateUserPasswordResponse, ValidationError, WebsocketHealthReport,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthReport,
 };
 pub use build_info::BuildMetadata;
 pub use config::{
@@ -67,7 +69,7 @@ pub use ports::{
     ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertFileInput,
     InsertFileResult, OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
     ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, ProvisionerStore, StorageError,
-    UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
+    TemplateStore, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
     WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
 };
 pub use provisioner::{
@@ -77,4 +79,11 @@ pub use provisioner::{
     ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatus,
     ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
     ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType, UpsertProvisionerDaemonInput,
+};
+pub use template::{
+    CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
+    CreateTemplateVersionInput, TemplateDAURow, TemplateListFilter, TemplateRecord,
+    TemplateVersionListFilter, TemplateVersionParameterRecord,
+    TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
+    TemplateVersionVariableRecord, UpdateTemplateMetaInput,
 };
