@@ -2572,7 +2572,7 @@ async fn cancel_provisioner_job(
 
 // ---------------------------------------------------------------------------
 // GET /organizations/{org}/provisionerjobs/{job}/logs — stream provisioner
-// job logs. Stub: returns an empty JSON array (no streaming support yet).
+// job logs. Stub: returns 404 (consistent with get/cancel single-job stubs).
 // ---------------------------------------------------------------------------
 async fn get_provisioner_job_logs(
     State(state): State<AppState>,
@@ -2590,8 +2590,14 @@ async fn get_provisioner_job_logs(
     {
         return handle_identity_error(error);
     }
-    let empty: Vec<coder_core::ProvisionerJobLogResponse> = Vec::new();
-    Ok((StatusCode::OK, Json(empty)).into_response())
+    Ok((
+        StatusCode::NOT_FOUND,
+        Json(ApiResponse::error(
+            "Resource not found or you do not have access to this resource",
+            "The provisioner domain is not yet implemented in this backend slice.",
+        )),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -7711,7 +7717,7 @@ mod tests {
         .await?;
         assert_eq!(cancel_job_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /organizations/{org}/provisionerjobs/{job}/logs returns 200 + empty array ---
+        // --- GET /organizations/{org}/provisionerjobs/{job}/logs returns 404 (consistent with get/cancel) ---
         let logs_response = call(
             app.clone(),
             authenticated_request(
@@ -7721,9 +7727,7 @@ mod tests {
             )?,
         )
         .await?;
-        assert_eq!(logs_response.status(), StatusCode::OK);
-        let logs_body = response_json(logs_response).await?;
-        assert_eq!(logs_body.as_array().map(Vec::len), Some(0));
+        assert_eq!(logs_response.status(), StatusCode::NOT_FOUND);
 
         // --- GET logs without auth returns 401 ---
         let logs_unauth = call(
