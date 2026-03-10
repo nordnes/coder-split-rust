@@ -15287,6 +15287,23 @@ mod tests {
                         .as_ref()
                         .is_none_or(|n| w.name.contains(n.as_str()))
                 })
+                .filter(|w| {
+                    filter
+                        .organization_id
+                        .is_none_or(|org_id| w.organization_id == org_id)
+                })
+                .filter(|w| {
+                    filter.template_ids.is_empty() || filter.template_ids.contains(&w.template_id)
+                })
+                .filter(|w| {
+                    filter.dormant.is_none_or(|d| {
+                        if d {
+                            w.dormant_at.is_some()
+                        } else {
+                            w.dormant_at.is_none()
+                        }
+                    })
+                })
                 .cloned()
                 .collect();
             let count = i64::try_from(rows.len()).unwrap_or(0);
@@ -15434,11 +15451,10 @@ mod tests {
             &self,
             workspace_id: Uuid,
         ) -> Result<WorkspaceACLRecord, StorageError> {
-            let acls = self.workspace_acls.lock().map_err(
-                |e: std::sync::PoisonError<
-                    std::sync::MutexGuard<'_, HashMap<Uuid, WorkspaceACLRecord>>,
-                >| { StorageError::unavailable(e.to_string()) },
-            )?;
+            let acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
             Ok(acls
                 .get(&workspace_id)
                 .cloned()
@@ -15453,11 +15469,10 @@ mod tests {
             workspace_id: Uuid,
             input: &UpdateWorkspaceACLInput,
         ) -> Result<(), StorageError> {
-            let mut acls = self.workspace_acls.lock().map_err(
-                |e: std::sync::PoisonError<
-                    std::sync::MutexGuard<'_, HashMap<Uuid, WorkspaceACLRecord>>,
-                >| { StorageError::unavailable(e.to_string()) },
-            )?;
+            let mut acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let entry = acls
                 .entry(workspace_id)
                 .or_insert_with(|| WorkspaceACLRecord {
@@ -15480,11 +15495,10 @@ mod tests {
         }
 
         async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
-            let mut acls = self.workspace_acls.lock().map_err(
-                |e: std::sync::PoisonError<
-                    std::sync::MutexGuard<'_, HashMap<Uuid, WorkspaceACLRecord>>,
-                >| { StorageError::unavailable(e.to_string()) },
-            )?;
+            let mut acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
             acls.remove(&workspace_id);
             Ok(())
         }
