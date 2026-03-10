@@ -34008,4 +34008,373 @@ mod tests {
         assert_eq!(updated_job.logs_length, 11); // "hello"(5) + "world!"(6)
         Ok(())
     }
+
+    // =======================================================================
+    // Happy-path integration tests — Template version archive/unarchive
+    // =======================================================================
+
+    #[tokio::test]
+    async fn archive_unarchive_template_version_toggles_flag() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Verify the version starts out unarchived.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let body = response_json(get_resp).await?;
+        assert_eq!(body.get("archived").and_then(Value::as_bool), Some(false));
+
+        // Archive the version.
+        let archive_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{}/archive", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_resp.status(), StatusCode::OK);
+
+        // Verify the archived flag is true.
+        let get_resp2 = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp2.status(), StatusCode::OK);
+        let body2 = response_json(get_resp2).await?;
+        assert_eq!(body2.get("archived").and_then(Value::as_bool), Some(true));
+
+        // Unarchive the version.
+        let unarchive_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{}/unarchive", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_resp.status(), StatusCode::OK);
+
+        // Verify the archived flag is false again.
+        let get_resp3 = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp3.status(), StatusCode::OK);
+        let body3 = response_json(get_resp3).await?;
+        assert_eq!(body3.get("archived").and_then(Value::as_bool), Some(false));
+
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests -- Workspace mutations
+    // =======================================================================
+
+    #[tokio::test]
+    async fn patch_workspace_rename_and_autostart_persist() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // PATCH -- rename the workspace.
+        let patch_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+                &json!({"name": "renamed-workspace"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_resp.status(), StatusCode::OK);
+        let patched = response_json(patch_resp).await?;
+        assert_eq!(
+            patched.get("name").and_then(Value::as_str),
+            Some("renamed-workspace")
+        );
+
+        // Update autostart schedule.
+        let autostart_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/autostart", ws.id),
+                &session_token,
+                &json!({"schedule": "CRON_TZ=US/Central 30 9 * * 1-5"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(autostart_resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify both changes persisted via GET.
+        let get_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert_eq!(
+            fetched.get("name").and_then(Value::as_str),
+            Some("renamed-workspace")
+        );
+        assert_eq!(
+            fetched.get("autostart_schedule").and_then(Value::as_str),
+            Some("CRON_TZ=US/Central 30 9 * * 1-5")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_create_and_cancel_preserves_access() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+        // Set active_version_id on template.
+        if let Ok(mut templates) = store.templates.lock() {
+            if let Some(t) = templates.get_mut(&tmpl.id) {
+                t.active_version_id = tv.id;
+            }
+        }
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // Create a build.
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/builds", ws.id),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        let job_id_str = build
+            .get("job_id")
+            .and_then(Value::as_str)
+            .ok_or("missing job_id")?;
+        let job_id: Uuid = job_id_str.parse().map_err(|_| "invalid job_id uuid")?;
+        assert_eq!(
+            build.get("transition").and_then(Value::as_str),
+            Some("start")
+        );
+
+        // Cancel the build.
+        let cancel_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/workspacebuilds/{build_id}/cancel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(cancel_resp.status(), StatusCode::OK);
+
+        // Verify the underlying provisioner job was canceled (no worker, so immediate cancel).
+        {
+            let jobs = store.provisioner_jobs.lock().map_err(|e| e.to_string())?;
+            let job = jobs.get(&job_id).ok_or("job not found in store")?;
+            assert_eq!(
+                job.job_status, "canceled",
+                "expected job_status to be canceled after cancel (no worker assigned)"
+            );
+            assert!(job.canceled_at.is_some(), "expected canceled_at to be set");
+        }
+
+        // Re-fetch the build -- verify it is still accessible after cancel.
+        let get_build_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_build_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_build_resp).await?;
+        assert_eq!(fetched.get("id").and_then(Value::as_str), Some(build_id));
+        assert_eq!(
+            fetched.get("transition").and_then(Value::as_str),
+            Some("start")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_extend_deadline_updates_build() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let _build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        // Extend deadline using an RFC3339 timestamp.
+        let new_deadline = "2099-12-31T23:59:59Z";
+        let extend_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/extend", ws.id),
+                &session_token,
+                &json!({"deadline": new_deadline}),
+            )?,
+        )
+        .await?;
+        assert_eq!(extend_resp.status(), StatusCode::NO_CONTENT);
+
+        // Verify the build's deadline was updated to the exact requested value.
+        let builds_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}/builds", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(builds_resp.status(), StatusCode::OK);
+        let builds_body = response_json(builds_resp).await?;
+        let builds = builds_body.as_array().ok_or("expected array")?;
+        assert!(!builds.is_empty());
+        let deadline = builds[0]
+            .get("deadline")
+            .and_then(Value::as_str)
+            .ok_or("expected deadline to be set on the latest build")?;
+        assert_eq!(
+            deadline, new_deadline,
+            "deadline should match the requested value"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_dormant_activate_toggles_dormant_at() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // Set workspace dormant.
+        let dormant_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/dormant", ws.id),
+                &session_token,
+                &json!({"dormant": true}),
+            )?,
+        )
+        .await?;
+        assert_eq!(dormant_resp.status(), StatusCode::OK);
+        let dormant_body = response_json(dormant_resp).await?;
+        assert!(
+            dormant_body
+                .get("dormant_at")
+                .and_then(Value::as_str)
+                .is_some(),
+            "expected dormant_at to be a non-null string timestamp"
+        );
+
+        // Reactivate the workspace.
+        let activate_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/dormant", ws.id),
+                &session_token,
+                &json!({"dormant": false}),
+            )?,
+        )
+        .await?;
+        assert_eq!(activate_resp.status(), StatusCode::OK);
+        let active_body = response_json(activate_resp).await?;
+        // dormant_at should be explicitly null (not missing) after reactivation.
+        assert!(
+            active_body
+                .get("dormant_at")
+                .map(Value::is_null)
+                .unwrap_or(false),
+            "expected dormant_at to be JSON null after reactivation, got {:?}",
+            active_body.get("dormant_at")
+        );
+
+        // Verify via GET.
+        let get_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let fetched = response_json(get_resp).await?;
+        assert!(
+            fetched
+                .get("dormant_at")
+                .map(Value::is_null)
+                .unwrap_or(false),
+            "expected dormant_at to be JSON null on re-fetched workspace, got {:?}",
+            fetched.get("dormant_at")
+        );
+
+        Ok(())
+    }
 }
