@@ -12629,11 +12629,16 @@ mod tests {
                     && !v.archived
                     && Some(v.id) != active_version_id
                 {
-                    // When `all` is false, only archive versions whose job failed.
+                    // When `all` is false, only archive versions whose job failed
+                    // (completed with an error and not canceled).
                     if !all {
                         let job_failed = jobs
                             .get(&v.job_id)
-                            .map(|j| j.job_status == "failed")
+                            .map(|j| {
+                                j.completed_at.is_some()
+                                    && !j.error.is_empty()
+                                    && j.canceled_at.is_none()
+                            })
                             .unwrap_or(false);
                         if !job_failed {
                             continue;

@@ -5434,7 +5434,9 @@ impl AppStore for PostgresStore {
                       SELECT tv.id FROM template_versions tv
                       JOIN provisioner_jobs pj ON pj.id = tv.job_id
                       WHERE tv.template_id = $1
-                        AND pj.job_status = 'failed'
+                        AND pj.completed_at IS NOT NULL
+                        AND pj.error <> ''
+                        AND pj.canceled_at IS NULL
                   )
                 RETURNING id
                 "#,
@@ -5470,6 +5472,7 @@ impl AppStore for PostgresStore {
                   AND tv.created_at < (
                       SELECT created_at FROM template_versions
                       WHERE organization_id = $1 AND name = $2 AND template_id = $3
+                      ORDER BY created_at DESC
                       LIMIT 1
                   )
                 ORDER BY tv.created_at DESC
@@ -5495,6 +5498,7 @@ impl AppStore for PostgresStore {
                   AND tv.created_at < (
                       SELECT created_at FROM template_versions
                       WHERE organization_id = $1 AND name = $2
+                      ORDER BY created_at DESC
                       LIMIT 1
                   )
                 ORDER BY tv.created_at DESC
