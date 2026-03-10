@@ -8269,12 +8269,13 @@ async fn post_workspace_build(
         return Ok(resource_not_found_response());
     };
 
-    // RBAC: verify the actor can create builds for this workspace.
+    // RBAC: verify the actor can update this workspace (creating a build
+    // is a mutation on an existing workspace, not creating a new one).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
-            Action::Create,
+            Action::Update,
             &Object::new(ResourceType::Workspace)
                 .with_id(workspace_id)
                 .with_owner(workspace.owner_id)
