@@ -13510,6 +13510,7 @@ mod tests {
                 .get_mut(&input.id)
                 .ok_or_else(|| StorageError::invalid_data(format!("job {} not found", input.id)))?;
             job.canceled_at = Some(input.canceled_at);
+            job.updated_at = input.canceled_at;
             if let Some(completed_at) = input.completed_at {
                 job.completed_at = Some(completed_at);
                 job.job_status = ProvisionerJobStatus::Canceled;
@@ -13538,18 +13539,8 @@ mod tests {
                 })
                 .cloned()
                 .collect();
-            result.truncate(
-                i64::try_from(result.len())
-                    .ok()
-                    .and_then(|len| {
-                        if len > input.max_jobs {
-                            Some(input.max_jobs as usize)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or(result.len()),
-            );
+            let max_jobs = usize::try_from(input.max_jobs).unwrap_or(0);
+            result.truncate(max_jobs.min(result.len()));
             Ok(result)
         }
 
@@ -13557,6 +13548,16 @@ mod tests {
             &self,
             input: InsertProvisionerJobLogsInput,
         ) -> Result<Vec<ProvisionerLogRecord>, StorageError> {
+            let count = input.created_at.len();
+            if input.source.len() != count
+                || input.level.len() != count
+                || input.stage.len() != count
+                || input.output.len() != count
+            {
+                return Err(StorageError::invalid_data(
+                    "insert_provisioner_job_logs: all input vectors must have the same length",
+                ));
+            }
             let mut logs = self
                 .prov_job_logs
                 .lock()
@@ -13565,7 +13566,6 @@ mod tests {
                 .prov_job_log_next_id
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let count = input.created_at.len();
             let mut inserted = Vec::with_capacity(count);
             for i in 0..count {
                 let record = ProvisionerLogRecord {
@@ -13580,6 +13580,18 @@ mod tests {
                 *next_id += 1;
                 logs.push(record.clone());
                 inserted.push(record);
+            }
+            // Mirror real DB behavior: increment parent job's logs_length.
+            let logs_length_delta: i32 = input.output.iter().map(|s| s.len() as i32).sum();
+            if logs_length_delta > 0 {
+                drop(logs);
+                let mut jobs = self
+                    .prov_jobs
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                if let Some(job) = jobs.get_mut(&input.job_id) {
+                    job.logs_length += logs_length_delta;
+                }
             }
             Ok(inserted)
         }
@@ -13604,11 +13616,21 @@ mod tests {
             &self,
             input: InsertProvisionerJobTimingsInput,
         ) -> Result<Vec<ProvisionerTimingRecord>, StorageError> {
+            let count = input.started_at.len();
+            if input.ended_at.len() != count
+                || input.stage.len() != count
+                || input.source.len() != count
+                || input.action.len() != count
+                || input.resource.len() != count
+            {
+                return Err(StorageError::invalid_data(
+                    "insert_provisioner_job_timings: all input vectors must have the same length",
+                ));
+            }
             let mut timings = self
                 .prov_job_timings
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let count = input.started_at.len();
             let mut inserted = Vec::with_capacity(count);
             for i in 0..count {
                 let record = ProvisionerTimingRecord {
