@@ -6771,7 +6771,7 @@ async fn patch_template_version(
 
     // RBAC: verify the actor can update this template version.
     let authorizer = Authorizer::new();
-    let mut obj = Object::new(ResourceType::Template);
+    let mut obj = Object::new(ResourceType::Template).in_org(existing.organization_id);
     if let Some(tid) = existing.template_id {
         obj = obj.with_id(tid);
     }
@@ -6832,7 +6832,7 @@ async fn post_archive_template_version(
 
     // RBAC: verify the actor can update this template version.
     let authorizer = Authorizer::new();
-    let mut obj = Object::new(ResourceType::Template);
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
     if let Some(tid) = ver.template_id {
         obj = obj.with_id(tid);
     }
@@ -6873,7 +6873,7 @@ async fn patch_cancel_template_version(
 
     // RBAC: verify the actor can update this template version.
     let authorizer = Authorizer::new();
-    let mut obj = Object::new(ResourceType::Template);
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
     if let Some(tid) = ver.template_id {
         obj = obj.with_id(tid);
     }
@@ -6975,21 +6975,26 @@ async fn get_template_version_dry_run(
 /// PATCH /templateversions/{templateversion}/dry-run/{jobid}
 async fn patch_template_version_dry_run(
     State(state): State<AppState>,
-    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Look up the template version for org-scoped RBAC.
+    let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
+        return Ok(not_found_response("Template version not found."));
+    };
+
     // RBAC: verify the actor can update templates (dry-run mutation).
     let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
     if authorizer
-        .authorize(
-            &_context.actor,
-            Action::Update,
-            &Object::new(ResourceType::Template),
-        )
+        .authorize(&_context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
@@ -7019,21 +7024,26 @@ async fn patch_template_version_dry_run(
 /// PATCH /templateversions/{templateversion}/dry-run/{jobid}/cancel
 async fn patch_cancel_template_version_dry_run(
     State(state): State<AppState>,
-    Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
+    Path((version_id, job_id)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Look up the template version for org-scoped RBAC.
+    let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
+        return Ok(not_found_response("Template version not found."));
+    };
+
     // RBAC: verify the actor can update templates (dry-run cancel).
     let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
     if authorizer
-        .authorize(
-            &_context.actor,
-            Action::Update,
-            &Object::new(ResourceType::Template),
-        )
+        .authorize(&_context.actor, Action::Update, &obj)
         .is_err()
     {
         return Ok(forbidden_response(
