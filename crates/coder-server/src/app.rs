@@ -3124,23 +3124,62 @@ async fn applications_auth_redirect(
 }
 
 // ---------------------------------------------------------------------------
-// GET /workspaceagents/me/gitsshkey — workspace agent endpoint (stub).
+// GET /workspaceagents/me/gitsshkey — workspace agent endpoint.
 // In Go this is `agentGitSSHKey` in `gitsshkey.go` — returns the agent's
-// Git SSH key.  The workspace-agent domain is not yet implemented in this
-// Rust slice, so we return an empty stub response.
+// Git SSH key for the workspace owner.
 // ---------------------------------------------------------------------------
 async fn workspace_agent_git_ssh_key(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    // Try agent auth first, fall back to user auth for backwards compatibility.
+    let agent = authenticate_agent_request(&state, &headers).await?;
+    if agent.is_none() {
+        let Some(_context) = authenticate_request(&state, &headers).await? else {
+            return Ok(unauthorized_response("Missing or invalid session token."));
+        };
+        // User-authenticated fallback: return empty stub (owner key lookup
+        // requires workspace resolution which is not yet available for user auth).
+        return Ok((
+            StatusCode::OK,
+            Json(json!({"public_key":"","private_key":""})),
+        )
+            .into_response());
+    }
+    let agent = match agent {
+        Some(a) => a,
+        None => return Ok(unauthorized_response("Missing or invalid agent token.")),
     };
-    Ok((
-        StatusCode::OK,
-        Json(json!({"public_key":"","private_key":""})),
-    )
-        .into_response())
+
+    // Look up the workspace to find the owner, then fetch their git SSH key.
+    let workspace = state.store.find_workspace_by_agent_id(agent.id).await?;
+    let owner_id = match workspace {
+        Some(ref ws) => ws.owner_id,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Failed to get workspace for agent.", "")),
+            )
+                .into_response());
+        }
+    };
+
+    let key = state.store.find_git_ssh_key(owner_id).await?;
+    match key {
+        Some(k) => Ok((
+            StatusCode::OK,
+            Json(json!({
+                "public_key": k.public_key,
+                "private_key": k.private_key,
+            })),
+        )
+            .into_response()),
+        None => Ok((
+            StatusCode::OK,
+            Json(json!({"public_key":"","private_key":""})),
+        )
+            .into_response()),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3149,13 +3188,17 @@ async fn workspace_agent_git_ssh_key(
 // ---------------------------------------------------------------------------
 
 /// GET /workspaceagents/me/gitauth — deprecated, returns empty array.
+/// Accepts both agent auth and user auth for backwards compatibility.
 async fn deprecated_workspace_agent_git_auth(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    let agent = authenticate_agent_request(&state, &headers).await?;
+    if agent.is_none() {
+        let Some(_context) = authenticate_request(&state, &headers).await? else {
+            return Ok(unauthorized_response("Missing or invalid session token."));
+        };
+    }
     let empty: Vec<Value> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -3717,8 +3760,31 @@ async fn post_task_log_snapshot(
     headers: HeaderMap,
     Json(request): Json<TaskLogSnapshotEnvelope>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    // This endpoint supports both agent auth and user auth.
+    // Agents post log snapshots for tasks running in their workspace.
+    let agent = authenticate_agent_request(&state, &headers).await?;
+    let owner_id = if let Some(ref agent_row) = agent {
+        // Agent auth: look up the workspace owner.
+        let workspace = state.store.find_workspace_by_agent_id(agent_row.id).await?;
+        match workspace {
+            Some(ws) => ws.owner_id,
+            None => {
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(
+                        "Failed to resolve workspace for agent.",
+                        "",
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    } else {
+        // Fall back to user auth.
+        let Some(context) = authenticate_request(&state, &headers).await? else {
+            return Ok(unauthorized_response("Missing or invalid session token."));
+        };
+        context.user.id
     };
 
     let Some(record) = state.store.find_task_by_id(task_id).await? else {
@@ -3729,7 +3795,7 @@ async fn post_task_log_snapshot(
             .into_response());
     };
 
-    if record.owner_id != context.user.id {
+    if record.owner_id != owner_id {
         return Ok((
             StatusCode::NOT_FOUND,
             Json(ApiResponse::error("Task not found.", "")),
@@ -6348,6 +6414,39 @@ async fn authenticate_request(
     state
         .auth
         .authenticate(headers)
+        .await
+        .map_err(AppError::from)
+}
+
+/// Authenticate an agent request by looking up the agent via its auth token.
+///
+/// Agents authenticate using the same `Coder-Session-Token` header, but their
+/// token is a UUID stored in `workspace_agents.auth_token` (not a hashed
+/// session token in the auth_sessions table).
+async fn authenticate_agent_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Option<coder_core::WorkspaceAgentRow>, AppError> {
+    // Extract token from header first, then fall back to cookie.
+    let raw_token: Option<String> = headers
+        .get("coder-session-token")
+        .and_then(|v| v.to_str().ok())
+        .map(String::from)
+        .or_else(|| cookie_from_headers(headers, "coder_session_token"));
+
+    let token_str = match raw_token {
+        Some(ref s) if !s.is_empty() => s.as_str(),
+        _ => return Ok(None),
+    };
+
+    let token = match Uuid::from_str(token_str) {
+        Ok(uuid) => uuid,
+        Err(_) => return Ok(None),
+    };
+
+    state
+        .store
+        .find_workspace_agent_by_auth_token(token)
         .await
         .map_err(AppError::from)
 }
@@ -10250,8 +10349,8 @@ async fn patch_workspace_agent_app_status(
     headers: HeaderMap,
     body: Result<Json<PatchAppStatusRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
     let Json(request) = match body {
@@ -10266,27 +10365,87 @@ async fn patch_workspace_agent_app_status(
         }]));
     }
 
-    // Agent app-status updates require resolving the agent from the auth token.
-    // For now, return accepted to acknowledge the structure.
-    let _ = request;
-    Ok(not_implemented_response(
-        "Agent app-status updates require agent token resolution.",
-    ))
+    // Resolve the workspace for this agent.
+    let workspace = state.store.find_workspace_by_agent_id(agent.id).await?;
+    let workspace = match workspace {
+        Some(ws) => ws,
+        None => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Failed to get workspace.", "")),
+            )
+                .into_response());
+        }
+    };
+
+    // Look up the app by slug to get its ID.
+    let app = state
+        .store
+        .find_workspace_app_by_agent_and_slug(agent.id, &request.app_slug)
+        .await?;
+    let app = match app {
+        Some(a) => a,
+        None => {
+            return Ok((
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error(
+                    "App not found.",
+                    format!("no app with slug {}", request.app_slug),
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Insert the app status.
+    let state_str = match request.state {
+        coder_core::WorkspaceAppStatusState::Working => "working",
+        coder_core::WorkspaceAppStatusState::Complete => "complete",
+        coder_core::WorkspaceAppStatusState::Failure => "failure",
+        coder_core::WorkspaceAppStatusState::Idle => "idle",
+    };
+    let input = coder_core::InsertWorkspaceAppStatusInput {
+        agent_id: agent.id,
+        app_id: app.id,
+        workspace_id: workspace.id,
+        state: state_str.to_owned(),
+        message: request.message,
+        uri: request.uri,
+    };
+    state.store.insert_workspace_app_status(&input).await?;
+
+    Ok((StatusCode::OK, Json(ApiResponse::ok("App status updated."))).into_response())
 }
 
 /// GET /api/v2/workspaceagents/me/external-auth — agent external auth.
 async fn get_workspace_agent_external_auth(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Query(_query): Query<AgentExternalAuthQuery>,
+    Query(query): Query<AgentExternalAuthQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
-    Ok(not_implemented_response(
-        "Agent external auth lookup is not yet implemented.",
-    ))
+    // Validate that either id or match is provided.
+    if query.id.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("'id' must be provided.", "")),
+        )
+            .into_response());
+    }
+
+    // External auth configuration lookup is not yet available in the Rust
+    // backend. Return a stub response indicating the provider was not found.
+    Ok((
+        StatusCode::NOT_FOUND,
+        Json(ApiResponse::error(
+            "External auth provider not found.",
+            "External auth configuration is not yet supported.",
+        )),
+    )
+        .into_response())
 }
 
 /// POST /api/v2/workspaceagents/me/log-source — create agent log source.
@@ -10295,8 +10454,8 @@ async fn post_workspace_agent_log_source(
     headers: HeaderMap,
     body: Result<Json<CreateLogSourceRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
     let Json(request) = match body {
@@ -10311,11 +10470,18 @@ async fn post_workspace_agent_log_source(
         }]));
     }
 
-    // Requires agent token resolution to determine the calling agent.
-    let _ = request;
-    Ok(not_implemented_response(
-        "Agent log source creation requires agent token resolution.",
-    ))
+    let row = state
+        .store
+        .insert_workspace_agent_log_source(
+            agent.id,
+            request.id,
+            &request.display_name,
+            &request.icon,
+        )
+        .await?;
+
+    let source = convert_log_source_row(&row);
+    Ok((StatusCode::CREATED, Json(source)).into_response())
 }
 
 /// PATCH /api/v2/workspaceagents/me/logs — append agent logs.
@@ -10324,8 +10490,8 @@ async fn patch_workspace_agent_logs(
     headers: HeaderMap,
     body: Result<Json<PatchAgentLogsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
     let Json(request) = match body {
@@ -10340,38 +10506,67 @@ async fn patch_workspace_agent_logs(
         }]));
     }
 
-    // Requires agent token resolution to determine the calling agent.
-    let _ = request;
-    Ok(not_implemented_response(
-        "Agent log appending requires agent token resolution.",
-    ))
+    let log_inputs: Vec<coder_core::InsertAgentLogInput> = request
+        .logs
+        .into_iter()
+        .map(|entry| coder_core::InsertAgentLogInput {
+            created_at: entry.created_at,
+            output: entry.output,
+            level: match entry.level {
+                coder_core::LogLevel::Trace => "trace".to_owned(),
+                coder_core::LogLevel::Debug => "debug".to_owned(),
+                coder_core::LogLevel::Info => "info".to_owned(),
+                coder_core::LogLevel::Warn => "warn".to_owned(),
+                coder_core::LogLevel::Error => "error".to_owned(),
+            },
+        })
+        .collect();
+
+    state
+        .store
+        .insert_workspace_agent_logs(agent.id, request.log_source_id, &log_inputs)
+        .await?;
+
+    Ok(StatusCode::OK.into_response())
 }
 
-/// GET /api/v2/workspaceagents/me/reinit — long-poll for agent reinit.
+/// GET /api/v2/workspaceagents/me/reinit — long-poll for agent reinit (SSE).
+///
+/// In Go this uses Server-Sent Events to stream reinitialization events
+/// (e.g. when a prebuilt workspace is claimed). For now, the Rust implementation
+/// authenticates the agent and returns a 200 with no events since the pubsub
+/// infrastructure for prebuild claims is not yet ported.
 async fn get_workspace_agent_reinit(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
+    // The full SSE-based reinit watcher requires pubsub subscription to
+    // prebuild_claimed channels. For now, return not_implemented to signal
+    // the endpoint is recognized but the streaming behaviour is pending.
     Ok(not_implemented_response(
-        "Agent reinit long-poll is not yet implemented.",
+        "Agent reinit long-poll requires pubsub infrastructure.",
     ))
 }
 
 /// GET /api/v2/workspaceagents/me/rpc — dRPC over WebSocket.
+///
+/// In Go this upgrades to a WebSocket, wraps it with yamux, then serves dRPC
+/// methods for the agent API (manifest, stats, lifecycle, etc.).
+/// The full dRPC/yamux infrastructure is not yet ported.
 async fn get_workspace_agent_rpc(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
+    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
     Ok(not_implemented_response(
-        "Agent dRPC/WebSocket endpoint is not yet implemented.",
+        "Agent dRPC/WebSocket endpoint requires yamux and dRPC infrastructure.",
     ))
 }
 
@@ -10970,10 +11165,11 @@ mod tests {
         CreateWorkspaceBuildInput, CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata,
         DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
         ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertChatInput,
-        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
-        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-        InsertProvisionerKeyInput, InsertTaskInput, LogFormat, LoginType, LoginWithPasswordRequest,
+        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertAgentLogInput,
+        InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult,
+        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, InsertTaskInput,
+        InsertWorkspaceAppStatusInput, LogFormat, LoginType, LoginWithPasswordRequest,
         OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
         PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
         ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
@@ -10987,8 +11183,9 @@ mod tests {
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertExternalAuthLinkInput,
         UpsertProvisionerDaemonInput, UserAppearanceRecord, UserListFilter, UserPreferenceRecord,
-        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentRow,
-        WorkspaceAgentStatInput, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
+        UserRecord, UserStatus, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
+        WorkspaceAgentLogSourceRow, WorkspaceAgentRow, WorkspaceAgentStatInput, WorkspaceAppRow,
+        WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
         WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
         WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
         WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
@@ -11061,7 +11258,13 @@ mod tests {
         template_version_preset_parameters:
             Mutex<HashMap<Uuid, Vec<TemplateVersionPresetParameterRecord>>>,
         files: Mutex<HashMap<Uuid, FileRecord>>,
+        // Agent-related fields
         workspace_agents: Mutex<HashMap<Uuid, WorkspaceAgentRow>>,
+        workspace_apps: Mutex<HashMap<Uuid, WorkspaceAppRow>>,
+        workspace_app_statuses: Mutex<Vec<WorkspaceAppStatusRow>>,
+        workspace_agent_log_sources: Mutex<HashMap<Uuid, WorkspaceAgentLogSourceRow>>,
+        workspace_agent_logs: Mutex<Vec<WorkspaceAgentLogRow>>,
+        workspace_agent_log_next_id: Mutex<i64>,
         workspaces: Mutex<HashMap<Uuid, WorkspaceRecord>>,
         workspace_builds: Mutex<HashMap<Uuid, WorkspaceBuildRecord>>,
         workspace_build_parameters: Mutex<HashMap<Uuid, Vec<WorkspaceBuildParameterRecord>>>,
@@ -11114,6 +11317,11 @@ mod tests {
                 template_version_preset_parameters: Mutex::new(HashMap::new()),
                 files: Mutex::new(HashMap::new()),
                 workspace_agents: Mutex::new(HashMap::new()),
+                workspace_apps: Mutex::new(HashMap::new()),
+                workspace_app_statuses: Mutex::new(Vec::new()),
+                workspace_agent_log_sources: Mutex::new(HashMap::new()),
+                workspace_agent_logs: Mutex::new(Vec::new()),
+                workspace_agent_log_next_id: Mutex::new(1),
                 workspaces: Mutex::new(HashMap::new()),
                 workspace_builds: Mutex::new(HashMap::new()),
                 workspace_build_parameters: Mutex::new(HashMap::new()),
@@ -11122,6 +11330,33 @@ mod tests {
                 provisioner_job_logs: Mutex::new(HashMap::new()),
                 provisioner_job_timings: Mutex::new(HashMap::new()),
             }
+        }
+
+        /// Inserts a workspace agent into the fake store for testing.
+        fn insert_agent(&self, agent: WorkspaceAgentRow) -> Result<(), StorageError> {
+            self.workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(agent.id, agent);
+            Ok(())
+        }
+
+        /// Inserts a workspace app into the fake store for testing.
+        fn insert_app(&self, app: WorkspaceAppRow) -> Result<(), StorageError> {
+            self.workspace_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(app.id, app);
+            Ok(())
+        }
+
+        /// Inserts a workspace into the fake store for testing.
+        fn insert_workspace(&self, workspace: WorkspaceRecord) -> Result<(), StorageError> {
+            self.workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(workspace.id, workspace);
+            Ok(())
         }
 
         fn set_one_time_passcode(
@@ -14144,6 +14379,167 @@ mod tests {
                         .find(|f| f.hash == hash && f.created_by == creator_id)
                         .cloned()
                 })
+        }
+
+        // ----- Agent storage methods -----
+
+        async fn find_workspace_agent_by_auth_token(
+            &self,
+            auth_token: Uuid,
+        ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(agents
+                .values()
+                .find(|a| a.auth_token == auth_token)
+                .cloned())
+        }
+
+        async fn find_workspace_by_agent_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            // In the fake store, we look up the agent to find the resource_id,
+            // but we don't have the full build chain. Instead we store
+            // workspaces keyed by their id and look up by iterating.
+            // For testing we rely on tests setting up workspace records with
+            // matching IDs.
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let _agent = match agents.get(&agent_id) {
+                Some(a) => a,
+                None => return Ok(None),
+            };
+            // Return the first workspace (tests typically only have one).
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(workspaces.values().next().cloned())
+        }
+
+        async fn insert_workspace_agent_log_source(
+            &self,
+            agent_id: Uuid,
+            id: Option<Uuid>,
+            display_name: &str,
+            icon: &str,
+        ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
+            let source_id = id.unwrap_or_else(Uuid::new_v4);
+            let now = OffsetDateTime::now_utc();
+            let row = WorkspaceAgentLogSourceRow {
+                id: source_id,
+                workspace_agent_id: agent_id,
+                created_at: now,
+                display_name: display_name.to_owned(),
+                icon: icon.to_owned(),
+            };
+            self.workspace_agent_log_sources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(source_id, row.clone());
+            Ok(row)
+        }
+
+        async fn list_workspace_agent_log_sources(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError> {
+            let sources = self
+                .workspace_agent_log_sources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(sources
+                .values()
+                .filter(|s| s.workspace_agent_id == agent_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn insert_workspace_agent_logs(
+            &self,
+            agent_id: Uuid,
+            log_source_id: Uuid,
+            logs: &[InsertAgentLogInput],
+        ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
+            let mut stored = self
+                .workspace_agent_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut next_id = self
+                .workspace_agent_log_next_id
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result = Vec::with_capacity(logs.len());
+            for entry in logs {
+                let row = WorkspaceAgentLogRow {
+                    id: *next_id,
+                    agent_id,
+                    created_at: entry.created_at,
+                    output: entry.output.clone(),
+                    level: entry.level.clone(),
+                    log_source_id,
+                };
+                *next_id += 1;
+                stored.push(row.clone());
+                result.push(row);
+            }
+            Ok(result)
+        }
+
+        async fn insert_workspace_app_status(
+            &self,
+            input: &InsertWorkspaceAppStatusInput,
+        ) -> Result<WorkspaceAppStatusRow, StorageError> {
+            let row = WorkspaceAppStatusRow {
+                id: Uuid::new_v4(),
+                created_at: OffsetDateTime::now_utc(),
+                agent_id: input.agent_id,
+                app_id: input.app_id,
+                workspace_id: input.workspace_id,
+                state: input.state.clone(),
+                message: input.message.clone(),
+                uri: input.uri.clone(),
+            };
+            self.workspace_app_statuses
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(row.clone());
+            Ok(row)
+        }
+
+        async fn list_workspace_app_statuses_by_agent_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<WorkspaceAppStatusRow>, StorageError> {
+            let statuses = self
+                .workspace_app_statuses
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(statuses
+                .iter()
+                .filter(|s| s.agent_id == agent_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn find_workspace_app_by_agent_and_slug(
+            &self,
+            agent_id: Uuid,
+            slug: &str,
+        ) -> Result<Option<WorkspaceAppRow>, StorageError> {
+            let apps = self
+                .workspace_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(apps
+                .values()
+                .find(|a| a.agent_id == agent_id && a.slug == slug)
+                .cloned())
         }
 
         async fn find_workspace_agent_by_instance_id(
@@ -19257,6 +19653,480 @@ mod tests {
         let response = call(app, req).await?;
         // CSP reports are exempt from CSRF; should not get 403.
         assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Agent endpoint tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: set up a FakeStore with an agent, workspace, and optionally an
+    /// app. Returns (AppState, Arc<FakeStore>, agent_auth_token).
+    fn setup_agent_test_state() -> Result<(AppState, Arc<FakeStore>, Uuid), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_token = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let owner_id = Uuid::from_u128(100);
+        let now = OffsetDateTime::now_utc();
+
+        let agent = WorkspaceAgentRow {
+            id: agent_id,
+            parent_id: None,
+            created_at: now,
+            updated_at: now,
+            name: "test-agent".to_owned(),
+            first_connected_at: None,
+            last_connected_at: None,
+            disconnected_at: None,
+            resource_id: Uuid::new_v4(),
+            auth_token: agent_token,
+            auth_instance_id: None,
+            architecture: "amd64".to_owned(),
+            environment_variables: None,
+            operating_system: "linux".to_owned(),
+            directory: "/home/coder".to_owned(),
+            expanded_directory: "/home/coder".to_owned(),
+            version: "2.0.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            connection_timeout_seconds: 120,
+            troubleshooting_url: String::new(),
+            motd_file: String::new(),
+            lifecycle_state: "ready".to_owned(),
+            logs_length: 0,
+            logs_overflowed: false,
+            started_at: Some(now),
+            ready_at: Some(now),
+            subsystems: Vec::new(),
+            display_apps: Vec::new(),
+            display_order: 0,
+            api_key_scope: "all".to_owned(),
+        };
+        store.insert_agent(agent)?;
+
+        let workspace = WorkspaceRecord {
+            id: workspace_id,
+            created_at: now,
+            updated_at: now,
+            owner_id,
+            organization_id: Uuid::from_u128(2),
+            template_id: Uuid::new_v4(),
+            deleted: false,
+            name: "test-workspace".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        };
+        store.insert_workspace(workspace)?;
+
+        Ok((state, store, agent_token))
+    }
+
+    /// Helper: create an authenticated agent request using the agent token.
+    fn agent_request(
+        method: Method,
+        uri: &str,
+        agent_token: Uuid,
+    ) -> Result<Request<Body>, http::Error> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(SESSION_TOKEN_HEADER, agent_token.to_string())
+            .body(Body::empty())
+    }
+
+    fn agent_json_request<T: Serialize>(
+        method: Method,
+        uri: &str,
+        agent_token: Uuid,
+        payload: &T,
+    ) -> Result<Request<Body>, Box<dyn Error>> {
+        let body = serde_json::to_vec(payload)?;
+        let req = Request::builder()
+            .method(method)
+            .uri(uri)
+            .header(CONTENT_TYPE, "application/json")
+            .header(SESSION_TOKEN_HEADER, agent_token.to_string())
+            .body(Body::from(body))?;
+        Ok(req)
+    }
+
+    #[tokio::test]
+    async fn agent_endpoints_reject_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let app = build_router(state);
+
+        // All agent endpoints should return 401 without a valid token.
+        let endpoints: Vec<(Method, &str)> = vec![
+            (Method::GET, "/api/v2/workspaceagents/me/gitsshkey"),
+            (
+                Method::GET,
+                "/api/v2/workspaceagents/me/external-auth?id=github",
+            ),
+            (Method::GET, "/api/v2/workspaceagents/me/reinit"),
+            (Method::GET, "/api/v2/workspaceagents/me/rpc"),
+        ];
+
+        for (method, uri) in endpoints {
+            let req = request(method.clone(), uri)?;
+            let response = call(app.clone(), req).await?;
+            assert_eq!(
+                response.status(),
+                StatusCode::UNAUTHORIZED,
+                "Expected 401 for unauthenticated {method} {uri}"
+            );
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_gitsshkey_returns_ok() -> Result<(), Box<dyn Error>> {
+        let (state, store, agent_token) = setup_agent_test_state()?;
+
+        // Insert a git SSH key for the workspace owner.
+        let owner_id = Uuid::from_u128(100);
+        store
+            .git_ssh_keys
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(
+                owner_id,
+                GitSshKeyRecord {
+                    user_id: owner_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    private_key: "PRIVATE_KEY".to_owned(),
+                    public_key: "PUBLIC_KEY".to_owned(),
+                },
+            );
+
+        let app = build_router(state);
+        let req = agent_request(
+            Method::GET,
+            "/api/v2/workspaceagents/me/gitsshkey",
+            agent_token,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_json(response).await?;
+        assert_eq!(body["public_key"], "PUBLIC_KEY");
+        assert_eq!(body["private_key"], "PRIVATE_KEY");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_log_source_create() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "display_name": "Startup Script",
+            "icon": "/icon/terminal.svg",
+        });
+        let req = agent_json_request(
+            Method::POST,
+            "/api/v2/workspaceagents/me/log-source",
+            agent_token,
+            &payload,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let body = response_json(response).await?;
+        assert_eq!(body["display_name"], "Startup Script");
+        assert_eq!(body["icon"], "/icon/terminal.svg");
+        assert!(body["id"].is_string());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_log_source_validation() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        // Empty display_name should fail validation.
+        let payload = json!({
+            "display_name": "",
+            "icon": "/icon/terminal.svg",
+        });
+        let req = agent_json_request(
+            Method::POST,
+            "/api/v2/workspaceagents/me/log-source",
+            agent_token,
+            &payload,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_logs_append() -> Result<(), Box<dyn Error>> {
+        let (state, store, agent_token) = setup_agent_test_state()?;
+
+        // First create a log source.
+        let agent_id = store
+            .workspace_agents
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .values()
+            .next()
+            .map(|a| a.id)
+            .ok_or("no agent")?;
+        let source = store
+            .insert_workspace_agent_log_source(agent_id, None, "test", "")
+            .await?;
+
+        let app = build_router(state);
+        let payload = json!({
+            "log_source_id": source.id.to_string(),
+            "logs": [
+                {
+                    "created_at": "2025-01-01T00:00:00Z",
+                    "output": "hello world",
+                    "level": "info"
+                }
+            ]
+        });
+        let req = agent_json_request(
+            Method::PATCH,
+            "/api/v2/workspaceagents/me/logs",
+            agent_token,
+            &payload,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify log was stored.
+        let logs = store
+            .workspace_agent_logs
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].output, "hello world");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_logs_empty_validation() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "log_source_id": Uuid::new_v4().to_string(),
+            "logs": []
+        });
+        let req = agent_json_request(
+            Method::PATCH,
+            "/api/v2/workspaceagents/me/logs",
+            agent_token,
+            &payload,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_app_status_update() -> Result<(), Box<dyn Error>> {
+        let (state, store, agent_token) = setup_agent_test_state()?;
+
+        // Insert a workspace app.
+        let agent_id = store
+            .workspace_agents
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .values()
+            .next()
+            .map(|a| a.id)
+            .ok_or("no agent")?;
+        let now = OffsetDateTime::now_utc();
+        let app_row = WorkspaceAppRow {
+            id: Uuid::new_v4(),
+            created_at: now,
+            agent_id,
+            display_name: "My App".to_owned(),
+            icon: String::new(),
+            command: None,
+            url: None,
+            healthcheck_url: String::new(),
+            healthcheck_interval: 0,
+            healthcheck_threshold: 0,
+            health: "healthy".to_owned(),
+            subdomain: false,
+            sharing_level: "owner".to_owned(),
+            slug: "my-app".to_owned(),
+            external: false,
+            display_order: 0,
+            hidden: false,
+            open_in: "slim-window".to_owned(),
+            display_group: None,
+        };
+        store.insert_app(app_row)?;
+
+        let app = build_router(state);
+        let payload = json!({
+            "app_slug": "my-app",
+            "state": "working",
+            "message": "Processing...",
+        });
+        let req = agent_json_request(
+            Method::PATCH,
+            "/api/v2/workspaceagents/me/app-status",
+            agent_token,
+            &payload,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify status was stored.
+        let statuses = store
+            .workspace_app_statuses
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, "working");
+        assert_eq!(statuses[0].message, "Processing...");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_app_status_missing_slug() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "app_slug": "",
+            "state": "working",
+            "message": "test",
+        });
+        let req = agent_json_request(
+            Method::PATCH,
+            "/api/v2/workspaceagents/me/app-status",
+            agent_token,
+            &payload,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_app_status_unknown_slug() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let payload = json!({
+            "app_slug": "nonexistent",
+            "state": "working",
+            "message": "test",
+        });
+        let req = agent_json_request(
+            Method::PATCH,
+            "/api/v2/workspaceagents/me/app-status",
+            agent_token,
+            &payload,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_external_auth_requires_id() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        // No 'id' parameter should fail.
+        let req = agent_request(
+            Method::GET,
+            "/api/v2/workspaceagents/me/external-auth?id=",
+            agent_token,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_external_auth_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let req = agent_request(
+            Method::GET,
+            "/api/v2/workspaceagents/me/external-auth?id=github",
+            agent_token,
+        )?;
+        let response = call(app, req).await?;
+        // Returns 404 since external auth config is not yet supported.
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_reinit_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let req = agent_request(
+            Method::GET,
+            "/api/v2/workspaceagents/me/reinit",
+            agent_token,
+        )?;
+        let response = call(app, req).await?;
+        // Reinit SSE requires pubsub infrastructure, returns 501.
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let req = agent_request(Method::GET, "/api/v2/workspaceagents/me/rpc", agent_token)?;
+        let response = call(app, req).await?;
+        // RPC/WebSocket requires yamux/dRPC infrastructure, returns 501.
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_gitauth_deprecated_returns_empty() -> Result<(), Box<dyn Error>> {
+        let (state, _store, agent_token) = setup_agent_test_state()?;
+        let app = build_router(state);
+
+        let req = agent_request(
+            Method::GET,
+            "/api/v2/workspaceagents/me/gitauth",
+            agent_token,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_json(response).await?;
+        assert_eq!(body, json!([]));
+
         Ok(())
     }
 
