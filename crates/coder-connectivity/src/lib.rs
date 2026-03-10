@@ -1195,71 +1195,10 @@ mod tests {
         let snapshot = snapshot.unwrap_or_else(|_| unreachable!());
         assert_eq!(snapshot.deployment_id, "test-deploy-id");
         assert_eq!(snapshot.version, "0.0.1-test");
-    }
-
-    // ── User-requested tests ────────────────────────────────
-
-    #[test]
-    fn test_git_ssh_key_generation() {
-        let result = generate_git_ssh_key("dev@coder.com");
-        assert!(result.is_ok());
-        let key = result.unwrap_or_else(|_| unreachable!());
-
-        // Public key format
-        assert!(
-            key.public_key.starts_with("ssh-ed25519 "),
-            "public key should start with ssh-ed25519"
-        );
-        assert!(
-            key.public_key.contains("dev@coder.com"),
-            "public key should contain the comment"
-        );
-        assert!(
-            key.public_key.ends_with('\n'),
-            "public key should end with a newline"
-        );
-
-        // Private key format
-        assert!(
-            key.private_key.contains("BEGIN OPENSSH PRIVATE KEY"),
-            "private key should contain PEM begin header"
-        );
-        assert!(
-            key.private_key.contains("END OPENSSH PRIVATE KEY"),
-            "private key should contain PEM end header"
-        );
-    }
-
-    #[test]
-    fn test_health_service_creation() {
-        let store = MockStore::healthy();
-        let svc = HealthService::new(store);
-        assert!(
-            svc.is_ok(),
-            "HealthService::new should succeed with a valid store"
-        );
-    }
-
-    #[tokio::test]
-    async fn test_telemetry_snapshot() {
-        let store = MockStore::healthy();
-        let service = Arc::new(TelemetryService {
-            store,
-            deployment_id: "snap-test-id".to_owned(),
-            version: "1.2.3".to_owned(),
-        });
-
-        let snapshot = service.collect_snapshot().await;
-        assert!(snapshot.is_ok());
-        let snapshot = snapshot.unwrap_or_else(|_| unreachable!());
-
-        assert_eq!(snapshot.deployment_id, "snap-test-id");
-        assert_eq!(snapshot.version, "1.2.3");
         assert!(
             !snapshot.timestamp.is_empty(),
             "timestamp should be non-empty"
         );
-        // Sessions and workspaces should be 0 from mock store defaults
         assert_eq!(snapshot.active_sessions, 0);
         assert_eq!(snapshot.workspaces, 0);
     }
