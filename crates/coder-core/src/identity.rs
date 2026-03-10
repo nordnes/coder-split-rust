@@ -9,7 +9,9 @@ use uuid::Uuid;
 use crate::{api::ApiAllowListTarget, ports::StorageError};
 
 /// Supported login types for the Rust identity slice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
+#[derive(
+    Clone, Copy, Debug, Hash, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type,
+)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "login_type", rename_all = "snake_case")]
 pub enum LoginType {
