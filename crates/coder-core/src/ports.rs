@@ -1,5 +1,6 @@
 //! Storage contracts for the Rust backend slice.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use async_trait::async_trait;
@@ -473,7 +474,7 @@ pub struct ProvisionerDaemonHealthInput {
     /// Supported provisioner types.
     pub provisioners: Vec<String>,
     /// Free-form daemon tags.
-    pub tags: std::collections::HashMap<String, String>,
+    pub tags: HashMap<String, String>,
     /// Current daemon status.
     pub status: Option<String>,
 }
@@ -498,7 +499,7 @@ pub struct ProvisionerDaemonHealthRecord {
     /// Supported provisioner types.
     pub provisioners: Vec<String>,
     /// Free-form daemon tags.
-    pub tags: std::collections::HashMap<String, String>,
+    pub tags: HashMap<String, String>,
     /// Current daemon status.
     pub status: Option<String>,
 }
@@ -506,6 +507,24 @@ pub struct ProvisionerDaemonHealthRecord {
 // ---------------------------------------------------------------------------
 // Workspace domain records
 // ---------------------------------------------------------------------------
+
+/// Stored workspace ACL record.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkspaceACLRecord {
+    /// User ACL: maps user UUID string to role string.
+    pub user_acl: HashMap<String, String>,
+    /// Group ACL: maps group UUID string to role string.
+    pub group_acl: HashMap<String, String>,
+}
+
+/// Input for updating workspace ACL.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpdateWorkspaceACLInput {
+    /// User role mapping (UUID string -> role).
+    pub user_roles: HashMap<String, String>,
+    /// Group role mapping (UUID string -> role).
+    pub group_roles: HashMap<String, String>,
+}
 
 /// Stored workspace record.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3002,6 +3021,37 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
+    /// Returns the ACL for a workspace.
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable(
+            "workspace ACL is not implemented",
+        ))
+    }
+
+    /// Updates workspace ACL entries.
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError> {
+        let _ = (workspace_id, input);
+        Err(StorageError::unavailable(
+            "workspace ACL is not implemented",
+        ))
+    }
+
+    /// Clears all workspace ACL entries.
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+        let _ = workspace_id;
+        Err(StorageError::unavailable(
+            "workspace ACL is not implemented",
+        ))
+    }
+
     /// Lists workspace builds for a workspace.
     async fn list_workspace_builds(
         &self,
@@ -3945,6 +3995,22 @@ pub trait WorkspaceStore: Send + Sync {
 
     /// Soft-deletes a workspace.
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Returns the ACL for a workspace.
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError>;
+
+    /// Updates workspace ACL entries.
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError>;
+
+    /// Clears all workspace ACL entries.
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError>;
 
     /// Looks up a template by stable identifier.
     async fn find_template_by_id(
@@ -5076,6 +5142,25 @@ where
         AppStore::soft_delete_workspace(self, workspace_id).await
     }
 
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError> {
+        AppStore::get_workspace_acl(self, workspace_id).await
+    }
+
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError> {
+        AppStore::update_workspace_acl(self, workspace_id, input).await
+    }
+
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+        AppStore::delete_workspace_acl(self, workspace_id).await
+    }
+
     async fn find_template_by_id(
         &self,
         template_id: Uuid,
@@ -5348,6 +5433,25 @@ where
 
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
         (**self).soft_delete_workspace(workspace_id).await
+    }
+
+    async fn get_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+    ) -> Result<WorkspaceACLRecord, StorageError> {
+        (**self).get_workspace_acl(workspace_id).await
+    }
+
+    async fn update_workspace_acl(
+        &self,
+        workspace_id: Uuid,
+        input: &UpdateWorkspaceACLInput,
+    ) -> Result<(), StorageError> {
+        (**self).update_workspace_acl(workspace_id, input).await
+    }
+
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
+        (**self).delete_workspace_acl(workspace_id).await
     }
 
     async fn find_template_by_id(
