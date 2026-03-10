@@ -3043,6 +3043,7 @@ async fn list_workspaces(
                 "deleting_at": w.deleting_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
                 "automatic_updates": w.automatic_updates,
                 "favorite": w.favorite,
+                "next_start_at": w.next_start_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
             })
         })
         .collect();
@@ -4241,6 +4242,7 @@ fn workspace_to_json(w: &coder_core::WorkspaceRecord) -> Value {
         "deleting_at": w.deleting_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
         "automatic_updates": w.automatic_updates,
         "favorite": w.favorite,
+        "next_start_at": w.next_start_at.map(|t| t.format(&time::format_description::well_known::Rfc3339).unwrap_or_default()),
     })
 }
 
