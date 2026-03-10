@@ -1858,6 +1858,22 @@ async fn post_user(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can create users.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::User),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create users.",
+        ));
+    }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -1955,8 +1971,21 @@ async fn put_user_git_ssh_key(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
-    if !context.actor.can_access_user(target_user.id) {
-        return Ok(not_found_response("User not found."));
+    // RBAC: verify the actor can update this user's SSH key.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::User)
+                .with_id(target_user.id)
+                .with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this user's SSH key.",
+        ));
     }
 
     let key = match store_new_git_ssh_key(&state, &target_user).await {
@@ -2182,6 +2211,7 @@ async fn put_user_appearance(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2249,6 +2279,7 @@ async fn put_user_preferences(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2290,6 +2321,7 @@ async fn put_user_password(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2633,6 +2665,25 @@ async fn post_organization_member(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can add members to this organization.
+    let org = resolve_organization(&state, &organization).await?;
+    let authorizer = Authorizer::new();
+    if let Some(ref o) = org {
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Create,
+                &Object::new(ResourceType::OrganizationMember).in_org(o.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to add members to this organization.",
+            ));
+        }
+    }
+
     let member = match state
         .identity
         .create_organization_member(&context.actor, &context.user, &organization, &user)
@@ -2667,6 +2718,25 @@ async fn delete_organization_member(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can remove members from this organization.
+    let org = resolve_organization(&state, &organization).await?;
+    let authorizer = Authorizer::new();
+    if let Some(ref o) = org {
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Delete,
+                &Object::new(ResourceType::OrganizationMember).in_org(o.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to remove members from this organization.",
+            ));
+        }
+    }
+
     let (organization_id, user_id) = match state
         .identity
         .delete_organization_member(&context.actor, &context.user, &organization, &user)
@@ -2698,6 +2768,25 @@ async fn put_organization_member_roles(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update member roles in this organization.
+    let org = resolve_organization(&state, &organization).await?;
+    let authorizer = Authorizer::new();
+    if let Some(ref o) = org {
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Update,
+                &Object::new(ResourceType::OrganizationMember).in_org(o.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to update member roles in this organization.",
+            ));
+        }
+    }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2745,6 +2834,27 @@ async fn create_session_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can create API keys for this user.
+    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let authorizer = Authorizer::new();
+    if let Some(ref tu) = target_user {
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Create,
+                &Object::new(ResourceType::User)
+                    .with_id(tu.id)
+                    .with_owner(tu.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to create API keys for this user.",
+            ));
+        }
+    }
+
     let result = match state
         .auth
         .create_session_api_key(&context.actor, &context.user, &user)
@@ -2776,6 +2886,27 @@ async fn create_token_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can create token API keys for this user.
+    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let authorizer = Authorizer::new();
+    if let Some(ref tu) = target_user {
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Create,
+                &Object::new(ResourceType::User)
+                    .with_id(tu.id)
+                    .with_owner(tu.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to create token API keys for this user.",
+            ));
+        }
+    }
+
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2877,6 +3008,27 @@ async fn delete_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can delete API keys for this user.
+    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let authorizer = Authorizer::new();
+    if let Some(ref tu) = target_user {
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Delete,
+                &Object::new(ResourceType::User)
+                    .with_id(tu.id)
+                    .with_owner(tu.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to delete API keys for this user.",
+            ));
+        }
+    }
+
     let key_id = match state
         .auth
         .delete_api_key(&context.actor, &context.user, &user, &keyid)
@@ -2907,6 +3059,27 @@ async fn expire_api_key(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can expire API keys for this user.
+    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let authorizer = Authorizer::new();
+    if let Some(ref tu) = target_user {
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Update,
+                &Object::new(ResourceType::User)
+                    .with_id(tu.id)
+                    .with_owner(tu.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to expire API keys for this user.",
+            ));
+        }
+    }
+
     let key_id = match state
         .auth
         .expire_api_key(&context.actor, &context.user, &user, &keyid)
@@ -3064,13 +3237,30 @@ async fn list_provisioner_daemons(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
+        Ok(o) => o,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    // RBAC: verify the actor can read provisioner daemons in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerDaemon).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner daemons.",
+        ));
     }
+
     let empty: Vec<coder_core::ProvisionerDaemonResponse> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -3088,13 +3278,30 @@ async fn list_provisioner_jobs(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
+        Ok(o) => o,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    // RBAC: verify the actor can read provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner jobs.",
+        ));
     }
+
     let empty: Vec<ProvisionerJobResponse> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -3112,12 +3319,28 @@ async fn get_provisioner_job(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // Validate the organization exists and the caller has access.
-    if let Err(error) = state
+    let org = match state
         .identity
         .get_organization(&context.actor, &organization)
         .await
     {
-        return handle_identity_error(error);
+        Ok(o) => o,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    // RBAC: verify the actor can read provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner jobs.",
+        ));
     }
     Ok((
         StatusCode::NOT_FOUND,
@@ -3152,6 +3375,21 @@ async fn cancel_provisioner_job(
             return handle_identity_error(error);
         }
     };
+
+    // RBAC: verify the actor can update provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel provisioner jobs.",
+        ));
+    }
 
     // Parse job UUID.
     let job_id = match Uuid::from_str(&job) {
@@ -3237,6 +3475,21 @@ async fn get_provisioner_job_logs(
             return handle_identity_error(error);
         }
     };
+
+    // RBAC: verify the actor can read provisioner jobs in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::ProvisionerJobs).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view provisioner job logs.",
+        ));
+    }
 
     // Parse job UUID.
     let job_id = match Uuid::from_str(&job) {
@@ -5835,6 +6088,21 @@ async fn post_org_template(
         }
     };
 
+    // RBAC: verify the actor can create templates in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Template).in_org(org_record.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create templates in this organization.",
+        ));
+    }
+
     let now = OffsetDateTime::now_utc();
     let template_id = Uuid::new_v4();
     let input = CreateTemplateInput {
@@ -6044,6 +6312,21 @@ async fn post_org_template_version(
         }
     };
 
+    // RBAC: verify the actor can create template versions in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Template).in_org(org_record.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create template versions in this organization.",
+        ));
+    }
+
     let now = OffsetDateTime::now_utc();
     let job_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
@@ -6182,6 +6465,28 @@ async fn delete_template(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Look up the template to get org info for RBAC.
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+
+    // RBAC: verify the actor can delete this template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Template)
+                .with_id(template_id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete this template.",
+        ));
+    }
+
     let deleted = state.store.soft_delete_template(template_id).await?;
     if !deleted {
         return Ok(not_found_response("Template not found."));
@@ -6222,6 +6527,23 @@ async fn patch_template(
         Some(t) if !t.deleted => t,
         _ => return Ok(not_found_response("Template not found.")),
     };
+
+    // RBAC: verify the actor can update this template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template_id)
+                .in_org(existing.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this template.",
+        ));
+    }
 
     let name = if body.name.is_empty() {
         &existing.name
@@ -6447,6 +6769,21 @@ async fn patch_template_version(
         None => return Ok(not_found_response("Template version not found.")),
     };
 
+    // RBAC: verify the actor can update this template version.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template);
+    if let Some(tid) = existing.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this template version.",
+        ));
+    }
+
     let name = if body.name.is_empty() {
         &existing.name
     } else {
@@ -6487,6 +6824,27 @@ async fn post_archive_template_version(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Look up the version to get template info for RBAC.
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
+        Some(v) => v,
+        None => return Ok(not_found_response("Template version not found.")),
+    };
+
+    // RBAC: verify the actor can update this template version.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&_context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to archive this template version.",
+        ));
+    }
+
     let archived = state.store.archive_template_version(version_id).await?;
     if !archived {
         return Ok(not_found_response("Template version not found."));
@@ -6512,6 +6870,21 @@ async fn patch_cancel_template_version(
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
+
+    // RBAC: verify the actor can update this template version.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&_context.actor, Action::Update, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel this template version job.",
+        ));
+    }
 
     let canceled = state
         .store
@@ -6609,6 +6982,21 @@ async fn patch_template_version_dry_run(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // RBAC: verify the actor can update templates (dry-run mutation).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &_context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update template version dry runs.",
+        ));
+    }
+
     let canceled = state.store.cancel_template_provisioner_job(job_id).await?;
     if !canceled {
         return Ok((
@@ -6637,6 +7025,21 @@ async fn patch_cancel_template_version_dry_run(
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update templates (dry-run cancel).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &_context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel template version dry runs.",
+        ));
+    }
 
     let canceled = state.store.cancel_template_provisioner_job(job_id).await?;
     if !canceled {
@@ -7769,13 +8172,31 @@ async fn patch_workspace(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace.",
+        ));
+    }
 
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
         let Some(updated) = state
@@ -7845,6 +8266,24 @@ async fn post_workspace_build(
     else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can create builds for this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create builds for this workspace.",
+        ));
+    }
 
     let transition = body
         .get("transition")
@@ -8911,6 +9350,33 @@ async fn patch_cancel_workspace_build(
         return Ok(resource_not_found_response());
     };
 
+    // Look up the workspace to get owner/org info for RBAC.
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(build.workspace_id, None)
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // RBAC: verify the actor can update this workspace build.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &_context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(build.workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to cancel this workspace build.",
+        ));
+    }
+
     let canceled = state
         .store
         .cancel_template_provisioner_job(build.job_id)
@@ -9092,9 +9558,36 @@ async fn put_workspace_build_state(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_build) = state.store.find_workspace_build_by_id(build_id).await? else {
+    let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // Look up the workspace to get owner/org info for RBAC.
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(build.workspace_id, None)
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // RBAC: verify the actor can update this workspace build state.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &_context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Workspace)
+                .with_id(build.workspace_id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this workspace build state.",
+        ));
+    }
 
     state
         .store
@@ -9135,6 +9628,21 @@ async fn get_user_workspace_by_name(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can read workspaces owned by target user.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::Workspace).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view this user's workspaces.",
+        ));
+    }
 
     let Some(workspace) = state
         .store
@@ -9198,6 +9706,21 @@ async fn post_user_workspace(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can create workspaces for this user.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Workspace).with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create workspaces for this user.",
+        ));
+    }
 
     let template_id = match body.get("template_id").and_then(|v| v.as_str()) {
         Some(id) => match Uuid::parse_str(id) {
