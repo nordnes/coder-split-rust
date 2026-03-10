@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS templates (
     disable_module_cache            boolean NOT NULL DEFAULT false
 );
 
-CREATE INDEX IF NOT EXISTS idx_templates_org_name
+CREATE UNIQUE INDEX IF NOT EXISTS idx_templates_org_name
     ON templates (organization_id, LOWER(name))
     WHERE deleted = false;
 
