@@ -34217,13 +34217,13 @@ mod tests {
         .await?;
         assert_eq!(cancel_resp.status(), StatusCode::OK);
 
-        // Verify the underlying provisioner job was marked as canceling.
+        // Verify the underlying provisioner job was canceled (no worker, so immediate cancel).
         {
             let jobs = store.provisioner_jobs.lock().map_err(|e| e.to_string())?;
             let job = jobs.get(&job_id).ok_or("job not found in store")?;
             assert_eq!(
-                job.job_status, "canceling",
-                "expected job_status to be canceling after cancel"
+                job.job_status, "canceled",
+                "expected job_status to be canceled after cancel (no worker assigned)"
             );
             assert!(job.canceled_at.is_some(), "expected canceled_at to be set");
         }
