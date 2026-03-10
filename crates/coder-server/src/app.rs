@@ -2835,19 +2835,6 @@ async fn deprecated_workspace_agent_startup_logs(
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
 
-/// GET /templateversions/{tv}/schema — deprecated, returns empty array.
-async fn deprecated_template_version_schema(
-    State(state): State<AppState>,
-    Path(_templateversion): Path<String>,
-    headers: HeaderMap,
-) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let empty: Vec<Value> = Vec::new();
-    Ok((StatusCode::OK, Json(empty)).into_response())
-}
-
 // ---------------------------------------------------------------------------
 // Template & Template Version Handlers (33 routes)
 // ---------------------------------------------------------------------------
