@@ -4020,7 +4020,7 @@ impl AppStore for PostgresStore {
     // -----------------------------------------------------------------------
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
-    async fn fetch_pending_notification_messages(
+    async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
         max_attempt_count: u32,
@@ -4028,11 +4028,13 @@ impl AppStore for PostgresStore {
         let rows = sqlx::query_as::<_, StoredNotificationMessageRow>(
             r#"UPDATE notification_messages
                SET status = 'leased'::notification_message_status,
+                   leased_until = NOW() + INTERVAL '30 seconds',
                    updated_at = NOW()
                WHERE id IN (
                    SELECT id
                    FROM notification_messages
-                   WHERE status IN ('pending', 'temporary_failure')
+                   WHERE (status IN ('pending', 'temporary_failure')
+                          OR (status = 'leased' AND leased_until < NOW()))
                      AND (next_retry_after IS NULL OR next_retry_after < NOW())
                      AND (attempt_count IS NULL OR attempt_count < $2)
                    ORDER BY created_at ASC

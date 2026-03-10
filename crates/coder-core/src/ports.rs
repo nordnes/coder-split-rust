@@ -1641,11 +1641,15 @@ pub trait IdentityStore: Send + Sync {
 
     // ----- Notifications -----
 
-    /// Fetches pending notification messages for dispatch.
+    /// Atomically acquires pending notification messages for dispatch.
+    ///
+    /// Uses `FOR UPDATE SKIP LOCKED` to lease rows, preventing concurrent
+    /// workers from picking up the same messages. Expired leases (where
+    /// `leased_until < NOW()`) are automatically reclaimed.
     ///
     /// Messages with `attempt_count >= max_attempt_count` are excluded so they
     /// can be purged separately rather than retried indefinitely.
-    async fn fetch_pending_notification_messages(
+    async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
         max_attempt_count: u32,
@@ -4260,11 +4264,15 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     // ----- Notification message dispatch -----
 
-    /// Fetches pending notification messages for dispatch.
+    /// Atomically acquires pending notification messages for dispatch.
+    ///
+    /// Uses `FOR UPDATE SKIP LOCKED` to lease rows, preventing concurrent
+    /// workers from picking up the same messages. Expired leases (where
+    /// `leased_until < NOW()`) are automatically reclaimed.
     ///
     /// Messages with `attempt_count >= max_attempt_count` are excluded so they
     /// can be purged separately rather than retried indefinitely.
-    async fn fetch_pending_notification_messages(
+    async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
         max_attempt_count: u32,
