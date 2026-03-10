@@ -5160,6 +5160,42 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredTemplateVersionRow>(
+            r#"
+            SELECT tv.*,
+                   COALESCE(u.avatar_url, '') AS created_by_avatar_url,
+                   COALESCE(u.username, '') AS created_by_username,
+                   COALESCE(u.name, '') AS created_by_name
+            FROM template_versions tv
+            LEFT JOIN users u ON u.id = tv.created_by
+            JOIN templates t ON t.id = tv.template_id
+            WHERE t.organization_id = $1 AND t.name = $2
+              AND tv.created_at < (
+                  SELECT tv2.created_at
+                  FROM template_versions tv2
+                  JOIN templates t2 ON t2.id = tv2.template_id
+                  WHERE t2.organization_id = $1 AND t2.name = $2 AND tv2.name = $3
+              )
+            ORDER BY tv.created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(organization_id)
+        .bind(template_name)
+        .bind(version_name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(template_version_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn insert_template_version(
         &self,
         input: CreateTemplateVersionInput,
