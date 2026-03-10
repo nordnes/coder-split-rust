@@ -163,6 +163,28 @@ pub struct ChatQueuedMessageRecord {
     pub created_at: OffsetDateTime,
 }
 
+/// A chat file record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct ChatFileRecord {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub organization_id: Uuid,
+    pub created_at: OffsetDateTime,
+    pub name: String,
+    pub mimetype: String,
+    pub data: Vec<u8>,
+}
+
+/// Input for inserting a new chat file.
+#[derive(Clone, Debug)]
+pub struct InsertChatFileInput {
+    pub owner_id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub mimetype: String,
+    pub data: Vec<u8>,
+}
+
 /// Deployment metadata required by the HTTP layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeploymentMetadata {
@@ -2776,6 +2798,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
         let _ = chat_id;
         Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Unarchives a chat by ID (sets archived = false for the single chat).
+    async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Files
+    // -----------------------------------------------------------------------
+
+    /// Inserts a new chat file.
+    async fn insert_chat_file(
+        &self,
+        input: InsertChatFileInput,
+    ) -> Result<ChatFileRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("chat files are not implemented"))
+    }
+
+    /// Fetches a chat file by ID.
+    async fn find_chat_file_by_id(&self, id: Uuid) -> Result<Option<ChatFileRecord>, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chat files are not implemented"))
     }
 
     // -----------------------------------------------------------------------

@@ -2596,6 +2596,12 @@ pub struct CreateChatMessageApiResponse {
     pub queued: bool,
 }
 
+/// UploadChatFileResponse is the response from uploading a chat file.
+#[derive(Clone, Debug, Serialize)]
+pub struct UploadChatFileResponse {
+    pub id: Uuid,
+}
+
 // ---------------------------------------------------------------------------
 // Workspace Agent types
 // ---------------------------------------------------------------------------
