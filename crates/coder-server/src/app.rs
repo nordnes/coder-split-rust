@@ -2667,21 +2667,21 @@ async fn post_organization_member(
     };
 
     // RBAC: verify the actor can add members to this organization.
-    let org = resolve_organization(&state, &organization).await?;
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
     let authorizer = Authorizer::new();
-    if let Some(ref o) = org {
-        if authorizer
-            .authorize(
-                &context.actor,
-                Action::Create,
-                &Object::new(ResourceType::OrganizationMember).in_org(o.id),
-            )
-            .is_err()
-        {
-            return Ok(forbidden_response(
-                "You are not authorized to add members to this organization.",
-            ));
-        }
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::OrganizationMember).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to add members to this organization.",
+        ));
     }
 
     let member = match state
@@ -2720,21 +2720,21 @@ async fn delete_organization_member(
     };
 
     // RBAC: verify the actor can remove members from this organization.
-    let org = resolve_organization(&state, &organization).await?;
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
     let authorizer = Authorizer::new();
-    if let Some(ref o) = org {
-        if authorizer
-            .authorize(
-                &context.actor,
-                Action::Delete,
-                &Object::new(ResourceType::OrganizationMember).in_org(o.id),
-            )
-            .is_err()
-        {
-            return Ok(forbidden_response(
-                "You are not authorized to remove members from this organization.",
-            ));
-        }
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::OrganizationMember).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to remove members from this organization.",
+        ));
     }
 
     let (organization_id, user_id) = match state
@@ -2770,21 +2770,21 @@ async fn put_organization_member_roles(
     };
 
     // RBAC: verify the actor can update member roles in this organization.
-    let org = resolve_organization(&state, &organization).await?;
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
     let authorizer = Authorizer::new();
-    if let Some(ref o) = org {
-        if authorizer
-            .authorize(
-                &context.actor,
-                Action::Update,
-                &Object::new(ResourceType::OrganizationMember).in_org(o.id),
-            )
-            .is_err()
-        {
-            return Ok(forbidden_response(
-                "You are not authorized to update member roles in this organization.",
-            ));
-        }
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::OrganizationMember).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update member roles in this organization.",
+        ));
     }
 
     let Json(request) = match payload {
@@ -2836,23 +2836,23 @@ async fn create_session_api_key(
     };
 
     // RBAC: verify the actor can create API keys for this user.
-    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
     let authorizer = Authorizer::new();
-    if let Some(ref tu) = target_user {
-        if authorizer
-            .authorize(
-                &context.actor,
-                Action::Create,
-                &Object::new(ResourceType::User)
-                    .with_id(tu.id)
-                    .with_owner(tu.id),
-            )
-            .is_err()
-        {
-            return Ok(forbidden_response(
-                "You are not authorized to create API keys for this user.",
-            ));
-        }
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::User)
+                .with_id(target_user.id)
+                .with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create API keys for this user.",
+        ));
     }
 
     let result = match state
@@ -2888,23 +2888,23 @@ async fn create_token_api_key(
     };
 
     // RBAC: verify the actor can create token API keys for this user.
-    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
     let authorizer = Authorizer::new();
-    if let Some(ref tu) = target_user {
-        if authorizer
-            .authorize(
-                &context.actor,
-                Action::Create,
-                &Object::new(ResourceType::User)
-                    .with_id(tu.id)
-                    .with_owner(tu.id),
-            )
-            .is_err()
-        {
-            return Ok(forbidden_response(
-                "You are not authorized to create token API keys for this user.",
-            ));
-        }
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::User)
+                .with_id(target_user.id)
+                .with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create token API keys for this user.",
+        ));
     }
 
     let Json(request) = match payload {
@@ -3010,23 +3010,23 @@ async fn delete_api_key(
     };
 
     // RBAC: verify the actor can delete API keys for this user.
-    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
     let authorizer = Authorizer::new();
-    if let Some(ref tu) = target_user {
-        if authorizer
-            .authorize(
-                &context.actor,
-                Action::Delete,
-                &Object::new(ResourceType::User)
-                    .with_id(tu.id)
-                    .with_owner(tu.id),
-            )
-            .is_err()
-        {
-            return Ok(forbidden_response(
-                "You are not authorized to delete API keys for this user.",
-            ));
-        }
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::User)
+                .with_id(target_user.id)
+                .with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete API keys for this user.",
+        ));
     }
 
     let key_id = match state
@@ -3061,23 +3061,23 @@ async fn expire_api_key(
     };
 
     // RBAC: verify the actor can expire API keys for this user.
-    let target_user = resolve_user(&state, &user, &context.user).await?;
+    let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
+        return Ok(not_found_response("User not found."));
+    };
     let authorizer = Authorizer::new();
-    if let Some(ref tu) = target_user {
-        if authorizer
-            .authorize(
-                &context.actor,
-                Action::Update,
-                &Object::new(ResourceType::User)
-                    .with_id(tu.id)
-                    .with_owner(tu.id),
-            )
-            .is_err()
-        {
-            return Ok(forbidden_response(
-                "You are not authorized to expire API keys for this user.",
-            ));
-        }
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::User)
+                .with_id(target_user.id)
+                .with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to expire API keys for this user.",
+        ));
     }
 
     let key_id = match state
