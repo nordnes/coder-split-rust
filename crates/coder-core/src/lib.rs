@@ -62,9 +62,10 @@ pub use api::{
 // Insights / Analytics & Debug types are accessed via `coder_core::api::*` in
 // downstream crates that need them (e.g. coder-server).
 pub use api::{
-    DeleteWebpushSubscription, GetInboxNotificationResponse, InboxNotification,
-    InboxNotificationAction, ListInboxNotificationsResponse, NotificationMethodsResponse,
-    NotificationPreference, NotificationTemplate, NotificationsSettings,
+    CustomNotificationContent, CustomNotificationRequest, DeleteWebpushSubscription,
+    GetInboxNotificationResponse, InboxNotification, InboxNotificationAction,
+    ListInboxNotificationsResponse, NotificationMethodsResponse, NotificationPreference,
+    NotificationTemplate, NotificationsSettings, Region, RegionsResponse,
     UpdateInboxNotificationReadStatusRequest, UpdateInboxNotificationReadStatusResponse,
     UpdateNotificationTemplateMethod, UpdateUserNotificationPreferences, WebpushSubscription,
 };
