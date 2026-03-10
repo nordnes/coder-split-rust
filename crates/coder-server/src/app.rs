@@ -28623,7 +28623,16 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = response_json(response).await?;
-        assert!(body.is_object());
+        // PauseTaskResponse { workspace_build: None } serializes to {} (field omitted via skip_serializing_if)
+        assert!(
+            body.get("workspace_build").is_none(),
+            "workspace_build should be absent when None"
+        );
+        assert_eq!(
+            body.as_object().map(|o| o.len()),
+            Some(0),
+            "pause response should be an empty object"
+        );
         Ok(())
     }
 
@@ -28677,7 +28686,16 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::ACCEPTED);
         let body = response_json(response).await?;
-        assert!(body.is_object());
+        // ResumeTaskResponse { workspace_build: None } serializes to {} (field omitted via skip_serializing_if)
+        assert!(
+            body.get("workspace_build").is_none(),
+            "workspace_build should be absent when None"
+        );
+        assert_eq!(
+            body.as_object().map(|o| o.len()),
+            Some(0),
+            "resume response should be an empty object"
+        );
         Ok(())
     }
 
@@ -28736,7 +28754,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_task_log_snapshot() -> Result<(), Box<dyn Error>> {
-        let (state, store) = test_state_with_store(true)?;
+        let (state, _store) = test_state_with_store(true)?;
         let app = build_router(state);
         let session_token = create_and_login(&app).await?;
 
@@ -28760,16 +28778,6 @@ mod tests {
             .and_then(Value::as_str)
             .ok_or("missing id")?;
         let task_id = Uuid::parse_str(task_id_str)?;
-
-        // Get the user ID from the store so we can confirm ownership
-        let owner_id = {
-            let tasks = store
-                .tasks
-                .lock()
-                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
-            tasks.get(&task_id).ok_or("task not found")?.owner_id
-        };
-        let _ = owner_id;
 
         let response = call(
             app,
@@ -29116,8 +29124,10 @@ mod tests {
         Ok(())
     }
 
+    // NOTE: This test exercises a 501 stub endpoint, not a happy path.
+    // Kept alongside chat tests for locality but excluded from the happy_ prefix.
     #[tokio::test]
-    async fn happy_watch_chat_git_returns_not_implemented() -> Result<(), Box<dyn Error>> {
+    async fn watch_chat_git_returns_not_implemented() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?);
         let session_token = create_and_login(&app).await?;
 
@@ -29778,7 +29788,26 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert!(body.is_object());
+        // TemplateInsightsResponse: FakeStore returns report and interval_reports with data
+        assert!(
+            body.get("report").is_some(),
+            "expected report field in template insights response"
+        );
+        let report = body.get("report").ok_or("missing report")?;
+        assert!(
+            report.get("start_time").is_some(),
+            "missing start_time in report"
+        );
+        assert!(
+            report.get("end_time").is_some(),
+            "missing end_time in report"
+        );
+        assert!(
+            body.get("interval_reports")
+                .and_then(Value::as_array)
+                .is_some(),
+            "expected interval_reports array"
+        );
         Ok(())
     }
 
@@ -29878,7 +29907,10 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         // The owner should have permission to read their own workspace
-        assert!(body.get("readWorkspace").and_then(Value::as_bool).is_some());
+        assert_eq!(
+            body.get("readWorkspace").and_then(Value::as_bool),
+            Some(true)
+        );
         Ok(())
     }
 
@@ -29926,7 +29958,18 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert!(body.is_object());
+        assert!(body.get("session_count").is_some(), "missing session_count");
+        assert!(body.get("workspaces").is_some(), "missing workspaces");
+        assert!(
+            body.get("aggregated_from")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing aggregated_from"
+        );
+        assert!(
+            body.get("collected_at").and_then(Value::as_str).is_some(),
+            "missing collected_at"
+        );
         Ok(())
     }
 
@@ -29958,8 +30001,11 @@ mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        // dismissed_healthchecks is empty by default and skipped via skip_serializing_if
-        assert!(body.is_object());
+        // dismissed_healthchecks is empty by default and omitted via skip_serializing_if = "Vec::is_empty"
+        assert!(
+            body.get("dismissed_healthchecks").is_none(),
+            "dismissed_healthchecks should be absent when empty"
+        );
         Ok(())
     }
 
