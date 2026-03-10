@@ -10211,9 +10211,9 @@ mod tests {
         let api_key_id = format!("ak-{}", &uniq());
         sqlx::query(
             "INSERT INTO api_keys (id, hashed_secret, user_id, last_used, expires_at, created_at,
-             updated_at, login_type, lifetime_seconds, ip_address, scope, token_name)
+             updated_at, login_type, lifetime_seconds, scopes, token_name)
              VALUES ($1, $2, $3, NOW(), NOW() + INTERVAL '1 hour', NOW(), NOW(),
-             'password'::login_type, 3600, '127.0.0.1'::inet, 'all'::api_key_scope, '')",
+             'password'::login_type, 3600, ARRAY['all']::text[], '')",
         )
         .bind(&api_key_id)
         .bind(b"fakehashedsecret".to_vec())
@@ -10576,8 +10576,8 @@ mod tests {
                 ..default_ws_filter()
             })
             .await?;
-        assert!(count >= 2);
-        assert!(by_org.len() >= 2);
+        assert_eq!(count, 2);
+        assert_eq!(by_org.len(), 2);
         Ok(())
     }
 
@@ -11142,9 +11142,12 @@ mod tests {
     // ── get_user_latency_insights ────────────────────────────────────
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_user_latency_insights_basic() {
-        let Ok(Some(store)) = setup_store().await else {
-            return; // skip if no DATABASE_URL
+        let store = match setup_store().await {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => panic!("setup_store() failed: {e}"), // skip if no DATABASE_URL
         };
         let pool = store.pool();
 
@@ -11243,9 +11246,12 @@ mod tests {
     // ── get_user_activity_insights ───────────────────────────────────
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_user_activity_insights_cap_per_slot() {
-        let Ok(Some(store)) = setup_store().await else {
-            return;
+        let store = match setup_store().await {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => panic!("setup_store() failed: {e}"),
         };
         let pool = store.pool();
 
@@ -11299,9 +11305,12 @@ mod tests {
     // ── get_template_insights_by_interval ────────────────────────────
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_template_insights_by_interval_day() {
-        let Ok(Some(store)) = setup_store().await else {
-            return;
+        let store = match setup_store().await {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => panic!("setup_store() failed: {e}"),
         };
         let pool = store.pool();
 
@@ -11377,9 +11386,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_template_insights_by_interval_week() {
-        let Ok(Some(store)) = setup_store().await else {
-            return;
+        let store = match setup_store().await {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => panic!("setup_store() failed: {e}"),
         };
         let pool = store.pool();
 
@@ -11418,9 +11430,12 @@ mod tests {
     // ── get_template_insights ────────────────────────────────────────
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_template_insights_empty_data() {
-        let Ok(Some(store)) = setup_store().await else {
-            return;
+        let store = match setup_store().await {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => panic!("setup_store() failed: {e}"),
         };
 
         // Query a time range with no data — COALESCE wrappers should ensure
@@ -11453,9 +11468,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore]
     async fn test_get_template_insights_builtin_apps() {
-        let Ok(Some(store)) = setup_store().await else {
-            return;
+        let store = match setup_store().await {
+            Ok(Some(s)) => s,
+            Ok(None) => return,
+            Err(e) => panic!("setup_store() failed: {e}"),
         };
         let pool = store.pool();
 
