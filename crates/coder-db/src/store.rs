@@ -21,21 +21,23 @@ use coder_core::{
     AcquireProvisionerJobInput, ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord,
     ApiKeyWithOwnerRecord, AppStore, AuditDiff, AuditLog, AuditLogAction, AuditLogListFilter,
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
+    ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
     CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
     CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
     CreateWorkspaceInput, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
     DeploymentStore, ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser,
     FileRecord, FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings,
-    InsertAgentLogInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
-    InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-    InsertProvisionerKeyInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization,
-    MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
-    PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
-    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
-    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
-    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TokenConfigRecord,
+    InsertAgentLogInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
+    InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
+    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
+    InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType, MinimalOrganization, MinimalUser,
+    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
+    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
+    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
+    ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
+    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
     UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
     UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
     WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
@@ -336,6 +338,71 @@ struct StoredWebpushSubscriptionRow {
     endpoint: String,
     endpoint_p256dh_key: String,
     endpoint_auth_key: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredTaskRow {
+    id: Uuid,
+    organization_id: Uuid,
+    owner_id: Uuid,
+    name: String,
+    display_name: String,
+    workspace_id: Option<Uuid>,
+    template_version_id: Uuid,
+    template_parameters: Value,
+    prompt: String,
+    created_at: OffsetDateTime,
+    deleted_at: Option<OffsetDateTime>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredTaskSnapshotRow {
+    task_id: Uuid,
+    log_snapshot: Value,
+    log_snapshot_created_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatRow {
+    id: Uuid,
+    owner_id: Uuid,
+    workspace_id: Option<Uuid>,
+    title: String,
+    status: String,
+    last_error: Option<String>,
+    parent_chat_id: Option<Uuid>,
+    root_chat_id: Option<Uuid>,
+    last_model_config_id: Uuid,
+    archived: bool,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatMessageRow {
+    id: i64,
+    chat_id: Uuid,
+    model_config_id: Option<Uuid>,
+    created_at: OffsetDateTime,
+    role: String,
+    content: Option<Value>,
+    visibility: String,
+    input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    reasoning_tokens: Option<i64>,
+    cache_creation_tokens: Option<i64>,
+    cache_read_tokens: Option<i64>,
+    context_limit: Option<i64>,
+    compressed: bool,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatQueuedMessageRow {
+    id: i64,
+    chat_id: Uuid,
+    content: Value,
+    created_at: OffsetDateTime,
 }
 
 #[derive(Debug, FromRow)]
@@ -2877,6 +2944,300 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)
         .and_then(external_auth_link_record_from_row)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tasks
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_task(&self, input: InsertTaskInput) -> Result<TaskRecord, StorageError> {
+        let row: StoredTaskRow = sqlx::query_as(
+            "INSERT INTO tasks (id, organization_id, owner_id, name, display_name, template_version_id, template_parameters, prompt, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             RETURNING id, organization_id, owner_id, name, display_name, workspace_id, template_version_id, template_parameters, prompt, created_at, deleted_at",
+        )
+        .bind(input.id)
+        .bind(input.organization_id)
+        .bind(input.owner_id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(input.template_version_id)
+        .bind(&input.template_parameters)
+        .bind(&input.prompt)
+        .bind(input.created_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(task_record_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_task_by_id(&self, id: Uuid) -> Result<Option<TaskRecord>, StorageError> {
+        let row: Option<StoredTaskRow> = sqlx::query_as(
+            "SELECT id, organization_id, owner_id, name, display_name, workspace_id, template_version_id, template_parameters, prompt, created_at, deleted_at
+             FROM tasks WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(task_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_tasks(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, StorageError> {
+        let rows: Vec<StoredTaskRow> = sqlx::query_as(
+            "SELECT id, organization_id, owner_id, name, display_name, workspace_id, template_version_id, template_parameters, prompt, created_at, deleted_at
+             FROM tasks
+             WHERE deleted_at IS NULL
+               AND ($1::uuid IS NULL OR owner_id = $1)
+               AND ($2::uuid IS NULL OR organization_id = $2)
+             ORDER BY created_at DESC",
+        )
+        .bind(filter.owner_id)
+        .bind(filter.organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows.into_iter().map(task_record_from_row).collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_task(
+        &self,
+        id: Uuid,
+        deleted_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result =
+            sqlx::query("UPDATE tasks SET deleted_at = $2 WHERE id = $1 AND deleted_at IS NULL")
+                .bind(id)
+                .bind(deleted_at)
+                .execute(&self.pool)
+                .await
+                .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_task_prompt(
+        &self,
+        id: Uuid,
+        prompt: &str,
+    ) -> Result<Option<TaskRecord>, StorageError> {
+        let row: Option<StoredTaskRow> = sqlx::query_as(
+            "UPDATE tasks SET prompt = $2
+             WHERE id = $1 AND deleted_at IS NULL
+             RETURNING id, organization_id, owner_id, name, display_name, workspace_id, template_version_id, template_parameters, prompt, created_at, deleted_at",
+        )
+        .bind(id)
+        .bind(prompt)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(task_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn upsert_task_snapshot(
+        &self,
+        task_id: Uuid,
+        log_snapshot: &Value,
+        log_snapshot_created_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO task_snapshots (task_id, log_snapshot, log_snapshot_created_at)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (task_id)
+             DO UPDATE SET log_snapshot = EXCLUDED.log_snapshot,
+                           log_snapshot_created_at = EXCLUDED.log_snapshot_created_at",
+        )
+        .bind(task_id)
+        .bind(log_snapshot)
+        .bind(log_snapshot_created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_task_snapshot(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<TaskSnapshotRecord>, StorageError> {
+        let row: Option<StoredTaskSnapshotRow> = sqlx::query_as(
+            "SELECT task_id, log_snapshot, log_snapshot_created_at
+             FROM task_snapshots WHERE task_id = $1",
+        )
+        .bind(task_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| TaskSnapshotRecord {
+            task_id: r.task_id,
+            log_snapshot: r.log_snapshot,
+            log_snapshot_created_at: r.log_snapshot_created_at,
+        }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chats
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_chat(&self, input: InsertChatInput) -> Result<ChatRecord, StorageError> {
+        let row: StoredChatRow = sqlx::query_as(
+            "INSERT INTO chats (owner_id, workspace_id, parent_chat_id, root_chat_id, last_model_config_id, title)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, owner_id, workspace_id, title, status::text, last_error, parent_chat_id, root_chat_id, last_model_config_id, archived, created_at, updated_at",
+        )
+        .bind(input.owner_id)
+        .bind(input.workspace_id)
+        .bind(input.parent_chat_id)
+        .bind(input.root_chat_id)
+        .bind(input.last_model_config_id)
+        .bind(&input.title)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        chat_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_chat_by_id(&self, id: Uuid) -> Result<Option<ChatRecord>, StorageError> {
+        let row: Option<StoredChatRow> = sqlx::query_as(
+            "SELECT id, owner_id, workspace_id, title, status::text, last_error, parent_chat_id, root_chat_id, last_model_config_id, archived, created_at, updated_at
+             FROM chats WHERE id = $1",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        row.map(chat_record_from_row).transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_chats_by_owner(
+        &self,
+        owner_id: Uuid,
+        archived: Option<bool>,
+    ) -> Result<Vec<ChatRecord>, StorageError> {
+        let rows: Vec<StoredChatRow> = sqlx::query_as(
+            "SELECT id, owner_id, workspace_id, title, status::text, last_error, parent_chat_id, root_chat_id, last_model_config_id, archived, created_at, updated_at
+             FROM chats
+             WHERE owner_id = $1
+               AND ($2::boolean IS NULL OR archived = $2)
+             ORDER BY updated_at DESC",
+        )
+        .bind(owner_id)
+        .bind(archived)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(chat_record_from_row).collect()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn archive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chats SET archived = true, updated_at = now()
+             WHERE id = $1
+                OR root_chat_id = $1
+                OR id = (SELECT COALESCE(root_chat_id, id) FROM chats WHERE id = $1)
+                OR root_chat_id = (SELECT COALESCE(root_chat_id, id) FROM chats WHERE id = $1)",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_chat_messages(
+        &self,
+        chat_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<ChatMessageRecord>, StorageError> {
+        let rows: Vec<StoredChatMessageRow> = sqlx::query_as(
+            "SELECT id, chat_id, model_config_id, created_at, role, content, visibility::text, input_tokens, output_tokens, total_tokens, reasoning_tokens, cache_creation_tokens, cache_read_tokens, context_limit, compressed
+             FROM chat_messages
+             WHERE chat_id = $1 AND id > $2
+             ORDER BY id ASC",
+        )
+        .bind(chat_id)
+        .bind(after_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(chat_message_record_from_row).collect()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_chat_message(
+        &self,
+        input: InsertChatMessageInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        let visibility_str = match input.visibility {
+            ChatMessageVisibility::User => "user",
+            ChatMessageVisibility::Model => "model",
+            ChatMessageVisibility::Both => "both",
+        };
+        let row: StoredChatMessageRow = sqlx::query_as(
+            "INSERT INTO chat_messages (chat_id, model_config_id, role, content, visibility)
+             VALUES ($1, $2, $3, $4, $5::chat_message_visibility)
+             RETURNING id, chat_id, model_config_id, created_at, role, content, visibility::text, input_tokens, output_tokens, total_tokens, reasoning_tokens, cache_creation_tokens, cache_read_tokens, context_limit, compressed",
+        )
+        .bind(input.chat_id)
+        .bind(input.model_config_id)
+        .bind(&input.role)
+        .bind(&input.content)
+        .bind(visibility_str)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        chat_message_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_chat_queued_messages(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
+        let rows: Vec<StoredChatQueuedMessageRow> = sqlx::query_as(
+            "SELECT id, chat_id, content, created_at
+             FROM chat_queued_messages
+             WHERE chat_id = $1
+             ORDER BY id ASC",
+        )
+        .bind(chat_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ChatQueuedMessageRecord {
+                id: r.id,
+                chat_id: r.chat_id,
+                content: r.content,
+                created_at: r.created_at,
+            })
+            .collect())
     }
 
     // -----------------------------------------------------------------------
@@ -6445,6 +6806,87 @@ fn title_case(value: &str) -> String {
         Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
         None => String::new(),
     }
+}
+
+fn task_record_from_row(row: StoredTaskRow) -> TaskRecord {
+    // The tasks table doesn't store status directly; it's derived from workspace state.
+    // For now we default to "pending" since we don't have workspace provisioning yet.
+    TaskRecord {
+        id: row.id,
+        organization_id: row.organization_id,
+        owner_id: row.owner_id,
+        name: row.name,
+        display_name: row.display_name,
+        workspace_id: row.workspace_id,
+        template_version_id: row.template_version_id,
+        template_parameters: row.template_parameters,
+        prompt: row.prompt,
+        status: TaskStatus::Pending,
+        created_at: row.created_at,
+        deleted_at: row.deleted_at,
+    }
+}
+
+fn chat_record_from_row(row: StoredChatRow) -> Result<ChatRecord, StorageError> {
+    let status = match row.status.as_str() {
+        "waiting" => ChatStatus::Waiting,
+        "pending" => ChatStatus::Pending,
+        "running" => ChatStatus::Running,
+        "paused" => ChatStatus::Paused,
+        "completed" => ChatStatus::Completed,
+        "error" => ChatStatus::Error,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown chat status: {other}"
+            )));
+        }
+    };
+    Ok(ChatRecord {
+        id: row.id,
+        owner_id: row.owner_id,
+        workspace_id: row.workspace_id,
+        title: row.title,
+        status,
+        last_error: row.last_error,
+        parent_chat_id: row.parent_chat_id,
+        root_chat_id: row.root_chat_id,
+        last_model_config_id: row.last_model_config_id,
+        archived: row.archived,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    })
+}
+
+fn chat_message_record_from_row(
+    row: StoredChatMessageRow,
+) -> Result<ChatMessageRecord, StorageError> {
+    let visibility = match row.visibility.as_str() {
+        "user" => ChatMessageVisibility::User,
+        "model" => ChatMessageVisibility::Model,
+        "both" => ChatMessageVisibility::Both,
+        other => {
+            return Err(StorageError::invalid_data(format!(
+                "unknown chat message visibility: {other}"
+            )));
+        }
+    };
+    Ok(ChatMessageRecord {
+        id: row.id,
+        chat_id: row.chat_id,
+        model_config_id: row.model_config_id,
+        created_at: row.created_at,
+        role: row.role,
+        content: row.content,
+        visibility,
+        input_tokens: row.input_tokens,
+        output_tokens: row.output_tokens,
+        total_tokens: row.total_tokens,
+        reasoning_tokens: row.reasoning_tokens,
+        cache_creation_tokens: row.cache_creation_tokens,
+        cache_read_tokens: row.cache_read_tokens,
+        context_limit: row.context_limit,
+        compressed: row.compressed,
+    })
 }
 
 fn inbox_notification_from_row(

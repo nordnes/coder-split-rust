@@ -9,8 +9,9 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::api::{
-    AuditLogResponse, ExternalAuthAppInstallation, ExternalAuthUser, HealthSettings,
-    InboxNotification, NotificationPreference, NotificationTemplate, NotificationsSettings,
+    AuditLogResponse, ChatMessageVisibility, ChatStatus, ExternalAuthAppInstallation,
+    ExternalAuthUser, HealthSettings, InboxNotification, NotificationPreference,
+    NotificationTemplate, NotificationsSettings, TaskStatus,
 };
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
@@ -40,6 +41,123 @@ use crate::template::{
     TemplateVersionPresetRecord, TemplateVersionRecord, TemplateVersionVariableRecord,
     UpdateTemplateMetaInput,
 };
+
+// ---------------------------------------------------------------------------
+// Task & Chat domain records
+// ---------------------------------------------------------------------------
+
+/// A task record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct TaskRecord {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub owner_id: Uuid,
+    pub name: String,
+    pub display_name: String,
+    pub workspace_id: Option<Uuid>,
+    pub template_version_id: Uuid,
+    pub template_parameters: Value,
+    pub prompt: String,
+    pub status: TaskStatus,
+    pub created_at: OffsetDateTime,
+    pub deleted_at: Option<OffsetDateTime>,
+}
+
+/// Input for creating a new task.
+#[derive(Clone, Debug)]
+pub struct InsertTaskInput {
+    pub id: Uuid,
+    pub organization_id: Uuid,
+    pub owner_id: Uuid,
+    pub name: String,
+    pub display_name: String,
+    pub template_version_id: Uuid,
+    pub template_parameters: Value,
+    pub prompt: String,
+    pub created_at: OffsetDateTime,
+}
+
+/// Filter for listing tasks.
+#[derive(Clone, Debug, Default)]
+pub struct TaskListFilter {
+    pub owner_id: Option<Uuid>,
+    pub organization_id: Option<Uuid>,
+}
+
+/// A task log snapshot record.
+#[derive(Clone, Debug)]
+pub struct TaskSnapshotRecord {
+    pub task_id: Uuid,
+    pub log_snapshot: Value,
+    pub log_snapshot_created_at: OffsetDateTime,
+}
+
+/// A chat record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct ChatRecord {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub title: String,
+    pub status: ChatStatus,
+    pub last_error: Option<String>,
+    pub parent_chat_id: Option<Uuid>,
+    pub root_chat_id: Option<Uuid>,
+    pub last_model_config_id: Uuid,
+    pub archived: bool,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+/// Input for creating a new chat.
+#[derive(Clone, Debug)]
+pub struct InsertChatInput {
+    pub owner_id: Uuid,
+    pub workspace_id: Option<Uuid>,
+    pub parent_chat_id: Option<Uuid>,
+    pub root_chat_id: Option<Uuid>,
+    pub last_model_config_id: Uuid,
+    pub title: String,
+}
+
+/// A chat message record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct ChatMessageRecord {
+    pub id: i64,
+    pub chat_id: Uuid,
+    pub model_config_id: Option<Uuid>,
+    pub created_at: OffsetDateTime,
+    pub role: String,
+    pub content: Option<Value>,
+    pub visibility: ChatMessageVisibility,
+    pub input_tokens: Option<i64>,
+    pub output_tokens: Option<i64>,
+    pub total_tokens: Option<i64>,
+    pub reasoning_tokens: Option<i64>,
+    pub cache_creation_tokens: Option<i64>,
+    pub cache_read_tokens: Option<i64>,
+    pub context_limit: Option<i64>,
+    pub compressed: bool,
+}
+
+/// Input for inserting a chat message.
+#[derive(Clone, Debug)]
+pub struct InsertChatMessageInput {
+    pub chat_id: Uuid,
+    pub model_config_id: Option<Uuid>,
+    pub role: String,
+    pub content: Option<Value>,
+    pub visibility: ChatMessageVisibility,
+}
+
+/// A chat queued message record.
+#[derive(Clone, Debug)]
+pub struct ChatQueuedMessageRecord {
+    pub id: i64,
+    pub chat_id: Uuid,
+    pub content: Value,
+    pub created_at: OffsetDateTime,
+}
 
 /// Deployment metadata required by the HTTP layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2307,6 +2425,129 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable(
             "external auth links are not implemented",
         ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Tasks
+    // -----------------------------------------------------------------------
+
+    /// Inserts a new task.
+    async fn insert_task(&self, input: InsertTaskInput) -> Result<TaskRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    /// Fetches a task by ID.
+    async fn find_task_by_id(&self, id: Uuid) -> Result<Option<TaskRecord>, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    /// Lists tasks matching the supplied filter.
+    async fn list_tasks(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, StorageError> {
+        let _ = filter;
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    /// Soft-deletes a task by ID.
+    async fn delete_task(
+        &self,
+        id: Uuid,
+        deleted_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let _ = (id, deleted_at);
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    /// Updates a task's prompt.
+    async fn update_task_prompt(
+        &self,
+        id: Uuid,
+        prompt: &str,
+    ) -> Result<Option<TaskRecord>, StorageError> {
+        let _ = (id, prompt);
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    /// Upserts a task log snapshot.
+    async fn upsert_task_snapshot(
+        &self,
+        task_id: Uuid,
+        log_snapshot: &Value,
+        log_snapshot_created_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        let _ = (task_id, log_snapshot, log_snapshot_created_at);
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    /// Fetches the task log snapshot.
+    async fn find_task_snapshot(
+        &self,
+        task_id: Uuid,
+    ) -> Result<Option<TaskSnapshotRecord>, StorageError> {
+        let _ = task_id;
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chats
+    // -----------------------------------------------------------------------
+
+    /// Inserts a new chat.
+    async fn insert_chat(&self, input: InsertChatInput) -> Result<ChatRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Fetches a chat by ID.
+    async fn find_chat_by_id(&self, id: Uuid) -> Result<Option<ChatRecord>, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Lists chats by owner ID.
+    async fn list_chats_by_owner(
+        &self,
+        owner_id: Uuid,
+        archived: Option<bool>,
+    ) -> Result<Vec<ChatRecord>, StorageError> {
+        let _ = (owner_id, archived);
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Archives a chat by ID (sets archived = true for the chat and all chats
+    /// sharing the same root).
+    async fn archive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Fetches chat messages by chat ID.
+    async fn list_chat_messages(
+        &self,
+        chat_id: Uuid,
+        after_id: i64,
+    ) -> Result<Vec<ChatMessageRecord>, StorageError> {
+        let _ = (chat_id, after_id);
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Inserts a chat message.
+    async fn insert_chat_message(
+        &self,
+        input: InsertChatMessageInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Lists queued messages for a chat.
+    async fn list_chat_queued_messages(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
+        let _ = chat_id;
+        Err(StorageError::unavailable("chats are not implemented"))
     }
 
     // -----------------------------------------------------------------------
