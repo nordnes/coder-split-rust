@@ -39,9 +39,9 @@ pub use api::{
     TaskSendRequest, TaskStateEntry, TaskStatus, TasksListResponse, TokenConfig,
     UpdateCheckResponse, UpdateOrganizationRequest, UpdateRolesRequest, UpdateTaskInputRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
-    UserLoginType, UserParameter, UserPreferenceSettings, UserResponse, UserRolesResponse,
-    ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
+    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UploadFileResponse,
+    UserAppearanceSettings, UserLoginType, UserParameter, UserPreferenceSettings, UserResponse,
+    UserRolesResponse, ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
     WebsocketHealthReport, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceProxyHealthReport,
 };
@@ -68,10 +68,11 @@ pub use password::{
 };
 pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, ChatMessageRecord, ChatQueuedMessageRecord,
-    ChatRecord, DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, GitSshKeyRecord,
-    IdentityStore, InsertChatInput, InsertChatMessageInput, InsertTaskInput, OperationalStore,
-    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
-    ProvisionerJobStatsInput, StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord,
-    UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    ChatRecord, DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord,
+    GitSshKeyRecord, IdentityStore, InsertChatInput, InsertChatMessageInput, InsertFileInput,
+    InsertFileResult, InsertTaskInput, OperationalStore, PersistAuditLogInput,
+    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
+    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, UpsertExternalAuthLinkInput,
+    WorkspaceAgentStatInput, WorkspaceBuildStatsInput, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
 };
