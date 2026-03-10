@@ -11,6 +11,12 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+chrono.workspace = true
+chrono-tz.workspace = true
 coder-core = { path = "../coder-core" }
+cron.workspace = true
+thiserror.workspace = true
+time.workspace = true
 tokio.workspace = true
 tracing.workspace = true
+uuid.workspace = true

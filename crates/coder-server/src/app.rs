@@ -4,7 +4,8 @@ use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use axum::{
     Json, Router,
-    extract::{OriginalUri, Path, Query, State, rejection::JsonRejection},
+    body::Bytes,
+    extract::{DefaultBodyLimit, Form, OriginalUri, Path, Query, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
@@ -12,14 +13,15 @@ use axum::{
             ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE, LOCATION,
         },
     },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{get, post, put},
 };
 use coder_audit::{AuditAction, AuditEvent, AuditSink};
 use coder_auth::{
     AuthService, AuthServiceError, AuthenticatedRequest, ExternalAuthService,
-    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, cookie_from_headers,
-    supported_auth_methods,
+    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
+    OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
 use coder_connectivity::{HealthService, generate_git_ssh_key};
 use coder_core::pubsub::PubSub;
@@ -30,13 +32,16 @@ use coder_core::{
     CreateFirstUserResponse, CreateTestAuditLogRequest, CreateTokenRequest,
     CreateUserRequestWithOrgs, DeploymentConfigResponse, ExternalApiKeyScopes,
     ExternalAuthDeviceExchangeRequest, GetUsersResponse, HealthSettings, HealthcheckReport,
-    LoginType, LoginWithPasswordRequest, OrganizationMember, OrganizationMemberWithUserData,
-    OrganizationResponse, PaginatedMembersResponse, PersistAuditLogInput,
+    InsertFileInput, LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest,
+    OAuth2ProviderAppEndpoints, OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
+    OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse, OrganizationMember,
+    OrganizationMemberWithUserData, OrganizationResponse, PaginatedMembersResponse,
+    PersistAuditLogInput, PostOAuth2ProviderAppRequest, PutOAuth2ProviderAppRequest,
     RequestOneTimePasscodeRequest, ServerConfig, SshConfigResponse, UpdateCheckResponse,
     UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
-    UserListFilter, UserParameter, UserPreferenceSettings, UserRecord, UserResponse,
-    UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
+    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UploadFileResponse,
+    UserAppearanceSettings, UserListFilter, UserParameter, UserPreferenceSettings, UserRecord,
+    UserResponse, UserRolesResponse, UserStatus, ValidateUserPasswordRequest, ValidationError,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
 use coder_provisioner::{InitScriptError, render_init_script};
@@ -44,6 +49,8 @@ use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, 
 use coder_workspaces::DeploymentStatsService;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::net::IpAddr;
 use time::OffsetDateTime;
 use tower_http::{
     normalize_path::NormalizePathLayer,
@@ -141,6 +148,7 @@ pub struct AppState {
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
     health: HealthService<Arc<dyn AppStore>>,
     external_auth: ExternalAuthService<Arc<dyn AppStore>>,
+    oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
 }
 
 impl AppState {
@@ -158,6 +166,7 @@ impl AppState {
         let deployment_stats = DeploymentStatsService::new(store.clone());
         let health = HealthService::new(store.clone())?;
         let external_auth = ExternalAuthService::new(store.clone())?;
+        let oauth2_provider = OAuth2ProviderService::new(store.clone());
 
         Ok(Self {
             config,
@@ -171,6 +180,7 @@ impl AppState {
             deployment_stats,
             health,
             external_auth,
+            oauth2_provider,
         })
     }
 }
@@ -378,8 +388,46 @@ pub fn build_router(state: AppState) -> Router {
                 .route("/users/{user}/password", put(put_user_password))
                 .route("/users/{user}/convert-login", post(post_convert_login))
                 .route("/users/{user}", get(get_user).delete(delete_user))
-                .route("/authcheck", post(post_authcheck)),
+                .route("/authcheck", post(post_authcheck))
+                .route(
+                    "/oauth2-provider/apps",
+                    get(list_oauth2_provider_apps).post(post_oauth2_provider_app),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}",
+                    get(get_oauth2_provider_app)
+                        .put(put_oauth2_provider_app)
+                        .delete(delete_oauth2_provider_app),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}/secrets",
+                    get(list_oauth2_provider_app_secrets).post(post_oauth2_provider_app_secret),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}/secrets/{secret_id}",
+                    axum::routing::delete(delete_oauth2_provider_app_secret),
+                )
+                .route(
+                    "/oauth2-provider/apps/{app_id}/tokens",
+                    axum::routing::delete(delete_oauth2_provider_app_tokens),
+                )
+                .route(
+                    "/files",
+                    post(post_file).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
+                )
+                .route("/files/{fileid}", get(get_file_by_id)),
         )
+        .route(
+            "/oauth2/authorize",
+            get(get_oauth2_authorize).post(post_oauth2_authorize),
+        )
+        .route("/oauth2/tokens", post(post_oauth2_token))
+        // route_layer runs *after* routing so MatchedPath is populated.
+        .route_layer(middleware::from_fn(prometheus_middleware))
+        .layer(middleware::from_fn(csrf_middleware))
+        .layer(middleware::from_fn(csp_middleware))
+        .layer(middleware::from_fn(hsts_middleware))
+        .layer(middleware::from_fn(real_ip_middleware))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new())
@@ -2810,6 +2858,579 @@ fn forbidden_response(message: impl Into<String>) -> Response {
     (StatusCode::FORBIDDEN, Json(ApiResponse::ok(message.into()))).into_response()
 }
 
+// ---------------------------------------------------------------------------
+// OAuth2 Provider Handlers
+// ---------------------------------------------------------------------------
+
+async fn list_oauth2_provider_apps(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let apps = match state.oauth2_provider.list_apps().await {
+        Ok(apps) => apps,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let response: Vec<OAuth2ProviderAppResponse> =
+        apps.into_iter().map(oauth2_app_response).collect();
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn post_oauth2_provider_app(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<PostOAuth2ProviderAppRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider apps.",
+        ));
+    }
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let app = match state
+        .oauth2_provider
+        .create_app(
+            &request.name,
+            &request.icon,
+            &request.callback_url,
+            context.user.id,
+        )
+        .await
+    {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::Oauth2ProviderApp,
+        Some(&context.user),
+        Some(app.id.to_string()),
+        "created oauth2 provider app",
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(oauth2_app_response(app))).into_response())
+}
+
+async fn get_oauth2_provider_app(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let app = match state.oauth2_provider.get_app(app_uuid).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    Ok((StatusCode::OK, Json(oauth2_app_response(app))).into_response())
+}
+
+async fn put_oauth2_provider_app(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<PutOAuth2ProviderAppRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider apps.",
+        ));
+    }
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let app = match state
+        .oauth2_provider
+        .update_app(
+            app_uuid,
+            &request.name,
+            &request.icon,
+            &request.callback_url,
+        )
+        .await
+    {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Oauth2ProviderApp,
+        Some(&context.user),
+        Some(app.id.to_string()),
+        "updated oauth2 provider app",
+    )
+    .await;
+
+    Ok((StatusCode::OK, Json(oauth2_app_response(app))).into_response())
+}
+
+async fn delete_oauth2_provider_app(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider apps.",
+        ));
+    }
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    if let Err(error) = state.oauth2_provider.delete_app(app_uuid).await {
+        return handle_oauth2_provider_error(error);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Oauth2ProviderApp,
+        Some(&context.user),
+        Some(app_id),
+        "deleted oauth2 provider app",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn list_oauth2_provider_app_secrets(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let secrets = match state.oauth2_provider.list_app_secrets(app_uuid).await {
+        Ok(secrets) => secrets,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let response: Vec<OAuth2ProviderAppSecretResponse> =
+        secrets.into_iter().map(oauth2_secret_response).collect();
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+async fn post_oauth2_provider_app_secret(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider app secrets.",
+        ));
+    }
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let (raw_secret, record) = match state.oauth2_provider.create_app_secret(app_uuid).await {
+        Ok(result) => result,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::Oauth2ProviderAppSecret,
+        Some(&context.user),
+        Some(record.id.to_string()),
+        "created oauth2 provider app secret",
+    )
+    .await;
+
+    let response = OAuth2ProviderAppSecretFullResponse {
+        id: record.id.to_string(),
+        client_secret_full: raw_secret,
+        client_secret_truncated: record.display_secret,
+    };
+    Ok((StatusCode::CREATED, Json(response)).into_response())
+}
+
+async fn delete_oauth2_provider_app_secret(
+    State(state): State<AppState>,
+    Path((app_id, secret_id)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if !context.actor.is_owner() {
+        return Ok(forbidden_response(
+            "You must be an owner to manage OAuth2 provider app secrets.",
+        ));
+    }
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    let secret_uuid = match Uuid::parse_str(&secret_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app secret not found."));
+        }
+    };
+    if let Err(error) = state
+        .oauth2_provider
+        .delete_app_secret(app_uuid, secret_uuid)
+        .await
+    {
+        return handle_oauth2_provider_error(error);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Oauth2ProviderAppSecret,
+        Some(&context.user),
+        Some(secret_id),
+        "deleted oauth2 provider app secret",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn delete_oauth2_provider_app_tokens(
+    State(state): State<AppState>,
+    Path(app_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let app_uuid = match Uuid::parse_str(&app_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(not_found_response("OAuth2 provider app not found."));
+        }
+    };
+    if let Err(error) = state
+        .oauth2_provider
+        .revoke_tokens(app_uuid, context.user.id)
+        .await
+    {
+        return handle_oauth2_provider_error(error);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Oauth2ProviderApp,
+        Some(&context.user),
+        Some(app_id),
+        "revoked oauth2 provider app tokens",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+async fn get_oauth2_authorize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<OAuth2AuthorizeRequest>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    if params.response_type != "code" {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok("response_type must be \"code\".")),
+        )
+            .into_response());
+    }
+    let client_id = match Uuid::parse_str(&params.client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("Invalid client_id.")),
+            )
+                .into_response());
+        }
+    };
+
+    // Validate the app and its callback URL BEFORE creating the authorization
+    // code.  This prevents orphaned codes when the callback URL is invalid.
+    let app = match state.oauth2_provider.get_app(client_id).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let mut redirect_url = match url::Url::parse(&app.callback_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("App has invalid callback URL.")),
+            )
+                .into_response());
+        }
+    };
+
+    let raw_code = match state
+        .oauth2_provider
+        .create_authorization_code(
+            client_id,
+            context.user.id,
+            &params.resource,
+            &params.code_challenge,
+            &params.code_challenge_method,
+        )
+        .await
+    {
+        Ok(code) => code,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    // Build the redirect URL with the code and state.
+    redirect_url
+        .query_pairs_mut()
+        .append_pair("code", &raw_code)
+        .append_pair("state", &params.state);
+
+    Ok((
+        StatusCode::TEMPORARY_REDIRECT,
+        [("location", redirect_url.as_str())],
+    )
+        .into_response())
+}
+
+async fn post_oauth2_authorize(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<OAuth2AuthorizeRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+    let Json(params) = match payload {
+        Ok(p) => p,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    if params.response_type != "code" {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok("response_type must be \"code\".")),
+        )
+            .into_response());
+    }
+    let client_id = match Uuid::parse_str(&params.client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("Invalid client_id.")),
+            )
+                .into_response());
+        }
+    };
+
+    // Validate the app and its callback URL BEFORE creating the authorization
+    // code.  This prevents orphaned codes when the callback URL is invalid.
+    let app = match state.oauth2_provider.get_app(client_id).await {
+        Ok(app) => app,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+    let mut redirect_url = match url::Url::parse(&app.callback_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok("App has invalid callback URL.")),
+            )
+                .into_response());
+        }
+    };
+
+    let raw_code = match state
+        .oauth2_provider
+        .create_authorization_code(
+            client_id,
+            context.user.id,
+            &params.resource,
+            &params.code_challenge,
+            &params.code_challenge_method,
+        )
+        .await
+    {
+        Ok(code) => code,
+        Err(error) => return handle_oauth2_provider_error(error),
+    };
+
+    // Build the redirect URL with the code and state.
+    redirect_url
+        .query_pairs_mut()
+        .append_pair("code", &raw_code)
+        .append_pair("state", &params.state);
+
+    // Use 303 See Other (not 307) so the browser follows the redirect with
+    // GET.  A 307 would re-issue the POST to the callback URL, which only
+    // handles GET per RFC 6749 §4.1.2.
+    Ok((StatusCode::SEE_OTHER, [("location", redirect_url.as_str())]).into_response())
+}
+
+async fn post_oauth2_token(
+    State(state): State<AppState>,
+    Form(request): Form<OAuth2TokenRequest>,
+) -> Result<Response, AppError> {
+    match request.grant_type.as_str() {
+        "authorization_code" => {
+            let client_id = match Uuid::parse_str(&request.client_id) {
+                Ok(id) => id,
+                Err(_) => {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::ok("Invalid client_id.")),
+                    )
+                        .into_response());
+                }
+            };
+            let result = match state
+                .oauth2_provider
+                .exchange_code(
+                    &request.code,
+                    client_id,
+                    &request.client_secret,
+                    &request.code_verifier,
+                )
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => return handle_oauth2_provider_error(error),
+            };
+            let response = OAuth2TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                refresh_token: result.refresh_token,
+            };
+            Ok((StatusCode::OK, Json(response)).into_response())
+        }
+        "refresh_token" => {
+            let client_id = match Uuid::parse_str(&request.client_id) {
+                Ok(id) => id,
+                Err(_) => {
+                    return Ok((
+                        StatusCode::BAD_REQUEST,
+                        Json(ApiResponse::ok("Invalid client_id.")),
+                    )
+                        .into_response());
+                }
+            };
+            let result = match state
+                .oauth2_provider
+                .refresh_token(&request.refresh_token, client_id, &request.client_secret)
+                .await
+            {
+                Ok(result) => result,
+                Err(error) => return handle_oauth2_provider_error(error),
+            };
+            let response = OAuth2TokenResponse {
+                access_token: result.access_token,
+                token_type: result.token_type,
+                expires_in: result.expires_in,
+                refresh_token: result.refresh_token,
+            };
+            Ok((StatusCode::OK, Json(response)).into_response())
+        }
+        _ => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::ok("Unsupported grant_type.")),
+        )
+            .into_response()),
+    }
+}
+
+fn handle_oauth2_provider_error(error: OAuth2ProviderError) -> Result<Response, AppError> {
+    match error {
+        OAuth2ProviderError::Storage(error) => Err(AppError::from(error)),
+        OAuth2ProviderError::BadRequest { message } => {
+            Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
+        }
+        OAuth2ProviderError::NotFound { message } => Ok(not_found_response(message)),
+        OAuth2ProviderError::Unauthorized { message } => Ok(unauthorized_response(message)),
+    }
+}
+
+fn oauth2_app_response(
+    app: coder_core::identity::OAuth2ProviderAppRecord,
+) -> OAuth2ProviderAppResponse {
+    OAuth2ProviderAppResponse {
+        id: app.id.to_string(),
+        name: app.name,
+        icon: app.icon,
+        callback_url: app.callback_url,
+        redirect_uris: app.redirect_uris,
+        endpoints: OAuth2ProviderAppEndpoints {
+            authorization: "/oauth2/authorize".to_owned(),
+            token: "/oauth2/tokens".to_owned(),
+            device_authorization: String::new(),
+        },
+    }
+}
+
+fn oauth2_secret_response(
+    secret: coder_core::identity::OAuth2ProviderAppSecretRecord,
+) -> OAuth2ProviderAppSecretResponse {
+    OAuth2ProviderAppSecretResponse {
+        id: secret.id.to_string(),
+        last_used_at: None,
+        client_secret_truncated: secret.display_secret,
+    }
+}
+
 fn not_implemented_response(message: impl Into<String>) -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
@@ -2830,6 +3451,278 @@ fn resource_not_found_response() -> Response {
         )),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// File upload / download handlers
+// ---------------------------------------------------------------------------
+
+const TAR_MIME_TYPE: &str = "application/x-tar";
+const ZIP_MIME_TYPE: &str = "application/zip";
+const WINDOWS_ZIP_MIME_TYPE: &str = "application/x-zip-compressed";
+
+/// POST /api/v2/files – upload a binary file, deduplicate by SHA-256 hash.
+async fn post_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let raw_content_type = headers
+        .get(CONTENT_TYPE)
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or_default();
+
+    // Strip optional parameters (e.g. "; charset=binary") before matching.
+    let content_type = raw_content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim();
+
+    match content_type {
+        TAR_MIME_TYPE | ZIP_MIME_TYPE | WINDOWS_ZIP_MIME_TYPE => {}
+        _ => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::ok(format!(
+                    "Unsupported content type header \"{content_type}\"."
+                ))),
+            )
+                .into_response());
+        }
+    }
+
+    let data: Vec<u8> = body.to_vec();
+    let mimetype = content_type.to_owned();
+
+    // Compute SHA-256 hash of the raw bytes.
+    let hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(&data);
+        format!("{:x}", hasher.finalize())
+    };
+
+    let file_id = Uuid::new_v4();
+    let input = InsertFileInput {
+        id: file_id,
+        hash,
+        created_by: context.user.id,
+        mimetype,
+        data,
+    };
+
+    // INSERT … ON CONFLICT handles the race atomically – if a duplicate
+    // exists the DB returns the existing row instead of raising an error.
+    let result = state.store.insert_file(input).await?;
+
+    // If the returned id differs from the one we generated, a duplicate
+    // already existed and the DB returned the existing row.
+    let status = if result.id == file_id {
+        StatusCode::CREATED
+    } else {
+        StatusCode::OK
+    };
+
+    Ok((status, Json(UploadFileResponse { id: result.id })).into_response())
+}
+
+/// GET /api/v2/files/{fileid} – retrieve a file by UUID.
+async fn get_file_by_id(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(file_id): Path<Uuid>,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let file = state.store.get_file_by_id(file_id).await?;
+    let Some(file) = file else {
+        return Ok(resource_not_found_response());
+    };
+
+    let content_type = HeaderValue::from_str(&file.mimetype)
+        .unwrap_or(HeaderValue::from_static("application/octet-stream"));
+
+    let mut response_headers = HeaderMap::new();
+    response_headers.insert(CONTENT_TYPE, content_type);
+
+    Ok((StatusCode::OK, response_headers, file.data).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Middleware
+// ---------------------------------------------------------------------------
+
+/// Stored in request extensions so downstream handlers can read the real
+/// client IP even when the server is behind a reverse proxy.
+#[derive(Clone, Debug)]
+#[allow(dead_code)]
+pub(crate) struct RealIp(pub(crate) IpAddr);
+
+/// Middleware: extract the real client IP from X-Forwarded-For / X-Real-IP
+/// headers and store it in request extensions.
+async fn real_ip_middleware(mut request: axum::extract::Request, next: Next) -> Response {
+    let ip = request
+        .headers()
+        .get("x-forwarded-for")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.split(',').next())
+        .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        .or_else(|| {
+            request
+                .headers()
+                .get("x-real-ip")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<IpAddr>().ok())
+        });
+
+    if let Some(ip) = ip {
+        request.extensions_mut().insert(RealIp(ip));
+    }
+
+    next.run(request).await
+}
+
+/// Middleware: set Content-Security-Policy on every response.
+async fn csp_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    // Use a restrictive default policy; callers can override per-route if needed.
+    if let Ok(value) =
+        HeaderValue::from_str("default-src 'self'; frame-ancestors 'none'; form-action 'self'")
+    {
+        response
+            .headers_mut()
+            .insert(HeaderName::from_static("content-security-policy"), value);
+    }
+    response
+}
+
+/// Middleware: add Strict-Transport-Security header when the request arrived
+/// over HTTPS (indicated by scheme or X-Forwarded-Proto).
+async fn hsts_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let is_https = request
+        .uri()
+        .scheme_str()
+        .map(|s| s == "https")
+        .unwrap_or(false)
+        || request
+            .headers()
+            .get("x-forwarded-proto")
+            .and_then(|v| v.to_str().ok())
+            .and_then(|v| v.split(',').next())
+            .map(|v| v.trim().eq_ignore_ascii_case("https"))
+            .unwrap_or(false);
+
+    let mut response = next.run(request).await;
+
+    if is_https {
+        if let Ok(value) = HeaderValue::from_str("max-age=31536000; includeSubDomains") {
+            response
+                .headers_mut()
+                .insert(HeaderName::from_static("strict-transport-security"), value);
+        }
+    }
+
+    response
+}
+
+/// Middleware: CSRF protection – require a non-empty X-CSRF-Token header on
+/// mutating requests (POST / PUT / DELETE / PATCH) that carry cookie-based
+/// authentication.
+///
+/// Pre-authentication endpoints are exempt because the browser may still hold
+/// an expired session cookie when the user tries to log in again, and there is
+/// no way for the client to obtain a CSRF token before authenticating.  CSP
+/// violation reports are also exempt because browsers send them automatically
+/// without custom headers.
+async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Response {
+    use http::Method;
+
+    /// Paths that are exempt from CSRF validation.  These are either
+    /// pre-authentication endpoints or browser-initiated reports that cannot
+    /// carry custom headers.
+    const CSRF_EXEMPT_PATHS: &[&str] = &[
+        "/api/v2/users/login",
+        "/api/v2/users/first",
+        "/api/v2/users/otp/request",
+        "/api/v2/users/otp/change-password",
+        "/api/v2/csp/reports",
+        "/oauth2/tokens",
+    ];
+
+    let path = request.uri().path();
+    let is_exempt = CSRF_EXEMPT_PATHS.contains(&path);
+
+    if is_exempt {
+        return next.run(request).await;
+    }
+
+    let is_mutating_method = matches!(
+        *request.method(),
+        Method::POST | Method::PUT | Method::DELETE | Method::PATCH
+    );
+
+    let has_cookie = request.headers().contains_key(http::header::COOKIE);
+
+    if is_mutating_method && has_cookie {
+        let has_csrf = request
+            .headers()
+            .get("x-csrf-token")
+            .and_then(|v| v.to_str().ok())
+            .map(|v| !v.is_empty())
+            .unwrap_or(false);
+
+        if !has_csrf {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiResponse::ok(
+                    "CSRF token required for cookie-authenticated mutating requests.",
+                )),
+            )
+                .into_response();
+        }
+    }
+
+    next.run(request).await
+}
+
+/// Middleware: record basic Prometheus-style HTTP metrics using the `metrics`
+/// crate.  Counters and histograms are registered lazily on first use.
+async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let method = request.method().to_string();
+    let path = request
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map(|m| m.as_str().to_owned())
+        .unwrap_or_else(|| "unmatched".to_owned());
+
+    let start = std::time::Instant::now();
+    let response = next.run(request).await;
+    let elapsed = start.elapsed().as_secs_f64();
+
+    let status = response.status().as_u16().to_string();
+
+    metrics::counter!(
+        "coderd_api_requests_processed_total",
+        "code" => status,
+        "method" => method.clone(),
+        "path" => path.clone(),
+    )
+    .increment(1);
+
+    metrics::histogram!(
+        "coderd_api_request_latencies_seconds",
+        "method" => method,
+        "path" => path,
+    )
+    .record(elapsed);
+
+    response
 }
 
 #[cfg(test)]
@@ -2864,11 +3757,12 @@ mod tests {
         CreateFirstUserStoreError, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
         CreateUserRequestWithOrgs, CreateUserStoreError, DatabaseConfig, DeploymentMetadata,
         DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, GetJobsToBeReapedInput,
-        GitSshKeyRecord, HealthSettings, InsertOrganizationMemberError, InsertProvisionerJobInput,
-        InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
-        LogFormat, LoginType, LoginWithPasswordRequest, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
+        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
+        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertFileInput, InsertFileResult,
+        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, LogFormat, LoginType,
+        LoginWithPasswordRequest, OrganizationMemberListFilter, OrganizationMemberRecord,
+        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
         ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
         ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatsInput,
         ProvisionerJobTimingRecord, ProvisionerKeyRecord, ProvisionerStore,
@@ -2928,6 +3822,7 @@ mod tests {
         stats_agents: Mutex<Vec<WorkspaceAgentStatInput>>,
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
+        files: Mutex<HashMap<Uuid, FileRecord>>,
     }
 
     impl FakeStore {
@@ -2953,6 +3848,7 @@ mod tests {
                 stats_agents: Mutex::new(Vec::new()),
                 workspace_proxies: Mutex::new(HashMap::new()),
                 provisioner_daemons: Mutex::new(HashMap::new()),
+                files: Mutex::new(HashMap::new()),
             }
         }
 
@@ -4726,6 +5622,60 @@ mod tests {
             };
             links.insert((user_id, link.provider_id.clone()), record.clone());
             Ok(record)
+        }
+
+        async fn insert_file(
+            &self,
+            input: InsertFileInput,
+        ) -> Result<InsertFileResult, StorageError> {
+            let mut files = self
+                .files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+
+            // Mimic ON CONFLICT (hash, created_by) DO UPDATE SET id = files.id
+            // – return the existing record's id when a duplicate exists.
+            if let Some(existing) = files
+                .values()
+                .find(|f| f.hash == input.hash && f.created_by == input.created_by)
+            {
+                return Ok(InsertFileResult { id: existing.id });
+            }
+
+            let id = input.id;
+            let record = FileRecord {
+                id,
+                hash: input.hash,
+                created_by: input.created_by,
+                created_at: OffsetDateTime::now_utc(),
+                mimetype: input.mimetype,
+                data: input.data,
+            };
+            files.insert(record.id, record);
+            Ok(InsertFileResult { id })
+        }
+
+        async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
+            self.files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|files| files.get(&file_id).cloned())
+        }
+
+        async fn get_file_by_hash_and_creator(
+            &self,
+            hash: &str,
+            creator_id: Uuid,
+        ) -> Result<Option<FileRecord>, StorageError> {
+            self.files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|files| {
+                    files
+                        .values()
+                        .find(|f| f.hash == hash && f.created_by == creator_id)
+                        .cloned()
+                })
         }
     }
 
@@ -6857,6 +7807,254 @@ mod tests {
         )
         .await?;
         assert_eq!(convert_login_response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // File upload / download tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn file_upload_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .body(Body::from(vec![1u8, 2, 3]))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_upload_rejects_unsupported_content_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "text/plain")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(vec![1u8, 2, 3]))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_upload_and_download_round_trip() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let payload = b"hello tar world".to_vec();
+        let upload_req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(payload.clone()))?;
+        let upload_response = call(app.clone(), upload_req).await?;
+        assert_eq!(upload_response.status(), StatusCode::CREATED);
+
+        let upload_body = response_json(upload_response).await?;
+        let file_id = upload_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash in upload response")?;
+
+        // Download
+        let download_req = authenticated_request(
+            Method::GET,
+            &format!("/api/v2/files/{file_id}"),
+            &session_token,
+        )?;
+        let download_response = call(app, download_req).await?;
+        assert_eq!(download_response.status(), StatusCode::OK);
+        assert_eq!(
+            download_response
+                .headers()
+                .get(CONTENT_TYPE)
+                .and_then(|v| v.to_str().ok()),
+            Some("application/x-tar"),
+        );
+        let bytes = to_bytes(download_response.into_body(), usize::MAX).await?;
+        assert_eq!(bytes.to_vec(), payload);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_upload_duplicate_returns_existing_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let payload = b"duplicate content".to_vec();
+
+        let first = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(payload.clone()))?;
+        let first_response = call(app.clone(), first).await?;
+        assert_eq!(first_response.status(), StatusCode::CREATED);
+        let first_body = response_json(first_response).await?;
+        let first_id = first_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash")?
+            .to_owned();
+
+        let second = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/files")
+            .header(CONTENT_TYPE, "application/x-tar")
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .body(Body::from(payload))?;
+        let second_response = call(app, second).await?;
+        // Duplicate returns 200 OK, not 201
+        assert_eq!(second_response.status(), StatusCode::OK);
+        let second_body = response_json(second_response).await?;
+        let second_id = second_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing hash")?;
+        assert_eq!(first_id, second_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn file_download_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let random_id = Uuid::new_v4();
+        let req = authenticated_request(
+            Method::GET,
+            &format!("/api/v2/files/{random_id}"),
+            &session_token,
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Middleware tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn csp_header_present_on_responses() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/")?).await?;
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok());
+        assert!(csp.is_some(), "CSP header should be present");
+        assert!(
+            csp.map(|v| v.contains("default-src")).unwrap_or(false),
+            "CSP should contain default-src directive"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hsts_header_present_when_https() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/")
+            .header("x-forwarded-proto", "https")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        let hsts = response
+            .headers()
+            .get("strict-transport-security")
+            .and_then(|v| v.to_str().ok());
+        assert!(hsts.is_some(), "HSTS header should be present for HTTPS");
+        assert!(
+            hsts.map(|v| v.contains("max-age=31536000"))
+                .unwrap_or(false),
+            "HSTS should contain correct max-age"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hsts_header_absent_when_http() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/")?).await?;
+        let hsts = response.headers().get("strict-transport-security");
+        assert!(hsts.is_none(), "HSTS header should not be present for HTTP");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_rejects_mutating_cookie_request_without_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        // Use a non-exempt path so the CSRF middleware actually fires.
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/users",
+            &[("coder_session_token", "fake")],
+        )?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_allows_get_with_cookies() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = request_with_cookies(Method::GET, "/", &[("coder_session_token", "fake")])?;
+        let response = call(app, req).await?;
+        // GET requests should not be blocked by CSRF middleware
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_allows_mutating_request_with_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/users")
+            .header(http::header::COOKIE, "coder_session_token=fake")
+            .header("x-csrf-token", "some-token-value")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("{}"))?;
+        let response = call(app, req).await?;
+        // Should pass CSRF check (might fail auth, but not CSRF)
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_exempts_login_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        // Login is exempt: even with a cookie and no CSRF token the
+        // middleware must not return 403.
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/users/login",
+            &[("coder_session_token", "expired")],
+        )?;
+        let response = call(app, req).await?;
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csrf_exempts_csp_reports_endpoint() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let req = request_with_cookies(
+            Method::POST,
+            "/api/v2/csp/reports",
+            &[("coder_session_token", "expired")],
+        )?;
+        let response = call(app, req).await?;
+        // CSP reports are exempt from CSRF; should not get 403.
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 }

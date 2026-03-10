@@ -26,15 +26,18 @@ pub use api::{
     ExternalAuthLink, ExternalAuthLinkProvider, ExternalAuthResponse, ExternalAuthUser,
     GenerateApiKeyResponse, GetUsersResponse, GitSshKeyResponse, GithubAuthMethod, HealthSettings,
     HealthSeverity, HealthcheckReport, ListUserExternalAuthResponse, LoginWithPasswordRequest,
-    LoginWithPasswordResponse, MinimalOrganization, MinimalUser, OAuthConversionResponse,
-    OidcAuthMethod, OrganizationMember, OrganizationMemberWithUserData, OrganizationResponse,
-    PaginatedMembersResponse, PermissionResponse, ProvisionerDaemonsHealthReport, ReducedUser,
-    RequestOneTimePasscodeRequest, RoleResponse, SessionCountDeploymentStatsResponse, SlimRole,
-    SshConfigResponse, TokenConfig, UpdateCheckResponse, UpdateOrganizationRequest,
+    LoginWithPasswordResponse, MinimalOrganization, MinimalUser, OAuth2AuthorizeRequest,
+    OAuth2ProviderAppEndpoints, OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
+    OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse,
+    OAuthConversionResponse, OidcAuthMethod, OrganizationMember, OrganizationMemberWithUserData,
+    OrganizationResponse, PaginatedMembersResponse, PermissionResponse,
+    PostOAuth2ProviderAppRequest, ProvisionerDaemonsHealthReport, PutOAuth2ProviderAppRequest,
+    ReducedUser, RequestOneTimePasscodeRequest, RoleResponse, SessionCountDeploymentStatsResponse,
+    SlimRole, SshConfigResponse, TokenConfig, UpdateCheckResponse, UpdateOrganizationRequest,
     UpdateRolesRequest, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UserAppearanceSettings,
-    UserLoginType, UserParameter, UserPreferenceSettings, UserResponse, UserRolesResponse,
-    ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
+    UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UploadFileResponse,
+    UserAppearanceSettings, UserLoginType, UserParameter, UserPreferenceSettings, UserResponse,
+    UserRolesResponse, ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
     WebsocketHealthReport, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceProxyHealthReport,
 };
@@ -45,12 +48,15 @@ pub use config::{
 };
 pub use identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
-    CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError,
+    CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
     CreateOrganizationInput, CreateOrganizationStoreError, CreateUserInput, CreateUserStoreError,
-    FirstUserRecord, InsertOrganizationMemberError, LoginType, OrganizationMemberListFilter,
+    CustomRoleRecord, FirstUserRecord, GroupMemberRecord, GroupRecord,
+    InsertOrganizationMemberError, LoginType, OrganizationMemberListFilter,
     OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, SlimRoleRecord,
-    TokenConfigRecord, UpdateOrganizationInput, UpdateOrganizationStoreError, UserAppearanceRecord,
-    UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+    TokenConfigRecord, UpdateOrganizationInput, UpdateOrganizationStoreError,
+    UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
+    UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+    UserStatus, UserStatusChangeRecord,
 };
 pub use password::{
     PasswordError, hash_password, hash_session_token, new_session_token, normalize_real_name,
@@ -58,11 +64,11 @@ pub use password::{
 };
 pub use ports::{
     AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
-    ExternalAuthLinkRecord, GitSshKeyRecord, IdentityStore, OperationalStore, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput,
-    ProvisionerStore, StorageError, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput,
-    WorkspaceBuildStatsInput, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
-    WorkspaceStatsWorkspaceInput,
+    ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertFileInput,
+    InsertFileResult, OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, ProvisionerStore, StorageError,
+    UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
 };
 pub use provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,

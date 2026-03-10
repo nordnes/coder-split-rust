@@ -1485,6 +1485,268 @@ impl From<SlimRoleRecord> for SlimRole {
     }
 }
 
+/// Response returned by `POST /api/v2/files` after uploading a file.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct UploadFileResponse {
+    /// The file identifier (returned as "hash" for Go SDK compatibility).
+    #[serde(rename = "hash")]
+    pub id: Uuid,
+}
+
+// ---------------------------------------------------------------------------
+// OAuth2 Provider API types
+// ---------------------------------------------------------------------------
+
+/// Response for a registered OAuth2 provider application.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ProviderAppResponse {
+    /// Application identifier.
+    pub id: String,
+    /// Application name.
+    pub name: String,
+    /// Application icon URL.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub icon: String,
+    /// Primary callback URL.
+    pub callback_url: String,
+    /// Redirect URIs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redirect_uris: Vec<String>,
+    /// Endpoints for the OAuth2 flow.
+    pub endpoints: OAuth2ProviderAppEndpoints,
+}
+
+/// Endpoints for an OAuth2 provider application.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ProviderAppEndpoints {
+    /// Authorization endpoint.
+    pub authorization: String,
+    /// Token endpoint.
+    pub token: String,
+    /// Device authorization endpoint.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub device_authorization: String,
+}
+
+/// Request to create or update an OAuth2 provider application.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PostOAuth2ProviderAppRequest {
+    /// Application name.
+    pub name: String,
+    /// Application icon URL.
+    #[serde(default)]
+    pub icon: String,
+    /// Primary callback URL.
+    pub callback_url: String,
+}
+
+/// Request to update an existing OAuth2 provider application.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PutOAuth2ProviderAppRequest {
+    /// Updated application name.
+    pub name: String,
+    /// Updated icon URL.
+    #[serde(default)]
+    pub icon: String,
+    /// Updated callback URL.
+    pub callback_url: String,
+}
+
+/// Response for an OAuth2 provider app secret.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ProviderAppSecretResponse {
+    /// Secret identifier.
+    pub id: String,
+    /// Last few characters of the secret for display.
+    pub last_used_at: Option<String>,
+    /// Truncated secret for display.
+    pub client_secret_truncated: String,
+}
+
+/// Full secret response returned only on creation.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ProviderAppSecretFullResponse {
+    /// Secret identifier.
+    pub id: String,
+    /// Full client secret (only shown once).
+    pub client_secret_full: String,
+    /// Truncated secret for display.
+    pub client_secret_truncated: String,
+}
+
+/// OAuth2 authorization request parameters.
+#[derive(Clone, Debug, Deserialize)]
+pub struct OAuth2AuthorizeRequest {
+    /// Response type (must be "code").
+    pub response_type: String,
+    /// Client (app) identifier.
+    pub client_id: String,
+    /// Redirect URI.
+    #[serde(default)]
+    pub redirect_uri: String,
+    /// State parameter for CSRF protection.
+    #[serde(default)]
+    pub state: String,
+    /// Requested scopes.
+    #[serde(default)]
+    pub scope: String,
+    /// PKCE code challenge.
+    #[serde(default)]
+    pub code_challenge: String,
+    /// PKCE code challenge method.
+    #[serde(default)]
+    pub code_challenge_method: String,
+    /// Resource URI.
+    #[serde(default)]
+    pub resource: String,
+}
+
+/// OAuth2 token request parameters.
+#[derive(Clone, Debug, Deserialize)]
+pub struct OAuth2TokenRequest {
+    /// Grant type (authorization_code or refresh_token).
+    pub grant_type: String,
+    /// Authorization code (for authorization_code grant).
+    #[serde(default)]
+    pub code: String,
+    /// Redirect URI (must match the authorize request).
+    #[serde(default)]
+    pub redirect_uri: String,
+    /// Client identifier.
+    #[serde(default)]
+    pub client_id: String,
+    /// Client secret.
+    #[serde(default)]
+    pub client_secret: String,
+    /// PKCE code verifier.
+    #[serde(default)]
+    pub code_verifier: String,
+    /// Refresh token (for refresh_token grant).
+    #[serde(default)]
+    pub refresh_token: String,
+    /// Resource URI.
+    #[serde(default)]
+    pub resource: String,
+}
+
+/// OAuth2 token response.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2TokenResponse {
+    /// Access token.
+    pub access_token: String,
+    /// Token type (always "Bearer").
+    pub token_type: String,
+    /// Token lifetime in seconds.
+    pub expires_in: i64,
+    /// Refresh token.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub refresh_token: String,
+}
+
+// ---------------------------------------------------------------------------
+// User Identity Supplement API types
+// ---------------------------------------------------------------------------
+
+/// Response for a user link.
+#[derive(Clone, Debug, Serialize)]
+pub struct UserLinkResponse {
+    /// Owning user identifier.
+    pub user_id: String,
+    /// Login type of the linked provider.
+    pub login_type: String,
+    /// Whether the link has a valid token.
+    pub has_valid_token: bool,
+}
+
+/// Response for a user configuration entry.
+#[derive(Clone, Debug, Serialize)]
+pub struct UserConfigResponse {
+    /// Configuration key.
+    pub key: String,
+    /// Configuration value.
+    pub value: String,
+}
+
+/// Request to set a user configuration entry.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PutUserConfigRequest {
+    /// Configuration value.
+    pub value: String,
+}
+
+/// Response for a group.
+#[derive(Clone, Debug, Serialize)]
+pub struct GroupResponse {
+    /// Group identifier.
+    pub id: String,
+    /// Group name.
+    pub name: String,
+    /// Group display name.
+    pub display_name: String,
+    /// Owning organization identifier.
+    pub organization_id: String,
+    /// Avatar URL.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub avatar_url: String,
+    /// Quota allowance.
+    pub quota_allowance: i32,
+    /// Source of creation.
+    pub source: String,
+    /// Member user identifiers.
+    pub members: Vec<ReducedUser>,
+}
+
+/// Request to create a group.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateGroupRequest {
+    /// Group name.
+    pub name: String,
+    /// Group display name.
+    #[serde(default)]
+    pub display_name: String,
+    /// Avatar URL.
+    #[serde(default)]
+    pub avatar_url: String,
+    /// Quota allowance.
+    #[serde(default)]
+    pub quota_allowance: i32,
+}
+
+/// Request to update a group.
+#[derive(Clone, Debug, Deserialize)]
+pub struct PatchGroupRequest {
+    /// Updated name.
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Updated display name.
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// Updated avatar URL.
+    #[serde(default)]
+    pub avatar_url: Option<String>,
+    /// Updated quota allowance.
+    #[serde(default)]
+    pub quota_allowance: Option<i32>,
+    /// User IDs to add to the group.
+    #[serde(default)]
+    pub add_users: Vec<String>,
+    /// User IDs to remove from the group.
+    #[serde(default)]
+    pub remove_users: Vec<String>,
+}
+
+/// Response for a custom role.
+#[derive(Clone, Debug, Serialize)]
+pub struct CustomRoleResponse {
+    /// Role name.
+    pub name: String,
+    /// Display name.
+    pub display_name: String,
+    /// Organization identifier (if org-scoped).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub organization_id: Option<String>,
+}
+
 fn serialize_login_type<S>(value: &&'static str, serializer: S) -> Result<S::Ok, S::Error>
 where
     S: Serializer,

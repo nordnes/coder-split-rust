@@ -12,13 +12,14 @@ use coder_core::{
     CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
     CreateFirstUserStoreError, CreateUserInput, CreateUserStoreError, DatabaseConfig,
     DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
-    ExternalAuthLinkRecord, ExternalAuthUser, FirstUserRecord, GetJobsToBeReapedInput,
-    GitSshKeyRecord, HealthSettings, InsertOrganizationMemberError, InsertProvisionerJobInput,
-    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
-    LogLevel, LogSource, LoginType, MinimalOrganization, MinimalUser, OrganizationMemberListFilter,
-    OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
-    ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
+    ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord,
+    GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertFileInput, InsertFileResult,
+    InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
+    InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, LogLevel, LogSource, LoginType,
+    MinimalOrganization, MinimalUser, OrganizationMemberListFilter, OrganizationMemberRecord,
+    OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+    ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobLogRecord,
+    ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
     ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
     ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
     SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TokenConfigRecord,
@@ -335,6 +336,16 @@ struct StoredFullProvisionerDaemonRow {
     provisioners: Vec<String>,
     tags_json: String,
     key_id: Option<Uuid>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredFileRow {
+    id: Uuid,
+    hash: String,
+    created_by: Uuid,
+    created_at: OffsetDateTime,
+    mimetype: String,
+    data: Vec<u8>,
 }
 
 impl PostgresStore {
@@ -2430,6 +2441,61 @@ impl AppStore for PostgresStore {
         git_ssh_key_record_from_row(row)
     }
 
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
+        // Only RETURNING id — avoids shipping the (potentially large) data
+        // blob back from Postgres on every insert/duplicate.
+        let (id,): (Uuid,) = sqlx::query_as(
+            "INSERT INTO files (id, hash, created_by, created_at, mimetype, data)
+             VALUES ($1, $2, $3, NOW(), $4, $5)
+             ON CONFLICT (hash, created_by) DO UPDATE SET id = files.id
+             RETURNING id",
+        )
+        .bind(input.id)
+        .bind(&input.hash)
+        .bind(input.created_by)
+        .bind(&input.mimetype)
+        .bind(&input.data)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(InsertFileResult { id })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
+        Ok(sqlx::query_as::<_, StoredFileRow>(
+            "SELECT id, hash, created_by, created_at, mimetype, data
+             FROM files
+             WHERE id = $1",
+        )
+        .bind(file_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .map(file_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_file_by_hash_and_creator(
+        &self,
+        hash: &str,
+        creator_id: Uuid,
+    ) -> Result<Option<FileRecord>, StorageError> {
+        Ok(sqlx::query_as::<_, StoredFileRow>(
+            "SELECT id, hash, created_by, created_at, mimetype, data
+             FROM files
+             WHERE hash = $1 AND created_by = $2",
+        )
+        .bind(hash)
+        .bind(creator_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .map(file_record_from_row))
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_external_auth_links(
         &self,
@@ -3701,6 +3767,17 @@ fn full_provisioner_daemon_from_row(
         tags,
         key_id: row.key_id,
     })
+}
+
+fn file_record_from_row(row: StoredFileRow) -> FileRecord {
+    FileRecord {
+        id: row.id,
+        hash: row.hash,
+        created_by: row.created_by,
+        created_at: row.created_at,
+        mimetype: row.mimetype,
+        data: row.data,
+    }
 }
 
 fn slim_roles_from_names(
