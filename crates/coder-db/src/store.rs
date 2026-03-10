@@ -3761,6 +3761,34 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "SELECT
+                w.id, w.created_at, w.updated_at, w.deleted,
+                w.owner_id, w.organization_id, w.template_id,
+                w.name, w.autostart_schedule, w.ttl,
+                w.last_used_at, w.dormant_at, w.deleting_at,
+                w.automatic_updates::text AS automatic_updates,
+                w.favorite, w.next_start_at
+             FROM workspaces w
+             JOIN workspace_builds wb ON wb.workspace_id = w.id
+             JOIN workspace_resources wr ON wr.job_id = wb.job_id
+             JOIN workspace_agents wa ON wa.resource_id = wr.id
+             WHERE wa.id = $1 AND wa.deleted = false AND w.deleted = false
+             ORDER BY wb.build_number DESC
+             LIMIT 1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_agents_by_resource_ids(
         &self,
         resource_ids: &[Uuid],
@@ -4004,15 +4032,17 @@ impl AppStore for PostgresStore {
     async fn insert_workspace_agent_log_source(
         &self,
         agent_id: Uuid,
+        id: Option<Uuid>,
         display_name: &str,
         icon: &str,
     ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
+        let source_id = id.unwrap_or_else(Uuid::new_v4);
         let row = sqlx::query_as::<_, StoredWorkspaceAgentLogSourceRow>(
             "INSERT INTO workspace_agent_log_sources (id, workspace_agent_id, created_at, display_name, icon)
              VALUES ($1, $2, NOW(), $3, $4)
              RETURNING id, workspace_agent_id, created_at, display_name, icon",
         )
-        .bind(Uuid::new_v4())
+        .bind(source_id)
         .bind(agent_id)
         .bind(display_name)
         .bind(icon)
