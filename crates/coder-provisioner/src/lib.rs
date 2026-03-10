@@ -4,12 +4,13 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
+use coder_core::provisioner::{ProvisionerJobLogRecord, ProvisionerJobTimingRecord};
 use coder_core::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
     GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
     InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, ProvisionerDaemonRecord,
-    ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobTimingRecord,
-    ProvisionerKeyRecord, ProvisionerStore, StorageError, UpsertProvisionerDaemonInput,
+    ProvisionerJobRecord, ProvisionerKeyRecord, ProvisionerStore, StorageError,
+    UpsertProvisionerDaemonInput,
 };
 use sha2::{Digest, Sha256};
 use thiserror::Error;
@@ -350,12 +351,13 @@ impl<S: ProvisionerStore> ProvisionerService<S> {
 mod tests {
     use super::{InitScriptError, ProvisionerService, render_init_script};
     use async_trait::async_trait;
+    use coder_core::provisioner::{ProvisionerJobLogRecord, ProvisionerJobTimingRecord};
     use coder_core::{
         AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
         GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
         InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, ProvisionerDaemonRecord,
-        ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobTimingRecord,
-        ProvisionerKeyRecord, ProvisionerStore, StorageError, UpsertProvisionerDaemonInput,
+        ProvisionerJobRecord, ProvisionerKeyRecord, ProvisionerStore, StorageError,
+        UpsertProvisionerDaemonInput,
     };
     use std::sync::Arc;
     use time::OffsetDateTime;

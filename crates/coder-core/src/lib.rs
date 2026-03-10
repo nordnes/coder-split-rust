@@ -65,20 +65,24 @@ pub use password::{
     validate_email, validate_password, validate_real_name, validate_username, verify_password,
 };
 pub use ports::{
-    AppStore, AuditLogListFilter, AuthStore, DeploymentMetadata, DeploymentStore,
-    ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertFileInput,
-    InsertFileResult, OperationalStore, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-    ProvisionerDaemonHealthRecord, ProvisionerJobStatsInput, ProvisionerStore, StorageError,
-    TemplateStore, UpsertExternalAuthLinkInput, WorkspaceAgentStatInput, WorkspaceBuildStatsInput,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceStatsWorkspaceInput,
+    AppStore, AuditLogListFilter, AuthStore, CreateWorkspaceBuildInput, CreateWorkspaceInput,
+    DeploymentMetadata, DeploymentStore, ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord,
+    IdentityStore, InsertFileInput, InsertFileResult, OperationalStore, PersistAuditLogInput,
+    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord,
+    ProvisionerJobStatsInput, ProvisionerJobTimingRecord, ProvisionerStore, StorageError,
+    TemplateStore, UpsertExternalAuthLinkInput, UpsertPortShareInput,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentStatInput, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceRecord,
+    WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
 pub use provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
     GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
     InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, LogLevel, LogSource,
-    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatus,
-    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType, UpsertProvisionerDaemonInput,
+    ProvisionerDaemonRecord, ProvisionerJobRecord, ProvisionerJobStatus, ProvisionerJobTimingStage,
+    ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType,
+    UpsertProvisionerDaemonInput,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
