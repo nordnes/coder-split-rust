@@ -3740,6 +3740,7 @@ impl AppStore for PostgresStore {
         let status_str = match status {
             NotificationMessageStatus::Pending => "pending",
             NotificationMessageStatus::Sent => "sent",
+            NotificationMessageStatus::TemporaryFailure => "temporary_failure",
             NotificationMessageStatus::Failed => "permanent_failure",
         };
 
@@ -7588,7 +7589,8 @@ fn notification_message_from_row(
     let status = match row.status.as_str() {
         "pending" | "leased" => NotificationMessageStatus::Pending,
         "sent" => NotificationMessageStatus::Sent,
-        "permanent_failure" | "temporary_failure" => NotificationMessageStatus::Failed,
+        "temporary_failure" => NotificationMessageStatus::TemporaryFailure,
+        "permanent_failure" => NotificationMessageStatus::Failed,
         other => {
             return Err(StorageError::invalid_data(format!(
                 "unknown notification message status: {other}"

@@ -848,6 +848,8 @@ pub enum NotificationMessageStatus {
     Pending,
     /// Successfully dispatched.
     Sent,
+    /// Dispatch temporarily failed (eligible for retry).
+    TemporaryFailure,
     /// Dispatch permanently failed.
     Failed,
 }
