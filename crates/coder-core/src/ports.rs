@@ -85,6 +85,7 @@ pub struct InsertTaskInput {
 pub struct TaskListFilter {
     pub owner_id: Option<Uuid>,
     pub organization_id: Option<Uuid>,
+    pub status: Option<TaskStatus>,
 }
 
 /// A task log snapshot record.
@@ -160,6 +161,28 @@ pub struct ChatQueuedMessageRecord {
     pub chat_id: Uuid,
     pub content: Value,
     pub created_at: OffsetDateTime,
+}
+
+/// A chat file record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct ChatFileRecord {
+    pub id: Uuid,
+    pub owner_id: Uuid,
+    pub organization_id: Uuid,
+    pub created_at: OffsetDateTime,
+    pub name: String,
+    pub mimetype: String,
+    pub data: Vec<u8>,
+}
+
+/// Input for inserting a new chat file.
+#[derive(Clone, Debug)]
+pub struct InsertChatFileInput {
+    pub owner_id: Uuid,
+    pub organization_id: Uuid,
+    pub name: String,
+    pub mimetype: String,
+    pub data: Vec<u8>,
 }
 
 /// Deployment metadata required by the HTTP layer.
@@ -694,6 +717,29 @@ pub struct ProvisionerJobTimingRecord {
     pub action: String,
     /// Resource.
     pub resource: String,
+}
+
+/// Stored workspace agent script timing row (joined from script timings + agents).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentScriptTimingRow {
+    /// Script identifier.
+    pub script_id: Uuid,
+    /// Start time.
+    pub started_at: OffsetDateTime,
+    /// End time.
+    pub ended_at: OffsetDateTime,
+    /// Exit code.
+    pub exit_code: i32,
+    /// Timing stage.
+    pub stage: String,
+    /// Timing status.
+    pub status: String,
+    /// Display name.
+    pub display_name: String,
+    /// Workspace agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Workspace agent name.
+    pub workspace_agent_name: String,
 }
 
 /// Filter for listing workspaces.
@@ -2654,6 +2700,16 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("tasks are not implemented"))
     }
 
+    /// Fetches a task by owner ID and name.
+    async fn find_task_by_owner_and_name(
+        &self,
+        owner_id: Uuid,
+        name: &str,
+    ) -> Result<Option<TaskRecord>, StorageError> {
+        let _ = (owner_id, name);
+        Err(StorageError::unavailable("tasks are not implemented"))
+    }
+
     /// Lists tasks matching the supplied filter.
     async fn list_tasks(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, StorageError> {
         let _ = filter;
@@ -2759,6 +2815,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
         let _ = chat_id;
         Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Unarchives a chat by ID (sets archived = false for the single chat).
+    async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Files
+    // -----------------------------------------------------------------------
+
+    /// Inserts a new chat file.
+    async fn insert_chat_file(
+        &self,
+        input: InsertChatFileInput,
+    ) -> Result<ChatFileRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable("chat files are not implemented"))
+    }
+
+    /// Fetches a chat file by ID.
+    async fn find_chat_file_by_id(&self, id: Uuid) -> Result<Option<ChatFileRecord>, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable("chat files are not implemented"))
     }
 
     // -----------------------------------------------------------------------
@@ -3230,6 +3311,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = job_id;
         Err(StorageError::unavailable(
             "provisioner job timings are not implemented",
+        ))
+    }
+
+    /// Looks up a workspace resource by stable identifier.
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        let _ = resource_id;
+        Err(StorageError::unavailable(
+            "workspace resources are not implemented",
+        ))
+    }
+
+    /// Lists workspace agent script timings for a build.
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        let _ = build_id;
+        Err(StorageError::unavailable(
+            "workspace agent script timings are not implemented",
         ))
     }
 
@@ -4211,6 +4314,18 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
+
+    /// Looks up a workspace resource by stable identifier.
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError>;
+
+    /// Lists workspace agent script timings for a build.
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError>;
 
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
@@ -5388,6 +5503,20 @@ where
         AppStore::list_provisioner_job_timings(self, job_id).await
     }
 
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        AppStore::find_workspace_resource_by_id(self, resource_id).await
+    }
+
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        AppStore::list_workspace_agent_script_timings_by_build_id(self, build_id).await
+    }
+
     async fn list_workspace_resources_by_job(
         &self,
         job_id: Uuid,
@@ -5702,6 +5831,22 @@ where
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
         (**self).list_provisioner_job_timings(job_id).await
+    }
+
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        (**self).find_workspace_resource_by_id(resource_id).await
+    }
+
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        (**self)
+            .list_workspace_agent_script_timings_by_build_id(build_id)
+            .await
     }
 
     async fn list_workspace_resources_by_job(
