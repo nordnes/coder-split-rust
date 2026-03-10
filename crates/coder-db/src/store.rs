@@ -2762,7 +2762,7 @@ impl AppStore for PostgresStore {
                 use_classic_parameter_flow = $18,
                 disable_module_cache = $19,
                 updated_at = NOW()
-            WHERE id = $1
+            WHERE id = $1 AND deleted = false
             "#,
         )
         .bind(input.template_id)

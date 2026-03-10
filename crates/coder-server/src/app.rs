@@ -9228,7 +9228,7 @@ mod tests {
         // PATCH with partial update — only change description and the newly-fixed fields.
         let patch_body = UpdateTemplateMeta {
             description: Some("Updated description".to_owned()),
-            cors_behavior: Some("same-origin".to_owned()),
+            cors_behavior: Some("passthru".to_owned()),
             use_classic_parameter_flow: Some(true),
             disable_module_cache: Some(true),
             ..UpdateTemplateMeta::default()
