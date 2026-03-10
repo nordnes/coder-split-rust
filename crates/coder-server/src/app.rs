@@ -2468,12 +2468,20 @@ async fn delete_user(
 // ---------------------------------------------------------------------------
 async fn list_provisioner_daemons(
     State(state): State<AppState>,
-    Path(_organization): Path<String>,
+    Path(organization): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    // Validate the organization exists and the caller has access.
+    if let Err(error) = state
+        .identity
+        .get_organization(&context.actor, &organization)
+        .await
+    {
+        return handle_identity_error(error);
+    }
     let empty: Vec<coder_core::ProvisionerDaemonResponse> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -2484,12 +2492,20 @@ async fn list_provisioner_daemons(
 // ---------------------------------------------------------------------------
 async fn list_provisioner_jobs(
     State(state): State<AppState>,
-    Path(_organization): Path<String>,
+    Path(organization): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    // Validate the organization exists and the caller has access.
+    if let Err(error) = state
+        .identity
+        .get_organization(&context.actor, &organization)
+        .await
+    {
+        return handle_identity_error(error);
+    }
     let empty: Vec<coder_core::ProvisionerJobResponse> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -2500,12 +2516,20 @@ async fn list_provisioner_jobs(
 // ---------------------------------------------------------------------------
 async fn get_provisioner_job(
     State(state): State<AppState>,
-    Path((_organization, _job)): Path<(String, String)>,
+    Path((organization, _job)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    // Validate the organization exists and the caller has access.
+    if let Err(error) = state
+        .identity
+        .get_organization(&context.actor, &organization)
+        .await
+    {
+        return handle_identity_error(error);
+    }
     Ok((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::error(
@@ -2522,12 +2546,20 @@ async fn get_provisioner_job(
 // ---------------------------------------------------------------------------
 async fn cancel_provisioner_job(
     State(state): State<AppState>,
-    Path((_organization, _job)): Path<(String, String)>,
+    Path((organization, _job)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    // Validate the organization exists and the caller has access.
+    if let Err(error) = state
+        .identity
+        .get_organization(&context.actor, &organization)
+        .await
+    {
+        return handle_identity_error(error);
+    }
     Ok((
         StatusCode::NOT_FOUND,
         Json(ApiResponse::error(
@@ -2544,12 +2576,20 @@ async fn cancel_provisioner_job(
 // ---------------------------------------------------------------------------
 async fn get_provisioner_job_logs(
     State(state): State<AppState>,
-    Path((_organization, _job)): Path<(String, String)>,
+    Path((organization, _job)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+    // Validate the organization exists and the caller has access.
+    if let Err(error) = state
+        .identity
+        .get_organization(&context.actor, &organization)
+        .await
+    {
+        return handle_identity_error(error);
+    }
     let empty: Vec<coder_core::ProvisionerJobLogResponse> = Vec::new();
     Ok((StatusCode::OK, Json(empty)).into_response())
 }
@@ -7574,6 +7614,19 @@ mod tests {
         .await?;
         assert_eq!(daemons_unauth.status(), StatusCode::UNAUTHORIZED);
 
+        // --- GET /organizations/{invalid_org}/provisionerdaemons returns 404 ---
+        let fake_org = Uuid::new_v4();
+        let daemons_bad_org = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{fake_org}/provisionerdaemons"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(daemons_bad_org.status(), StatusCode::NOT_FOUND);
+
         // --- GET /organizations/{org}/provisionerjobs returns 200 + empty array ---
         let jobs_response = call(
             app.clone(),
@@ -7598,6 +7651,18 @@ mod tests {
         )
         .await?;
         assert_eq!(jobs_unauth.status(), StatusCode::UNAUTHORIZED);
+
+        // --- GET /organizations/{invalid_org}/provisionerjobs returns 404 ---
+        let jobs_bad_org = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{fake_org}/provisionerjobs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(jobs_bad_org.status(), StatusCode::NOT_FOUND);
 
         // --- GET /organizations/{org}/provisionerjobs/{job} returns 404 ---
         let job_id = Uuid::new_v4();
