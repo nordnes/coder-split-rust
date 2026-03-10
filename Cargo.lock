@@ -475,6 +475,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
+ "base64",
  "coder-audit",
  "coder-auth",
  "coder-connectivity",

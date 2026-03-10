@@ -3139,6 +3139,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
+    /// Looks up a workspace resource by stable identifier.
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        let _ = resource_id;
+        Err(StorageError::unavailable(
+            "workspace resources are not implemented",
+        ))
+    }
+
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
         &self,
@@ -4049,6 +4060,12 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
+
+    /// Looks up a workspace resource by stable identifier.
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError>;
 
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
@@ -5197,6 +5214,13 @@ where
         AppStore::list_provisioner_job_timings(self, job_id).await
     }
 
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        AppStore::find_workspace_resource_by_id(self, resource_id).await
+    }
+
     async fn list_workspace_resources_by_job(
         &self,
         job_id: Uuid,
@@ -5481,6 +5505,13 @@ where
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
         (**self).list_provisioner_job_timings(job_id).await
+    }
+
+    async fn find_workspace_resource_by_id(
+        &self,
+        resource_id: Uuid,
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
+        (**self).find_workspace_resource_by_id(resource_id).await
     }
 
     async fn list_workspace_resources_by_job(
