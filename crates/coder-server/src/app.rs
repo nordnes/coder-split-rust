@@ -32,10 +32,11 @@ use coder_core::StorageError;
 use coder_core::api::{
     CreateTemplateRequest, CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest,
     DAUEntry, DAUsResponse, MinimalUser, PatchTemplateVersionRequest, ProvisionerJobLog,
-    ProvisionerJobResponse, ProvisionerJobStatus, TemplateExample, TemplateFilter,
-    TemplateResponse, TemplateVersionExternalAuth, TemplateVersionParameter, TemplateVersionPreset,
-    TemplateVersionPresetParameter, TemplateVersionResponse, TemplateVersionVariable,
-    UpdateTemplateMeta, WorkspaceResource,
+    ProvisionerJobResponse, ProvisionerJobStatus, ProvisionerTiming, TemplateExample,
+    TemplateFilter, TemplateResponse, TemplateVersionExternalAuth, TemplateVersionParameter,
+    TemplateVersionPreset, TemplateVersionPresetParameter, TemplateVersionResponse,
+    TemplateVersionVariable, UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceBuildTimings,
+    WorkspaceResource, WorkspaceResourceMetadata, WorkspaceResourceResponse,
 };
 use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
 use coder_core::api::{
@@ -7198,17 +7199,15 @@ async fn get_workspace_build_logs(
         .list_provisioner_job_logs(build.job_id, query.after)
         .await?;
 
-    let items: Vec<Value> = logs
+    let items: Vec<ProvisionerJobLog> = logs
         .into_iter()
-        .map(|l| {
-            json!({
-                "id": l.id,
-                "created_at": l.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
-                "source": l.source,
-                "level": l.level,
-                "stage": l.stage,
-                "output": l.output,
-            })
+        .map(|l| ProvisionerJobLog {
+            id: l.id,
+            created_at: l.created_at,
+            log_source: l.source,
+            log_level: l.level,
+            stage: l.stage,
+            output: l.output,
         })
         .collect();
 
@@ -7234,9 +7233,12 @@ async fn get_workspace_build_parameters(
         .list_workspace_build_parameters(build_id)
         .await?;
 
-    let items: Vec<Value> = params
+    let items: Vec<WorkspaceBuildParameter> = params
         .into_iter()
-        .map(|p| json!({ "name": p.name, "value": p.value }))
+        .map(|p| WorkspaceBuildParameter {
+            name: p.name,
+            value: p.value,
+        })
         .collect();
 
     Ok((StatusCode::OK, Json(items)).into_response())
@@ -7261,22 +7263,43 @@ async fn get_workspace_build_resources(
         .list_workspace_resources_by_job(build.job_id)
         .await?;
 
-    let items: Vec<Value> = resources
+    // Fetch metadata for all resources in one batch.
+    let resource_ids: Vec<Uuid> = resources.iter().map(|r| r.id).collect();
+    let all_metadata = state
+        .store
+        .list_workspace_resource_metadata(&resource_ids)
+        .await?;
+
+    // Group metadata by resource id.
+    let mut metadata_map: HashMap<Uuid, Vec<WorkspaceResourceMetadata>> = HashMap::new();
+    for m in all_metadata {
+        metadata_map
+            .entry(m.workspace_resource_id)
+            .or_default()
+            .push(WorkspaceResourceMetadata {
+                key: m.key,
+                value: m.value,
+                sensitive: m.sensitive,
+            });
+    }
+
+    let items: Vec<WorkspaceResourceResponse> = resources
         .into_iter()
         .map(|r| {
-            json!({
-                "id": r.id,
-                "created_at": r.created_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
-                "job_id": r.job_id,
-                "workspace_transition": r.transition,
-                "type": r.resource_type,
-                "name": r.name,
-                "hide": r.hide,
-                "icon": r.icon,
-                "daily_cost": r.daily_cost,
-                "agents": [],
-                "metadata": [],
-            })
+            let meta = metadata_map.remove(&r.id).unwrap_or_default();
+            WorkspaceResourceResponse {
+                id: r.id,
+                created_at: r.created_at,
+                job_id: r.job_id,
+                workspace_transition: workspace_transition_from_str(&r.transition),
+                resource_type: r.resource_type,
+                name: r.name,
+                hide: r.hide,
+                icon: r.icon,
+                daily_cost: r.daily_cost,
+                agents: Vec::new(),
+                metadata: meta,
+            }
         })
         .collect();
 
@@ -7351,25 +7374,26 @@ async fn get_workspace_build_timings(
         .list_provisioner_job_timings(build.job_id)
         .await?;
 
-    let items: Vec<Value> = timings
+    let provisioner_timings: Vec<ProvisionerTiming> = timings
         .into_iter()
-        .map(|t| {
-            json!({
-                "started_at": t.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
-                "ended_at": t.ended_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
-                "stage": t.stage,
-                "source": t.source,
-                "action": t.action,
-                "resource": t.resource,
-            })
+        .map(|t| ProvisionerTiming {
+            job_id: t.job_id,
+            started_at: t.started_at,
+            ended_at: t.ended_at,
+            stage: t.stage,
+            source: t.source,
+            action: t.action,
+            resource: t.resource,
         })
         .collect();
 
-    Ok((
-        StatusCode::OK,
-        Json(json!({ "provisioner_timings": items, "agent_script_timings": [] })),
-    )
-        .into_response())
+    let response = WorkspaceBuildTimings {
+        provisioner_timings,
+        agent_script_timings: Vec::new(),
+        agent_connection_timings: Vec::new(),
+    };
+
+    Ok((StatusCode::OK, Json(response)).into_response())
 }
 
 /// GET /users/{user}/workspace/{name}
@@ -7779,6 +7803,21 @@ async fn get_org_member_workspace_available_users(
 // ---------------------------------------------------------------------------
 // Workspace JSON helpers
 // ---------------------------------------------------------------------------
+
+fn workspace_transition_from_str(s: &str) -> coder_core::api::WorkspaceTransition {
+    match s {
+        "start" => coder_core::api::WorkspaceTransition::Start,
+        "stop" => coder_core::api::WorkspaceTransition::Stop,
+        "delete" => coder_core::api::WorkspaceTransition::Delete,
+        other => {
+            tracing::warn!(
+                transition = other,
+                "unknown workspace transition, defaulting to start"
+            );
+            coder_core::api::WorkspaceTransition::Start
+        }
+    }
+}
 
 fn workspace_to_json(w: &coder_core::WorkspaceRecord) -> Value {
     json!({
@@ -10038,6 +10077,10 @@ mod tests {
         OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_TOKEN_HEADER,
         hash_password,
     };
+    use coder_core::ports::{
+        ProvisionerJobLogRecord as PortsJobLogRecord,
+        ProvisionerJobTimingRecord as PortsJobTimingRecord,
+    };
     use coder_core::provisioner::{
         ProvisionerJobLogRecord as ProvisionerLogRecord,
         ProvisionerJobTimingRecord as ProvisionerTimingRecord,
@@ -10078,7 +10121,8 @@ mod tests {
         WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow,
         WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
         WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceProxyHealthInput,
-        WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
+        WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -10157,6 +10201,10 @@ mod tests {
         workspaces: Mutex<HashMap<Uuid, WorkspaceRecord>>,
         workspace_builds: Mutex<HashMap<Uuid, WorkspaceBuildRecord>>,
         workspace_build_parameters: Mutex<HashMap<Uuid, Vec<WorkspaceBuildParameterRecord>>>,
+        workspace_resources: Mutex<HashMap<Uuid, Vec<WorkspaceResourceRecord>>>,
+        workspace_resource_metadata: Mutex<HashMap<Uuid, Vec<WorkspaceResourceMetadataRecord>>>,
+        provisioner_job_logs: Mutex<HashMap<Uuid, Vec<PortsJobLogRecord>>>,
+        provisioner_job_timings: Mutex<HashMap<Uuid, Vec<PortsJobTimingRecord>>>,
     }
 
     impl FakeStore {
@@ -10210,6 +10258,10 @@ mod tests {
                 workspaces: Mutex::new(HashMap::new()),
                 workspace_builds: Mutex::new(HashMap::new()),
                 workspace_build_parameters: Mutex::new(HashMap::new()),
+                workspace_resources: Mutex::new(HashMap::new()),
+                workspace_resource_metadata: Mutex::new(HashMap::new()),
+                provisioner_job_logs: Mutex::new(HashMap::new()),
+                provisioner_job_timings: Mutex::new(HashMap::new()),
             }
         }
 
@@ -13282,6 +13334,76 @@ mod tests {
                         .cloned()
                         .collect()
                 })
+        }
+
+        async fn find_workspace_build_by_id(
+            &self,
+            build_id: Uuid,
+        ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
+            self.workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|builds| builds.get(&build_id).cloned())
+        }
+
+        async fn list_workspace_build_parameters(
+            &self,
+            build_id: Uuid,
+        ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError> {
+            self.workspace_build_parameters
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|params| params.get(&build_id).cloned().unwrap_or_default())
+        }
+
+        async fn list_provisioner_job_logs(
+            &self,
+            job_id: Uuid,
+            _after: Option<i64>,
+        ) -> Result<Vec<PortsJobLogRecord>, StorageError> {
+            let logs = self
+                .provisioner_job_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(logs.get(&job_id).cloned().unwrap_or_default())
+        }
+
+        async fn list_workspace_resources_by_job(
+            &self,
+            job_id: Uuid,
+        ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
+            self.workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))
+                .map(|resources| resources.get(&job_id).cloned().unwrap_or_default())
+        }
+
+        async fn list_workspace_resource_metadata(
+            &self,
+            resource_ids: &[Uuid],
+        ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
+            let metadata = self
+                .workspace_resource_metadata
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result = Vec::new();
+            for id in resource_ids {
+                if let Some(items) = metadata.get(id) {
+                    result.extend(items.iter().cloned());
+                }
+            }
+            Ok(result)
+        }
+
+        async fn list_provisioner_job_timings(
+            &self,
+            job_id: Uuid,
+        ) -> Result<Vec<PortsJobTimingRecord>, StorageError> {
+            let timings = self
+                .provisioner_job_timings
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(timings.get(&job_id).cloned().unwrap_or_default())
         }
 
         // ---------------------------------------------------------------
@@ -18765,6 +18887,282 @@ mod tests {
                 || response.status() == StatusCode::UPGRADE_REQUIRED,
             "expected 101 or 426, got {}",
             response.status()
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace build handler tests
+    // -----------------------------------------------------------------------
+
+    /// Helper: seed a workspace build into the FakeStore and return its id + job_id.
+    fn seed_workspace_build(store: &FakeStore) -> (Uuid, Uuid) {
+        let build_id = Uuid::from_u128(1000);
+        let job_id = Uuid::from_u128(2000);
+        let now = OffsetDateTime::now_utc();
+        let build = WorkspaceBuildRecord {
+            id: build_id,
+            created_at: now,
+            updated_at: now,
+            workspace_id: Uuid::from_u128(3000),
+            build_number: 1,
+            transition: "start".to_owned(),
+            job_id,
+            template_version_id: Uuid::from_u128(4000),
+            initiator_id: Uuid::from_u128(1),
+            provisioner_state: None,
+            deadline: None,
+            max_deadline: None,
+            reason: "initiator".to_owned(),
+            daily_cost: 0,
+        };
+        if let Ok(mut builds) = store.workspace_builds.lock() {
+            builds.insert(build_id, build);
+        }
+        (build_id, job_id)
+    }
+
+    #[tokio::test]
+    async fn workspace_build_get_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(Method::GET, &format!("/api/v2/workspacebuilds/{build_id}"))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_get_returns_not_found() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let build_id = Uuid::from_u128(9999);
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_cancel_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(
+                Method::PATCH,
+                &format!("/api/v2/workspacebuilds/{build_id}/cancel"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_logs_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/logs"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_logs_returns_empty_array() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let (build_id, _job_id) = seed_workspace_build(&store);
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body, json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_parameters_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/parameters"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_parameters_returns_empty_array() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let (build_id, _job_id) = seed_workspace_build(&store);
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/parameters"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body, json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_resources_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/resources"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_resources_returns_empty_array() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let (build_id, _job_id) = seed_workspace_build(&store);
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/resources"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body, json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_state_get_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/state"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_state_put_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(
+                Method::PUT,
+                &format!("/api/v2/workspacebuilds/{build_id}/state"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_timings_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let build_id = Uuid::from_u128(1000);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/timings"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_timings_returns_empty_timings() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let (build_id, _job_id) = seed_workspace_build(&store);
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id}/timings"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("provisioner_timings")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            body.get("agent_script_timings")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            body.get("agent_connection_timings")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
         );
         Ok(())
     }
