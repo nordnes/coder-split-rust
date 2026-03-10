@@ -28302,4 +28302,1790 @@ mod tests {
         assert_eq!(logs.len(), 2);
         Ok(())
     }
+
+    // =========================================================================
+    // Happy-path integration tests — Auth Flows
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_first_user_returns_ok_after_creation() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        create_and_login(&app).await?;
+
+        let response = call(app, request(Method::GET, "/api/v2/users/first")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("The initial user has already been created!")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_first_user_creates_user_and_organization() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/users/first",
+                &CreateFirstUserRequest {
+                    email: "admin@example.com".to_owned(),
+                    username: "admin".to_owned(),
+                    name: "Admin".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("user_id").and_then(Value::as_str).is_some());
+        assert!(
+            body.get("organization_id")
+                .and_then(Value::as_str)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn login_with_password_returns_session_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        // Create first user
+        let create_response = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/first",
+                &CreateFirstUserRequest {
+                    email: "owner@example.com".to_owned(),
+                    username: "owner".to_owned(),
+                    name: "Owner".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let login_response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "owner@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(login_response.status(), StatusCode::CREATED);
+        let body = response_json(login_response).await?;
+        assert!(body.get("session_token").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn logout_invalidates_session() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let logout_response = call(
+            app.clone(),
+            authenticated_request(Method::POST, "/api/v2/users/logout", &session_token)?,
+        )
+        .await?;
+        assert_eq!(logout_response.status(), StatusCode::OK);
+        let body = response_json(logout_response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Logged out!")
+        );
+
+        // Verify session is invalidated
+        let me_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        assert_eq!(me_response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn validate_password_accepts_strong_password() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/users/validate-password",
+                &ValidateUserPasswordRequest {
+                    password: "StrongPassword123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("valid").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    // =========================================================================
+    // Happy-path integration tests — Users
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_users_returns_created_users() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a second user
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "member@example.com".to_owned(),
+                    username: "member".to_owned(),
+                    name: "Member User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(2));
+        let users = body.get("users").and_then(Value::as_array);
+        assert_eq!(users.map(Vec::len), Some(2));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_users_with_status_filter() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a user then suspend them
+        let _create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "suspended@example.com".to_owned(),
+                    username: "suspended".to_owned(),
+                    name: "Suspended User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let _suspend = call(
+            app.clone(),
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/suspended/status/suspend",
+                &session_token,
+            )?,
+        )
+        .await?;
+
+        // Filter for suspended users
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users?status=suspended",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_user_creates_new_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "new@example.com".to_owned(),
+                    username: "newuser".to_owned(),
+                    name: "New User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("email").and_then(Value::as_str),
+            Some("new@example.com")
+        );
+        assert_eq!(
+            body.get("username").and_then(Value::as_str),
+            Some("newuser")
+        );
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("New User"));
+        assert_eq!(body.get("status").and_then(Value::as_str), Some("active"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_by_username() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/owner", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
+        assert_eq!(
+            body.get("email").and_then(Value::as_str),
+            Some("owner@example.com")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_me_returns_current_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_user_removes_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create user to delete
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "todelete@example.com".to_owned(),
+                    username: "todelete".to_owned(),
+                    name: "To Delete".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(Method::DELETE, "/api/v2/users/todelete", &session_token)?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::OK);
+
+        // Verify user is gone
+        let get_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/todelete", &session_token)?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_login_type_returns_password() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/login-type", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("login_type").and_then(Value::as_str),
+            Some("password")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn git_ssh_key_get_and_regenerate() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // First GET should generate a key
+        let get_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/gitsshkey", &session_token)?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = response_json(get_response).await?;
+        let original_public_key = get_body
+            .get("public_key")
+            .and_then(Value::as_str)
+            .ok_or("missing public_key")?
+            .to_owned();
+        assert!(!original_public_key.is_empty());
+
+        // PUT should regenerate the key
+        let put_response = call(
+            app.clone(),
+            authenticated_request(Method::PUT, "/api/v2/users/me/gitsshkey", &session_token)?,
+        )
+        .await?;
+        assert_eq!(put_response.status(), StatusCode::OK);
+        let put_body = response_json(put_response).await?;
+        let new_public_key = put_body
+            .get("public_key")
+            .and_then(Value::as_str)
+            .ok_or("missing public_key")?
+            .to_owned();
+        assert!(!new_public_key.is_empty());
+        // The key should be different after regeneration
+        assert_ne!(original_public_key, new_public_key);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_autofill_parameters_returns_empty() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/api/v2/users/me/autofill-parameters?template_id={}",
+                    Uuid::nil()
+                ),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response_json(response).await?, Value::Array(Vec::new()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_user_profile_updates_name() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/profile",
+                &session_token,
+                &UpdateUserProfileRequest {
+                    username: "owner".to_owned(),
+                    name: "Updated Owner".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("Updated Owner")
+        );
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn suspend_and_activate_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create user
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "target@example.com".to_owned(),
+                    username: "target".to_owned(),
+                    name: "Target User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        // Suspend
+        let suspend_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/target/status/suspend",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(suspend_response.status(), StatusCode::OK);
+        let suspend_body = response_json(suspend_response).await?;
+        assert_eq!(
+            suspend_body.get("status").and_then(Value::as_str),
+            Some("suspended")
+        );
+
+        // Activate
+        let activate_response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/target/status/activate",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(activate_response.status(), StatusCode::OK);
+        let activate_body = response_json(activate_response).await?;
+        assert_eq!(
+            activate_body.get("status").and_then(Value::as_str),
+            Some("active")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn appearance_settings_get_and_put() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET defaults
+        let get_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/appearance", &session_token)?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+
+        // PUT new settings
+        let put_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/appearance",
+                &session_token,
+                &UpdateUserAppearanceSettingsRequest {
+                    theme_preference: "dark".to_owned(),
+                    terminal_font: "fira-code".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(put_response.status(), StatusCode::OK);
+        let put_body = response_json(put_response).await?;
+        assert_eq!(
+            put_body.get("theme_preference").and_then(Value::as_str),
+            Some("dark")
+        );
+        assert_eq!(
+            put_body.get("terminal_font").and_then(Value::as_str),
+            Some("fira-code")
+        );
+
+        // GET to verify persistence
+        let verify_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/appearance", &session_token)?,
+        )
+        .await?;
+        assert_eq!(verify_response.status(), StatusCode::OK);
+        let verify_body = response_json(verify_response).await?;
+        assert_eq!(
+            verify_body.get("theme_preference").and_then(Value::as_str),
+            Some("dark")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn preferences_get_and_put() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET defaults
+        let get_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/preferences", &session_token)?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = response_json(get_response).await?;
+        assert_eq!(
+            get_body
+                .get("task_notification_alert_dismissed")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+
+        // PUT new preferences
+        let put_response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/preferences",
+                &session_token,
+                &UpdateUserPreferenceSettingsRequest {
+                    task_notification_alert_dismissed: true,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(put_response.status(), StatusCode::OK);
+        let put_body = response_json(put_response).await?;
+        assert_eq!(
+            put_body
+                .get("task_notification_alert_dismissed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_user_password_changes_password() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create user
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "pwuser@example.com".to_owned(),
+                    username: "pwuser".to_owned(),
+                    name: "PW User".to_owned(),
+                    password: "OldPassword123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        // Login as the new user
+        let login_response = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "pwuser@example.com".to_owned(),
+                    password: "OldPassword123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        let user_token = response_json(login_response)
+            .await?
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing session token")?
+            .to_owned();
+
+        // Change password
+        let change_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/password",
+                &user_token,
+                &UpdateUserPasswordRequest {
+                    old_password: "OldPassword123".to_owned(),
+                    password: "NewPassword123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(change_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify new password works
+        let new_login = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "pwuser@example.com".to_owned(),
+                    password: "NewPassword123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(new_login.status(), StatusCode::CREATED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_roles_returns_role_info() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/roles", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("roles").and_then(Value::as_array).is_some());
+        assert!(
+            body.get("organization_roles")
+                .and_then(Value::as_object)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_user_roles_assigns_role() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a second user
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "roleuser@example.com".to_owned(),
+                    username: "roleuser".to_owned(),
+                    name: "Role User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/roleuser/roles",
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["auditor".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body.get("roles").and_then(Value::as_array);
+        assert!(roles.is_some());
+        let role_names: Vec<&str> = roles
+            .ok_or("missing roles")?
+            .iter()
+            .filter_map(|role| role.get("name").and_then(Value::as_str))
+            .collect();
+        assert!(role_names.contains(&"auditor"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_preferences_get_and_put() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // GET defaults (should return empty list)
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = response_json(get_response).await?;
+        assert!(get_body.is_array());
+
+        // PUT notification preferences
+        let template_id = Uuid::new_v4();
+        let mut template_disabled_map = HashMap::new();
+        template_disabled_map.insert(template_id.to_string(), true);
+        let put_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+                &json!({ "template_disabled_map": template_disabled_map }),
+            )?,
+        )
+        .await?;
+        assert_eq!(put_response.status(), StatusCode::OK);
+        let put_body = response_json(put_response).await?;
+        assert!(put_body.is_array());
+        assert!(!put_body.as_array().ok_or("expected array")?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_convert_login_returns_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Attempting to convert to Github login should return BAD_REQUEST since
+        // the provider is not enabled, but it exercises the full handler pipeline.
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/convert-login",
+                &session_token,
+                &ConvertLoginRequest {
+                    to_type: LoginType::Github,
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(body.get("message").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    // =========================================================================
+    // Happy-path integration tests — API Keys
+    // =========================================================================
+
+    #[tokio::test]
+    async fn create_session_api_key_returns_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/users/me/keys", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("key").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_token_api_key_returns_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(7200),
+                    token_name: "test-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("key").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_token_api_keys_returns_created_tokens() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a token
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "list-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.as_array().map(Vec::len), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_api_key_by_id_returns_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a token
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "get-by-id".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        // List to get the key ID
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        let list_body = response_json(list_response).await?;
+        let key_id = list_body
+            .as_array()
+            .and_then(|keys| keys.first())
+            .and_then(|key| key.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing key id")?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/users/me/keys/{key_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("id").and_then(Value::as_str), Some(key_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_api_key_by_name_returns_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a named token
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "named-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/keys/tokens/named-token",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("token_name").and_then(Value::as_str),
+            Some("named-token")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_api_key_removes_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a token
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "del-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        // Get key ID
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        let list_body = response_json(list_response).await?;
+        let key_id = list_body
+            .as_array()
+            .and_then(|keys| keys.first())
+            .and_then(|key| key.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing key id")?
+            .to_owned();
+
+        // Delete
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/users/me/keys/{key_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify token is gone
+        let verify_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        let verify_body = response_json(verify_response).await?;
+        assert_eq!(verify_body.as_array().map(Vec::len), Some(0));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn expire_api_key_marks_key_expired() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a token
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "expire-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        // Get key ID
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        let list_body = response_json(list_response).await?;
+        let key_id = list_body
+            .as_array()
+            .and_then(|keys| keys.first())
+            .and_then(|key| key.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing key id")?
+            .to_owned();
+
+        // Expire
+        let expire_response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                &format!("/api/v2/users/me/keys/{key_id}/expire"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(expire_response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_token_config_returns_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/keys/tokens/tokenconfig",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("max_token_lifetime").is_some());
+        Ok(())
+    }
+
+    // =========================================================================
+    // Happy-path integration tests — Organizations
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_organizations_returns_default_org() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/organizations", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let orgs = body.as_array().ok_or("expected array")?;
+        assert_eq!(orgs.len(), 1);
+        assert!(orgs[0].get("id").and_then(Value::as_str).is_some());
+        assert!(orgs[0].get("name").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_organization_by_name() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        assert_eq!(body.get("is_default").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_organization_by_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{organization_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some(organization_id.to_string().as_str())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_organization_members_returns_owner() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let members = body.as_array().ok_or("expected array")?;
+        assert_eq!(members.len(), 1);
+        assert!(
+            members[0].get("user_id").and_then(Value::as_str).is_some()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_paginated_organization_members_returns_count() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/paginated-members?limit=10&offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(1));
+        assert_eq!(
+            body.get("members").and_then(Value::as_array).map(Vec::len),
+            Some(1)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_organization_member_returns_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members/me",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("user_id").and_then(Value::as_str).is_some());
+        assert!(body.get("organization_id").and_then(Value::as_str).is_some());
+        assert_eq!(
+            body.get("username").and_then(Value::as_str),
+            Some("owner")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_and_delete_organization_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a user NOT in the org initially
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgtest@example.com".to_owned(),
+                    username: "orgtest".to_owned(),
+                    name: "Org Test".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        // Verify the member exists
+        let get_member_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members/orgtest",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_member_response.status(), StatusCode::OK);
+
+        // Delete the member from the org
+        let delete_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                "/api/v2/organizations/first-organization/members/orgtest",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+        // Re-add the member
+        let add_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                "/api/v2/organizations/first-organization/members/orgtest",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(add_response.status(), StatusCode::OK);
+        let add_body = response_json(add_response).await?;
+        assert!(add_body.get("user_id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_organization_member_roles_assigns_role() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create member
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgrole@example.com".to_owned(),
+                    username: "orgrole".to_owned(),
+                    name: "Org Role".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/organizations/first-organization/members/orgrole/roles",
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["organization-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("roles")
+                .and_then(Value::as_array)
+                .and_then(|roles| roles.first())
+                .and_then(|role| role.get("name"))
+                .and_then(Value::as_str),
+            Some("organization-admin")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_organization_roles_returns_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members/roles",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body.as_array().ok_or("expected array")?;
+        assert!(!roles.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_site_roles_returns_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/roles", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body.as_array().ok_or("expected array")?;
+        assert!(!roles.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_user_organizations_returns_orgs() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/organizations",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let orgs = body.as_array().ok_or("expected array")?;
+        assert_eq!(orgs.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_organization_by_name_returns_org() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/organizations/first-organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        assert_eq!(body.get("is_default").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    // =========================================================================
+    // Happy-path integration tests — External Auth
+    // =========================================================================
+
+    #[tokio::test]
+    async fn list_external_auths_returns_empty_providers() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/external-auth", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("providers")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            body.get("links").and_then(Value::as_array).map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_auth_get_with_configured_provider() -> Result<(), Box<dyn Error>> {
+        let (provider_url, provider_handle) = spawn_test_server(Router::new().route(
+            "/user",
+            get(|| async {
+                Json(json!({
+                    "id": 1,
+                    "login": "testuser",
+                    "avatar_url": "",
+                    "html_url": "https://github.com/testuser",
+                    "name": "Test User"
+                }))
+            }),
+        ))
+        .await?;
+
+        let (mut state, store) = test_state_with_store(true)?;
+        state.config.external_auth_providers = vec![ExternalAuthLinkProvider {
+            id: "github".to_owned(),
+            provider_type: "github".to_owned(),
+            display_name: "GitHub".to_owned(),
+            display_icon: "github".to_owned(),
+            allow_validate: true,
+            user_url: provider_url.join("/user")?.to_string(),
+            client_id: "client-id".to_owned(),
+            client_secret: "client-secret".to_owned(),
+            ..ExternalAuthLinkProvider::default()
+        }];
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Insert a valid link into the store
+        store
+            .external_auth_links
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(
+                (Uuid::from_u128(1), "github".to_owned()),
+                ExternalAuthLinkRecord {
+                    provider_id: "github".to_owned(),
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    has_refresh_token: false,
+                    expires: OffsetDateTime::now_utc() + time::Duration::hours(1),
+                    access_token: "valid-token".to_owned(),
+                    refresh_token: String::new(),
+                    token_type: "bearer".to_owned(),
+                    scopes: Vec::new(),
+                    authenticated: true,
+                    validate_error: String::new(),
+                    refresh_error: String::new(),
+                    last_validated_at: Some(OffsetDateTime::now_utc()),
+                    last_refreshed_at: None,
+                    user: Some(ExternalAuthUser {
+                        id: 1,
+                        login: "testuser".to_owned(),
+                        avatar_url: String::new(),
+                        profile_url: "https://github.com/testuser".to_owned(),
+                        name: "Test User".to_owned(),
+                    }),
+                    installations: Vec::new(),
+                    app_installable: false,
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/external-auth/github", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("authenticated").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("user")
+                .and_then(|v| v.get("login"))
+                .and_then(Value::as_str),
+            Some("testuser")
+        );
+
+        provider_handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_auth_delete_unlinks_provider() -> Result<(), Box<dyn Error>> {
+        let (mut state, store) = test_state_with_store(true)?;
+        state.config.external_auth_providers = vec![ExternalAuthLinkProvider {
+            id: "github".to_owned(),
+            provider_type: "github".to_owned(),
+            display_name: "GitHub".to_owned(),
+            display_icon: "github".to_owned(),
+            supports_revocation: false,
+            ..ExternalAuthLinkProvider::default()
+        }];
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Insert a link
+        store
+            .external_auth_links
+            .lock()
+            .map_err(|error| error.to_string())?
+            .insert(
+                (Uuid::from_u128(1), "github".to_owned()),
+                ExternalAuthLinkRecord {
+                    provider_id: "github".to_owned(),
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    has_refresh_token: false,
+                    expires: OffsetDateTime::now_utc() + time::Duration::hours(1),
+                    access_token: "token".to_owned(),
+                    refresh_token: String::new(),
+                    token_type: "bearer".to_owned(),
+                    scopes: Vec::new(),
+                    authenticated: true,
+                    validate_error: String::new(),
+                    refresh_error: String::new(),
+                    last_validated_at: None,
+                    last_refreshed_at: None,
+                    user: None,
+                    installations: Vec::new(),
+                    app_installable: false,
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                "/api/v2/external-auth/github",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("token_revoked").is_some());
+
+        // Verify link is removed
+        assert!(
+            store
+                .external_auth_links
+                .lock()
+                .map_err(|error| error.to_string())?
+                .get(&(Uuid::from_u128(1), "github".to_owned()))
+                .is_none()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_auth_device_flow_returns_device_code() -> Result<(), Box<dyn Error>> {
+        let (provider_url, provider_handle) = spawn_test_server(Router::new().route(
+            "/device",
+            post(|| async {
+                Json(json!({
+                    "device_code": "dev-code-123",
+                    "user_code": "ABCD-1234",
+                    "verification_uri": "https://example.com/device",
+                    "expires_in": 900,
+                    "interval": 5
+                }))
+            }),
+        ))
+        .await?;
+
+        let (mut state, _store) = test_state_with_store(true)?;
+        state.config.external_auth_providers = vec![ExternalAuthLinkProvider {
+            id: "gitlab".to_owned(),
+            provider_type: "gitlab".to_owned(),
+            device: true,
+            display_name: "GitLab".to_owned(),
+            display_icon: "gitlab".to_owned(),
+            device_authorization_url: provider_url.join("/device")?.to_string(),
+            client_id: "client-id".to_owned(),
+            ..ExternalAuthLinkProvider::default()
+        }];
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/external-auth/gitlab/device",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("device_code").and_then(Value::as_str),
+            Some("dev-code-123")
+        );
+        assert_eq!(
+            body.get("user_code").and_then(Value::as_str),
+            Some("ABCD-1234")
+        );
+
+        provider_handle.abort();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn external_auth_device_exchange_persists_link() -> Result<(), Box<dyn Error>> {
+        let (provider_url, provider_handle) = spawn_test_server(
+            Router::new()
+                .route(
+                    "/token",
+                    post(|| async {
+                        Json(json!({
+                            "access_token": "dev-access-token",
+                            "refresh_token": "dev-refresh-token",
+                            "expires_in": 900
+                        }))
+                    }),
+                )
+                .route(
+                    "/user",
+                    get(|| async {
+                        Json(json!({
+                            "id": 42,
+                            "login": "devuser",
+                            "avatar_url": "",
+                            "profile_url": "https://gitlab.example.com/devuser",
+                            "name": "Dev User"
+                        }))
+                    }),
+                ),
+        )
+        .await?;
+
+        let (mut state, _store) = test_state_with_store(true)?;
+        state.config.external_auth_providers = vec![ExternalAuthLinkProvider {
+            id: "gitlab".to_owned(),
+            provider_type: "gitlab".to_owned(),
+            device: true,
+            display_name: "GitLab".to_owned(),
+            display_icon: "gitlab".to_owned(),
+            token_url: provider_url.join("/token")?.to_string(),
+            user_url: provider_url.join("/user")?.to_string(),
+            client_id: "client-id".to_owned(),
+            client_secret: "client-secret".to_owned(),
+            ..ExternalAuthLinkProvider::default()
+        }];
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let exchange_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/external-auth/gitlab/device",
+                &session_token,
+                &json!({ "device_code": "dev-code-123" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(exchange_response.status(), StatusCode::NO_CONTENT);
+
+        // Verify link was persisted by fetching the provider
+        let get_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/external-auth/gitlab", &session_token)?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let body = response_json(get_response).await?;
+        assert_eq!(
+            body.get("authenticated").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("user")
+                .and_then(|v| v.get("login"))
+                .and_then(Value::as_str),
+            Some("devuser")
+        );
+
+        provider_handle.abort();
+        Ok(())
+    }
 }
