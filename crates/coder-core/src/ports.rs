@@ -2023,6 +2023,14 @@ pub trait TemplateStore: Send + Sync {
         message: &str,
     ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 
+    /// Finds the template version created immediately before the named version.
+    async fn find_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
     /// Archives a template version.
     async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError>;
 
@@ -3345,6 +3353,19 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         message: &str,
     ) -> Result<Option<TemplateVersionRecord>, StorageError> {
         let _ = (version_id, name, message);
+        Err(StorageError::unavailable(
+            "template versions are not implemented",
+        ))
+    }
+
+    /// Finds the template version created immediately before the named version.
+    async fn find_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        let _ = (organization_id, template_name, version_name);
         Err(StorageError::unavailable(
             "template versions are not implemented",
         ))
@@ -5976,6 +5997,16 @@ where
         message: &str,
     ) -> Result<Option<TemplateVersionRecord>, StorageError> {
         AppStore::update_template_version(self, version_id, name, message).await
+    }
+
+    async fn find_previous_template_version(
+        &self,
+        organization_id: Uuid,
+        template_name: &str,
+        version_name: &str,
+    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
+        AppStore::find_previous_template_version(self, organization_id, template_name, version_name)
+            .await
     }
 
     async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
