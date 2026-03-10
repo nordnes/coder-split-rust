@@ -10738,14 +10738,15 @@ mod tests {
             .await?;
         }
 
-        // Count unread -- should be at least 1
+        // Count unread -- fresh user with exactly 1 unread notification
         let unread_count = store.count_unread_inbox_notifications(user_id).await?;
-        assert!(unread_count >= 1, "expected at least 1 unread notification");
+        assert_eq!(unread_count, 1, "expected exactly 1 unread notification");
 
         // Filter: unread only
         let unread = store
             .get_filtered_inbox_notifications(user_id, None, None, "unread", None)
             .await?;
+        assert_eq!(unread.len(), 1, "expected exactly 1 unread notification");
         assert!(
             unread.iter().all(|n| n.read_at.is_none()),
             "all returned notifications should be unread"
@@ -10755,6 +10756,7 @@ mod tests {
         let read_notifs = store
             .get_filtered_inbox_notifications(user_id, None, None, "read", None)
             .await?;
+        assert_eq!(read_notifs.len(), 1, "expected exactly 1 read notification");
         assert!(
             read_notifs.iter().all(|n| n.read_at.is_some()),
             "all returned notifications should be read"
@@ -10764,7 +10766,7 @@ mod tests {
         let all = store
             .get_filtered_inbox_notifications(user_id, None, None, "all", None)
             .await?;
-        assert!(all.len() >= 2, "expected at least 2 total notifications");
+        assert_eq!(all.len(), 2, "expected exactly 2 total notifications");
         Ok(())
     }
 
