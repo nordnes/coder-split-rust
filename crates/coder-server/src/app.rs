@@ -4936,8 +4936,9 @@ async fn watch_chat_git(
     // The Go implementation upgrades to a WebSocket, dials the workspace
     // agent, and proxies bidirectional JSON messages. This requires the
     // tailnet coordinator and agent provider which are not yet available.
-    Ok(not_implemented_response(
+    Ok(not_implemented_detail_response(
         "Git watch is not yet implemented.",
+        "Agent infrastructure required for git watching is not available.",
     ))
 }
 
@@ -7941,6 +7942,17 @@ fn not_implemented_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
+fn not_implemented_detail_response(
+    message: impl Into<String>,
+    detail: impl Into<String>,
+) -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiResponse::error(message.into(), detail.into())),
+    )
+        .into_response()
+}
+
 /// Accept a WebSocket upgrade then immediately close with a "not implemented" reason.
 /// Used for endpoints that require tailnet/pubsub integration not yet available.
 async fn ws_close_not_implemented(mut socket: WebSocket, reason: &str) {
@@ -7970,7 +7982,7 @@ fn not_found_detail_response(message: impl Into<String>, detail: impl Into<Strin
 fn internal_server_error_response(message: impl Into<String>) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiResponse::ok(message.into())),
+        Json(ApiResponse::error(message.into(), "")),
     )
         .into_response()
 }
