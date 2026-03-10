@@ -6959,6 +6959,10 @@ async fn get_workspace_resolve_autostart(
 }
 
 /// GET /workspaces/{workspace}/timings
+///
+/// Returns build timings for the latest workspace build, including provisioner
+/// timings and agent script timings. Mirrors the Go `buildTimings` function
+/// in `coderd/workspacebuilds.go`.
 async fn get_workspace_timings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -6975,35 +6979,17 @@ async fn get_workspace_timings(
     else {
         return Ok((
             StatusCode::OK,
-            Json(json!({ "provisioner_timings": [], "agent_script_timings": [] })),
+            Json(json!({
+                "provisioner_timings": [],
+                "agent_script_timings": [],
+                "agent_connection_timings": []
+            })),
         )
             .into_response());
     };
 
-    let timings = state
-        .store
-        .list_provisioner_job_timings(latest_build.job_id)
-        .await?;
-
-    let items: Vec<Value> = timings
-        .into_iter()
-        .map(|t| {
-            json!({
-                "started_at": t.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
-                "ended_at": t.ended_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
-                "stage": t.stage,
-                "source": t.source,
-                "action": t.action,
-                "resource": t.resource,
-            })
-        })
-        .collect();
-
-    Ok((
-        StatusCode::OK,
-        Json(json!({ "provisioner_timings": items, "agent_script_timings": [] })),
-    )
-        .into_response())
+    let timings_response = build_timings_response(&state, &latest_build).await?;
+    Ok((StatusCode::OK, Json(timings_response)).into_response())
 }
 
 /// POST /workspaces/{workspace}/usage — updates last_used_at.
@@ -7032,12 +7018,19 @@ async fn post_workspace_usage(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// GET /workspaces/{workspace}/watch — SSE (returns initial state).
+/// GET /workspaces/{workspace}/watch — SSE stream of workspace updates.
+///
+/// Subscribes to the workspace owner's pub/sub channel and streams workspace
+/// state as Server-Sent Events whenever a relevant event is received.
+/// Mirrors the Go `watchWorkspace` handler in `coderd/workspaces.go`.
 async fn get_workspace_watch(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
+    use axum::body::Body;
+    use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
+
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
@@ -7050,30 +7043,116 @@ async fn get_workspace_watch(
         return Ok(resource_not_found_response());
     };
 
-    // Without pub/sub, return initial state as a single SSE event.
-    let body = format!(
-        "data: {}\n\n",
-        serde_json::to_string(&workspace_to_json(&workspace)).unwrap_or_default()
-    );
+    let owner_id = workspace.owner_id;
+    let channel = workspace_event_channel(owner_id);
+
+    let mut subscription = state.pubsub.subscribe(&channel).await.map_err(|e| {
+        AppError::Storage(StorageError::Unavailable {
+            message: e.to_string(),
+        })
+    })?;
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    // Send initial ping to signal the connection is established.
+    let _ = tx.send("event: ping\ndata: {}\n\n".to_owned()).await;
+
+    // Send current workspace state immediately after connection.
+    let initial_data = serde_json::to_string(&workspace_to_json(&workspace)).unwrap_or_default();
+    let _ = tx
+        .send(format!("event: data\ndata: {initial_data}\n\n"))
+        .await;
+
+    // Spawn a task that listens for pub/sub events and sends SSE data.
+    let store = state.store.clone();
+    let viewer_id = context.user.id;
+    tokio::spawn(async move {
+        loop {
+            // Race pub/sub recv against client disconnect (rx dropped → tx.closed()).
+            tokio::select! {
+                msg = subscription.recv() => {
+                    match msg {
+                        Ok(bytes) => {
+                            // Skip messages that fail to parse or belong to a different workspace.
+                            match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
+                                Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
+                                _ => continue,
+                            }
+
+                            // Fetch fresh workspace state.
+                            match store
+                                .find_workspace_by_id(workspace_id, Some(viewer_id))
+                                .await
+                            {
+                                Ok(Some(w)) => {
+                                    let data =
+                                        serde_json::to_string(&workspace_to_json(&w)).unwrap_or_default();
+                                    let sse = format!("event: data\ndata: {data}\n\n");
+                                    if tx.send(sse).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    let err_data = serde_json::to_string(&json!({
+                                        "message": "Internal error fetching workspace."
+                                    }))
+                                    .unwrap_or_default();
+                                    let sse = format!("event: error\ndata: {err_data}\n\n");
+                                    let _ = tx.send(sse).await;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                _ = tx.closed() => {
+                    // Client disconnected (rx was dropped).
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = Body::from_stream(tokio_stream::StreamExt::map(
+        stream,
+        Ok::<_, std::convert::Infallible>,
+    ));
+
     Ok((
         StatusCode::OK,
-        [(CONTENT_TYPE, HeaderValue::from_static("text/event-stream"))],
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("text/event-stream")),
+            (
+                HeaderName::from_static("cache-control"),
+                HeaderValue::from_static("no-cache"),
+            ),
+        ],
         body,
     )
         .into_response())
 }
 
-/// GET /workspaces/{workspace}/watch-ws — WebSocket (returns not implemented).
+/// GET /workspaces/{workspace}/watch-ws — WebSocket stream of workspace updates.
+///
+/// Upgrades the connection to a WebSocket and streams workspace JSON state
+/// whenever a relevant pub/sub event is received for this workspace.
+/// Mirrors the Go `watchWorkspaceWS` handler.
 async fn get_workspace_watch_ws(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(workspace_id): Path<Uuid>,
+    ws: axum::extract::ws::WebSocketUpgrade,
 ) -> Result<Response, AppError> {
+    use axum::extract::ws::Message;
+    use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
+
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_workspace) = state
+    let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
         .await?
@@ -7081,9 +7160,72 @@ async fn get_workspace_watch_ws(
         return Ok(resource_not_found_response());
     };
 
-    Ok(not_implemented_response(
-        "WebSocket workspace watch is not yet implemented.",
-    ))
+    let owner_id = workspace.owner_id;
+    let viewer_id = context.user.id;
+    let store = state.store.clone();
+    let pubsub = state.pubsub.clone();
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
+        let channel = workspace_event_channel(owner_id);
+        let mut subscription = match pubsub.subscribe(&channel).await {
+            Ok(sub) => sub,
+            Err(_) => return,
+        };
+
+        // Send initial workspace state.
+        let initial = serde_json::to_string(&workspace_to_json(&workspace)).unwrap_or_default();
+        if socket.send(Message::Text(initial.into())).await.is_err() {
+            return;
+        }
+
+        loop {
+            // Race pub/sub recv against WebSocket client messages to detect disconnect.
+            tokio::select! {
+                msg = subscription.recv() => {
+                    match msg {
+                        Ok(bytes) => {
+                            // Skip messages that fail to parse or belong to a different workspace.
+                            match serde_json::from_slice::<WorkspaceEvent>(&bytes) {
+                                Ok(ev) if ev.workspace_id == workspace_id => { /* proceed */ }
+                                _ => continue,
+                            }
+
+                            match store
+                                .find_workspace_by_id(workspace_id, Some(viewer_id))
+                                .await
+                            {
+                                Ok(Some(w)) => {
+                                    let data =
+                                        serde_json::to_string(&workspace_to_json(&w)).unwrap_or_default();
+                                    if socket.send(Message::Text(data.into())).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Ok(None) => break,
+                                Err(_) => {
+                                    let err = serde_json::to_string(&json!({
+                                        "message": "Internal error fetching workspace."
+                                    }))
+                                    .unwrap_or_default();
+                                    let _ = socket.send(Message::Text(err.into())).await;
+                                }
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                ws_msg = socket.recv() => {
+                    // Client sent a close frame or disconnected.
+                    match ws_msg {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        _ => { /* ignore other client messages */ }
+                    }
+                }
+            }
+        }
+    }))
 }
 
 /// GET /workspacebuilds/{build}
@@ -7324,31 +7466,8 @@ async fn get_workspace_build_timings(
         return Ok(resource_not_found_response());
     };
 
-    let timings = state
-        .store
-        .list_provisioner_job_timings(build.job_id)
-        .await?;
-
-    let provisioner_timings: Vec<ProvisionerTiming> = timings
-        .into_iter()
-        .map(|t| ProvisionerTiming {
-            job_id: t.job_id,
-            started_at: t.started_at,
-            ended_at: t.ended_at,
-            stage: t.stage,
-            source: t.source,
-            action: t.action,
-            resource: t.resource,
-        })
-        .collect();
-
-    let response = WorkspaceBuildTimings {
-        provisioner_timings,
-        agent_script_timings: Vec::new(),
-        agent_connection_timings: Vec::new(),
-    };
-
-    Ok((StatusCode::OK, Json(response)).into_response())
+    let timings_response = build_timings_response(&state, &build).await?;
+    Ok((StatusCode::OK, Json(timings_response)).into_response())
 }
 
 /// GET /users/{user}/workspace/{name}
@@ -7758,6 +7877,75 @@ async fn get_org_member_workspace_available_users(
 // ---------------------------------------------------------------------------
 // Workspace JSON helpers
 // ---------------------------------------------------------------------------
+
+/// Builds the full timings response for a workspace build, including provisioner
+/// timings, agent script timings, and agent connection timings.
+/// Mirrors the Go `buildTimings` function in `coderd/workspacebuilds.go`.
+async fn build_timings_response(
+    state: &AppState,
+    build: &coder_core::WorkspaceBuildRecord,
+) -> Result<Value, AppError> {
+    // Fetch provisioner job timings.
+    let provisioner_timings = state
+        .store
+        .list_provisioner_job_timings(build.job_id)
+        .await?;
+
+    // Go's time.Time.IsZero() checks for year 0001-01-01T00:00:00Z, not Unix epoch.
+    let go_zero = time::Date::from_calendar_date(1, time::Month::January, 1)
+        .unwrap_or(time::Date::MIN)
+        .midnight()
+        .assume_utc();
+
+    let provisioner_items: Vec<Value> = provisioner_timings
+        .into_iter()
+        .filter(|t| {
+            // Ref: #15432: timings must not have a zero start or end time.
+            t.started_at != go_zero && t.ended_at != go_zero
+        })
+        .map(|t| {
+            json!({
+                "job_id": build.job_id,
+                "started_at": t.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "ended_at": t.ended_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "stage": t.stage,
+                "source": t.source,
+                "action": t.action,
+                "resource": t.resource,
+            })
+        })
+        .collect();
+
+    // Fetch agent script timings (best-effort; the store may not implement this yet).
+    let agent_script_timings = state
+        .store
+        .list_workspace_agent_script_timings_by_build_id(build.id)
+        .await
+        .unwrap_or_default();
+
+    let agent_script_items: Vec<Value> = agent_script_timings
+        .into_iter()
+        .filter(|t| t.started_at != go_zero && t.ended_at != go_zero)
+        .map(|t| {
+            json!({
+                "started_at": t.started_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "ended_at": t.ended_at.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+                "exit_code": t.exit_code,
+                "stage": t.stage,
+                "status": t.status,
+                "display_name": t.display_name,
+                "workspace_agent_id": t.workspace_agent_id.to_string(),
+                "workspace_agent_name": t.workspace_agent_name,
+            })
+        })
+        .collect();
+
+    Ok(json!({
+        "provisioner_timings": provisioner_items,
+        "agent_script_timings": agent_script_items,
+        "agent_connection_timings": [],
+    }))
+}
 
 fn workspace_transition_from_str(s: &str) -> coder_core::api::WorkspaceTransition {
     match s {

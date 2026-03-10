@@ -43,11 +43,12 @@ use coder_core::{
     UserAppearanceRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
     WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow,
     WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentStatInput, WorkspaceAppRow,
-    WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
-    WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
-    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+    WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
+    WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
+    WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
+    WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
+    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -4754,6 +4755,64 @@ impl AppStore for PostgresStore {
         Ok(rows
             .into_iter()
             .map(provisioner_job_timing_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            script_id: Uuid,
+            started_at: OffsetDateTime,
+            ended_at: OffsetDateTime,
+            exit_code: i32,
+            stage: String,
+            status: String,
+            display_name: String,
+            workspace_agent_id: Uuid,
+            workspace_agent_name: String,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT
+                DISTINCT ON (wast.script_id) wast.script_id,
+                wast.started_at,
+                wast.ended_at,
+                wast.exit_code,
+                wast.stage::text AS stage,
+                wast.status::text AS status,
+                was2.display_name,
+                wa.id AS workspace_agent_id,
+                wa.name AS workspace_agent_name
+             FROM workspace_agent_script_timings wast
+             INNER JOIN workspace_agent_scripts was2 ON was2.id = wast.script_id
+             INNER JOIN workspace_agents wa ON wa.id = was2.workspace_agent_id
+             INNER JOIN workspace_resources wr ON wr.id = wa.resource_id
+             INNER JOIN workspace_builds wb ON wb.job_id = wr.job_id
+             WHERE wb.id = $1
+             ORDER BY wast.script_id, wast.started_at",
+        )
+        .bind(build_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| WorkspaceAgentScriptTimingRow {
+                script_id: r.script_id,
+                started_at: r.started_at,
+                ended_at: r.ended_at,
+                exit_code: r.exit_code,
+                stage: r.stage,
+                status: r.status,
+                display_name: r.display_name,
+                workspace_agent_id: r.workspace_agent_id,
+                workspace_agent_name: r.workspace_agent_name,
+            })
             .collect())
     }
 

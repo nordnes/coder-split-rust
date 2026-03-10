@@ -696,6 +696,29 @@ pub struct ProvisionerJobTimingRecord {
     pub resource: String,
 }
 
+/// Stored workspace agent script timing row (joined from script timings + agents).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentScriptTimingRow {
+    /// Script identifier.
+    pub script_id: Uuid,
+    /// Start time.
+    pub started_at: OffsetDateTime,
+    /// End time.
+    pub ended_at: OffsetDateTime,
+    /// Exit code.
+    pub exit_code: i32,
+    /// Timing stage.
+    pub stage: String,
+    /// Timing status.
+    pub status: String,
+    /// Display name.
+    pub display_name: String,
+    /// Workspace agent identifier.
+    pub workspace_agent_id: Uuid,
+    /// Workspace agent name.
+    pub workspace_agent_name: String,
+}
+
 /// Filter for listing workspaces.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct WorkspaceListFilter {
@@ -3216,6 +3239,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
+    /// Lists workspace agent script timings for a build.
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        let _ = build_id;
+        Err(StorageError::unavailable(
+            "workspace agent script timings are not implemented",
+        ))
+    }
+
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
         &self,
@@ -4169,6 +4203,12 @@ pub trait WorkspaceStore: Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
+
+    /// Lists workspace agent script timings for a build.
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError>;
 
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
@@ -5346,6 +5386,13 @@ where
         AppStore::list_provisioner_job_timings(self, job_id).await
     }
 
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        AppStore::list_workspace_agent_script_timings_by_build_id(self, build_id).await
+    }
+
     async fn list_workspace_resources_by_job(
         &self,
         job_id: Uuid,
@@ -5660,6 +5707,15 @@ where
         job_id: Uuid,
     ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
         (**self).list_provisioner_job_timings(job_id).await
+    }
+
+    async fn list_workspace_agent_script_timings_by_build_id(
+        &self,
+        build_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+        (**self)
+            .list_workspace_agent_script_timings_by_build_id(build_id)
+            .await
     }
 
     async fn list_workspace_resources_by_job(
