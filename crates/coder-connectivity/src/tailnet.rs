@@ -50,15 +50,18 @@ fn html_escape(s: &str) -> String {
 /// milestone must add protobuf (or at minimum proto-JSON) support to
 /// achieve true wire-compatibility with Go agents/clients.
 ///
-/// TODO(proto): Add `key` (bytes — `key.NodePublic`) and `disco` (string —
-/// `key.DiscoPublic`) fields to match the Go `proto.Node` message.  These
-/// are essential for WireGuard handshake but are omitted here because the
-/// current JSON transport cannot carry them in the same form as protobuf.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NodeInfo {
     /// Unique node identifier.
     #[serde(default)]
     pub id: i64,
+    /// WireGuard public key (`key.NodePublic`) for handshake.
+    /// Encoded as raw bytes in protobuf; serialised as a byte array in JSON.
+    #[serde(default)]
+    pub key: Option<Vec<u8>>,
+    /// Disco public key (`key.DiscoPublic`) used for endpoint discovery.
+    #[serde(default)]
+    pub disco: Option<String>,
     /// Preferred DERP region for this node.
     #[serde(default)]
     pub preferred_derp: i64,
@@ -1679,10 +1682,10 @@ mod tests {
         assert!(agent_handle.response_rx.try_recv().is_err());
     }
 
-    // TODO(integration): Add WebSocket-level integration tests that connect
-    // to the actual `tailnet_rpc_conn` handler, send `CoordinateRequest`
-    // messages over the WebSocket, and verify `CoordinateResponse` messages
-    // are received.  The current tests only exercise the coordinator
-    // internals, not the handler's `tokio::select!` multiplexing, JSON
-    // parse error paths, or WebSocket message framing.
+    // NOTE: Coordinator-level unit tests exist above and cover add/remove
+    // peer, tunnel routing, node updates, and session lifecycle.  WebSocket-
+    // level integration tests (connecting to the `tailnet_rpc_conn` handler,
+    // sending `CoordinateRequest` messages, and verifying `CoordinateResponse`
+    // framing) are deferred — they require a running Axum server with an
+    // upgrade-capable HTTP client, which is outside the scope of this crate.
 }
