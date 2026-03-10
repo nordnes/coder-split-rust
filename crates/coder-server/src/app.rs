@@ -18389,6 +18389,164 @@ mod tests {
             Ok(true)
         }
 
+        async fn update_workspace_autostart(
+            &self,
+            workspace_id: Uuid,
+            schedule: Option<&str>,
+        ) -> Result<bool, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            if ws.deleted {
+                return Ok(false);
+            }
+            ws.autostart_schedule = schedule.map(String::from);
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn update_workspace_ttl(
+            &self,
+            workspace_id: Uuid,
+            ttl_ns: Option<i64>,
+        ) -> Result<bool, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            if ws.deleted {
+                return Ok(false);
+            }
+            ws.ttl_ns = ttl_ns;
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn update_workspace_dormant_at(
+            &self,
+            workspace_id: Uuid,
+            dormant_at: Option<OffsetDateTime>,
+            _viewer_id: Option<Uuid>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(None);
+            };
+            if ws.deleted {
+                return Ok(None);
+            }
+            ws.dormant_at = dormant_at;
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(Some(ws.clone()))
+        }
+
+        async fn update_workspace_automatic_updates(
+            &self,
+            workspace_id: Uuid,
+            automatic_updates: &str,
+        ) -> Result<bool, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            if ws.deleted {
+                return Ok(false);
+            }
+            ws.automatic_updates = automatic_updates.to_owned();
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn update_workspace_last_used_at(
+            &self,
+            workspace_id: Uuid,
+            last_used_at: OffsetDateTime,
+        ) -> Result<bool, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            if ws.deleted {
+                return Ok(false);
+            }
+            ws.last_used_at = last_used_at;
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn favorite_workspace(
+            &self,
+            workspace_id: Uuid,
+            _user_id: Uuid,
+            favorite: bool,
+        ) -> Result<bool, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(false);
+            };
+            if ws.deleted {
+                return Ok(false);
+            }
+            ws.favorite = favorite;
+            ws.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn update_workspace_build_deadline(
+            &self,
+            build_id: Uuid,
+            deadline: Option<OffsetDateTime>,
+            max_deadline: Option<OffsetDateTime>,
+        ) -> Result<bool, StorageError> {
+            let mut builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(build) = builds.get_mut(&build_id) else {
+                return Ok(false);
+            };
+            build.deadline = deadline;
+            build.max_deadline = max_deadline;
+            build.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
+        async fn update_workspace_build_provisioner_state(
+            &self,
+            build_id: Uuid,
+            state: &[u8],
+        ) -> Result<bool, StorageError> {
+            let mut builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(build) = builds.get_mut(&build_id) else {
+                return Ok(false);
+            };
+            build.provisioner_state = Some(state.to_vec());
+            build.updated_at = OffsetDateTime::now_utc();
+            Ok(true)
+        }
+
         async fn list_workspace_builds(
             &self,
             workspace_id: Uuid,
@@ -29096,6 +29254,1780 @@ mod tests {
         let body = response_json(response).await?;
         let logs = body.as_array().ok_or("expected array")?;
         assert_eq!(logs.len(), 2);
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests — Templates
+    // =======================================================================
+
+    /// Helper: seed a template into the FakeStore and return its record.
+    fn seed_template(store: &FakeStore, org_id: Uuid, created_by: Uuid) -> TemplateRecord {
+        let now = OffsetDateTime::now_utc();
+        let template_id = Uuid::new_v4();
+        let record = TemplateRecord {
+            id: template_id,
+            created_at: now,
+            updated_at: now,
+            organization_id: org_id,
+            organization_name: "default".to_owned(),
+            organization_display_name: "Default".to_owned(),
+            organization_icon: String::new(),
+            name: "test-template".to_owned(),
+            display_name: "Test Template".to_owned(),
+            provisioner: "terraform".to_owned(),
+            active_version_id: Uuid::nil(),
+            description: "A test template".to_owned(),
+            default_ttl: 3_600_000_000_000,
+            activity_bump: 0,
+            icon: "/icon/test.png".to_owned(),
+            created_by,
+            created_by_name: "owner".to_owned(),
+            created_by_username: "owner".to_owned(),
+            created_by_avatar_url: String::new(),
+            user_acl: HashMap::new(),
+            group_acl: HashMap::new(),
+            allow_user_autostart: true,
+            allow_user_autostop: true,
+            allow_user_cancel_workspace_jobs: true,
+            failure_ttl: 0,
+            time_til_dormant: 0,
+            time_til_dormant_autodelete: 0,
+            autostop_requirement_days_of_week: 0,
+            autostop_requirement_weeks: 0,
+            autostart_block_days_of_week: 0,
+            require_active_version: false,
+            deprecated: String::new(),
+            deleted: false,
+            max_port_sharing_level: "owner".to_owned(),
+            cors_behavior: String::new(),
+            use_classic_parameter_flow: false,
+            disable_module_cache: false,
+        };
+        if let Ok(mut templates) = store.templates.lock() {
+            templates.insert(template_id, record.clone());
+        }
+        record
+    }
+
+    /// Helper: seed a template version into the FakeStore and return its record.
+    fn seed_template_version(
+        store: &FakeStore,
+        template_id: Option<Uuid>,
+        org_id: Uuid,
+        created_by: Uuid,
+    ) -> TemplateVersionRecord {
+        let now = OffsetDateTime::now_utc();
+        let version_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let record = TemplateVersionRecord {
+            id: version_id,
+            template_id,
+            organization_id: org_id,
+            created_at: now,
+            updated_at: now,
+            name: "v1.0.0".to_owned(),
+            message: "initial version".to_owned(),
+            readme: "# Test".to_owned(),
+            job_id,
+            created_by,
+            created_by_name: "owner".to_owned(),
+            created_by_username: "owner".to_owned(),
+            created_by_avatar_url: String::new(),
+            external_auth_providers: serde_json::json!([]),
+            archived: false,
+            source_example_id: None,
+            has_ai_task: None,
+            has_external_agent: None,
+        };
+        if let Ok(mut versions) = store.template_versions.lock() {
+            versions.insert(version_id, record.clone());
+        }
+        // Also seed the provisioner job so build_tv_response succeeds.
+        seed_provisioner_job(store, job_id, org_id);
+        record
+    }
+
+    /// Helper: seed a workspace into the FakeStore and return its record.
+    fn seed_workspace(
+        store: &FakeStore,
+        owner_id: Uuid,
+        org_id: Uuid,
+        template_id: Uuid,
+    ) -> WorkspaceRecord {
+        let now = OffsetDateTime::now_utc();
+        let workspace_id = Uuid::new_v4();
+        let record = WorkspaceRecord {
+            id: workspace_id,
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id,
+            organization_id: org_id,
+            template_id,
+            name: "test-workspace".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: Some(28_800_000_000_000),
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        };
+        if let Ok(mut workspaces) = store.workspaces.lock() {
+            workspaces.insert(workspace_id, record.clone());
+        }
+        record
+    }
+
+    /// Helper: seed a workspace build for a given workspace and return its record.
+    fn seed_workspace_build_for(
+        store: &FakeStore,
+        workspace_id: Uuid,
+        org_id: Uuid,
+        initiator_id: Uuid,
+    ) -> WorkspaceBuildRecord {
+        let now = OffsetDateTime::now_utc();
+        let build_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let record = WorkspaceBuildRecord {
+            id: build_id,
+            created_at: now,
+            updated_at: now,
+            workspace_id,
+            build_number: 1,
+            transition: "start".to_owned(),
+            job_id,
+            template_version_id: Uuid::new_v4(),
+            initiator_id,
+            provisioner_state: None,
+            deadline: None,
+            max_deadline: None,
+            reason: "initiator".to_owned(),
+            daily_cost: 0,
+        };
+        if let Ok(mut builds) = store.workspace_builds.lock() {
+            builds.insert(build_id, record.clone());
+        }
+        // Seed the provisioner job so handlers that reference it work.
+        seed_provisioner_job(store, job_id, org_id);
+        record
+    }
+
+    /// Helper: get the owner user_id from the FakeStore (first user).
+    fn owner_user_id(store: &FakeStore) -> Uuid {
+        store
+            .users
+            .lock()
+            .ok()
+            .and_then(|users| users.values().next().map(|u| u.id))
+            .unwrap_or(Uuid::nil())
+    }
+
+    #[tokio::test]
+    async fn get_template_returns_template_by_id() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{}", tmpl.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some(tmpl.id.to_string()).as_deref()
+        );
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+        assert_eq!(
+            body.get("display_name").and_then(Value::as_str),
+            Some("Test Template")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_template_returns_ok() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/templates/{}", tmpl.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify template is now gone (soft-deleted).
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{}", tmpl.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_template_updates_fields() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{}", tmpl.id),
+                &session_token,
+                &json!({
+                    "name": "updated-template",
+                    "display_name": "Updated Template",
+                    "description": "Updated description",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("updated-template")
+        );
+        assert_eq!(
+            body.get("display_name").and_then(Value::as_str),
+            Some("Updated Template")
+        );
+        assert_eq!(
+            body.get("description").and_then(Value::as_str),
+            Some("Updated description")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_org_templates_returns_templates() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let _tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let templates = body.as_array().ok_or("expected array")?;
+        assert!(!templates.is_empty(), "expected at least one template");
+        assert_eq!(
+            templates[0].get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_org_template_creates_template() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tv = seed_template_version(&store, None, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/templates"),
+                &session_token,
+                &json!({
+                    "name": "new-template",
+                    "display_name": "New Template",
+                    "description": "Created via test",
+                    "template_version_id": tv.id.to_string(),
+                    "default_ttl_ms": 3600000,
+                    "icon": "/icon/new.png",
+                    "allow_user_cancel_workspace_jobs": true,
+                    "allow_user_autostart": true,
+                    "allow_user_autostop": true,
+                    "failure_ttl_ms": 0,
+                    "time_til_dormant_ms": 0,
+                    "time_til_dormant_autodelete_ms": 0,
+                    "require_active_version": false,
+                    "activity_bump_ms": 0,
+                    "max_port_share_level": "owner",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("new-template")
+        );
+        assert_eq!(
+            body.get("display_name").and_then(Value::as_str),
+            Some("New Template")
+        );
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_org_template_by_name_returns_template() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let _tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates/test-template"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("test-template")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_daus_returns_entries() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{}/daus", tmpl.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("entries").is_some());
+        assert!(body.get("tz_hour_offset").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_examples_returns_empty_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{}/examples", tmpl.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let arr = body.as_array().ok_or("expected array")?;
+        // The handler returns an empty list for per-template examples.
+        assert!(arr.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_org_template_examples_returns_starter_list() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates/examples"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let arr = body.as_array().ok_or("expected array")?;
+        assert!(!arr.is_empty(), "expected starter template examples");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_all_template_examples_returns_starter_list() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/templates/examples", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let arr = body.as_array().ok_or("expected array")?;
+        assert!(!arr.is_empty(), "expected starter template examples");
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests — Template Versions
+    // =======================================================================
+
+    #[tokio::test]
+    async fn get_template_version_returns_version() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some(tv.id.to_string()).as_deref()
+        );
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("v1.0.0"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_template_versions_returns_versions() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let _tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{}/versions", tmpl.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let versions = body.as_array().ok_or("expected array")?;
+        assert!(!versions.is_empty(), "expected at least one version");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_by_name_returns_version() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let _tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templates/{}/versions/v1.0.0", tmpl.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("v1.0.0"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_org_template_version_by_name_returns_version() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let _tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/templates/test-template/versions/v1.0.0"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("v1.0.0"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_org_template_version_creates_version() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/templateversions"),
+                &session_token,
+                &json!({
+                    "name": "v2.0.0",
+                    "template_id": tmpl.id.to_string(),
+                    "provisioner": "terraform",
+                    "tags": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("v2.0.0"));
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_template_version_updates_name() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templateversions/{}", tv.id),
+                &session_token,
+                &json!({
+                    "name": "v1.0.1",
+                    "message": "patched version",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("v1.0.1"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archive_and_unarchive_template_version() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Archive
+        let archive_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{}/archive", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(archive_response.status(), StatusCode::OK);
+
+        // Unarchive
+        let unarchive_response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{}/unarchive", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unarchive_response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_parameters_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Seed a parameter
+        {
+            let mut params = store
+                .template_version_parameters
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            params.insert(
+                tv.id,
+                vec![TemplateVersionParameterRecord {
+                    template_version_id: tv.id,
+                    name: "region".to_owned(),
+                    display_name: "Region".to_owned(),
+                    description: "AWS region".to_owned(),
+                    param_type: "string".to_owned(),
+                    form_type: String::new(),
+                    mutable: false,
+                    default_value: "us-east-1".to_owned(),
+                    icon: String::new(),
+                    options: serde_json::json!([]),
+                    validation_error: String::new(),
+                    validation_regex: String::new(),
+                    validation_min: None,
+                    validation_max: None,
+                    validation_monotonic: String::new(),
+                    required: true,
+                    ephemeral: false,
+                    display_order: 0,
+                }],
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/parameters", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let params = body.as_array().ok_or("expected array")?;
+        assert_eq!(params.len(), 1);
+        assert_eq!(
+            params[0].get("name").and_then(Value::as_str),
+            Some("region")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_rich_parameters_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/rich-parameters", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Returns empty list when no parameters are seeded.
+        let params = body.as_array().ok_or("expected array")?;
+        assert!(params.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_variables_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Seed a variable.
+        {
+            let mut vars = store
+                .template_version_variables
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            vars.insert(
+                tv.id,
+                vec![TemplateVersionVariableRecord {
+                    template_version_id: tv.id,
+                    name: "aws_region".to_owned(),
+                    description: "The AWS region".to_owned(),
+                    var_type: "string".to_owned(),
+                    value: "us-west-2".to_owned(),
+                    default_value: "us-east-1".to_owned(),
+                    required: false,
+                    sensitive: false,
+                }],
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/variables", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let vars = body.as_array().ok_or("expected array")?;
+        assert_eq!(vars.len(), 1);
+        assert_eq!(
+            vars[0].get("name").and_then(Value::as_str),
+            Some("aws_region")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_resources_returns_empty() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/resources", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let resources = body.as_array().ok_or("expected array")?;
+        assert!(resources.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_logs_returns_empty() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/logs", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected array")?;
+        assert!(logs.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_schema_returns_empty() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/schema", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let schema = body.as_array().ok_or("expected array")?;
+        assert!(schema.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_archive_template_versions_returns_archived_ids() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        // Seed a version that is NOT the active version (so it can be archived).
+        let _tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templates/{}/versions/archive", tmpl.id),
+                &session_token,
+                &json!({ "all": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("template_id").is_some());
+        assert!(body.get("archived_ids").is_some());
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests — Workspaces
+    // =======================================================================
+
+    #[tokio::test]
+    async fn list_workspaces_returns_workspaces() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let _ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/workspaces", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let workspaces = body
+            .get("workspaces")
+            .and_then(Value::as_array)
+            .ok_or("expected workspaces array")?;
+        assert!(!workspaces.is_empty(), "expected at least one workspace");
+        assert_eq!(
+            workspaces[0].get("name").and_then(Value::as_str),
+            Some("test-workspace")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_workspace_updates_name() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+                &json!({ "name": "renamed-workspace" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("renamed-workspace")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_workspace_by_name_returns_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let _ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/workspace/test-workspace",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("test-workspace")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_user_workspace_creates_workspace() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+        // Set active_version_id on template.
+        if let Ok(mut templates) = store.templates.lock() {
+            if let Some(t) = templates.get_mut(&tmpl.id) {
+                t.active_version_id = tv.id;
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/workspaces",
+                &session_token,
+                &json!({
+                    "name": "my-workspace",
+                    "template_id": tmpl.id.to_string(),
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("my-workspace")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_resolve_autostart_returns_info() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}/resolve-autostart", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("parameter_mismatch").and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_timings_returns_empty_timings() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}/timings", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // No build exists yet, so timings should be empty arrays.
+        assert!(body.get("provisioner_timings").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_returns_workspace_by_id() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("test-workspace")
+        );
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests — Workspace Builds
+    // =======================================================================
+
+    #[tokio::test]
+    async fn list_workspace_builds_returns_builds() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let _build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}/builds", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let builds = body.as_array().ok_or("expected array")?;
+        assert!(!builds.is_empty(), "expected at least one build");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_build_returns_build() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{}", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some(build.id.to_string()).as_deref()
+        );
+        assert_eq!(
+            body.get("transition").and_then(Value::as_str),
+            Some("start")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_user_workspace_build_by_number_returns_build() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let _build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/users/me/workspace/{}/builds/1", ws.name),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("build_number").and_then(Value::as_i64), Some(1));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_workspace_build_creates_new_build() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+        // Set active_version_id on template.
+        if let Ok(mut templates) = store.templates.lock() {
+            if let Some(t) = templates.get_mut(&tmpl.id) {
+                t.active_version_id = tv.id;
+            }
+        }
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/builds", ws.id),
+                &session_token,
+                &json!({ "transition": "start" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("transition").and_then(Value::as_str),
+            Some("start")
+        );
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn patch_cancel_workspace_build_cancels_build() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/workspacebuilds/{}/cancel", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_build_logs_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{}/logs", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected array")?;
+        // Empty because no logs are seeded.
+        assert!(logs.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_build_parameters_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{}/parameters", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let params = body.as_array().ok_or("expected array")?;
+        assert!(params.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_build_resources_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{}/resources", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let resources = body.as_array().ok_or("expected array")?;
+        assert!(resources.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_build_timings_returns_timings() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{}/timings", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("provisioner_timings").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_and_put_workspace_build_state() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        // PUT state
+        let put_request = Request::builder()
+            .method(Method::PUT)
+            .uri(format!("/api/v2/workspacebuilds/{}/state", build.id))
+            .header(SESSION_TOKEN_HEADER, &session_token)
+            .header(CONTENT_TYPE, "application/octet-stream")
+            .body(Body::from(b"test-state-bytes".to_vec()))?;
+
+        let put_response = call(app.clone(), put_request).await?;
+        assert_eq!(put_response.status(), StatusCode::NO_CONTENT);
+
+        // GET state
+        let get_response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{}/state", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let bytes = to_bytes(get_response.into_body(), usize::MAX).await?;
+        assert_eq!(&bytes[..], b"test-state-bytes");
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests — Workspace Settings
+    // =======================================================================
+
+    #[tokio::test]
+    async fn put_workspace_autostart_sets_schedule() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/autostart", ws.id),
+                &session_token,
+                &json!({ "schedule": "CRON_TZ=US/Central 30 9 * * 1-5" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_workspace_ttl_sets_ttl() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/ttl", ws.id),
+                &session_token,
+                &json!({ "ttl_ms": 7200000 }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_workspace_autoupdates_sets_policy() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/autoupdates", ws.id),
+                &session_token,
+                &json!({ "automatic_updates": "always" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_workspace_dormant_activates_dormancy() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/dormant", ws.id),
+                &session_token,
+                &json!({ "dormant": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("dormant_at").is_some());
+        assert!(!body["dormant_at"].is_null());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_workspace_extend_extends_deadline() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        // Need a build to exist for extend to work.
+        let _build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let deadline = (OffsetDateTime::now_utc() + time::Duration::hours(4))
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/extend", ws.id),
+                &session_token,
+                &json!({ "deadline": deadline }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn put_and_delete_workspace_favorite() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // Favorite
+        let fav_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/favorite", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(fav_response.status(), StatusCode::NO_CONTENT);
+
+        // Unfavorite
+        let unfav_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{}/favorite", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(unfav_response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_workspace_usage_updates_last_used() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/usage", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_port_share_crud() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // Create port share
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/port-share", ws.id),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                    "share_level": "authenticated",
+                    "protocol": "http",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::OK);
+        let create_body = response_json(create_response).await?;
+        assert_eq!(create_body.get("port").and_then(Value::as_i64), Some(8080));
+
+        // List port shares
+        let list_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}/port-share", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(list_response.status(), StatusCode::OK);
+        let list_body = response_json(list_response).await?;
+        let shares = list_body
+            .get("shares")
+            .and_then(Value::as_array)
+            .ok_or("expected shares array")?;
+        assert!(!shares.is_empty());
+
+        // Delete port share
+        let delete_response = call(
+            app,
+            authenticated_json_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{}/port-share", ws.id),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_acl_get_and_patch() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // GET ACL
+        let get_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}/acl", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_response.status(), StatusCode::OK);
+        let get_body = response_json(get_response).await?;
+        assert!(get_body.get("users").is_some());
+        assert!(get_body.get("groups").is_some());
+
+        // PATCH ACL
+        let patch_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{}/acl", ws.id),
+                &session_token,
+                &json!({
+                    "user_roles": {},
+                    "group_roles": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch_response.status(), StatusCode::NO_CONTENT);
+
+        // DELETE ACL
+        let delete_response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{}/acl", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_watch_sse_returns_initial_state() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaces/{}/watch", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("text/event-stream")
+        );
         Ok(())
     }
 
