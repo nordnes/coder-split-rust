@@ -11638,7 +11638,7 @@ mod tests {
 
         let tag = uniq();
         // Create 3 users: 2 active, 1 suspended
-        let _u1 = store
+        let u1 = store
             .create_user(CreateUserInput {
                 email: format!("list-a-{tag}@example.com"),
                 username: format!("lista-{tag}"),
@@ -11649,7 +11649,7 @@ mod tests {
                 organization_ids: vec![org_id],
             })
             .await?;
-        let _u2 = store
+        let u2 = store
             .create_user(CreateUserInput {
                 email: format!("list-b-{tag}@example.com"),
                 username: format!("listb-{tag}"),
@@ -11660,7 +11660,7 @@ mod tests {
                 organization_ids: vec![org_id],
             })
             .await?;
-        let _u3 = store
+        let u3 = store
             .create_user(CreateUserInput {
                 email: format!("list-c-{tag}@example.com"),
                 username: format!("listc-{tag}"),
@@ -11683,12 +11683,28 @@ mod tests {
             .await?;
         assert!(total >= 3, "should find at least 3 users with tag");
         assert!(users.len() >= 3);
-        // Verify the search filter actually matched our users by checking
-        // that each returned username contains the unique tag.
+        // Verify the created users are present in the result set.
+        let returned_ids: Vec<_> = users.iter().map(|u| u.id).collect();
         assert!(
-            users
-                .iter()
-                .all(|u| u.username.contains(&tag) || u.email.contains(&tag)),
+            returned_ids.contains(&u1.id),
+            "u1 should be in results"
+        );
+        assert!(
+            returned_ids.contains(&u2.id),
+            "u2 should be in results"
+        );
+        assert!(
+            returned_ids.contains(&u3.id),
+            "u3 should be in results"
+        );
+        // Verify the search filter actually matched: every returned user
+        // must contain the unique tag in username, email, or name.
+        assert!(
+            users.iter().all(|u| {
+                u.username.contains(&tag)
+                    || u.email.contains(&tag)
+                    || u.name.contains(&tag)
+            }),
             "all returned users should match the search tag"
         );
 
@@ -11880,7 +11896,7 @@ mod tests {
 
     #[tokio::test]
     #[ignore]
-    async fn test_api_key_expiry_and_update() -> TestResult {
+    async fn test_api_key_expiry() -> TestResult {
         let store = match setup_store().await? {
             Some(s) => s,
             None => return Ok(()),
@@ -11908,10 +11924,6 @@ mod tests {
                 allow_list: vec![],
             })
             .await?;
-
-        // Update last_used by touching the key via raw SQL (the store exposes
-        // update_api_key_last_used indirectly through session auth, but we can
-        // verify expiry directly).
 
         // Expire the key
         let expire_time = OffsetDateTime::now_utc();
@@ -12311,9 +12323,13 @@ mod tests {
                 provisioner_tags: serde_json::json!({}),
             })
             .await?;
-        // We may or may not get *our* specific job (other pending jobs may exist),
-        // but the acquire should succeed
-        assert!(acquired.is_some(), "should acquire a pending job");
+        // Within our unique org, the only pending Echo job is the one we just
+        // created, so acquire must return that specific job.
+        let acquired = acquired.expect("should acquire the pending job");
+        assert_eq!(
+            acquired.id, job_id,
+            "acquired job should be the one we created"
+        );
 
         // Complete the job
         let complete_time = OffsetDateTime::now_utc();
@@ -12478,6 +12494,14 @@ mod tests {
                 .iter()
                 .any(|l| l.resource_target == target),
             "should find our specific audit entry"
+        );
+        // Verify the search filter actually works: every returned log must
+        // match the search term in resource_target or description.
+        assert!(
+            response.audit_logs.iter().all(|l| {
+                l.resource_target.contains(&target) || l.description.contains(&target)
+            }),
+            "all returned audit logs should match the search term"
         );
 
         Ok(())
