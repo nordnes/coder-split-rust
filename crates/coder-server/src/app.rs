@@ -15548,6 +15548,11 @@ mod tests {
             app_id: Uuid,
             user_id: Uuid,
         ) -> Result<u64, StorageError> {
+            // Lock tokens first, then secrets — same order as list_oauth2_provider_app_tokens_by_app_and_user
+            let mut tokens = self
+                .oauth2_app_tokens
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let secrets = self
                 .oauth2_app_secrets
                 .lock()
@@ -15557,10 +15562,6 @@ mod tests {
                 .filter(|s| s.app_id == app_id)
                 .map(|s| s.id)
                 .collect();
-            let mut tokens = self
-                .oauth2_app_tokens
-                .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let before = tokens.len();
             tokens.retain(|_, t| {
                 !(t.user_id == user_id && app_secret_ids.contains(&t.app_secret_id))
