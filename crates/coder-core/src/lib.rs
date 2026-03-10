@@ -81,6 +81,7 @@ pub use identity::{
     CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateOrganizationInput,
     CreateOrganizationStoreError, CreateUserInput, CreateUserStoreError, CustomRoleRecord,
     FirstUserRecord, GroupMemberRecord, GroupRecord, InsertOrganizationMemberError, LoginType,
+    NotificationMessageRecord, NotificationMessageStatus, NotificationMethod,
     OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord, OAuth2ProviderAppSecretRecord,
     OAuth2ProviderAppTokenRecord, OrganizationMemberListFilter, OrganizationMemberRecord,
     OrganizationRecord, PasswordUserRecord, SlimRoleRecord, TokenConfigRecord,

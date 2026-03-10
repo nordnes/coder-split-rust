@@ -1642,11 +1642,15 @@ pub trait IdentityStore: Send + Sync {
     // ----- Notifications -----
 
     /// Fetches pending notification messages for dispatch.
+    ///
+    /// Messages with `attempt_count >= max_attempt_count` are excluded so they
+    /// can be purged separately rather than retried indefinitely.
     async fn fetch_pending_notification_messages(
         &self,
         limit: u32,
+        max_attempt_count: u32,
     ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = limit;
+        let _ = (limit, max_attempt_count);
         Err(StorageError::unavailable(
             "notification messages are not implemented",
         ))
@@ -2346,6 +2350,33 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         user_id: Uuid,
         task_notification_alert_dismissed: bool,
     ) -> Result<Option<UserPreferenceRecord>, StorageError>;
+
+    // ----- User identity supplements -----
+
+    /// Deletes a user configuration value.
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        let _ = (user_id, key);
+        Err(StorageError::unavailable(
+            "user configs are not implemented",
+        ))
+    }
+
+    /// Lists user links for a user.
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable("user links are not implemented"))
+    }
+
+    /// Lists status changes for a user.
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        let _ = user_id;
+        Err(StorageError::unavailable(
+            "user status changes are not implemented",
+        ))
+    }
 
     /// Lists organizations, optionally filtering by identifiers.
     async fn list_organizations(
@@ -4226,6 +4257,70 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
             "oauth2 provider app tokens are not implemented",
         ))
     }
+
+    // ----- Notification message dispatch -----
+
+    /// Fetches pending notification messages for dispatch.
+    ///
+    /// Messages with `attempt_count >= max_attempt_count` are excluded so they
+    /// can be purged separately rather than retried indefinitely.
+    async fn fetch_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        let _ = (limit, max_attempt_count);
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Updates the status of a notification message after dispatch.
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        let _ = (message_id, status);
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    /// Increments the attempt count for a notification message.
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let _ = message_id;
+        Err(StorageError::unavailable(
+            "notification messages are not implemented",
+        ))
+    }
+
+    // ----- Custom roles -----
+
+    /// Lists custom roles, optionally filtered by organization.
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        let _ = organization_id;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
+
+    /// Upserts a custom role.
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "custom roles are not implemented",
+        ))
+    }
 }
 
 /// Stored webpush subscription record.
@@ -5484,6 +5579,21 @@ where
     ) -> Result<u64, StorageError> {
         AppStore::delete_oauth2_provider_app_tokens_by_app_and_user(self, app_id, user_id).await
     }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        AppStore::delete_user_config(self, user_id, key).await
+    }
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        AppStore::list_user_links(self, user_id).await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        AppStore::list_user_status_changes(self, user_id).await
+    }
 }
 
 #[async_trait]
@@ -5893,6 +6003,21 @@ where
         (**self)
             .delete_oauth2_provider_app_tokens_by_app_and_user(app_id, user_id)
             .await
+    }
+
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
+        (**self).delete_user_config(user_id, key).await
+    }
+
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
+        (**self).list_user_links(user_id).await
+    }
+
+    async fn list_user_status_changes(
+        &self,
+        user_id: Uuid,
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+        (**self).list_user_status_changes(user_id).await
     }
 }
 
