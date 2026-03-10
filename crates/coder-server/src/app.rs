@@ -13592,22 +13592,23 @@ mod tests {
         ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
         CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
-        CreateFirstUserRequest, CreateFirstUserStoreError, CreateProvisionerJobInput,
-        CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest, CreateTemplateStoreError,
-        CreateTemplateVersionInput, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
-        CreateUserRequestWithOrgs, CreateUserStoreError, CreateWorkspaceBuildInput,
-        CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig, DeploymentMetadata,
-        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-        GetJobsToBeReapedInput, GitSshKeyRecord, HealthSettings, InsertAgentLogInput,
-        InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertFileResult,
-        InsertOrganizationMemberError, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
-        InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, InsertTaskInput,
-        InsertWorkspaceAppStatusInput, LogFormat, LoginType, LoginWithPasswordRequest,
-        NotificationMessageRecord, NotificationMessageStatus, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
-        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        CreateFirstUserRequest, CreateFirstUserStoreError, CreateGroupInput,
+        CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
+        CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
+        CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
+        CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig,
+        DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, DerpNodeConfig,
+        DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser,
+        FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
+        HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput,
+        InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
+        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LogFormat,
+        LoginType, LoginWithPasswordRequest, NotificationMessageRecord, NotificationMessageStatus,
+        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
+        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
@@ -13617,10 +13618,11 @@ mod tests {
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertCustomRoleInput,
         UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-        UserAppearanceRecord, UserConfigRecord, UserLinkRecord, UserListFilter,
-        UserPreferenceRecord, UserRecord, UserStatus, ValidateUserPasswordRequest,
-        WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
-        WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+        UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord,
+        UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+        UserStatusChangeRecord, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
+        WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
+        WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
         WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
         WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
         WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
@@ -13736,6 +13738,12 @@ mod tests {
         user_configs: Mutex<HashMap<(Uuid, String), UserConfigRecord>>,
         // Notification messages
         notification_messages: Mutex<Vec<NotificationMessageRecord>>,
+        // Groups
+        groups: Mutex<HashMap<Uuid, GroupRecord>>,
+        group_members: Mutex<Vec<GroupMemberRecord>>,
+        // User deletions and status changes
+        user_deletions: Mutex<Vec<UserDeletedRecord>>,
+        user_status_changes: Mutex<Vec<UserStatusChangeRecord>>,
     }
 
     impl FakeStore {
@@ -13812,6 +13820,10 @@ mod tests {
                 user_links: Mutex::new(HashMap::new()),
                 user_configs: Mutex::new(HashMap::new()),
                 notification_messages: Mutex::new(Vec::new()),
+                groups: Mutex::new(HashMap::new()),
+                group_members: Mutex::new(Vec::new()),
+                user_deletions: Mutex::new(Vec::new()),
+                user_status_changes: Mutex::new(Vec::new()),
             }
         }
 
@@ -18826,6 +18838,423 @@ mod tests {
                 Ok(false)
             }
         }
+
+        // -----------------------------------------------------------------
+        // Groups
+        // -----------------------------------------------------------------
+
+        async fn create_group(
+            &self,
+            input: &CreateGroupInput,
+        ) -> Result<GroupRecord, StorageError> {
+            let mut groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Check for duplicate name within the organization.
+            let duplicate = groups
+                .values()
+                .any(|g| g.organization_id == input.organization_id && g.name == input.name);
+            if duplicate {
+                return Err(StorageError::invalid_data(
+                    "group with this name already exists in the organization",
+                ));
+            }
+            let id = Uuid::new_v4();
+            let now = OffsetDateTime::now_utc();
+            let record = GroupRecord {
+                id,
+                name: input.name.clone(),
+                display_name: input.display_name.clone(),
+                organization_id: input.organization_id,
+                avatar_url: input.avatar_url.clone(),
+                quota_allowance: input.quota_allowance,
+                source: "user".to_owned(),
+                created_at: now,
+            };
+            groups.insert(id, record.clone());
+            Ok(record)
+        }
+
+        async fn find_group_by_id(
+            &self,
+            group_id: Uuid,
+        ) -> Result<Option<GroupRecord>, StorageError> {
+            Ok(self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&group_id)
+                .cloned())
+        }
+
+        async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
+            let removed = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&group_id)
+                .is_some();
+            if removed {
+                // Also remove all members of this group.
+                self.group_members
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?
+                    .retain(|m| m.group_id != group_id);
+            }
+            Ok(removed)
+        }
+
+        async fn list_groups(
+            &self,
+            organization_id: Uuid,
+        ) -> Result<Vec<GroupRecord>, StorageError> {
+            let groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<GroupRecord> = groups
+                .values()
+                .filter(|g| g.organization_id == organization_id)
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+            Ok(result)
+        }
+
+        async fn insert_group_member(
+            &self,
+            group_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<(), StorageError> {
+            let mut members = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let already_exists = members
+                .iter()
+                .any(|m| m.group_id == group_id && m.user_id == user_id);
+            if already_exists {
+                return Err(StorageError::invalid_data(
+                    "user is already a member of this group",
+                ));
+            }
+            members.push(GroupMemberRecord { group_id, user_id });
+            Ok(())
+        }
+
+        async fn delete_group_member(
+            &self,
+            group_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let mut members = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let before = members.len();
+            members.retain(|m| !(m.group_id == group_id && m.user_id == user_id));
+            Ok(members.len() < before)
+        }
+
+        async fn list_group_members(
+            &self,
+            group_id: Uuid,
+        ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+            let members = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(members
+                .iter()
+                .filter(|m| m.group_id == group_id)
+                .cloned()
+                .collect())
+        }
+
+        // -----------------------------------------------------------------
+        // User Links (upsert / delete)
+        // -----------------------------------------------------------------
+
+        async fn upsert_user_link(
+            &self,
+            user_id: Uuid,
+            input: &UpsertUserLinkInput,
+        ) -> Result<UserLinkRecord, StorageError> {
+            let mut links = self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let record = UserLinkRecord {
+                user_id,
+                login_type: input.login_type,
+                linked_id: input.linked_id.clone(),
+                oauth_access_token: input.oauth_access_token.clone(),
+                oauth_refresh_token: input.oauth_refresh_token.clone(),
+                oauth_expiry: input.oauth_expiry,
+            };
+            links.insert((user_id, input.login_type), record.clone());
+            Ok(record)
+        }
+
+        async fn delete_user_link(
+            &self,
+            user_id: Uuid,
+            login_type: LoginType,
+        ) -> Result<bool, StorageError> {
+            Ok(self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&(user_id, login_type))
+                .is_some())
+        }
+
+        // -----------------------------------------------------------------
+        // User Configs (get / upsert)
+        // -----------------------------------------------------------------
+
+        async fn get_user_config(
+            &self,
+            user_id: Uuid,
+            key: &str,
+        ) -> Result<Option<UserConfigRecord>, StorageError> {
+            Ok(self
+                .user_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&(user_id, key.to_owned()))
+                .cloned())
+        }
+
+        async fn upsert_user_config(
+            &self,
+            user_id: Uuid,
+            key: &str,
+            value: &str,
+        ) -> Result<UserConfigRecord, StorageError> {
+            let mut configs = self
+                .user_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let record = UserConfigRecord {
+                user_id,
+                key: key.to_owned(),
+                value: value.to_owned(),
+            };
+            configs.insert((user_id, key.to_owned()), record.clone());
+            Ok(record)
+        }
+
+        // -----------------------------------------------------------------
+        // User Deletion / Status Changes
+        // -----------------------------------------------------------------
+
+        async fn insert_user_deleted(
+            &self,
+            user_id: Uuid,
+            deleted_by: Option<Uuid>,
+            reason: &str,
+        ) -> Result<UserDeletedRecord, StorageError> {
+            let record = UserDeletedRecord {
+                id: Uuid::new_v4(),
+                user_id,
+                deleted_at: OffsetDateTime::now_utc(),
+                deleted_by,
+                reason: reason.to_owned(),
+            };
+            self.user_deletions
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(record.clone());
+            Ok(record)
+        }
+
+        async fn insert_user_status_change(
+            &self,
+            user_id: Uuid,
+            old_status: UserStatus,
+            new_status: UserStatus,
+            changed_by: Option<Uuid>,
+            reason: &str,
+        ) -> Result<UserStatusChangeRecord, StorageError> {
+            let record = UserStatusChangeRecord {
+                id: Uuid::new_v4(),
+                user_id,
+                new_status,
+                old_status,
+                changed_at: OffsetDateTime::now_utc(),
+                changed_by,
+                reason: reason.to_owned(),
+            };
+            self.user_status_changes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(record.clone());
+            Ok(record)
+        }
+
+        async fn list_user_status_changes(
+            &self,
+            user_id: Uuid,
+        ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+            let changes = self
+                .user_status_changes
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<UserStatusChangeRecord> = changes
+                .iter()
+                .filter(|c| c.user_id == user_id)
+                .cloned()
+                .collect();
+            result.sort_by_key(|c| c.changed_at);
+            Ok(result)
+        }
+
+        // -----------------------------------------------------------------
+        // Delete Custom Role
+        // -----------------------------------------------------------------
+
+        async fn delete_custom_role(
+            &self,
+            name: &str,
+            organization_id: Option<Uuid>,
+        ) -> Result<bool, StorageError> {
+            Ok(self
+                .custom_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&(name.to_lowercase(), organization_id))
+                .is_some())
+        }
+
+        // -----------------------------------------------------------------
+        // Workspace Domain
+        // -----------------------------------------------------------------
+
+        async fn find_workspace_port_share(
+            &self,
+            workspace_id: Uuid,
+            agent_name: &str,
+            port: i32,
+        ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
+            let shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(shares
+                .iter()
+                .find(|s| {
+                    s.workspace_id == workspace_id && s.agent_name == agent_name && s.port == port
+                })
+                .cloned())
+        }
+
+        async fn list_workspace_agents_by_resource_ids(
+            &self,
+            resource_ids: &[Uuid],
+        ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<WorkspaceAgentRow> = agents
+                .values()
+                .filter(|a| resource_ids.contains(&a.resource_id))
+                .cloned()
+                .collect();
+            result.sort_by_key(|a| a.created_at);
+            Ok(result)
+        }
+
+        async fn list_workspace_agent_script_timings_by_build_id(
+            &self,
+            build_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
+            // Walk: build -> resources (via job_id) -> agents (via resource_id)
+            //       -> scripts (via workspace_agent_id) -> timings (via script_id)
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let build = match builds.get(&build_id) {
+                Some(b) => b.clone(),
+                None => return Ok(Vec::new()),
+            };
+            drop(builds);
+
+            let resources = self
+                .workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let resource_ids: Vec<Uuid> = resources
+                .values()
+                .flatten()
+                .filter(|r| r.job_id == build.job_id)
+                .map(|r| r.id)
+                .collect();
+            drop(resources);
+
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let agent_map: HashMap<Uuid, WorkspaceAgentRow> = agents
+                .values()
+                .filter(|a| resource_ids.contains(&a.resource_id))
+                .map(|a| (a.id, a.clone()))
+                .collect();
+            drop(agents);
+
+            let scripts = self
+                .workspace_agent_scripts
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let matching_scripts: Vec<&WorkspaceAgentScriptRow> = scripts
+                .iter()
+                .filter(|s| agent_map.contains_key(&s.workspace_agent_id))
+                .collect();
+
+            // For the fake store, we don't have a separate script-timings table.
+            // Build timing rows from the scripts themselves with default timing
+            // data. In tests, this provides the structural join that the real
+            // query performs.
+            let mut result = Vec::new();
+            for script in matching_scripts {
+                if let Some(agent) = agent_map.get(&script.workspace_agent_id) {
+                    result.push(WorkspaceAgentScriptTimingRow {
+                        script_id: script.id,
+                        started_at: script.created_at,
+                        ended_at: script.created_at,
+                        exit_code: 0,
+                        stage: "start".to_owned(),
+                        status: "ok".to_owned(),
+                        display_name: script.display_name.clone(),
+                        workspace_agent_id: agent.id,
+                        workspace_agent_name: agent.name.clone(),
+                    });
+                }
+            }
+            Ok(result)
+        }
+
+        async fn next_workspace_build_number(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<i64, StorageError> {
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let max = builds
+                .values()
+                .filter(|b| b.workspace_id == workspace_id)
+                .map(|b| b.build_number)
+                .max()
+                .unwrap_or(0);
+            Ok(max + 1)
+        }
+
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
