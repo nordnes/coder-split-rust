@@ -332,6 +332,7 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "coder-rbac",
+ "sqlx",
  "tracing",
  "uuid",
 ]
@@ -379,9 +380,11 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "sqlx",
  "subtle",
  "thiserror 2.0.18",
  "time",
+ "tokio",
  "url",
  "uuid",
 ]
@@ -397,6 +400,7 @@ dependencies = [
  "sqlx",
  "thiserror 2.0.18",
  "time",
+ "tokio",
  "tracing",
  "uuid",
 ]

@@ -9,8 +9,9 @@ use uuid::Uuid;
 use crate::{api::ApiAllowListTarget, ports::StorageError};
 
 /// Supported login types for the Rust identity slice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "login_type", rename_all = "snake_case")]
 pub enum LoginType {
     /// Password-backed local account.
     Password,
@@ -58,8 +59,9 @@ impl FromStr for LoginType {
 }
 
 /// Supported user states for the Rust identity slice.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
 #[serde(rename_all = "snake_case")]
+#[sqlx(type_name = "user_status", rename_all = "snake_case")]
 pub enum UserStatus {
     /// Active user that may log in.
     Active,
@@ -161,6 +163,8 @@ pub struct AuthenticatedUser {
     pub organization_ids: Vec<Uuid>,
     /// Site-wide RBAC roles.
     pub roles: Vec<SlimRoleRecord>,
+    /// Organization-scoped RBAC roles in `"role_name:org_id"` format.
+    pub org_roles: Vec<String>,
     /// Login type for the account.
     pub login_type: LoginType,
     /// Current user status.
@@ -180,6 +184,7 @@ impl From<UserRecord> for AuthenticatedUser {
             last_seen_at: value.last_seen_at,
             organization_ids: value.organization_ids,
             roles: value.roles,
+            org_roles: vec![],
             login_type: value.login_type,
             status: value.status,
         }
