@@ -1,7 +1,7 @@
 //! Workspace agent connectivity layer.
 //!
 //! Provides the [`AgentProvider`] trait for tracking live agent connections and
-//! the [`InMemoryAgentProvider`] default implementation backed by a `DashMap`.
+//! the [`InMemoryAgentProvider`] default implementation backed by a `Mutex<HashMap>`.
 
 use std::{collections::HashMap, fmt, sync::Arc};
 
