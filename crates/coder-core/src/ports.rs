@@ -6205,6 +6205,8 @@ where
 
     async fn get_user_status_counts(
         &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
         timezone: &str,
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
@@ -6270,6 +6272,8 @@ where
 
     async fn get_user_status_counts(
         &self,
+        start_time: OffsetDateTime,
+        end_time: OffsetDateTime,
         timezone: &str,
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
