@@ -498,4 +498,98 @@ mod tests {
         let map = build_derp_map_from_config(&[]);
         assert!(map.regions.is_empty());
     }
+
+    #[test]
+    fn test_coordinator_register_peer() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let peer_id = Uuid::new_v4();
+
+        coordinator.add_peer(peer_id, "my-agent".to_string(), PeerKind::Agent);
+
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["total_peers"], 1);
+        assert_eq!(debug["agents"][0]["name"], "my-agent");
+        assert_eq!(debug["agents"][0]["id"], peer_id.to_string());
+    }
+
+    #[test]
+    fn test_coordinator_deregister_peer() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let peer_id = Uuid::new_v4();
+
+        coordinator.add_peer(peer_id, "temp-peer".to_string(), PeerKind::Client);
+        assert_eq!(coordinator.debug_json()["total_peers"], 1);
+
+        coordinator.remove_peer(peer_id);
+        assert_eq!(coordinator.debug_json()["total_peers"], 0);
+    }
+
+    #[test]
+    fn test_coordinator_update_derp_map() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        assert!(coordinator.derp_map().regions.is_empty());
+
+        let mut new_map = DERPMap::default();
+        new_map.regions.insert(
+            "2".to_string(),
+            DERPMapRegion {
+                region_id: 2,
+                region_code: "eu-west".to_string(),
+                region_name: "EU West".to_string(),
+                avoid: false,
+                nodes: vec![],
+            },
+        );
+
+        coordinator.update_derp_map(new_map);
+        let map = coordinator.derp_map();
+        assert_eq!(map.regions.len(), 1);
+        assert!(map.regions.contains_key("2"));
+        assert_eq!(map.regions["2"].region_code, "eu-west");
+    }
+
+    #[test]
+    fn test_coordinator_multiple_peers() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+
+        let ids: Vec<Uuid> = (0..5).map(|_| Uuid::new_v4()).collect();
+        for (i, id) in ids.iter().enumerate() {
+            coordinator.add_peer(*id, format!("peer-{i}"), PeerKind::Agent);
+        }
+
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["total_peers"], 5);
+    }
+
+    #[test]
+    fn test_coordinator_peer_kinds() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+
+        let agent_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+
+        coordinator.add_peer(agent_id, "agent".to_string(), PeerKind::Agent);
+        coordinator.add_peer(client_id, "client".to_string(), PeerKind::Client);
+
+        let debug = coordinator.debug_json();
+        assert_eq!(debug["agents"].as_array().map(|a| a.len()), Some(1));
+        assert_eq!(debug["clients"].as_array().map(|a| a.len()), Some(1));
+    }
+
+    #[test]
+    fn test_peer_info_creation() {
+        let id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let info = PeerInfo {
+            id,
+            name: "test-peer".to_string(),
+            kind: PeerKind::Agent,
+            connected_at: now,
+        };
+
+        assert_eq!(info.id, id);
+        assert_eq!(info.name, "test-peer");
+        assert_eq!(info.kind, PeerKind::Agent);
+        assert_eq!(info.connected_at, now);
+    }
 }

@@ -257,4 +257,81 @@ mod tests {
         let info = provider.debug_info().await;
         assert_eq!(info.len(), 2);
     }
+
+    #[tokio::test]
+    async fn test_agent_provider_register_connection() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+
+        assert!(provider.get_agent_connection(agent_id).await.is_none());
+
+        provider.register_agent(agent_id, conn).await;
+        let found = provider.get_agent_connection(agent_id).await;
+        assert!(found.is_some());
+        assert_eq!(found.map(|c| c.agent_id()), Some(agent_id));
+    }
+
+    #[tokio::test]
+    async fn test_agent_provider_deregister() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+
+        provider.register_agent(agent_id, conn.clone()).await;
+        assert!(provider.get_agent_connection(agent_id).await.is_some());
+
+        provider.remove_agent(agent_id, &conn).await;
+        assert!(provider.get_agent_connection(agent_id).await.is_none());
+    }
+
+    #[tokio::test]
+    async fn test_agent_provider_list_connections() {
+        let provider = InMemoryAgentProvider::new();
+        let ids: Vec<Uuid> = (0..3).map(|_| Uuid::new_v4()).collect();
+
+        for id in &ids {
+            provider
+                .register_agent(
+                    *id,
+                    Arc::new(StubConnection {
+                        id: *id,
+                        connected: OffsetDateTime::now_utc(),
+                    }),
+                )
+                .await;
+        }
+
+        let info = provider.debug_info().await;
+        assert_eq!(info.len(), 3);
+        for id in &ids {
+            assert!(
+                info.iter().any(|i| i.agent_id == *id),
+                "expected agent {id} in debug_info"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_agent_provider_connection_info_fields() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let connected_at = OffsetDateTime::now_utc();
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: connected_at,
+        });
+
+        provider.register_agent(agent_id, conn).await;
+        let info = provider.debug_info().await;
+        assert_eq!(info.len(), 1);
+        assert_eq!(info[0].agent_id, agent_id);
+        assert_eq!(info[0].connected_at, connected_at);
+    }
 }
