@@ -3239,6 +3239,7 @@ impl AppStore for PostgresStore {
                         JOIN workspace_apps AS app ON app.agent_id = agent.id
                         WHERE
                                 ws.deleted = FALSE
+                            AND agent.deleted = FALSE
                         AND CASE WHEN COALESCE(array_length($3::uuid[], 1), 0) > 0 THEN ws.template_id = ANY($3::uuid[]) ELSE TRUE END
                             ORDER BY ws.template_id, app.slug, app.created_at DESC
                     ),
