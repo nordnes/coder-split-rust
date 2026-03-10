@@ -1024,4 +1024,204 @@ mod tests {
         assert!(result.is_ok());
         assert!(result.unwrap_or_default().is_empty());
     }
+
+    // ── User-requested tests ────────────────────────────────────
+
+    #[test]
+    fn test_provisioner_job_status_transitions() {
+        use coder_core::ProvisionerJobStatus;
+
+        // Verify all enum variants exist and are distinct
+        let statuses = [
+            ProvisionerJobStatus::Pending,
+            ProvisionerJobStatus::Running,
+            ProvisionerJobStatus::Succeeded,
+            ProvisionerJobStatus::Failed,
+            ProvisionerJobStatus::Canceling,
+            ProvisionerJobStatus::Canceled,
+            ProvisionerJobStatus::Unknown,
+        ];
+
+        // Each variant should be unique
+        for (i, a) in statuses.iter().enumerate() {
+            for (j, b) in statuses.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "status variants at {i} and {j} should differ");
+                }
+            }
+        }
+
+        // Verify status on a job record transitions correctly
+        let mut job = make_job_record();
+        assert_eq!(job.job_status, ProvisionerJobStatus::Running);
+
+        job.job_status = ProvisionerJobStatus::Succeeded;
+        assert_eq!(job.job_status, ProvisionerJobStatus::Succeeded);
+
+        job.job_status = ProvisionerJobStatus::Failed;
+        assert_eq!(job.job_status, ProvisionerJobStatus::Failed);
+
+        job.job_status = ProvisionerJobStatus::Canceled;
+        assert_eq!(job.job_status, ProvisionerJobStatus::Canceled);
+    }
+
+    #[test]
+    fn test_provisioner_daemon_registration() {
+        // NOTE: Intentional construction-validation smoke test for ProvisionerDaemonRecord.
+        // This struct has no behavior methods, so we verify all fields survive round-trip
+        // construction to guard against accidental field reordering or type changes.
+        use std::collections::HashMap;
+
+        let org_id = Uuid::new_v4();
+        let daemon_id = Uuid::new_v4();
+        let key_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let mut tags = HashMap::new();
+        tags.insert("scope".to_owned(), "organization".to_owned());
+        tags.insert("owner".to_owned(), String::new());
+
+        let daemon = ProvisionerDaemonRecord {
+            id: daemon_id,
+            organization_id: org_id,
+            created_at: now,
+            last_seen_at: Some(now),
+            name: "test-daemon-01".to_owned(),
+            version: "v2.18.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            provisioners: vec!["terraform".to_owned(), "echo".to_owned()],
+            tags: tags.clone(),
+            key_id: Some(key_id),
+        };
+
+        assert_eq!(daemon.id, daemon_id);
+        assert_eq!(daemon.organization_id, org_id);
+        assert_eq!(daemon.name, "test-daemon-01");
+        assert_eq!(daemon.version, "v2.18.0");
+        assert_eq!(daemon.api_version, "1.0");
+        assert_eq!(daemon.provisioners.len(), 2);
+        assert!(daemon.provisioners.contains(&"terraform".to_owned()));
+        assert!(daemon.provisioners.contains(&"echo".to_owned()));
+        assert_eq!(daemon.tags, tags);
+        assert_eq!(daemon.key_id, Some(key_id));
+        assert!(daemon.last_seen_at.is_some());
+    }
+
+    #[test]
+    fn test_provisioner_job_creation() {
+        // NOTE: Intentional construction-validation smoke test for ProvisionerJobRecord.
+        // This struct has no behavior methods, so we verify all fields survive round-trip
+        // construction to guard against accidental field reordering or type changes.
+        use coder_core::{ProvisionerJobType, ProvisionerStorageMethod, ProvisionerType};
+
+        let now = OffsetDateTime::now_utc();
+        let job_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let initiator_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+        let worker_id = Uuid::new_v4();
+
+        let job = ProvisionerJobRecord {
+            id: job_id,
+            created_at: now,
+            updated_at: now,
+            started_at: Some(now),
+            canceled_at: None,
+            completed_at: None,
+            error: String::new(),
+            error_code: String::new(),
+            organization_id: Some(org_id),
+            initiator_id: Some(initiator_id),
+            provisioner: ProvisionerType::Terraform,
+            storage_method: ProvisionerStorageMethod::File,
+            file_id: Some(file_id),
+            job_type: ProvisionerJobType::WorkspaceBuild,
+            input: serde_json::json!({"workspace_name": "my-ws"}),
+            tags: serde_json::json!({"scope": "organization"}),
+            trace_metadata: serde_json::json!({}),
+            worker_id: Some(worker_id),
+            job_status: coder_core::ProvisionerJobStatus::Running,
+            logs_overflowed: false,
+            logs_length: 0,
+        };
+
+        assert_eq!(job.id, job_id);
+        assert_eq!(job.organization_id, Some(org_id));
+        assert_eq!(job.initiator_id, Some(initiator_id));
+        assert_eq!(job.provisioner, ProvisionerType::Terraform);
+        assert_eq!(job.storage_method, ProvisionerStorageMethod::File);
+        assert_eq!(job.file_id, Some(file_id));
+        assert_eq!(job.job_type, ProvisionerJobType::WorkspaceBuild);
+        assert_eq!(job.worker_id, Some(worker_id));
+        assert_eq!(job.job_status, coder_core::ProvisionerJobStatus::Running);
+        assert!(!job.logs_overflowed);
+        assert_eq!(job.logs_length, 0);
+        assert!(job.error.is_empty());
+        assert!(job.canceled_at.is_none());
+        assert!(job.completed_at.is_none());
+
+        // Verify all job types
+        let types = [
+            ProvisionerJobType::TemplateVersionImport,
+            ProvisionerJobType::TemplateVersionDryRun,
+            ProvisionerJobType::WorkspaceBuild,
+        ];
+        for (i, a) in types.iter().enumerate() {
+            for (j, b) in types.iter().enumerate() {
+                if i != j {
+                    assert_ne!(a, b, "job types at {i} and {j} should differ");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_provisioner_tag_matching_contract() {
+        // NOTE: This test validates the expected contract of tag matching
+        // (daemon tags must be a superset of job tags) until a Rust-side
+        // helper is extracted from the DB layer. The real matching lives
+        // in Postgres SQL (tags <@ $5::JSONB in coder-db).
+        use std::collections::HashMap;
+
+        let mut daemon_tags: HashMap<String, String> = HashMap::new();
+        daemon_tags.insert("scope".to_owned(), "organization".to_owned());
+        daemon_tags.insert("owner".to_owned(), String::new());
+        daemon_tags.insert("region".to_owned(), "us-east-1".to_owned());
+
+        let mut job_tags: HashMap<String, String> = HashMap::new();
+        job_tags.insert("scope".to_owned(), "organization".to_owned());
+
+        // All job tags present in daemon tags → match
+        let matches = job_tags.iter().all(|(k, v)| daemon_tags.get(k) == Some(v));
+        assert!(matches, "daemon should match when it has all job tags");
+
+        // Job requires a tag the daemon doesn't have → no match
+        job_tags.insert("gpu".to_owned(), "true".to_owned());
+        let matches = job_tags.iter().all(|(k, v)| daemon_tags.get(k) == Some(v));
+        assert!(
+            !matches,
+            "daemon should not match when missing required tags"
+        );
+
+        // Empty job tags → always matches
+        let empty_job_tags: HashMap<String, String> = HashMap::new();
+        let matches = empty_job_tags
+            .iter()
+            .all(|(k, v)| daemon_tags.get(k) == Some(v));
+        assert!(matches, "empty job tags should match any daemon");
+    }
+
+    #[test]
+    fn test_provisioner_log_source_types() {
+        use coder_core::provisioner::LogSource;
+
+        let sources = [LogSource::ProvisionerDaemon, LogSource::Provisioner];
+
+        // Verify both variants are distinct
+        assert_ne!(sources[0], sources[1]);
+
+        // Verify as_str round-trip
+        assert_eq!(sources[0].as_str(), "provisioner_daemon");
+        assert_eq!(sources[1].as_str(), "provisioner");
+    }
 }

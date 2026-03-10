@@ -421,6 +421,7 @@ dependencies = [
  "coder-core",
  "coder-rbac",
  "thiserror",
+ "time",
  "uuid",
 ]
 

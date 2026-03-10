@@ -1439,4 +1439,202 @@ mod tests {
             matches!(result, Err(validations) if validations[0].detail == "unsupported role: bogus")
         );
     }
+
+    // ── LoginType tests ─────────────────────────────────────────
+
+    #[test]
+    fn test_login_type_variants() {
+        let variants = [
+            (LoginType::Password, "password"),
+            (LoginType::Github, "github"),
+            (LoginType::Oidc, "oidc"),
+            (LoginType::Token, "token"),
+            (LoginType::None, "none"),
+            (LoginType::Oauth2ProviderApp, "oauth2_provider_app"),
+        ];
+
+        for (variant, expected_str) in &variants {
+            assert_eq!(variant.as_str(), *expected_str);
+        }
+
+        // Round-trip through FromStr
+        for (variant, wire_str) in &variants {
+            let parsed: Result<LoginType, _> = wire_str.parse();
+            assert!(
+                parsed.is_ok(),
+                "should parse '{wire_str}' back to LoginType"
+            );
+            assert_eq!(parsed.ok(), Some(*variant));
+        }
+
+        // Unknown string should fail
+        let bad: Result<LoginType, _> = "bogus_login".parse();
+        assert!(bad.is_err(), "unknown login type should fail to parse");
+    }
+
+    // ── Create-user validation tests ─────────────────────────────
+
+    #[test]
+    fn test_non_password_login_type_rejects_password() {
+        // Validate that create-user validation rejects passwords for
+        // non-password login types (Github, Oidc, None).
+        for login_type in [LoginType::Github, LoginType::Oidc, LoginType::None] {
+            let validations = validate_create_user_request(
+                &CreateUserRequestWithOrgs {
+                    email: "ext@example.com".to_owned(),
+                    username: "extuser".to_owned(),
+                    name: "External User".to_owned(),
+                    password: "should-not-be-set".to_owned(),
+                    login_type: Some(login_type),
+                    organization_ids: vec![Uuid::new_v4()],
+                    user_status: Some(UserStatus::Active),
+                },
+                login_type,
+            );
+
+            assert!(
+                validations.iter().any(|v| v.field == "password"
+                    && v.detail
+                        .contains("password cannot be set for non-password authentication")),
+                "login type {:?} should reject password",
+                login_type
+            );
+        }
+    }
+
+    #[test]
+    fn test_unsupported_and_password_login_type_validation() {
+        // Token and Oauth2ProviderApp are unsupported for manual user creation.
+        for login_type in [LoginType::Token, LoginType::Oauth2ProviderApp] {
+            let validations = validate_create_user_request(
+                &CreateUserRequestWithOrgs {
+                    email: "token@example.com".to_owned(),
+                    username: "tokenuser".to_owned(),
+                    name: "Token User".to_owned(),
+                    password: String::new(),
+                    login_type: Some(login_type),
+                    organization_ids: vec![Uuid::new_v4()],
+                    user_status: Some(UserStatus::Active),
+                },
+                login_type,
+            );
+
+            assert!(
+                validations.iter().any(|v| v.field == "login_type"
+                    && v.detail
+                        .contains("unsupported login type for manual user creation")),
+                "login type {:?} should be rejected for manual creation",
+                login_type
+            );
+        }
+
+        // A valid password-type user should produce no validation errors
+        // (except the missing organizations, which we supply here).
+        let validations = validate_create_user_request(
+            &CreateUserRequestWithOrgs {
+                email: "valid@example.com".to_owned(),
+                username: "validuser".to_owned(),
+                name: "Valid User".to_owned(),
+                password: "StrongP@ss1234".to_owned(),
+                login_type: Some(LoginType::Password),
+                organization_ids: vec![Uuid::new_v4()],
+                user_status: Some(UserStatus::Active),
+            },
+            LoginType::Password,
+        );
+        assert!(
+            validations.is_empty(),
+            "valid password user should have no validation errors, got: {validations:?}"
+        );
+    }
+
+    // ── UserLinkRecord tests ────────────────────────────────────
+
+    #[test]
+    fn test_user_link_record_creation() {
+        // NOTE: Intentional construction-validation smoke test for UserLinkRecord.
+        // This struct has no behavior methods, so we verify all fields survive round-trip
+        // construction to guard against accidental field reordering or type changes.
+        let user_id = Uuid::new_v4();
+        let now = time::OffsetDateTime::now_utc();
+        let link = UserLinkRecord {
+            user_id,
+            login_type: LoginType::Github,
+            linked_id: "gh-12345".to_owned(),
+            oauth_access_token: "access-token-abc".to_owned(),
+            oauth_refresh_token: "refresh-token-xyz".to_owned(),
+            oauth_expiry: now,
+        };
+
+        assert_eq!(link.user_id, user_id);
+        assert_eq!(link.login_type, LoginType::Github);
+        assert_eq!(link.linked_id, "gh-12345");
+        assert!(!link.oauth_access_token.is_empty());
+        assert!(!link.oauth_refresh_token.is_empty());
+
+        // Verify a different login type
+        let oidc_link = UserLinkRecord {
+            user_id,
+            login_type: LoginType::Oidc,
+            linked_id: "oidc-sub-001".to_owned(),
+            oauth_access_token: String::new(),
+            oauth_refresh_token: String::new(),
+            oauth_expiry: now,
+        };
+
+        assert_eq!(oidc_link.login_type, LoginType::Oidc);
+        assert_eq!(oidc_link.linked_id, "oidc-sub-001");
+    }
+
+    // ── Identity provider display names ─────────────────────────
+
+    #[test]
+    fn test_identity_provider_display_names() {
+        // Site-level roles must have human-readable display names.
+        // These must match coder_rbac::site_builtin_roles() — update if roles change.
+        let site_roles = site_builtin_roles();
+        assert!(!site_roles.is_empty(), "should have site roles");
+
+        let expected_site = [
+            ("owner", "Owner"),
+            ("member", "Member"),
+            ("template-admin", "Template Admin"),
+            ("user-admin", "User Admin"),
+            ("auditor", "Auditor"),
+        ];
+        for (name, display) in &expected_site {
+            let role = site_roles.iter().find(|r| r.name == *name);
+            assert!(role.is_some(), "site role '{name}' should exist");
+            assert_eq!(
+                role.map(|r| r.display_name),
+                Some(*display),
+                "display name mismatch for role '{name}'"
+            );
+        }
+
+        // Organization roles
+        let org_roles = organization_builtin_roles();
+        assert!(!org_roles.is_empty(), "should have organization roles");
+
+        for role in org_roles {
+            assert!(
+                !role.display_name.is_empty(),
+                "org role '{}' must have a display name",
+                role.name
+            );
+        }
+
+        // assignable_role_response must produce correct display names
+        let first_site = &site_roles[0];
+        let response = assignable_role_response(first_site, None, true);
+        assert_eq!(response.role.display_name, first_site.display_name);
+        assert!(response.assignable);
+        assert!(response.built_in);
+
+        // With an org id, the organization_id field should be set
+        let org_id = Uuid::new_v4();
+        let response_with_org = assignable_role_response(first_site, Some(org_id), false);
+        assert_eq!(response_with_org.role.organization_id, org_id.to_string());
+        assert!(!response_with_org.assignable);
+    }
 }
