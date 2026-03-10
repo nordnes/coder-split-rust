@@ -37028,4 +37028,744 @@ mod tests {
 
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Workspace build handlers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn happy_workspace_build_resources_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        let ws = create_test_workspace(&app, &session_token, org_id, template_id, "res-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id_str = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        let job_id = Uuid::parse_str(
+            build
+                .get("job_id")
+                .and_then(Value::as_str)
+                .ok_or("missing job_id")?,
+        )?;
+
+        // Seed a resource for the build's job.
+        let resource_id = Uuid::new_v4();
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(WorkspaceResourceRecord {
+                id: resource_id,
+                created_at: OffsetDateTime::now_utc(),
+                job_id,
+                transition: "start".to_owned(),
+                resource_type: "docker_container".to_owned(),
+                name: "main".to_owned(),
+                hide: false,
+                icon: String::new(),
+                daily_cost: 0,
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/resources"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let resources = body.as_array().ok_or("expected resources array")?;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(
+            resources[0].get("name").and_then(Value::as_str),
+            Some("main")
+        );
+        assert_eq!(
+            resources[0].get("type").and_then(Value::as_str),
+            Some("docker_container")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_workspace_build_state_returns_data() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "state-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id_str = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        let build_id = Uuid::parse_str(build_id_str)?;
+
+        // Seed provisioner state on the build.
+        let state_data = b"terraform-state-blob".to_vec();
+        {
+            let mut builds = store
+                .workspace_builds
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            if let Some(b) = builds.get_mut(&build_id) {
+                b.provisioner_state = Some(state_data.clone());
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/state"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        assert_eq!(body_bytes.as_ref(), b"terraform-state-blob");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_workspace_build_logs_returns_array() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "logs-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id_str = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        let job_id = Uuid::parse_str(
+            build
+                .get("job_id")
+                .and_then(Value::as_str)
+                .ok_or("missing job_id")?,
+        )?;
+
+        // Seed a provisioner job log for the build's job.
+        store
+            .provisioner_job_logs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobLogRecord {
+                id: 1,
+                job_id,
+                created_at: OffsetDateTime::now_utc(),
+                source: "provisioner".to_owned(),
+                level: "info".to_owned(),
+                stage: "init".to_owned(),
+                output: "Initializing resources...".to_owned(),
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected logs array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Initializing resources...")
+        );
+        assert_eq!(
+            logs[0].get("log_source").and_then(Value::as_str),
+            Some("provisioner")
+        );
+        assert_eq!(logs[0].get("stage").and_then(Value::as_str), Some("init"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_workspace_build_timings_returns_data() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "timings-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let build_id_str = build
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing build id")?;
+        let job_id = Uuid::parse_str(
+            build
+                .get("job_id")
+                .and_then(Value::as_str)
+                .ok_or("missing job_id")?,
+        )?;
+
+        // Seed a provisioner job timing for the build's job.
+        store
+            .provisioner_job_timings
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobTimingRecord {
+                job_id,
+                started_at: OffsetDateTime::now_utc(),
+                ended_at: OffsetDateTime::now_utc(),
+                stage: "plan".to_owned(),
+                source: "provisioner".to_owned(),
+                action: "create".to_owned(),
+                resource: "docker_container".to_owned(),
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspacebuilds/{build_id_str}/timings"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let prov_timings = body
+            .get("provisioner_timings")
+            .and_then(Value::as_array)
+            .ok_or("expected provisioner_timings array")?;
+        assert_eq!(prov_timings.len(), 1);
+        assert_eq!(
+            prov_timings[0].get("stage").and_then(Value::as_str),
+            Some("plan")
+        );
+        assert_eq!(
+            prov_timings[0].get("action").and_then(Value::as_str),
+            Some("create")
+        );
+        assert_eq!(
+            prov_timings[0].get("resource").and_then(Value::as_str),
+            Some("docker_container")
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Agent handlers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn happy_workspace_agent_list_returns_agents() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let (session_token, org_id, template) = create_test_template(&app).await?;
+
+        let template_id = template
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing template id")?;
+
+        let ws =
+            create_test_workspace(&app, &session_token, org_id, template_id, "agent-ws").await?;
+        let ws_id = ws
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing workspace id")?;
+
+        // Create a build so we can associate a resource and agent.
+        let build_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{ws_id}/builds"),
+                &session_token,
+                &json!({"transition": "start"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(build_resp.status(), StatusCode::CREATED);
+        let build = response_json(build_resp).await?;
+        let job_id = Uuid::parse_str(
+            build
+                .get("job_id")
+                .and_then(Value::as_str)
+                .ok_or("missing job_id")?,
+        )?;
+
+        // Seed a resource and agent tied to this build's job.
+        let resource_id = Uuid::new_v4();
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(WorkspaceResourceRecord {
+                id: resource_id,
+                created_at: OffsetDateTime::now_utc(),
+                job_id,
+                transition: "start".to_owned(),
+                resource_type: "docker_container".to_owned(),
+                name: "main".to_owned(),
+                hide: false,
+                icon: String::new(),
+                daily_cost: 0,
+            });
+
+        let agent_id = Uuid::new_v4();
+        let mut agent = make_connected_agent(agent_id);
+        agent.resource_id = resource_id;
+        store.insert_agent(agent)?;
+
+        // Verify via GET /workspaceagents/{agent} that the agent exists.
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some(agent_id.to_string()).as_deref()
+        );
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("test-agent"));
+        assert_eq!(
+            body.get("operating_system").and_then(Value::as_str),
+            Some("linux")
+        );
+        assert_eq!(
+            body.get("architecture").and_then(Value::as_str),
+            Some("amd64")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_workspace_agent_logs_returns_array() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        let log_source_id = Uuid::new_v4();
+        store
+            .workspace_agent_logs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentLogRow {
+                id: 1,
+                agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                output: "Agent log line 1".to_owned(),
+                level: "info".to_owned(),
+                log_source_id,
+            });
+        store
+            .workspace_agent_logs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentLogRow {
+                id: 2,
+                agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                output: "Agent log line 2".to_owned(),
+                level: "warn".to_owned(),
+                log_source_id,
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/logs"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected logs array")?;
+        assert_eq!(logs.len(), 2);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Agent log line 1")
+        );
+        assert_eq!(
+            logs[1].get("output").and_then(Value::as_str),
+            Some("Agent log line 2")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_workspace_agent_startup_logs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        let log_source_id = Uuid::new_v4();
+        store
+            .workspace_agent_logs
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentLogRow {
+                id: 1,
+                agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                output: "Startup log entry".to_owned(),
+                level: "info".to_owned(),
+                log_source_id,
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/startup-logs"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected logs array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Startup log entry")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_workspace_agent_listening_ports() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceagents/{agent_id}/listening-ports"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let ports = body
+            .get("ports")
+            .and_then(Value::as_array)
+            .ok_or("expected ports array")?;
+        // Ports are reported by agent in real-time; stub returns empty array.
+        assert!(ports.is_empty());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Provisioner handlers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn happy_provisioner_daemons_list() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerdaemons"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let daemons = body.as_array().ok_or("expected array")?;
+        // Provisioner domain is a stub; returns empty array.
+        assert!(daemons.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_provisioner_job_logs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(7000);
+        seed_provisioner_job(&store, job_id, org_id);
+
+        // Seed logs for the provisioner job.
+        store
+            .provisioner_job_logs
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .entry(job_id)
+            .or_default()
+            .push(PortsJobLogRecord {
+                id: 1,
+                job_id,
+                created_at: OffsetDateTime::now_utc(),
+                source: "provisioner".to_owned(),
+                level: "info".to_owned(),
+                stage: "apply".to_owned(),
+                output: "Applying changes...".to_owned(),
+            });
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}/logs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected logs array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(
+            logs[0].get("output").and_then(Value::as_str),
+            Some("Applying changes...")
+        );
+        assert_eq!(
+            logs[0].get("log_source").and_then(Value::as_str),
+            Some("provisioner")
+        );
+        assert_eq!(logs[0].get("stage").and_then(Value::as_str), Some("apply"));
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path integration tests: Template version handlers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn happy_template_version_resources() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        // Seed a template version directly in the store.
+        let version_id = Uuid::new_v4();
+        let org_id = first_organization_id(&app, &token).await?;
+        store
+            .template_versions
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                version_id,
+                TemplateVersionRecord {
+                    id: version_id,
+                    template_id: None,
+                    organization_id: org_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    name: "v1.0.0".to_owned(),
+                    readme: String::new(),
+                    job_id: Uuid::new_v4(),
+                    created_by: Uuid::nil(),
+                    external_auth_providers: Value::Array(Vec::new()),
+                    message: String::new(),
+                    archived: false,
+                    source_example_id: None,
+                    has_ai_task: None,
+                    has_external_agent: None,
+                    created_by_avatar_url: String::new(),
+                    created_by_username: String::new(),
+                    created_by_name: String::new(),
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{version_id}/resources"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let resources = body.as_array().ok_or("expected resources array")?;
+        // Resources are populated by the provisioner daemon; stub returns empty.
+        assert!(resources.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_template_version_logs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+
+        // Seed a template version directly in the store.
+        let version_id = Uuid::new_v4();
+        let org_id = first_organization_id(&app, &token).await?;
+        store
+            .template_versions
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?
+            .insert(
+                version_id,
+                TemplateVersionRecord {
+                    id: version_id,
+                    template_id: None,
+                    organization_id: org_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    name: "v1.0.0".to_owned(),
+                    readme: String::new(),
+                    job_id: Uuid::new_v4(),
+                    created_by: Uuid::nil(),
+                    external_auth_providers: Value::Array(Vec::new()),
+                    message: String::new(),
+                    archived: false,
+                    source_example_id: None,
+                    has_ai_task: None,
+                    has_external_agent: None,
+                    created_by_avatar_url: String::new(),
+                    created_by_username: String::new(),
+                    created_by_name: String::new(),
+                },
+            );
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{version_id}/logs"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected logs array")?;
+        // Logs are populated by the provisioner; stub returns empty.
+        assert!(logs.is_empty());
+        Ok(())
+    }
 }
