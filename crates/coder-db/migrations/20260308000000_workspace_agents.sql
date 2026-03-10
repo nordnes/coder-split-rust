@@ -1,110 +1,149 @@
 -- Workspace agent infrastructure tables.
 
 -- Enum: workspace agent lifecycle state
-CREATE TYPE workspace_agent_lifecycle_state AS ENUM (
-    'created',
-    'starting',
-    'start_timeout',
-    'start_error',
-    'ready',
-    'shutting_down',
-    'shutdown_timeout',
-    'shutdown_error',
-    'off'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_agent_lifecycle_state AS ENUM (
+        'created',
+        'starting',
+        'start_timeout',
+        'start_error',
+        'ready',
+        'shutting_down',
+        'shutdown_timeout',
+        'shutdown_error',
+        'off'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: workspace agent subsystem
-CREATE TYPE workspace_agent_subsystem AS ENUM (
-    'envbuilder',
-    'envbox',
-    'none',
-    'exectrace'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_agent_subsystem AS ENUM (
+        'envbuilder',
+        'envbox',
+        'none',
+        'exectrace'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: display app
-CREATE TYPE display_app AS ENUM (
-    'vscode',
-    'vscode_insiders',
-    'web_terminal',
-    'ssh_helper',
-    'port_forwarding_helper'
-);
+DO $$ BEGIN
+    CREATE TYPE display_app AS ENUM (
+        'vscode',
+        'vscode_insiders',
+        'web_terminal',
+        'ssh_helper',
+        'port_forwarding_helper'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: agent key scope
-CREATE TYPE agent_key_scope_enum AS ENUM (
-    'all',
-    'no_user_data'
-);
+DO $$ BEGIN
+    CREATE TYPE agent_key_scope_enum AS ENUM (
+        'all',
+        'no_user_data'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: app sharing level
-CREATE TYPE app_sharing_level AS ENUM (
-    'owner',
-    'authenticated',
-    'organization',
-    'public'
-);
+DO $$ BEGIN
+    CREATE TYPE app_sharing_level AS ENUM (
+        'owner',
+        'authenticated',
+        'organization',
+        'public'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: workspace app health
-CREATE TYPE workspace_app_health AS ENUM (
-    'disabled',
-    'initializing',
-    'healthy',
-    'unhealthy'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_app_health AS ENUM (
+        'disabled',
+        'initializing',
+        'healthy',
+        'unhealthy'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: workspace app open in
-CREATE TYPE workspace_app_open_in AS ENUM (
-    'tab',
-    'window',
-    'slim-window'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_app_open_in AS ENUM (
+        'tab',
+        'window',
+        'slim-window'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: workspace app status state
-CREATE TYPE workspace_app_status_state AS ENUM (
-    'working',
-    'complete',
-    'failure',
-    'idle'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_app_status_state AS ENUM (
+        'working',
+        'complete',
+        'failure',
+        'idle'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: workspace agent monitor state
-CREATE TYPE workspace_agent_monitor_state AS ENUM (
-    'OK',
-    'NOK'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_agent_monitor_state AS ENUM (
+        'OK',
+        'NOK'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: workspace agent script timing stage
-CREATE TYPE workspace_agent_script_timing_stage AS ENUM (
-    'start',
-    'stop',
-    'cron'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_agent_script_timing_stage AS ENUM (
+        'start',
+        'stop',
+        'cron'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: workspace agent script timing status
-CREATE TYPE workspace_agent_script_timing_status AS ENUM (
-    'ok',
-    'exit_failure',
-    'timed_out',
-    'pipes_left_open'
-);
+DO $$ BEGIN
+    CREATE TYPE workspace_agent_script_timing_status AS ENUM (
+        'ok',
+        'exit_failure',
+        'timed_out',
+        'pipes_left_open'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: port share protocol
-CREATE TYPE port_share_protocol AS ENUM (
-    'http',
-    'https'
-);
+DO $$ BEGIN
+    CREATE TYPE port_share_protocol AS ENUM (
+        'http',
+        'https'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Enum: log level
-CREATE TYPE log_level AS ENUM (
-    'trace',
-    'debug',
-    'info',
-    'warn',
-    'error'
-);
+DO $$ BEGIN
+    CREATE TYPE log_level AS ENUM (
+        'trace',
+        'debug',
+        'info',
+        'warn',
+        'error'
+    );
+EXCEPTION WHEN duplicate_object THEN null;
+END $$;
 
 -- Table: workspace_agents
-CREATE TABLE workspace_agents (
+CREATE TABLE IF NOT EXISTS workspace_agents (
     id uuid NOT NULL PRIMARY KEY,
     created_at timestamptz NOT NULL,
     updated_at timestamptz NOT NULL,
@@ -144,7 +183,7 @@ CREATE TABLE workspace_agents (
 );
 
 -- Table: workspace_apps
-CREATE TABLE workspace_apps (
+CREATE TABLE IF NOT EXISTS workspace_apps (
     id uuid NOT NULL PRIMARY KEY,
     created_at timestamptz NOT NULL,
     agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
@@ -168,7 +207,7 @@ CREATE TABLE workspace_apps (
 );
 
 -- Table: workspace_agent_log_sources
-CREATE TABLE workspace_agent_log_sources (
+CREATE TABLE IF NOT EXISTS workspace_agent_log_sources (
     workspace_agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
     id uuid NOT NULL PRIMARY KEY,
     created_at timestamptz NOT NULL,
@@ -177,7 +216,7 @@ CREATE TABLE workspace_agent_log_sources (
 );
 
 -- Table: workspace_agent_scripts
-CREATE TABLE workspace_agent_scripts (
+CREATE TABLE IF NOT EXISTS workspace_agent_scripts (
     workspace_agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
     log_source_id uuid NOT NULL,
     log_path text NOT NULL,
@@ -193,7 +232,7 @@ CREATE TABLE workspace_agent_scripts (
 );
 
 -- Table: workspace_agent_logs (unlogged for performance)
-CREATE UNLOGGED TABLE workspace_agent_logs (
+CREATE UNLOGGED TABLE IF NOT EXISTS workspace_agent_logs (
     agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
     created_at timestamptz NOT NULL,
     output varchar(1024) NOT NULL,
@@ -203,7 +242,7 @@ CREATE UNLOGGED TABLE workspace_agent_logs (
 );
 
 -- Table: workspace_agent_metadata (unlogged for performance)
-CREATE UNLOGGED TABLE workspace_agent_metadata (
+CREATE UNLOGGED TABLE IF NOT EXISTS workspace_agent_metadata (
     workspace_agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
     display_name varchar(127) NOT NULL,
     key varchar(127) NOT NULL,
@@ -218,7 +257,7 @@ CREATE UNLOGGED TABLE workspace_agent_metadata (
 );
 
 -- Table: workspace_agent_devcontainers
-CREATE TABLE workspace_agent_devcontainers (
+CREATE TABLE IF NOT EXISTS workspace_agent_devcontainers (
     id uuid NOT NULL PRIMARY KEY,
     workspace_agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
     created_at timestamptz DEFAULT now() NOT NULL,
@@ -229,7 +268,7 @@ CREATE TABLE workspace_agent_devcontainers (
 );
 
 -- Table: workspace_agent_memory_resource_monitors
-CREATE TABLE workspace_agent_memory_resource_monitors (
+CREATE TABLE IF NOT EXISTS workspace_agent_memory_resource_monitors (
     agent_id uuid NOT NULL PRIMARY KEY REFERENCES workspace_agents(id) ON DELETE CASCADE,
     enabled boolean NOT NULL,
     threshold integer NOT NULL,
@@ -240,7 +279,7 @@ CREATE TABLE workspace_agent_memory_resource_monitors (
 );
 
 -- Table: workspace_agent_volume_resource_monitors
-CREATE TABLE workspace_agent_volume_resource_monitors (
+CREATE TABLE IF NOT EXISTS workspace_agent_volume_resource_monitors (
     agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
     enabled boolean NOT NULL,
     threshold integer NOT NULL,
@@ -253,7 +292,7 @@ CREATE TABLE workspace_agent_volume_resource_monitors (
 );
 
 -- Table: workspace_agent_script_timings
-CREATE TABLE workspace_agent_script_timings (
+CREATE TABLE IF NOT EXISTS workspace_agent_script_timings (
     script_id uuid NOT NULL REFERENCES workspace_agent_scripts(id) ON DELETE CASCADE,
     started_at timestamptz NOT NULL,
     ended_at timestamptz NOT NULL,
@@ -263,7 +302,7 @@ CREATE TABLE workspace_agent_script_timings (
 );
 
 -- Table: workspace_app_stats
-CREATE TABLE workspace_app_stats (
+CREATE TABLE IF NOT EXISTS workspace_app_stats (
     id bigserial NOT NULL PRIMARY KEY,
     user_id uuid NOT NULL,
     workspace_id uuid NOT NULL,
@@ -277,7 +316,7 @@ CREATE TABLE workspace_app_stats (
 );
 
 -- Table: workspace_app_statuses
-CREATE TABLE workspace_app_statuses (
+CREATE TABLE IF NOT EXISTS workspace_app_statuses (
     id uuid DEFAULT gen_random_uuid() NOT NULL PRIMARY KEY,
     created_at timestamptz DEFAULT CURRENT_TIMESTAMP NOT NULL,
     agent_id uuid NOT NULL REFERENCES workspace_agents(id) ON DELETE CASCADE,
@@ -289,7 +328,7 @@ CREATE TABLE workspace_app_statuses (
 );
 
 -- Table: workspace_agent_port_share
-CREATE TABLE workspace_agent_port_share (
+CREATE TABLE IF NOT EXISTS workspace_agent_port_share (
     workspace_id uuid NOT NULL,
     agent_name text NOT NULL,
     port integer NOT NULL,
@@ -299,11 +338,11 @@ CREATE TABLE workspace_agent_port_share (
 );
 
 -- Indexes for common lookups
-CREATE INDEX idx_workspace_agents_resource_id ON workspace_agents(resource_id);
-CREATE INDEX idx_workspace_agents_auth_token ON workspace_agents(auth_token);
-CREATE INDEX idx_workspace_apps_agent_id ON workspace_apps(agent_id);
-CREATE INDEX idx_workspace_agent_logs_agent_id ON workspace_agent_logs(agent_id);
-CREATE INDEX idx_workspace_agent_scripts_agent_id ON workspace_agent_scripts(workspace_agent_id);
-CREATE INDEX idx_workspace_agent_log_sources_agent_id ON workspace_agent_log_sources(workspace_agent_id);
-CREATE INDEX idx_workspace_app_statuses_agent_id ON workspace_app_statuses(agent_id);
-CREATE INDEX idx_workspace_agent_devcontainers_agent_id ON workspace_agent_devcontainers(workspace_agent_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_agents_resource_id ON workspace_agents(resource_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_agents_auth_token ON workspace_agents(auth_token);
+CREATE INDEX IF NOT EXISTS idx_workspace_apps_agent_id ON workspace_apps(agent_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_agent_logs_agent_id ON workspace_agent_logs(agent_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_agent_scripts_agent_id ON workspace_agent_scripts(workspace_agent_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_agent_log_sources_agent_id ON workspace_agent_log_sources(workspace_agent_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_app_statuses_agent_id ON workspace_app_statuses(agent_id);
+CREATE INDEX IF NOT EXISTS idx_workspace_agent_devcontainers_agent_id ON workspace_agent_devcontainers(workspace_agent_id);
