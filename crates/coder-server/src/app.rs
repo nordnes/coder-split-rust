@@ -3340,12 +3340,20 @@ async fn put_workspace_extend(
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let Some(_workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
     };
 
     let deadline_str = body.get("deadline").and_then(|v| v.as_str());
