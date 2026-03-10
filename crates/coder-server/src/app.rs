@@ -7354,7 +7354,7 @@ async fn post_org_member_workspace(
     };
 
     // Resolve organization.
-    let Some(_org_record) = resolve_organization(&state, &organization).await? else {
+    let Some(org_record) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
     };
 
@@ -7399,6 +7399,13 @@ async fn post_org_member_workspace(
         return Ok(not_found_response("Template not found."));
     };
 
+    // Ensure the template belongs to the resolved organization.
+    if template.organization_id != org_record.id {
+        return Ok(not_found_response(
+            "Template not found in the specified organization.",
+        ));
+    }
+
     let workspace_id = Uuid::new_v4();
     let autostart_schedule = body
         .get("autostart_schedule")
@@ -7416,7 +7423,7 @@ async fn post_org_member_workspace(
         .insert_workspace(CreateWorkspaceInput {
             id: workspace_id,
             owner_id: target_user.id,
-            organization_id: template.organization_id,
+            organization_id: org_record.id,
             template_id,
             name: ws_name,
             autostart_schedule,
@@ -7441,7 +7448,7 @@ async fn post_org_member_workspace(
             id: job_id,
             created_at: OffsetDateTime::now_utc(),
             updated_at: OffsetDateTime::now_utc(),
-            organization_id: template.organization_id,
+            organization_id: org_record.id,
             initiator_id: context.user.id,
             provisioner: "echo".to_owned(),
             file_id: None,
@@ -7495,10 +7502,15 @@ async fn post_org_member_workspace(
 async fn get_org_member_workspace_available_users(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Path((_organization, _user)): Path<(String, String)>,
+    Path((organization, _user)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Validate the organization exists.
+    let Some(_org_record) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
     };
 
     // List all active users — the Go implementation lists all users using
