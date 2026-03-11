@@ -2,10 +2,10 @@
 //! backend rewrite.
 //!
 //! `coder-core` is the foundation crate of the Rust Coder backend.  It defines
-//! every type that crosses crate boundaries but contains **no** business logic
-//! or I/O of its own.  Higher-level crates (`coder-auth`, `coder-identity`,
-//! `coder-db`, `coder-server`, …) depend on `coder-core` for their shared
-//! vocabulary.
+//! every type that crosses crate boundaries and provides lightweight domain
+//! utilities (password hashing, retry helpers) but performs **no** external I/O.
+//! Higher-level crates (`coder-auth`, `coder-identity`, `coder-db`,
+//! `coder-server`, …) depend on `coder-core` for their shared vocabulary.
 //!
 //! # Modules
 //!

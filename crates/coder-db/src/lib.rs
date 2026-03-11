@@ -9,7 +9,7 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`migrations`] | Embedded SQLx migrations and schema-version helpers |
+//! | `migrations` | Embedded SQLx migrations and schema-version helpers |
 //! | [`pubsub`] | [`PostgresPubSub`] — `LISTEN`/`NOTIFY`-backed pub/sub |
 //! | `store` (private) | [`PostgresStore`] implementation with `sqlx` queries |
 //!

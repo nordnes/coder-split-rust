@@ -10,7 +10,7 @@
 //! |------|---------|
 //! | [`TracingAuditSink`] | Logs events via the `tracing` framework (default) |
 //! | [`batched_sink::BatchedAuditSink`] | Buffers events and flushes in batches to an inner sink |
-//! | `PersistingAuditSink` (in `coderd`) | Writes events to PostgreSQL via [`coder_core::AppStore`] |
+//! | `PersistingAuditSink` (in `coderd`) | Writes events to PostgreSQL via `coder_core::AppStore` |
 #![forbid(unsafe_code)]
 
 pub mod batched_sink;

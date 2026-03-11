@@ -9,15 +9,15 @@
 //!
 //! | Module | Purpose |
 //! |--------|---------|
-//! | [`app`](app) | [`AppState`] construction and [`build_router`] entry point |
-//! | [`auth_middleware`] | Session-cookie authentication middleware layer |
+//! | `app` | [`AppState`] construction and [`build_router`] entry point |
+//! | `auth_middleware` | Session-cookie authentication middleware layer |
 //! | [`connection_guard`] | Concurrency limiter returning 503 under overload |
-//! | [`error`](error) | [`AppError`](error::AppError) enum and `IntoResponse` mapping |
-//! | [`extractors`] | Axum `FromRequestParts` helpers (`Auth`, `OptionalAuth`, `AgentAuth`) |
-//! | [`handlers`] | Per-domain handler modules (users, templates, workspaces, …) |
-//! | [`helpers`] | Shared response builders and request helpers |
+//! | `error` | `AppError` enum and `IntoResponse` mapping |
+//! | `extractors` | Axum `FromRequestParts` helpers (`Auth`, `OptionalAuth`, `AgentAuth`) |
+//! | `handlers` | Per-domain handler modules (users, templates, workspaces, …) |
+//! | `helpers` | Shared response builders and request helpers |
 //! | [`metrics`] | Prometheus metric recording helpers |
-//! | [`middleware`] | CORS, CSP, HSTS, CSRF, real-IP, and OTel middleware |
+//! | `middleware` | CORS, CSP, HSTS, CSRF, real-IP, and OTel middleware |
 //! | [`rate_limit`] | Governor-based keyed rate limiters |
 //!
 //! # Quick Start
