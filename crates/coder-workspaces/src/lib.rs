@@ -468,7 +468,15 @@ where
     /// one concurrently (up to [`MAX_CONCURRENT_TRANSITIONS`] at a time).
     /// Returns statistics about the tick.
     pub async fn evaluate_once(&self) -> Result<AutobuildStats, StorageError> {
-        let now = OffsetDateTime::now_utc();
+        // Truncate to the nearest minute to match Go's `t.Truncate(time.Minute)`.
+        // This ensures consistent behaviour across ticks and avoids sub-minute
+        // jitter when comparing against deadline / schedule boundaries.
+        let raw_now = OffsetDateTime::now_utc();
+        let now = raw_now
+            .replace_second(0)
+            .unwrap_or(raw_now)
+            .replace_nanosecond(0)
+            .unwrap_or(raw_now);
         let workspaces = self
             .store
             .get_workspaces_eligible_for_transition(now)
@@ -534,7 +542,13 @@ where
             let _ = handle.await;
         }
 
-        let result = stats.lock().map(|s| s.clone()).unwrap_or_default();
+        let result = match stats.lock() {
+            Ok(s) => s.clone(),
+            Err(poisoned) => {
+                warn!("autobuild stats mutex poisoned, using recovered data");
+                poisoned.into_inner().clone()
+            }
+        };
 
         if result.transitions > 0 || result.errors > 0 {
             info!(
