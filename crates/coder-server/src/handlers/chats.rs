@@ -828,6 +828,23 @@ pub(crate) async fn interrupt_chat(
         return Ok(not_found_response("Chat not found."));
     }
 
+    // RBAC: verify the actor can update (interrupt) this chat.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Chat)
+                .with_id(chat_id)
+                .with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to interrupt this chat.",
+        ));
+    }
+
     // Update the chat status to "waiting" (interrupt).
     let updated = state
         .store

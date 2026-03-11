@@ -2485,14 +2485,14 @@ pub struct ChatMessageUsage {
 pub struct ChatMessageResponse {
     pub id: i64,
     pub chat_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config_id: Option<Uuid>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
     pub role: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<ChatMessagePart>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ChatMessageUsage>,
 }
 
@@ -2501,16 +2501,16 @@ pub struct ChatMessageResponse {
 pub struct ChatResponse {
     pub id: Uuid,
     pub owner_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_chat_id: Option<Uuid>,
     pub last_model_config_id: Uuid,
     pub title: String,
     pub status: ChatStatus,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
@@ -2731,15 +2731,15 @@ pub struct ChatStreamEvent {
     #[serde(rename = "type")]
     pub event_type: ChatStreamEventType,
     pub chat_id: Uuid,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<ChatMessageResponse>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_part: Option<ChatStreamMessagePart>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ChatStreamStatus>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ChatStreamError>,
-    #[serde(skip_serializing_if = "Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<ChatStreamRetry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_messages: Vec<ChatQueuedMessageResponse>,
