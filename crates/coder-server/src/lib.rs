@@ -3,6 +3,7 @@
 
 mod app;
 mod error;
+mod extractors;
 pub mod metrics;
 
 pub use app::{AppState, build_router};
