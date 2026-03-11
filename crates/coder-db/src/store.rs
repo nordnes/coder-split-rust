@@ -673,6 +673,7 @@ struct StoredUserLinkRow {
     oauth_access_token: String,
     oauth_refresh_token: String,
     oauth_expiry: OffsetDateTime,
+    claims: Value,
 }
 
 #[derive(Debug, FromRow)]
@@ -1615,20 +1616,22 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredUserLinkRow>(
             "INSERT INTO user_links (
                 user_id, login_type, linked_id,
-                oauth_access_token, oauth_refresh_token, oauth_expiry
-             ) VALUES ($1, $2::login_type, $3, $4, $5, $6)
+                oauth_access_token, oauth_refresh_token, oauth_expiry, claims
+             ) VALUES ($1, $2::login_type, $3, $4, $5, $6, $7)
              ON CONFLICT (user_id, login_type) DO UPDATE SET
                 linked_id = EXCLUDED.linked_id,
                 oauth_access_token = EXCLUDED.oauth_access_token,
                 oauth_refresh_token = EXCLUDED.oauth_refresh_token,
-                oauth_expiry = EXCLUDED.oauth_expiry
+                oauth_expiry = EXCLUDED.oauth_expiry,
+                claims = EXCLUDED.claims
              RETURNING
                 user_id,
                 login_type::text AS login_type,
                 linked_id,
                 oauth_access_token,
                 oauth_refresh_token,
-                oauth_expiry",
+                oauth_expiry,
+                claims",
         )
         .bind(user_id)
         .bind(input.login_type.as_str())
@@ -1636,6 +1639,7 @@ impl AppStore for PostgresStore {
         .bind(&input.oauth_access_token)
         .bind(&input.oauth_refresh_token)
         .bind(input.oauth_expiry)
+        .bind(serde_json::to_value(&input.claims).unwrap_or_default())
         .fetch_one(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -1803,7 +1807,8 @@ impl AppStore for PostgresStore {
                 linked_id,
                 oauth_access_token,
                 oauth_refresh_token,
-                oauth_expiry
+                oauth_expiry,
+                claims
              FROM user_links
              WHERE user_id = $1",
         )
@@ -9842,6 +9847,7 @@ fn user_link_record_from_row(row: StoredUserLinkRow) -> Result<UserLinkRecord, S
         .login_type
         .parse::<LoginType>()
         .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    let claims = serde_json::from_value(row.claims).unwrap_or_default();
     Ok(UserLinkRecord {
         user_id: row.user_id,
         login_type,
@@ -9849,6 +9855,7 @@ fn user_link_record_from_row(row: StoredUserLinkRow) -> Result<UserLinkRecord, S
         oauth_access_token: row.oauth_access_token,
         oauth_refresh_token: row.oauth_refresh_token,
         oauth_expiry: row.oauth_expiry,
+        claims,
     })
 }
 

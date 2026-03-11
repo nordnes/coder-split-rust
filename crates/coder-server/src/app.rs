@@ -1813,9 +1813,14 @@ async fn get_user_debug_link(
             .into_response());
     }
 
-    Ok(not_implemented_response(
-        "OIDC debug context is not yet available in the Rust backend.",
-    ))
+    let links = state.store.list_user_links(target_user.id).await?;
+    let claims = links
+        .into_iter()
+        .find(|l| l.login_type == LoginType::Oidc)
+        .map(|l| l.claims)
+        .unwrap_or_default();
+
+    Ok((StatusCode::OK, Json(claims)).into_response())
 }
 
 async fn list_users(
@@ -13897,8 +13902,8 @@ mod tests {
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertCustomRoleInput,
         UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
         UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord,
-        UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-        UserStatusChangeRecord, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
+        UserLinkClaims, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+        UserStatus, UserStatusChangeRecord, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
         WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
         WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
         WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
@@ -19402,6 +19407,7 @@ mod tests {
                 oauth_access_token: input.oauth_access_token.clone(),
                 oauth_refresh_token: input.oauth_refresh_token.clone(),
                 oauth_expiry: input.oauth_expiry,
+                claims: input.claims.clone(),
             };
             links.insert((user_id, input.login_type), record.clone());
             Ok(record)
@@ -38216,6 +38222,235 @@ mod tests {
         assert!(resp.peer_updates.is_empty());
 
         ws.close(None).await.ok();
+        Ok(())
+    }
+
+    // ── OIDC Debug Link tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn debug_link_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/owner/debug-link")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_link_non_oidc_user_returns_400() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // The default created user is a Password user, not OIDC
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/debug/owner/debug-link",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("User is not an OIDC user."),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_link_oidc_user_returns_claims() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Find the owner user and change their login_type to OIDC
+        let owner_id = {
+            let mut users = store.users.lock().map_err(|e| e.to_string())?;
+            let user = users
+                .values_mut()
+                .find(|u| u.username == "owner")
+                .ok_or("owner user not found")?;
+            user.login_type = LoginType::Oidc;
+            user.id
+        };
+
+        // Insert a user link with OIDC claims
+        let mut id_token_claims = serde_json::Map::new();
+        id_token_claims.insert("sub".to_owned(), Value::String("oidc-sub-123".to_owned()));
+        id_token_claims.insert(
+            "email".to_owned(),
+            Value::String("owner@example.com".to_owned()),
+        );
+
+        let mut user_info_claims = serde_json::Map::new();
+        user_info_claims.insert("name".to_owned(), Value::String("Owner".to_owned()));
+
+        let mut merged_claims = serde_json::Map::new();
+        merged_claims.insert("sub".to_owned(), Value::String("oidc-sub-123".to_owned()));
+        merged_claims.insert(
+            "email".to_owned(),
+            Value::String("owner@example.com".to_owned()),
+        );
+        merged_claims.insert("name".to_owned(), Value::String("Owner".to_owned()));
+
+        let claims = UserLinkClaims {
+            id_token_claims: id_token_claims.clone(),
+            user_info_claims: user_info_claims.clone(),
+            merged_claims: merged_claims.clone(),
+        };
+
+        store.user_links.lock().map_err(|e| e.to_string())?.insert(
+            (owner_id, LoginType::Oidc),
+            UserLinkRecord {
+                user_id: owner_id,
+                login_type: LoginType::Oidc,
+                linked_id: "oidc-sub-123".to_owned(),
+                oauth_access_token: String::new(),
+                oauth_refresh_token: String::new(),
+                oauth_expiry: OffsetDateTime::now_utc(),
+                claims: claims.clone(),
+            },
+        );
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/debug/owner/debug-link",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id_token_claims")
+                .and_then(|v| v.get("sub"))
+                .and_then(Value::as_str),
+            Some("oidc-sub-123"),
+        );
+        assert_eq!(
+            body.get("user_info_claims")
+                .and_then(|v| v.get("name"))
+                .and_then(Value::as_str),
+            Some("Owner"),
+        );
+        assert_eq!(
+            body.get("merged_claims")
+                .and_then(|v| v.get("email"))
+                .and_then(Value::as_str),
+            Some("owner@example.com"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_link_forbidden_for_non_owner() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+
+        // Create the first (owner) user via the normal flow
+        let _owner_session = create_and_login(&app).await?;
+
+        // Change the owner user's login_type to OIDC so the endpoint accepts them
+        let owner_id = {
+            let mut users = store.users.lock().map_err(|e| e.to_string())?;
+            let user = users
+                .values_mut()
+                .find(|u| u.username == "owner")
+                .ok_or("owner user not found")?;
+            user.login_type = LoginType::Oidc;
+            user.id
+        };
+
+        // Insert OIDC link for the owner
+        store.user_links.lock().map_err(|e| e.to_string())?.insert(
+            (owner_id, LoginType::Oidc),
+            UserLinkRecord {
+                user_id: owner_id,
+                login_type: LoginType::Oidc,
+                linked_id: "oidc-sub-owner".to_owned(),
+                oauth_access_token: String::new(),
+                oauth_refresh_token: String::new(),
+                oauth_expiry: OffsetDateTime::now_utc(),
+                claims: UserLinkClaims::default(),
+            },
+        );
+
+        // Create a second user (non-owner, Password login type)
+        let second_user_id = Uuid::new_v4();
+        let org_id = {
+            let orgs = store.organizations.lock().map_err(|e| e.to_string())?;
+            orgs.values().next().ok_or("no organization found")?.id
+        };
+
+        let password_hash = hash_password("Password123")?;
+        store
+            .password_hashes
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(second_user_id, password_hash);
+
+        let now = OffsetDateTime::now_utc();
+        store.users.lock().map_err(|e| e.to_string())?.insert(
+            second_user_id,
+            UserRecord {
+                id: second_user_id,
+                email: "other@example.com".to_owned(),
+                username: "other".to_owned(),
+                name: "Other".to_owned(),
+                avatar_url: String::new(),
+                created_at: now,
+                updated_at: now,
+                last_seen_at: None,
+                organization_ids: vec![org_id],
+                roles: vec![SlimRoleRecord {
+                    name: "member".to_owned(),
+                    display_name: "Member".to_owned(),
+                    organization_id: None,
+                }],
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                deleted: false,
+                is_system: false,
+            },
+        );
+
+        // Login as the second (non-owner) user via password
+        let login_response = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "other@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert!(
+            login_response.status().is_success(),
+            "login failed with status {}",
+            login_response.status(),
+        );
+        let login_body = response_json(login_response).await?;
+        let other_token = login_body
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing session token")?
+            .to_owned();
+
+        // Non-owner user trying to view another user's debug link should be forbidden
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/owner/debug-link", &other_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
         Ok(())
     }
 }
