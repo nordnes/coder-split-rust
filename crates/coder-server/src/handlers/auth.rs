@@ -669,6 +669,9 @@ async fn find_user_by_linked_id_or_email(
         .map_err(AppError::from)?;
 
     for user in &users {
+        if user.deleted || user.is_system || user.status != UserStatus::Active {
+            continue;
+        }
         let links = state
             .store
             .list_user_links(user.id)
@@ -683,7 +686,11 @@ async fn find_user_by_linked_id_or_email(
 
     // Fall back to email lookup.
     for user in &users {
-        if user.email.eq_ignore_ascii_case(email) && !user.deleted {
+        if user.email.eq_ignore_ascii_case(email)
+            && !user.deleted
+            && !user.is_system
+            && user.status == UserStatus::Active
+        {
             return Ok(Some(user.clone()));
         }
     }
