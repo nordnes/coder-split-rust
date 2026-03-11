@@ -12,9 +12,9 @@ against the Go reference in `coder/coderd/coderd.go`.
 | `complete` — Full implementation | 241 |
 | `stub-501` — Returns 501 / WS close | 5 |
 | `stub-partial` — Simplified/echo response | 10 |
-| `missing` — In Go but absent from Rust | 7 |
+| `missing` — In Go but absent from Rust | 1 |
 
-**Completion: 241/263 routes fully implemented (91.6%)**
+**Completion: 241/257 routes fully implemented (93.8%)**
 
 ### Status Legend
 
@@ -160,7 +160,7 @@ against the Go reference in `coder/coderd/coderd.go`.
 
 ### OAuth2 Provider
 
-12/18 complete
+12/12 complete
 
 | Route Path | Method | Handler Function | Status | Notes |
 |------------|--------|------------------|--------|-------|
@@ -173,12 +173,6 @@ against the Go reference in `coder/coderd/coderd.go`.
 | `/oauth2-provider/apps/{app_id}/secrets` | POST | `post_oauth2_provider_app_secret` | `complete` | Full implementation with store/service calls |
 | `/oauth2-provider/apps/{app_id}/secrets/{secret_id}` | DELETE | `delete_oauth2_provider_app_secret` | `complete` | Full implementation with store/service calls |
 | `/oauth2-provider/apps/{app_id}/tokens` | DELETE | `delete_oauth2_provider_app_tokens` | `complete` | Full implementation with store/service calls |
-| `/oauth2-provider/apps/{app}` | DELETE | — | `missing` | Exists in Go (coderd.go L1758), not in Rust |
-| `/oauth2-provider/apps/{app}` | GET | — | `missing` | Exists in Go (coderd.go L1756), not in Rust |
-| `/oauth2-provider/apps/{app}` | PUT | — | `missing` | Exists in Go (coderd.go L1757), not in Rust |
-| `/oauth2-provider/apps/{app}/secrets` | GET | — | `missing` | Exists in Go (coderd.go L1761), not in Rust |
-| `/oauth2-provider/apps/{app}/secrets` | POST | — | `missing` | Exists in Go (coderd.go L1762), not in Rust |
-| `/oauth2-provider/apps/{app}/secrets/{secretID}` | DELETE | — | `missing` | Exists in Go (coderd.go L1766), not in Rust |
 | `/oauth2/authorize` | GET | `get_oauth2_authorize` | `complete` | Full implementation with store/service calls |
 | `/oauth2/authorize` | POST | `post_oauth2_authorize` | `complete` | Full implementation with store/service calls |
 | `/oauth2/tokens` | POST | `post_oauth2_token` | `complete` | Simple/config-based handler |
