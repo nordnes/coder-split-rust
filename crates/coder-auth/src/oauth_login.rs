@@ -658,19 +658,44 @@ fn sanitize_username(input: &str) -> String {
 }
 
 /// Builds a `UserLinkClaims` from OIDC claims.
+///
+/// Because `OidcClaims` uses `#[serde(flatten)]` on the `extra` field, serde
+/// deserializes known fields (`sub`, `email`, `email_verified`, `name`,
+/// `preferred_username`, `groups`) into their typed struct fields and does NOT
+/// place them into `extra`. We must add them back so `id_token_claims` and
+/// `merged_claims` contain the complete set of claims.
 pub fn build_user_link_claims(claims: &OidcClaims) -> UserLinkClaims {
-    let mut merged = claims.extra.clone();
+    let mut all_claims = claims.extra.clone();
+    all_claims.insert(
+        "sub".to_owned(),
+        serde_json::Value::String(claims.sub.clone()),
+    );
     if let Some(ref email) = claims.email {
-        merged.insert("email".to_owned(), serde_json::Value::String(email.clone()));
+        all_claims.insert("email".to_owned(), serde_json::Value::String(email.clone()));
+    }
+    if let Some(ref verified) = claims.email_verified {
+        all_claims.insert(
+            "email_verified".to_owned(),
+            serde_json::Value::Bool(*verified),
+        );
     }
     if let Some(ref name) = claims.name {
-        merged.insert("name".to_owned(), serde_json::Value::String(name.clone()));
+        all_claims.insert("name".to_owned(), serde_json::Value::String(name.clone()));
+    }
+    if let Some(ref username) = claims.preferred_username {
+        all_claims.insert(
+            "preferred_username".to_owned(),
+            serde_json::Value::String(username.clone()),
+        );
+    }
+    if let Some(ref groups) = claims.groups {
+        all_claims.insert("groups".to_owned(), serde_json::json!(groups));
     }
 
     UserLinkClaims {
-        id_token_claims: claims.extra.clone(),
+        id_token_claims: all_claims.clone(),
         user_info_claims: Default::default(),
-        merged_claims: merged,
+        merged_claims: all_claims,
     }
 }
 

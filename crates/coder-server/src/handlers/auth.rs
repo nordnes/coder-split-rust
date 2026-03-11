@@ -717,7 +717,14 @@ async fn create_oauth_user_and_link(
         .list_organizations(Vec::new())
         .await
         .map_err(AppError::from)?;
-    let org_ids: Vec<Uuid> = orgs.iter().take(1).map(|o| o.id).collect();
+    // Prefer the default organization; fall back to the first one if no default is set.
+    let org_ids: Vec<Uuid> = orgs
+        .iter()
+        .find(|o| o.is_default)
+        .or_else(|| orgs.first())
+        .into_iter()
+        .map(|o| o.id)
+        .collect();
 
     let create_input = coder_core::CreateUserInput {
         email: email.to_owned(),
