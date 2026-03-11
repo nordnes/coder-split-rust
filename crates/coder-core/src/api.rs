@@ -1499,6 +1499,31 @@ pub struct UploadFileResponse {
 }
 
 // ---------------------------------------------------------------------------
+// License & Entitlements API types
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v2/licenses`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AddLicenseRequest {
+    /// Raw JWT license string.
+    pub license: String,
+}
+
+/// Response for a single license record.
+#[derive(Clone, Debug, Serialize)]
+pub struct LicenseResponse {
+    /// Numeric license identifier.
+    pub id: i32,
+    /// Unique license UUID.
+    pub uuid: Uuid,
+    /// When the license was uploaded (RFC 3339).
+    #[serde(with = "time::serde::rfc3339")]
+    pub uploaded_at: OffsetDateTime,
+    /// Parsed claims as a JSON value.
+    pub claims: Value,
+}
+
+// ---------------------------------------------------------------------------
 // OAuth2 Provider API types
 // ---------------------------------------------------------------------------
 
@@ -2195,6 +2220,47 @@ pub struct WebpushSubscription {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeleteWebpushSubscription {
     pub endpoint: String,
+}
+
+/// An action button inside a web push notification.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebpushMessageAction {
+    /// Display label for the action button.
+    pub label: String,
+    /// URL to navigate to when the action is activated.
+    pub url: String,
+}
+
+/// Payload for a web push notification sent to the browser.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebpushMessage {
+    /// Icon URL for the notification.
+    #[serde(default)]
+    pub icon: String,
+    /// Title text of the notification.
+    #[serde(default)]
+    pub title: String,
+    /// Body text of the notification.
+    #[serde(default)]
+    pub body: String,
+    /// Notification tag for grouping or replacing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tag: String,
+    /// Action buttons shown with the notification.
+    #[serde(default)]
+    pub actions: Vec<WebpushMessageAction>,
+    /// Arbitrary key-value data attached to the notification.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub data: HashMap<String, String>,
+}
+
+/// Stored VAPID key pair for web push.
+#[derive(Clone, Debug)]
+pub struct VapidKeyPair {
+    /// Base64url-encoded public key.
+    pub public_key: String,
+    /// PEM-encoded EC private key (SEC1 format).
+    pub private_key: String,
 }
 
 /// An action inside an inbox notification.

@@ -1,4 +1,16 @@
 //! Storage contracts for the Rust backend slice.
+//!
+//! This module defines the trait hierarchy that abstracts all persistence
+//! operations.  The top-level [`AppStore`] super-trait composes domain-specific
+//! sub-traits ([`DeploymentStore`], [`AuthStore`], [`IdentityStore`],
+//! [`OperationalStore`], [`TemplateStore`], [`WorkspaceStore`],
+//! [`InsightsStore`], [`ProvisionerStore`]) so that handler code can accept a
+//! single `Arc<dyn AppStore>` and call any storage method.
+//!
+//! Concrete implementations live in downstream crates:
+//!
+//! * `coder_db::PostgresStore` — production Postgres implementation.
+//! * `FakeStore` (test-only) — in-memory `HashMap`-backed mock.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -965,6 +977,22 @@ pub struct UpsertPortShareInput {
     pub protocol: String,
 }
 
+/// Stored license record.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LicenseRecord {
+    /// Numeric license identifier.
+    pub id: i32,
+    /// Stable UUID for the license.
+    pub uuid: Uuid,
+    /// When the license was uploaded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub uploaded_at: OffsetDateTime,
+    /// Raw JWT string.
+    pub jwt: String,
+    /// Parsed claims as a JSON value.
+    pub claims: Value,
+}
+
 /// Stored file record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileRecord {
@@ -1006,6 +1034,55 @@ pub struct InsertFileResult {
     /// Stable file identifier (either the newly-created id or the existing
     /// duplicate's id).
     pub id: Uuid,
+}
+
+/// A denormalized row returned by the eligible-for-transition query.
+///
+/// Mirrors Go's `GetWorkspacesEligibleForTransitionRow` — it carries every
+/// field the autobuild executor needs so that no extra queries are required
+/// inside the hot loop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceTransitionRow {
+    /// Workspace identifier.
+    pub id: Uuid,
+    /// Workspace name.
+    pub name: String,
+    /// Owner identifier.
+    pub owner_id: Uuid,
+    /// Template identifier.
+    pub template_id: Uuid,
+    /// Autostart cron schedule.
+    pub autostart_schedule: Option<String>,
+    /// TTL in nanoseconds.
+    pub ttl_ns: Option<i64>,
+    /// Last used time.
+    pub last_used_at: OffsetDateTime,
+    /// Dormant timestamp.
+    pub dormant_at: Option<OffsetDateTime>,
+    /// Scheduled deletion time.
+    pub deleting_at: Option<OffsetDateTime>,
+    /// Whether the workspace is soft-deleted.
+    pub deleted: bool,
+    /// Latest build transition (start / stop / delete).
+    pub build_transition: String,
+    /// Latest build deadline.
+    pub build_deadline: Option<OffsetDateTime>,
+    /// Latest provisioner job status.
+    pub job_status: String,
+    /// Latest provisioner job completed time.
+    pub job_completed_at: Option<OffsetDateTime>,
+    /// Template: allow user autostart.
+    pub template_allow_user_autostart: bool,
+    /// Template: default TTL (ns).
+    pub template_default_ttl: i64,
+    /// Template: failure TTL (ns).
+    pub template_failure_ttl: i64,
+    /// Template: time til dormant (ns).
+    pub template_time_til_dormant: i64,
+    /// Template: time til dormant auto-delete (ns).
+    pub template_time_til_dormant_autodelete: i64,
+    /// Owner's account status (e.g. "active", "suspended").
+    pub owner_status: String,
 }
 
 /// Errors surfaced by storage backends.
@@ -3834,6 +3911,34 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
+    /// Returns workspaces that are candidates for an autobuild transition.
+    ///
+    /// The returned rows carry denormalized data (workspace + latest build +
+    /// template + owner status) so the autobuild executor can decide each
+    /// workspace's next transition without extra queries.
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        _now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        Err(StorageError::unavailable(
+            "autobuild transition query is not implemented",
+        ))
+    }
+
+    /// Atomically sets `dormant_at` and recomputes `deleting_at` for a workspace.
+    ///
+    /// When `dormant_at` is set and the template has a dormant auto-delete
+    /// threshold, `deleting_at` is derived automatically.  Clearing `dormant_at`
+    /// (passing `None`) also clears `deleting_at`.
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        let _ = (workspace_id, dormant_at);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
     /// Creates a new group.
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
         let _ = input;
@@ -4576,6 +4681,45 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
+    /// Deletes webpush subscriptions by their IDs.
+    async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError> {
+        let _ = ids;
+        Err(StorageError::unavailable(
+            "webpush subscriptions are not implemented",
+        ))
+    }
+
+    /// Deletes all webpush subscriptions (used when regenerating VAPID keys).
+    async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError> {
+        Err(StorageError::unavailable(
+            "webpush subscriptions are not implemented",
+        ))
+    }
+
+    /// Retrieves the stored VAPID key pair for web push.
+    async fn get_webpush_vapid_keys(
+        &self,
+    ) -> Result<Option<crate::api::VapidKeyPair>, StorageError> {
+        Err(StorageError::unavailable(
+            "webpush VAPID keys are not implemented",
+        ))
+    }
+
+    /// Stores or updates the VAPID key pair for web push.
+    ///
+    /// `public_key` is base64url-encoded and `private_key` is PEM-encoded
+    /// (SEC1 EC private key format).
+    async fn upsert_webpush_vapid_keys(
+        &self,
+        public_key: &str,
+        private_key: &str,
+    ) -> Result<(), StorageError> {
+        let _ = (public_key, private_key);
+        Err(StorageError::unavailable(
+            "webpush VAPID keys are not implemented",
+        ))
+    }
+
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
@@ -4911,6 +5055,35 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = input;
         Err(StorageError::unavailable(
             "custom roles are not implemented",
+        ))
+    }
+
+    // ----- Licenses -----
+
+    /// Lists all stored license records.
+    async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError> {
+        Err(StorageError::unavailable(
+            "license storage is not implemented",
+        ))
+    }
+
+    /// Inserts a new license record from its raw JWT and parsed claims.
+    async fn insert_license(
+        &self,
+        jwt: &str,
+        claims: &Value,
+    ) -> Result<LicenseRecord, StorageError> {
+        let _ = (jwt, claims);
+        Err(StorageError::unavailable(
+            "license storage is not implemented",
+        ))
+    }
+
+    /// Deletes a license record by its numeric identifier.
+    async fn delete_license(&self, id: i32) -> Result<bool, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable(
+            "license storage is not implemented",
         ))
     }
 }
@@ -5272,6 +5445,19 @@ pub trait WorkspaceStore: Send + Sync {
 
     /// Soft-deletes a workspace.
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Returns workspaces that are candidates for an autobuild transition.
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError>;
+
+    /// Atomically sets `dormant_at` and recomputes `deleting_at` for a workspace.
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Creates a new group.
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError>;
@@ -7123,6 +7309,21 @@ where
         AppStore::soft_delete_workspace(self, workspace_id).await
     }
 
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        AppStore::get_workspaces_eligible_for_transition(self, now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::update_workspace_dormant_deleting_at(self, workspace_id, dormant_at).await
+    }
+
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
         AppStore::create_group(self, input).await
     }
@@ -7470,6 +7671,23 @@ where
 
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
         (**self).soft_delete_workspace(workspace_id).await
+    }
+
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        (**self).get_workspaces_eligible_for_transition(now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self)
+            .update_workspace_dormant_deleting_at(workspace_id, dormant_at)
+            .await
     }
 
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {

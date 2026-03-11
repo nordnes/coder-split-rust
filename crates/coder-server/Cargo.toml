@@ -20,7 +20,10 @@ coder-audit = { path = "../coder-audit" }
 coder-auth = { path = "../coder-auth" }
 coder-connectivity = { path = "../coder-connectivity" }
 coder-core = { path = "../coder-core" }
+coder-license = { path = "../coder-license" }
 coder-identity = { path = "../coder-identity" }
+coder-mcp = { path = "../coder-mcp" }
+coder-telemetry = { path = "../coder-telemetry" }
 coder-provisioner = { path = "../coder-provisioner" }
 coder-rbac = { path = "../coder-rbac" }
 coder-workspaces = { path = "../coder-workspaces" }

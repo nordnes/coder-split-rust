@@ -1,4 +1,16 @@
 //! Connectivity, agent, health, and SSH helpers.
+//!
+//! `coder-connectivity` groups operational services that probe the health
+//! of subsystems and manage infrastructure-level resources:
+//!
+//! * [`HealthService`] — cached deployment health checks (database, access URL,
+//!   WebSocket, DERP, workspace proxies, provisioner daemons) with a 15-second
+//!   TTL
+//! * [`TelemetryService`] — periodic anonymous deployment telemetry snapshots
+//! * [`UpdateCheckService`] — polls GitHub releases for available updates
+//! * [`generate_git_ssh_key`] — Ed25519 keypair generation for Git-over-SSH
+//! * [`agents`] — in-memory agent connection provider
+//! * [`tailnet`] — DERP map construction and in-memory coordinator
 #![forbid(unsafe_code)]
 
 pub mod agents;
@@ -943,13 +955,17 @@ mod tests {
             access_url: reqwest::Url::parse("http://127.0.0.1:0").unwrap_or_else(|_| {
                 reqwest::Url::parse("http://localhost").unwrap_or_else(|_| unreachable!())
             }),
+            wildcard_access_url: String::new(),
             database: coder_core::DatabaseConfig {
                 postgres_url: String::new(),
                 max_connections: 1,
                 min_connections: 1,
                 acquire_timeout_secs: 5,
             },
-            telemetry_enabled: false,
+            tls: coder_core::config::TlsConfig::default(),
+            networking: coder_core::config::NetworkingConfig::default(),
+            http_cookies: coder_core::config::HttpCookieConfig::default(),
+            telemetry: coder_core::config::TelemetryConfig::default(),
             ssh: coder_core::SshConfig {
                 hostname_prefix: String::new(),
                 hostname_suffix: String::new(),
@@ -959,6 +975,7 @@ mod tests {
             derp_regions: Vec::new(),
             shutdown_grace_period_secs: 5,
             log_format: coder_core::LogFormat::Pretty,
+            logging: coder_core::config::LoggingConfig::default(),
             session_cache_ttl_secs: 30,
             audit_batch_flush_interval_ms: 500,
             audit_batch_max_size: 50,
@@ -969,6 +986,31 @@ mod tests {
             oidc: None,
             otel: coder_core::config::OtelConfig::default(),
             cors: coder_core::config::CorsConfig::default(),
+            provisioner: coder_core::config::ProvisionerConfig::default(),
+            session_lifetime: coder_core::config::SessionLifetimeConfig::default(),
+            dangerous: coder_core::config::DangerousConfig::default(),
+            healthcheck: coder_core::config::HealthcheckConfig::default(),
+            workspace: coder_core::config::WorkspaceConfig::default(),
+            swagger_enabled: true,
+            update_check: false,
+            ssh_keygen_algorithm: "ed25519".to_owned(),
+            cache_dir: String::new(),
+            browser_only: false,
+            disable_password_auth: false,
+            disable_path_apps: false,
+            disable_owner_workspace_exec: false,
+            strict_transport_security: 0,
+            strict_transport_security_options: Vec::new(),
+            experiments: Vec::new(),
+            agent_fallback_troubleshooting_url: String::new(),
+            terms_of_service_url: String::new(),
+            web_terminal_renderer: String::new(),
+            allow_workspace_renames: false,
+            additional_csp_policy: Vec::new(),
+            disable_workspace_sharing: false,
+            docs_url: String::new(),
+            scim_api_key: String::new(),
+            cli_upgrade_message: String::new(),
         }
     }
 

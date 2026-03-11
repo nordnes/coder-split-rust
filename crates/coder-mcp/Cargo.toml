@@ -1,5 +1,5 @@
 [package]
-name = "coder-notifications"
+name = "coder-mcp"
 edition.workspace = true
 license.workspace = true
 publish = false
@@ -11,17 +11,11 @@ version.workspace = true
 workspace = true
 
 [dependencies]
-base64.workspace = true
-coder-core = { path = "../coder-core" }
-p256.workspace = true
-reqwest.workspace = true
+serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
-tokio.workspace = true
 tracing.workspace = true
 uuid.workspace = true
-web-push.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
-time.workspace = true
+serde_json.workspace = true

@@ -31,13 +31,13 @@ impl BuildMetadata {
         &self,
         deployment_id: Uuid,
         access_url: &Url,
-        telemetry_enabled: bool,
+        telemetry: &crate::config::TelemetryConfig,
     ) -> BuildInfoResponse {
         BuildInfoResponse {
             external_url: self.external_url.clone(),
             version: self.version.clone(),
             dashboard_url: access_url.to_string(),
-            telemetry: telemetry_enabled,
+            telemetry: telemetry.enabled,
             workspace_proxy: self.workspace_proxy,
             agent_api_version: self.agent_api_version.clone(),
             provisioner_api_version: self.provisioner_api_version.clone(),

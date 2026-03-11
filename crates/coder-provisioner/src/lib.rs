@@ -1,5 +1,18 @@
 //! Provisioner and job-orchestration helpers for the Rust `coderd` rewrite.
+//!
+//! `coder-provisioner` provides [`ProvisionerService`], a high-level wrapper
+//! around [`coder_core::ProvisionerStore`] that handles the full job lifecycle:
+//!
+//! * **Jobs** — acquire, heartbeat, complete, cancel, stale-job detection
+//! * **Logs & Timings** — batch insert and retrieval for build output
+//! * **Daemons** — upsert, heartbeat, listing, and stale-daemon cleanup
+//! * **Keys** — provisioner key CRUD
+//!
+//! The crate also exposes [`render_init_script`] for generating OS/arch-specific
+//! agent bootstrap scripts with SHA-256 content digests.
 #![forbid(unsafe_code)]
+
+pub mod server;
 
 use std::sync::Arc;
 

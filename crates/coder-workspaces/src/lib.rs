@@ -2,16 +2,35 @@
 //!
 //! Provides the autobuild executor loop, schedule evaluation, and
 //! deployment-stats caching.
+//!
+//! # Key types
+//!
+//! * [`DeploymentStatsService`] — cached deployment statistics with a
+//!   background 60-second refresh loop
+//! * [`AutostartSchedule`] — parsed cron expression with IANA timezone support
+//! * [`AutostopPolicy`] — TTL-based workspace auto-stop evaluation
+//! * [`AutobuildExecutor`] — background loop that evaluates workspace lifecycle
+//!   rules every 30 seconds
+//! * [`TemplateScheduleConstraints`] / [`QuietHoursWindow`] — template-level
+//!   schedule policies
+//! * [`AutobuildAction`] — transition enum (Start / Stop / Dormant / None)
+//!
+//! # Utility functions
+//!
+//! * [`compute_extended_deadline`] — deadline extension with optional max clamp
+//! * [`evaluate_dormancy`] — idle-days threshold check
 #![forbid(unsafe_code)]
 
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 
-use coder_core::{DeploymentStatsResponse, OperationalStore, StorageError};
+use async_trait::async_trait;
+use coder_core::ports::{WorkspaceRecord, WorkspaceTransitionRow};
+use coder_core::{AppStore, DeploymentStatsResponse, OperationalStore, StorageError};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 const DEPLOYMENT_STATS_REFRESH_SECS: u64 = 60;
 
@@ -200,6 +219,25 @@ impl AutostartSchedule {
         ts.and_then(|t| OffsetDateTime::from_unix_timestamp(t).ok())
     }
 
+    /// Returns the next occurrence after `after` as a `chrono::DateTime<Utc>`.
+    ///
+    /// Used by the autostart eligibility check to find the next allowed
+    /// autostart time after a build's creation time.
+    fn next_after_chrono(
+        &self,
+        after: chrono::DateTime<chrono::Utc>,
+    ) -> Option<chrono::DateTime<chrono::Utc>> {
+        if let Ok(tz) = self.timezone.parse::<chrono_tz::Tz>() {
+            self.schedule
+                .after(&after.with_timezone(&tz))
+                .take(1)
+                .next()
+                .map(|dt| dt.with_timezone(&chrono::Utc))
+        } else {
+            self.schedule.after(&after).take(1).next()
+        }
+    }
+
     /// Returns whether the schedule should have fired within the last
     /// `window_secs` seconds from now.
     #[must_use]
@@ -284,8 +322,23 @@ pub enum AutobuildAction {
     Stop,
     /// Mark the workspace as dormant.
     Dormant,
+    /// Delete the workspace (dormant auto-delete).
+    Delete,
     /// No action needed.
     None,
+}
+
+/// The reason a workspace is being transitioned.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BuildReason {
+    /// Automatic start based on schedule.
+    Autostart,
+    /// Automatic stop based on TTL or deadline.
+    Autostop,
+    /// Workspace became dormant due to inactivity.
+    Dormancy,
+    /// Workspace auto-deleted after dormancy period.
+    Autodelete,
 }
 
 // ---------------------------------------------------------------------------
@@ -294,75 +347,272 @@ pub enum AutobuildAction {
 
 const AUTOBUILD_TICK_SECS: u64 = 30;
 
+/// Maximum number of concurrent workspace evaluations.
+const MAX_CONCURRENT_TRANSITIONS: usize = 10;
+
+/// Narrow storage trait for the autobuild executor.
+///
+/// Contains only the methods required for workspace lifecycle evaluation.
+/// Implementations are provided for [`dyn AppStore`] (and `Arc<T>` where
+/// `T: AutobuildStore`), so callers can pass their full store directly.
+#[async_trait]
+pub trait AutobuildStore: Send + Sync {
+    /// Returns workspaces that are candidates for an autobuild transition.
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError>;
+
+    /// Atomically sets `dormant_at` and recomputes `deleting_at` for a workspace.
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: uuid::Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
+
+    /// Soft-deletes a workspace (sets `deleted = true`).
+    async fn soft_delete_workspace(&self, workspace_id: uuid::Uuid) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+impl AutobuildStore for dyn AppStore {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        AppStore::get_workspaces_eligible_for_transition(self, now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: uuid::Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::update_workspace_dormant_deleting_at(self, workspace_id, dormant_at).await
+    }
+
+    async fn soft_delete_workspace(&self, workspace_id: uuid::Uuid) -> Result<bool, StorageError> {
+        AppStore::soft_delete_workspace(self, workspace_id).await
+    }
+}
+
+#[async_trait]
+impl<T: AutobuildStore + ?Sized> AutobuildStore for Arc<T> {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        (**self).get_workspaces_eligible_for_transition(now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: uuid::Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self)
+            .update_workspace_dormant_deleting_at(workspace_id, dormant_at)
+            .await
+    }
+
+    async fn soft_delete_workspace(&self, workspace_id: uuid::Uuid) -> Result<bool, StorageError> {
+        (**self).soft_delete_workspace(workspace_id).await
+    }
+}
+
+/// Statistics for one autobuild executor tick.
+#[derive(Clone, Debug, Default)]
+pub struct AutobuildStats {
+    /// Number of workspaces that were transitioned.
+    pub transitions: u32,
+    /// Number of workspaces that had errors during evaluation.
+    pub errors: u32,
+    /// Number of workspaces evaluated.
+    pub evaluated: u32,
+}
+
 /// Background autobuild executor that evaluates workspace lifecycle rules.
 ///
-/// Runs every 30 seconds, evaluates all active workspaces against their
-/// autostart schedule, autostop TTL, deadlines, and dormancy rules.
+/// Runs on a configurable tick interval (default 30 seconds), evaluates all
+/// active workspaces against their autostart schedule, autostop TTL,
+/// deadlines, dormancy rules, and auto-delete policies.
+///
+/// Mirrors Go's `autobuild.Executor` with a concurrent worker pool
+/// limited to [`MAX_CONCURRENT_TRANSITIONS`] workers to avoid
+/// overloading the database.
 pub struct AutobuildExecutor<S> {
     store: S,
-    _refresh_lock: Mutex<()>,
+    cancel: CancellationToken,
+    tick_secs: u64,
 }
 
 impl<S> AutobuildExecutor<S>
 where
-    S: OperationalStore + Clone + Send + Sync + 'static,
+    S: AutobuildStore + Clone + Send + Sync + 'static,
 {
     /// Creates the executor and starts the background evaluation loop.
+    ///
+    /// Returns the executor and a [`tokio::task::JoinHandle`] for the
+    /// background loop.  Callers should cancel the token **and** await the
+    /// handle during shutdown to ensure in-flight evaluations complete before
+    /// resources (e.g. the database pool) are released.
     #[must_use]
-    pub fn new(store: S) -> Arc<Self> {
+    pub fn start(store: S, cancel: CancellationToken) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         let executor = Arc::new(Self {
             store,
-            _refresh_lock: Mutex::new(()),
+            cancel: cancel.clone(),
+            tick_secs: AUTOBUILD_TICK_SECS,
         });
-        Self::spawn_executor_loop(&executor);
-        executor
+        let handle = Self::spawn_executor_loop(&executor);
+        (executor, handle)
+    }
+
+    /// Creates the executor with a custom tick interval.
+    ///
+    /// Useful for testing with shorter intervals.
+    #[must_use]
+    pub fn start_with_interval(
+        store: S,
+        cancel: CancellationToken,
+        tick_secs: u64,
+    ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
+        let executor = Arc::new(Self {
+            store,
+            cancel: cancel.clone(),
+            tick_secs,
+        });
+        let handle = Self::spawn_executor_loop(&executor);
+        (executor, handle)
     }
 
     /// Evaluates one tick of the autobuild loop.
     ///
-    /// In a full implementation this queries active workspaces and evaluates
-    /// each against schedule constraints. For now, the executor is a skeleton
-    /// that logs each tick.
-    async fn evaluate_once(&self) -> Result<u32, StorageError> {
-        // Fetch deployment stats to determine workspace counts.
-        let stats = self.store.deployment_stats().await.ok();
-        let workspace_count = stats
-            .as_ref()
-            .map(|s| {
-                s.workspaces
-                    .running
-                    .saturating_add(s.workspaces.stopped)
-                    .saturating_add(s.workspaces.pending)
-            })
-            .unwrap_or(0);
+    /// Queries all workspaces eligible for a transition and evaluates each
+    /// one concurrently (up to [`MAX_CONCURRENT_TRANSITIONS`] at a time).
+    /// Returns statistics about the tick.
+    pub async fn evaluate_once(&self) -> Result<AutobuildStats, StorageError> {
+        // Truncate to the nearest minute to match Go's `t.Truncate(time.Minute)`.
+        // This ensures consistent behaviour across ticks and avoids sub-minute
+        // jitter when comparing against deadline / schedule boundaries.
+        let raw_now = OffsetDateTime::now_utc();
+        let now = raw_now
+            .replace_second(0)
+            .unwrap_or(raw_now)
+            .replace_nanosecond(0)
+            .unwrap_or(raw_now);
+        let workspaces = self
+            .store
+            .get_workspaces_eligible_for_transition(now)
+            .await?;
 
-        if workspace_count > 0 {
+        let total = workspaces.len();
+        if total == 0 {
+            return Ok(AutobuildStats::default());
+        }
+
+        info!(
+            eligible = total,
+            "autobuild executor tick: evaluating workspaces"
+        );
+
+        // Use a semaphore to limit concurrency.
+        let semaphore = Arc::new(tokio::sync::Semaphore::new(MAX_CONCURRENT_TRANSITIONS));
+        let stats = Arc::new(std::sync::Mutex::new(AutobuildStats::default()));
+
+        let mut handles = Vec::with_capacity(total);
+
+        for ws in workspaces {
+            let store = self.store.clone();
+            let sem = semaphore.clone();
+            let stats_ref = stats.clone();
+
+            let handle = tokio::spawn(async move {
+                // Acquire semaphore permit to limit concurrency.
+                let _permit = match sem.acquire().await {
+                    Ok(p) => p,
+                    Err(_) => return, // semaphore closed
+                };
+
+                match evaluate_workspace(&store, &ws, now).await {
+                    Ok(action) => {
+                        if let Ok(mut s) = stats_ref.lock() {
+                            s.evaluated = s.evaluated.saturating_add(1);
+                            if action != AutobuildAction::None {
+                                s.transitions = s.transitions.saturating_add(1);
+                            }
+                        }
+                    }
+                    Err(err) => {
+                        warn!(
+                            workspace_id = %ws.id,
+                            workspace_name = %ws.name,
+                            error = %err,
+                            "autobuild: failed to evaluate workspace"
+                        );
+                        if let Ok(mut s) = stats_ref.lock() {
+                            s.evaluated = s.evaluated.saturating_add(1);
+                            s.errors = s.errors.saturating_add(1);
+                        }
+                    }
+                }
+            });
+            handles.push(handle);
+        }
+
+        // Wait for all tasks to complete.
+        for handle in handles {
+            // Ignore JoinErrors (task panics) — they are logged by tokio.
+            let _ = handle.await;
+        }
+
+        let result = match stats.lock() {
+            Ok(s) => s.clone(),
+            Err(poisoned) => {
+                warn!("autobuild stats mutex poisoned, using recovered data");
+                poisoned.into_inner().clone()
+            }
+        };
+
+        if result.transitions > 0 || result.errors > 0 {
             info!(
-                workspaces = workspace_count,
-                "autobuild executor tick evaluated"
+                transitions = result.transitions,
+                errors = result.errors,
+                evaluated = result.evaluated,
+                "autobuild executor tick completed"
             );
         }
 
-        Ok(u32::try_from(workspace_count).unwrap_or(u32::MAX))
+        Ok(result)
     }
 
-    fn spawn_executor_loop(executor: &Arc<Self>) {
+    fn spawn_executor_loop(executor: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(executor);
+        let cancel = executor.cancel.clone();
+        let tick_secs = executor.tick_secs;
         tokio::spawn(async move {
-            run_autobuild_loop(weak).await;
-        });
+            run_autobuild_loop(weak, cancel, tick_secs).await;
+        })
     }
 }
 
-async fn run_autobuild_loop<S>(executor: Weak<AutobuildExecutor<S>>)
-where
-    S: OperationalStore + Clone + Send + Sync + 'static,
+async fn run_autobuild_loop<S>(
+    executor: Weak<AutobuildExecutor<S>>,
+    cancel: CancellationToken,
+    tick_secs: u64,
+) where
+    S: AutobuildStore + Clone + Send + Sync + 'static,
 {
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(AUTOBUILD_TICK_SECS));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(tick_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("autobuild executor loop cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
         let Some(executor) = executor.upgrade() else {
             return;
         };
@@ -370,6 +620,279 @@ where
             warn!(error = %error, "autobuild executor tick failed");
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Evaluation Logic
+// ---------------------------------------------------------------------------
+
+/// Evaluates a single workspace and performs the appropriate action.
+///
+/// This is the core of the autobuild executor. It determines what transition
+/// (if any) the workspace should undergo and performs it.
+async fn evaluate_workspace<S: AutobuildStore>(
+    store: &S,
+    ws: &WorkspaceTransitionRow,
+    now: OffsetDateTime,
+) -> Result<AutobuildAction, StorageError> {
+    let (action, reason) = match get_next_transition(ws, now) {
+        Some(pair) => pair,
+        None => return Ok(AutobuildAction::None),
+    };
+
+    debug!(
+        workspace_id = %ws.id,
+        workspace_name = %ws.name,
+        ?action,
+        ?reason,
+        "autobuild: determined transition"
+    );
+
+    match reason {
+        BuildReason::Dormancy => {
+            store
+                .update_workspace_dormant_deleting_at(ws.id, Some(now))
+                .await?;
+            info!(
+                workspace_id = %ws.id,
+                workspace_name = %ws.name,
+                last_used_at = %ws.last_used_at,
+                "autobuild: marked workspace dormant"
+            );
+            // If the workspace is running, it also needs to be stopped.
+            if action == AutobuildAction::Stop {
+                info!(
+                    workspace_id = %ws.id,
+                    workspace_name = %ws.name,
+                    "autobuild: stopping dormant workspace"
+                );
+                // In the full implementation this would trigger a stop build
+                // via the workspace builder.
+            }
+        }
+        BuildReason::Autodelete => {
+            info!(
+                workspace_id = %ws.id,
+                workspace_name = %ws.name,
+                "autobuild: auto-deleting dormant workspace"
+            );
+            store.soft_delete_workspace(ws.id).await?;
+        }
+        BuildReason::Autostart => {
+            info!(
+                workspace_id = %ws.id,
+                workspace_name = %ws.name,
+                "autobuild: autostarting workspace"
+            );
+            // In the full implementation this would trigger a start build
+            // via the workspace builder.
+        }
+        BuildReason::Autostop => {
+            info!(
+                workspace_id = %ws.id,
+                workspace_name = %ws.name,
+                "autobuild: autostopping workspace"
+            );
+            // In the full implementation this would trigger a stop build
+            // via the workspace builder.
+        }
+    }
+
+    Ok(action)
+}
+
+/// Determines the next transition for a workspace.
+///
+/// Returns `None` if no transition is needed, otherwise returns the action
+/// and the reason. Mirrors Go's `getNextTransition`.
+#[must_use]
+fn get_next_transition(
+    ws: &WorkspaceTransitionRow,
+    now: OffsetDateTime,
+) -> Option<(AutobuildAction, BuildReason)> {
+    // Check autostop first (highest priority for running workspaces).
+    if is_eligible_for_autostop(ws, now) {
+        return Some((AutobuildAction::Stop, BuildReason::Autostop));
+    }
+
+    // Check autostart (for stopped workspaces).
+    if is_eligible_for_autostart(ws, now) {
+        return Some((AutobuildAction::Start, BuildReason::Autostart));
+    }
+
+    // Check failed-stop (stop workspaces whose start build failed).
+    if is_eligible_for_failed_stop(ws, now) {
+        return Some((AutobuildAction::Stop, BuildReason::Autostop));
+    }
+
+    // Check dormancy (inactive workspaces should go dormant).
+    if is_eligible_for_dormant_stop(ws, now) {
+        if ws.build_transition == "start" {
+            return Some((AutobuildAction::Stop, BuildReason::Dormancy));
+        }
+        return Some((AutobuildAction::Dormant, BuildReason::Dormancy));
+    }
+
+    // Check auto-delete (dormant workspaces past deletion threshold).
+    if is_eligible_for_delete(ws, now) {
+        return Some((AutobuildAction::Delete, BuildReason::Autodelete));
+    }
+
+    None
+}
+
+/// Returns `true` if the workspace should be autostarted.
+///
+/// Conditions (matching Go's `isEligibleForAutostart`):
+/// - Owner is active (not suspended)
+/// - Last build job did not fail
+/// - Workspace is not dormant
+/// - Last build transition is "stop"
+/// - Template allows user autostart
+/// - Workspace has a valid autostart schedule
+/// - The schedule's next occurrence has passed since the last build
+fn is_eligible_for_autostart(ws: &WorkspaceTransitionRow, now: OffsetDateTime) -> bool {
+    if ws.owner_status != "active" {
+        return false;
+    }
+    if ws.job_status == "failed" {
+        return false;
+    }
+    if ws.dormant_at.is_some() {
+        return false;
+    }
+    if ws.build_transition != "stop" {
+        return false;
+    }
+    if !ws.template_allow_user_autostart {
+        return false;
+    }
+
+    let schedule_str = match &ws.autostart_schedule {
+        Some(s) if !s.is_empty() => s.as_str(),
+        _ => return false,
+    };
+
+    let schedule = match AutostartSchedule::parse(schedule_str) {
+        Ok(s) => s,
+        Err(_) => return false,
+    };
+
+    let after = match ws.job_completed_at {
+        Some(t) => {
+            let ts = t.unix_timestamp();
+            match chrono::DateTime::from_timestamp(ts, 0) {
+                Some(dt) => dt,
+                None => return false,
+            }
+        }
+        None => return false,
+    };
+
+    let next_transition = match schedule.next_after_chrono(after) {
+        Some(dt) => dt,
+        None => return false,
+    };
+
+    let now_chrono = match chrono::DateTime::from_timestamp(now.unix_timestamp(), 0) {
+        Some(dt) => dt,
+        None => return false,
+    };
+
+    now_chrono >= next_transition
+}
+
+/// Returns `true` if the workspace should be autostopped.
+///
+/// Conditions (matching Go's `isEligibleForAutostop`):
+/// - Last build job did not fail
+/// - Workspace is not dormant
+/// - If owner is suspended and workspace is running, stop immediately
+/// - Workspace is running, has a deadline, and deadline has passed
+fn is_eligible_for_autostop(ws: &WorkspaceTransitionRow, now: OffsetDateTime) -> bool {
+    if ws.job_status == "failed" {
+        return false;
+    }
+    if ws.dormant_at.is_some() {
+        return false;
+    }
+    if ws.build_transition == "start" && ws.owner_status == "suspended" {
+        return true;
+    }
+    if ws.build_transition != "start" {
+        return false;
+    }
+    match ws.build_deadline {
+        Some(deadline) if deadline != OffsetDateTime::UNIX_EPOCH => now > deadline,
+        _ => false,
+    }
+}
+
+/// Returns `true` if the workspace should be marked dormant.
+///
+/// Conditions (matching Go's `isEligibleForDormantStop`):
+/// - Workspace is not already dormant
+/// - Template has a `time_til_dormant` > 0
+/// - Time since last use exceeds the threshold
+fn is_eligible_for_dormant_stop(ws: &WorkspaceTransitionRow, now: OffsetDateTime) -> bool {
+    if ws.dormant_at.is_some() {
+        return false;
+    }
+    if ws.template_time_til_dormant <= 0 {
+        return false;
+    }
+    let threshold = time::Duration::nanoseconds(ws.template_time_til_dormant);
+    (now - ws.last_used_at) > threshold
+}
+
+/// Returns `true` if the workspace should be auto-deleted.
+///
+/// Conditions (matching Go's `isEligibleForDelete`):
+/// - Workspace is dormant and has a `deleting_at` timestamp
+/// - Template has `time_til_dormant_autodelete` > 0
+/// - Current time is after `deleting_at`
+/// - If last delete job failed, wait 24 hours before retrying
+fn is_eligible_for_delete(ws: &WorkspaceTransitionRow, now: OffsetDateTime) -> bool {
+    if ws.dormant_at.is_none() || ws.deleting_at.is_none() {
+        return false;
+    }
+    if ws.template_time_til_dormant_autodelete <= 0 {
+        return false;
+    }
+    let deleting_at = match ws.deleting_at {
+        Some(t) => t,
+        None => return false,
+    };
+    let eligible = now > deleting_at;
+    if ws.build_transition == "delete" && ws.job_status == "failed" {
+        if let Some(completed_at) = ws.job_completed_at {
+            return eligible && (now - completed_at) > time::Duration::hours(24);
+        }
+        return false;
+    }
+    eligible
+}
+
+/// Returns `true` if the workspace should be stopped due to a failed build.
+///
+/// Conditions (matching Go's `isEligibleForFailedStop`):
+/// - Template has a failure TTL > 0
+/// - Job status is "failed"
+/// - Build transition is "start"
+/// - Job has completed and sufficient time has elapsed
+fn is_eligible_for_failed_stop(ws: &WorkspaceTransitionRow, now: OffsetDateTime) -> bool {
+    if ws.template_failure_ttl <= 0 {
+        return false;
+    }
+    if ws.job_status != "failed" || ws.build_transition != "start" {
+        return false;
+    }
+    let completed_at = match ws.job_completed_at {
+        Some(t) => t,
+        None => return false,
+    };
+    let failure_ttl = time::Duration::nanoseconds(ws.template_failure_ttl);
+    (now - completed_at) > failure_ttl
 }
 
 /// Determines the deadline extension for a workspace.
@@ -939,59 +1462,617 @@ mod tests {
         );
     }
 
-    // ── AutobuildExecutor tests ─────────────────────────────
+    // ── Eligibility function tests ──────────────────────────
 
-    #[tokio::test]
-    async fn autobuild_executor_evaluate_returns_workspace_count() {
-        let stats = default_stats();
-        let store = MockOperationalStore::new(stats);
+    fn make_transition_row() -> WorkspaceTransitionRow {
+        WorkspaceTransitionRow {
+            id: uuid::Uuid::new_v4(),
+            name: "test-workspace".to_owned(),
+            owner_id: uuid::Uuid::new_v4(),
+            template_id: uuid::Uuid::new_v4(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: OffsetDateTime::now_utc(),
+            dormant_at: None,
+            deleting_at: None,
+            deleted: false,
+            build_transition: "start".to_owned(),
+            build_deadline: None,
+            job_status: "succeeded".to_owned(),
+            job_completed_at: Some(OffsetDateTime::now_utc()),
+            template_allow_user_autostart: true,
+            template_default_ttl: 0,
+            template_failure_ttl: 0,
+            template_time_til_dormant: 0,
+            template_time_til_dormant_autodelete: 0,
+            owner_status: "active".to_owned(),
+        }
+    }
 
-        let executor = StdArc::new(AutobuildExecutor {
-            store,
-            _refresh_lock: Mutex::new(()),
-        });
+    // ── Autostop eligibility tests ──────────────────────────
 
-        let count = executor.evaluate_once().await;
-        assert!(count.is_ok());
-        // pending(1) + running(5) + stopped(3) = 9
-        let workspace_count = count.unwrap_or_else(|_| unreachable!());
-        assert_eq!(workspace_count, 9);
+    #[test]
+    fn autostop_eligible_when_deadline_passed() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+        assert!(is_eligible_for_autostop(&ws, now));
+    }
+
+    #[test]
+    fn autostop_not_eligible_when_deadline_in_future() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now + time::Duration::hours(1));
+        assert!(!is_eligible_for_autostop(&ws, now));
+    }
+
+    #[test]
+    fn autostop_not_eligible_when_workspace_stopped() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+        assert!(!is_eligible_for_autostop(&ws, now));
+    }
+
+    #[test]
+    fn autostop_not_eligible_when_failed() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+        ws.job_status = "failed".to_owned();
+        assert!(!is_eligible_for_autostop(&ws, now));
+    }
+
+    #[test]
+    fn autostop_not_eligible_when_dormant() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+        ws.dormant_at = Some(now - time::Duration::days(1));
+        assert!(!is_eligible_for_autostop(&ws, now));
+    }
+
+    #[test]
+    fn autostop_suspended_user_running_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.owner_status = "suspended".to_owned();
+        assert!(is_eligible_for_autostop(&ws, now));
+    }
+
+    // ── Autostart eligibility tests ─────────────────────────
+
+    #[test]
+    fn autostart_eligible_when_schedule_triggers() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        assert!(is_eligible_for_autostart(&ws, now));
+    }
+
+    #[test]
+    fn autostart_not_eligible_when_suspended() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        ws.owner_status = "suspended".to_owned();
+        assert!(!is_eligible_for_autostart(&ws, now));
+    }
+
+    #[test]
+    fn autostart_not_eligible_when_dormant() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        ws.dormant_at = Some(now - time::Duration::days(1));
+        assert!(!is_eligible_for_autostart(&ws, now));
+    }
+
+    #[test]
+    fn autostart_not_eligible_when_running() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        assert!(!is_eligible_for_autostart(&ws, now));
+    }
+
+    #[test]
+    fn autostart_not_eligible_when_template_disallows() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        ws.template_allow_user_autostart = false;
+        assert!(!is_eligible_for_autostart(&ws, now));
+    }
+
+    #[test]
+    fn autostart_not_eligible_without_schedule() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.autostart_schedule = None;
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        assert!(!is_eligible_for_autostart(&ws, now));
+    }
+
+    #[test]
+    fn autostart_not_eligible_when_job_failed() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        ws.job_status = "failed".to_owned();
+        assert!(!is_eligible_for_autostart(&ws, now));
+    }
+
+    // ── Dormant stop eligibility tests ──────────────────────
+
+    #[test]
+    fn dormant_stop_eligible_when_idle() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.last_used_at = now - time::Duration::days(31);
+        // 30 days in nanoseconds
+        ws.template_time_til_dormant = 30 * 24 * 60 * 60 * 1_000_000_000;
+        assert!(is_eligible_for_dormant_stop(&ws, now));
+    }
+
+    #[test]
+    fn dormant_stop_not_eligible_when_recently_active() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.last_used_at = now - time::Duration::days(10);
+        ws.template_time_til_dormant = 30 * 24 * 60 * 60 * 1_000_000_000;
+        assert!(!is_eligible_for_dormant_stop(&ws, now));
+    }
+
+    #[test]
+    fn dormant_stop_not_eligible_when_already_dormant() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.last_used_at = now - time::Duration::days(31);
+        ws.template_time_til_dormant = 30 * 24 * 60 * 60 * 1_000_000_000;
+        ws.dormant_at = Some(now - time::Duration::days(1));
+        assert!(!is_eligible_for_dormant_stop(&ws, now));
+    }
+
+    #[test]
+    fn dormant_stop_not_eligible_when_no_threshold() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.last_used_at = now - time::Duration::days(365);
+        ws.template_time_til_dormant = 0;
+        assert!(!is_eligible_for_dormant_stop(&ws, now));
+    }
+
+    // ── Delete eligibility tests ────────────────────────────
+
+    #[test]
+    fn delete_eligible_when_past_deleting_at() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.dormant_at = Some(now - time::Duration::days(90));
+        ws.deleting_at = Some(now - time::Duration::hours(1));
+        ws.template_time_til_dormant_autodelete = 90 * 24 * 60 * 60 * 1_000_000_000;
+        assert!(is_eligible_for_delete(&ws, now));
+    }
+
+    #[test]
+    fn delete_not_eligible_when_not_dormant() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.dormant_at = None;
+        ws.deleting_at = Some(now - time::Duration::hours(1));
+        ws.template_time_til_dormant_autodelete = 90 * 24 * 60 * 60 * 1_000_000_000;
+        assert!(!is_eligible_for_delete(&ws, now));
+    }
+
+    #[test]
+    fn delete_not_eligible_when_before_deleting_at() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.dormant_at = Some(now - time::Duration::days(30));
+        ws.deleting_at = Some(now + time::Duration::days(60));
+        ws.template_time_til_dormant_autodelete = 90 * 24 * 60 * 60 * 1_000_000_000;
+        assert!(!is_eligible_for_delete(&ws, now));
+    }
+
+    #[test]
+    fn delete_waits_24h_after_failed_delete() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.dormant_at = Some(now - time::Duration::days(90));
+        ws.deleting_at = Some(now - time::Duration::hours(2));
+        ws.template_time_til_dormant_autodelete = 90 * 24 * 60 * 60 * 1_000_000_000;
+        ws.build_transition = "delete".to_owned();
+        ws.job_status = "failed".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::hours(12));
+        assert!(
+            !is_eligible_for_delete(&ws, now),
+            "should wait 24h after failed delete"
+        );
+
+        ws.job_completed_at = Some(now - time::Duration::hours(25));
+        assert!(
+            is_eligible_for_delete(&ws, now),
+            "should be eligible 24h+ after failed delete"
+        );
+    }
+
+    // ── Failed stop eligibility tests ───────────────────────
+
+    #[test]
+    fn failed_stop_eligible() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.job_status = "failed".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::hours(2));
+        // 1 hour in nanoseconds
+        ws.template_failure_ttl = 60 * 60 * 1_000_000_000;
+        assert!(is_eligible_for_failed_stop(&ws, now));
+    }
+
+    #[test]
+    fn failed_stop_not_eligible_before_ttl() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.job_status = "failed".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::minutes(30));
+        ws.template_failure_ttl = 60 * 60 * 1_000_000_000;
+        assert!(!is_eligible_for_failed_stop(&ws, now));
+    }
+
+    #[test]
+    fn failed_stop_not_eligible_without_failure_ttl() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.job_status = "failed".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::hours(2));
+        ws.template_failure_ttl = 0;
+        assert!(!is_eligible_for_failed_stop(&ws, now));
+    }
+
+    #[test]
+    fn failed_stop_not_eligible_when_not_failed() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.job_status = "succeeded".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::hours(2));
+        ws.template_failure_ttl = 60 * 60 * 1_000_000_000;
+        assert!(!is_eligible_for_failed_stop(&ws, now));
+    }
+
+    // ── get_next_transition tests ───────────────────────────
+
+    #[test]
+    fn next_transition_autostop_has_highest_priority() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+
+        let result = get_next_transition(&ws, now);
+        assert_eq!(result, Some((AutobuildAction::Stop, BuildReason::Autostop)));
+    }
+
+    #[test]
+    fn next_transition_autostart() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_completed_at = Some(now - time::Duration::minutes(2));
+        ws.build_deadline = None;
+
+        let result = get_next_transition(&ws, now);
+        assert_eq!(
+            result,
+            Some((AutobuildAction::Start, BuildReason::Autostart))
+        );
+    }
+
+    #[test]
+    fn next_transition_dormancy_running_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.last_used_at = now - time::Duration::days(31);
+        ws.template_time_til_dormant = 30 * 24 * 60 * 60 * 1_000_000_000;
+        ws.build_deadline = None;
+
+        let result = get_next_transition(&ws, now);
+        assert_eq!(result, Some((AutobuildAction::Stop, BuildReason::Dormancy)));
+    }
+
+    #[test]
+    fn next_transition_dormancy_stopped_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.last_used_at = now - time::Duration::days(31);
+        ws.template_time_til_dormant = 30 * 24 * 60 * 60 * 1_000_000_000;
+        ws.autostart_schedule = None;
+        ws.job_status = "succeeded".to_owned();
+        ws.job_completed_at = None;
+
+        let result = get_next_transition(&ws, now);
+        assert_eq!(
+            result,
+            Some((AutobuildAction::Dormant, BuildReason::Dormancy))
+        );
+    }
+
+    #[test]
+    fn next_transition_autodelete() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.dormant_at = Some(now - time::Duration::days(90));
+        ws.deleting_at = Some(now - time::Duration::hours(1));
+        ws.template_time_til_dormant_autodelete = 90 * 24 * 60 * 60 * 1_000_000_000;
+        ws.build_transition = "stop".to_owned();
+        ws.build_deadline = None;
+
+        let result = get_next_transition(&ws, now);
+        assert_eq!(
+            result,
+            Some((AutobuildAction::Delete, BuildReason::Autodelete))
+        );
+    }
+
+    #[test]
+    fn next_transition_none_when_no_action_needed() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now + time::Duration::hours(2));
+        ws.template_time_til_dormant = 0;
+        ws.template_failure_ttl = 0;
+
+        let result = get_next_transition(&ws, now);
+        assert_eq!(result, None);
+    }
+
+    // ── AutobuildExecutor integration tests ─────────────────
+
+    #[derive(Clone)]
+    struct MockWorkspaceStore {
+        workspaces: StdArc<Mutex<Vec<WorkspaceTransitionRow>>>,
+        should_fail: StdArc<AtomicBool>,
+        dormancy_updates: StdArc<std::sync::Mutex<Vec<uuid::Uuid>>>,
+        deleted_workspaces: StdArc<std::sync::Mutex<Vec<uuid::Uuid>>>,
+    }
+
+    impl MockWorkspaceStore {
+        fn new(workspaces: Vec<WorkspaceTransitionRow>) -> Self {
+            Self {
+                workspaces: StdArc::new(Mutex::new(workspaces)),
+                should_fail: StdArc::new(AtomicBool::new(false)),
+                dormancy_updates: StdArc::new(std::sync::Mutex::new(Vec::new())),
+                deleted_workspaces: StdArc::new(std::sync::Mutex::new(Vec::new())),
+            }
+        }
+
+        fn with_failure(self) -> Self {
+            self.should_fail.store(true, Ordering::SeqCst);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl AutobuildStore for MockWorkspaceStore {
+        async fn get_workspaces_eligible_for_transition(
+            &self,
+            _now: OffsetDateTime,
+        ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+            if self.should_fail.load(Ordering::SeqCst) {
+                return Err(StorageError::unavailable("mock store failure"));
+            }
+            Ok(self.workspaces.lock().await.clone())
+        }
+
+        async fn update_workspace_dormant_deleting_at(
+            &self,
+            workspace_id: uuid::Uuid,
+            _dormant_at: Option<OffsetDateTime>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            if let Ok(mut updates) = self.dormancy_updates.lock() {
+                updates.push(workspace_id);
+            }
+            Ok(None)
+        }
+
+        async fn soft_delete_workspace(
+            &self,
+            workspace_id: uuid::Uuid,
+        ) -> Result<bool, StorageError> {
+            if let Ok(mut deleted) = self.deleted_workspaces.lock() {
+                deleted.push(workspace_id);
+            }
+            Ok(true)
+        }
     }
 
     #[tokio::test]
-    async fn autobuild_executor_evaluate_handles_store_failure() {
-        let store = MockOperationalStore::new(default_stats()).with_failure();
-
-        let executor = StdArc::new(AutobuildExecutor {
+    async fn executor_evaluate_empty_workspaces() {
+        let store = MockWorkspaceStore::new(vec![]);
+        let cancel = CancellationToken::new();
+        let executor = AutobuildExecutor {
             store,
-            _refresh_lock: Mutex::new(()),
-        });
+            cancel,
+            tick_secs: AUTOBUILD_TICK_SECS,
+        };
 
-        // When the store fails, evaluate_once returns Ok(0) because
-        // deployment_stats().ok() returns None and unwrap_or(0) kicks in.
-        let count = executor.evaluate_once().await;
-        assert!(count.is_ok());
-        assert_eq!(count.unwrap_or_else(|_| unreachable!()), 0);
+        let stats = executor.evaluate_once().await;
+        assert!(stats.is_ok());
+        let s = stats.unwrap_or_else(|_| unreachable!());
+        assert_eq!(s.evaluated, 0);
+        assert_eq!(s.transitions, 0);
+        assert_eq!(s.errors, 0);
     }
 
     #[tokio::test]
-    async fn autobuild_executor_evaluate_zero_workspaces() {
-        let mut stats = default_stats();
-        stats.workspaces.pending = 0;
-        stats.workspaces.running = 0;
-        stats.workspaces.stopped = 0;
-        stats.workspaces.building = 0;
-        stats.workspaces.failed = 0;
-        let store = MockOperationalStore::new(stats);
-
-        let executor = StdArc::new(AutobuildExecutor {
+    async fn executor_evaluate_handles_store_failure() {
+        let store = MockWorkspaceStore::new(vec![]).with_failure();
+        let cancel = CancellationToken::new();
+        let executor = AutobuildExecutor {
             store,
-            _refresh_lock: Mutex::new(()),
-        });
+            cancel,
+            tick_secs: AUTOBUILD_TICK_SECS,
+        };
 
-        let count = executor.evaluate_once().await;
-        assert!(count.is_ok());
-        assert_eq!(count.unwrap_or_else(|_| unreachable!()), 0);
+        let result = executor.evaluate_once().await;
+        assert!(result.is_err(), "should propagate store error");
+    }
+
+    #[tokio::test]
+    async fn executor_autostop_transition() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+
+        let store = MockWorkspaceStore::new(vec![ws]);
+        let cancel = CancellationToken::new();
+        let executor = AutobuildExecutor {
+            store,
+            cancel,
+            tick_secs: AUTOBUILD_TICK_SECS,
+        };
+
+        let stats = executor.evaluate_once().await;
+        assert!(stats.is_ok());
+        let s = stats.unwrap_or_else(|_| unreachable!());
+        assert_eq!(s.evaluated, 1);
+        assert_eq!(s.transitions, 1);
+        assert_eq!(s.errors, 0);
+    }
+
+    #[tokio::test]
+    async fn executor_dormancy_marks_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.last_used_at = now - time::Duration::days(31);
+        ws.template_time_til_dormant = 30 * 24 * 60 * 60 * 1_000_000_000;
+        ws.autostart_schedule = None;
+        ws.job_completed_at = None;
+        let ws_id = ws.id;
+
+        let store = MockWorkspaceStore::new(vec![ws]);
+        let dormancy_updates = store.dormancy_updates.clone();
+        let cancel = CancellationToken::new();
+        let executor = AutobuildExecutor {
+            store,
+            cancel,
+            tick_secs: AUTOBUILD_TICK_SECS,
+        };
+
+        let stats = executor.evaluate_once().await;
+        assert!(stats.is_ok());
+        let s = stats.unwrap_or_else(|_| unreachable!());
+        assert_eq!(s.transitions, 1);
+
+        let updates = dormancy_updates.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            updates.contains(&ws_id),
+            "should have called update_workspace_dormant_deleting_at"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_autodelete_deletes_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.dormant_at = Some(now - time::Duration::days(90));
+        ws.deleting_at = Some(now - time::Duration::hours(1));
+        ws.template_time_til_dormant_autodelete = 90 * 24 * 60 * 60 * 1_000_000_000;
+        ws.build_transition = "stop".to_owned();
+        ws.build_deadline = None;
+        ws.autostart_schedule = None;
+        ws.job_completed_at = None;
+        let ws_id = ws.id;
+
+        let store = MockWorkspaceStore::new(vec![ws]);
+        let deleted = store.deleted_workspaces.clone();
+        let cancel = CancellationToken::new();
+        let executor = AutobuildExecutor {
+            store,
+            cancel,
+            tick_secs: AUTOBUILD_TICK_SECS,
+        };
+
+        let stats = executor.evaluate_once().await;
+        assert!(stats.is_ok());
+        let s = stats.unwrap_or_else(|_| unreachable!());
+        assert_eq!(s.transitions, 1);
+
+        let deleted = deleted.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(
+            deleted.contains(&ws_id),
+            "should have soft-deleted the workspace"
+        );
+    }
+
+    #[tokio::test]
+    async fn executor_cancellation() {
+        let store = MockWorkspaceStore::new(vec![]);
+        let cancel = CancellationToken::new();
+        let (_executor, _handle) =
+            AutobuildExecutor::start_with_interval(store, cancel.clone(), 3600);
+
+        cancel.cancel();
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+    }
+
+    #[tokio::test]
+    async fn executor_multiple_workspaces_concurrent() {
+        let now = OffsetDateTime::now_utc();
+        let mut workspaces = Vec::new();
+
+        for i in 0..20 {
+            let mut ws = make_transition_row();
+            ws.name = format!("ws-{i}");
+            ws.build_transition = "start".to_owned();
+            ws.build_deadline = Some(now - time::Duration::minutes(5));
+            workspaces.push(ws);
+        }
+
+        let store = MockWorkspaceStore::new(workspaces);
+        let cancel = CancellationToken::new();
+        let executor = AutobuildExecutor {
+            store,
+            cancel,
+            tick_secs: AUTOBUILD_TICK_SECS,
+        };
+
+        let stats = executor.evaluate_once().await;
+        assert!(stats.is_ok());
+        let s = stats.unwrap_or_else(|_| unreachable!());
+        assert_eq!(s.evaluated, 20);
+        assert_eq!(s.transitions, 20);
+        assert_eq!(s.errors, 0);
     }
 
     // ── TemplateScheduleConstraints tests ───────────────────

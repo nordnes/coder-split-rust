@@ -1,4 +1,8 @@
 //! Domain-specific handler modules.
+//!
+//! Each sub-module implements the Axum handler functions for one API domain
+//! (users, workspaces, templates, etc.).  Shared imports and re-exports are
+//! centralised here so individual handler files stay focused on request logic.
 
 pub(crate) use crate::app::*;
 pub(crate) use crate::error::AppError;
@@ -91,7 +95,7 @@ use coder_core::{
 use coder_provisioner::{InitScriptError, render_init_script};
 use coder_rbac::{Action, Authorizer, Object, ResourceKind, ResourceType};
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
 use time::OffsetDateTime;
@@ -103,14 +107,18 @@ pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod chats;
 pub(crate) mod deployment;
+pub(crate) mod derp;
 pub(crate) mod external_auth;
 pub(crate) mod files;
 pub(crate) mod health;
 pub(crate) mod insights;
+pub(crate) mod licenses;
+pub(crate) mod mcp;
 pub(crate) mod notifications;
 pub(crate) mod oauth2;
 pub(crate) mod organizations;
 pub(crate) mod tasks;
+pub(crate) mod telemetry;
 pub(crate) mod templates;
 pub(crate) mod users;
 // Many items are defined for incremental integration (database-backed app

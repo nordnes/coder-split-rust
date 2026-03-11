@@ -18,8 +18,11 @@ coder-audit = { path = "../../crates/coder-audit" }
 coder-connectivity = { path = "../../crates/coder-connectivity" }
 coder-core = { path = "../../crates/coder-core" }
 coder-db = { path = "../../crates/coder-db" }
+coder-notifications = { path = "../../crates/coder-notifications" }
 coder-rbac = { path = "../../crates/coder-rbac" }
 coder-server = { path = "../../crates/coder-server" }
+coder-telemetry = { path = "../../crates/coder-telemetry" }
+coder-workspaces = { path = "../../crates/coder-workspaces" }
 metrics-exporter-prometheus.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true
@@ -28,6 +31,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-util.workspace = true
 tracing.workspace = true
 tracing-opentelemetry.workspace = true
 tracing-subscriber.workspace = true
