@@ -766,7 +766,7 @@ pub(crate) async fn patch_chat_message(
 
     let message = match state.store.update_chat_message_content(input).await {
         Ok(m) => m,
-        Err(StorageError::Unavailable { .. }) => {
+        Err(StorageError::NotFound { .. }) => {
             return Ok(not_found_response(
                 "Chat message not found or not editable.",
             ));
@@ -842,7 +842,7 @@ pub(crate) async fn promote_chat_queued_message(
         .await
     {
         Ok(record) => record,
-        Err(StorageError::Unavailable { .. }) => {
+        Err(StorageError::NotFound { .. }) => {
             return Ok(not_found_response("Queued message not found."));
         }
         Err(e) => return Err(e.into()),

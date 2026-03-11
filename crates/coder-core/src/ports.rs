@@ -1014,6 +1014,9 @@ pub enum StorageError {
     /// The backing store is unavailable.
     #[error("storage unavailable: {message}")]
     Unavailable { message: String },
+    /// The requested row/entity was not found.
+    #[error("not found: {message}")]
+    NotFound { message: String },
     /// Stored data exists but is invalid.
     #[error("stored data is invalid: {message}")]
     InvalidData { message: String },
@@ -1024,6 +1027,14 @@ impl StorageError {
     #[must_use]
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::Unavailable {
+            message: message.into(),
+        }
+    }
+
+    /// Creates a not-found error.
+    #[must_use]
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound {
             message: message.into(),
         }
     }

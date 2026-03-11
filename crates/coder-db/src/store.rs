@@ -4684,7 +4684,7 @@ impl AppStore for PostgresStore {
             "SELECT id, chat_id, content, created_at
              FROM chat_queued_messages
              WHERE chat_id = $1
-             ORDER BY id ASC",
+             ORDER BY created_at ASC, id ASC",
         )
         .bind(chat_id)
         .fetch_all(&self.pool)
@@ -10174,6 +10174,9 @@ fn escape_like(input: &str) -> String {
 }
 
 fn storage_error(error: sqlx::Error) -> StorageError {
+    if matches!(error, sqlx::Error::RowNotFound) {
+        return StorageError::not_found(error.to_string());
+    }
     StorageError::unavailable(error.to_string())
 }
 
