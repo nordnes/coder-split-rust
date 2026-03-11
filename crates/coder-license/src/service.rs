@@ -154,14 +154,8 @@ impl<S: LicenseStore> LicenseService<S> {
 
     /// Applies a single license's claims to the entitlements snapshot.
     fn apply_claims(&self, ents: &mut Entitlements, claims: &LicenseClaims, now: OffsetDateTime) {
-        ents.has_license = true;
-        ents.require_telemetry = ents.require_telemetry || claims.require_telemetry;
-
-        if claims.trial {
-            ents.trial = true;
-        }
-
         // Determine the entitlement level for features from this license.
+        // Check expiry first so that fully expired licenses don't set any flags.
         let entitlement = if claims.is_expired(now) {
             // Fully expired (past grace period) — do not apply.
             return;
@@ -170,6 +164,13 @@ impl<S: LicenseStore> LicenseService<S> {
         } else {
             Entitlement::Entitled
         };
+
+        ents.has_license = true;
+        ents.require_telemetry = ents.require_telemetry || claims.require_telemetry;
+
+        if claims.trial {
+            ents.trial = true;
+        }
 
         // Resolve the effective feature set.
         let mut effective_set = claims.feature_set.clone();
@@ -240,18 +241,19 @@ impl<S: LicenseStore> LicenseService<S> {
         licenses: &[LicenseRecord],
         now: OffsetDateTime,
     ) {
-        // Find the earliest license_expires among valid licenses.
-        let mut earliest_expiry: Option<OffsetDateTime> = None;
+        // Find the latest license_expires among valid licenses.
+        // The latest expiry determines when actual coverage ends.
+        let mut latest_expiry: Option<OffsetDateTime> = None;
         for license in licenses {
             if let Ok(claims) = self.validator.validate(&license.jwt) {
                 let expires = claims.license_expires_at();
-                if earliest_expiry.is_none_or(|e| expires < e) {
-                    earliest_expiry = Some(expires);
+                if latest_expiry.is_none_or(|e| expires > e) {
+                    latest_expiry = Some(expires);
                 }
             }
         }
 
-        if let Some(expiry) = earliest_expiry {
+        if let Some(expiry) = latest_expiry {
             let duration = expiry - now;
             let days_to_expire = (duration.whole_seconds() as f64 / 86400.0).ceil() as i64;
 
