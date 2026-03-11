@@ -31,6 +31,10 @@ pub struct TelemetryConfig {
     pub flush_interval: Duration,
     /// Maximum number of events to buffer before forcing a flush.
     pub max_batch_size: usize,
+    /// Hard cap on the in-memory event buffer.  When the buffer exceeds
+    /// this size (e.g. due to repeated submission failures), the oldest
+    /// events are dropped to prevent unbounded memory growth.
+    pub max_buffer_size: usize,
     /// Capacity of the internal mpsc channel.
     pub channel_capacity: usize,
 }
@@ -44,6 +48,7 @@ impl Default for TelemetryConfig {
             endpoint: None,
             flush_interval: Duration::from_secs(30 * 60), // 30 minutes
             max_batch_size: 1024,
+            max_buffer_size: 8192,
             channel_capacity: 4096,
         }
     }
@@ -248,8 +253,19 @@ async fn flush_batch(
             warn!(error = %e, count, "failed to submit telemetry batch, re-queuing events");
             counters.submission_errors.fetch_add(1, Ordering::Relaxed);
             // Re-queue events so they are retried on the next flush cycle
-            // instead of being permanently lost.
+            // instead of being permanently lost.  Respect the configured
+            // buffer cap to prevent unbounded memory growth when the
+            // endpoint is persistently unreachable.
             buffer.extend(snapshot.events);
+            if buffer.len() > config.max_buffer_size {
+                let excess = buffer.len() - config.max_buffer_size;
+                warn!(
+                    excess,
+                    max_buffer_size = config.max_buffer_size,
+                    "telemetry buffer exceeded cap, dropping oldest events"
+                );
+                buffer.drain(..excess);
+            }
         }
     }
 }
