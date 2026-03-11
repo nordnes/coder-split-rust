@@ -5,6 +5,9 @@ mod app;
 pub mod connection_guard;
 mod error;
 mod extractors;
+mod handlers;
+pub(crate) mod helpers;
 pub mod metrics;
+pub(crate) mod middleware;
 
 pub use app::{AppState, build_router};
