@@ -1,3 +1,17 @@
+//! Rust `coderd` binary — the main entry point for the Coder backend.
+//!
+//! Parses CLI arguments via [`clap`], initialises the database pool and
+//! migrations, constructs the [`coder_server::AppState`], and starts the
+//! Axum HTTP server with graceful shutdown.
+//!
+//! # Subcommands
+//!
+//! * `server` — start the HTTP service (the only subcommand today)
+//!
+//! # Environment
+//!
+//! Every flag has a corresponding `CODER_*` environment variable so that
+//! the binary can be configured purely via env in container deployments.
 #![forbid(unsafe_code)]
 
 mod shutdown;
