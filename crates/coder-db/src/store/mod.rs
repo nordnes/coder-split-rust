@@ -29,16 +29,17 @@ use coder_core::{
     AcquireProvisionerJobInput, ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord,
     ApiKeyWithOwnerRecord, AppStore, AuditDiff, AuditLog, AuditLogAction, AuditLogListFilter,
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
-    ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
-    ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
-    CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
-    CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateUserInput,
-    CreateUserStoreError, CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord,
-    DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse, DeploymentStore,
-    ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-    FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
-    HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
-    InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+    ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatModelConfigRecord,
+    ChatProviderRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
+    CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
+    CreateFirstUserStoreError, CreateGroupInput, CreateOAuth2ProviderAppInput,
+    CreateOAuth2ProviderAppTokenInput, CreateUserInput, CreateUserStoreError,
+    CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig,
+    DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
+    ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput,
+    GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings, InsertAgentLogInput,
+    InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertChatModelConfigInput,
+    InsertChatProviderInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
     InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
     InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
     MinimalOrganization, MinimalUser, NotificationMessageRecord, NotificationMessageStatus,
@@ -50,7 +51,8 @@ use coder_core::{
     ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
     ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
     SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
-    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateOAuth2ProviderAppInput,
+    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateChatMessageContentInput,
+    UpdateChatModelConfigInput, UpdateChatProviderInput, UpdateOAuth2ProviderAppInput,
     UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
     UpsertProvisionerDaemonInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
     UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
@@ -476,6 +478,48 @@ struct StoredChatFileRow {
     name: String,
     mimetype: String,
     data: Vec<u8>,
+}
+
+#[derive(FromRow)]
+struct StoredChatProviderRow {
+    id: Uuid,
+    provider: String,
+    display_name: String,
+    api_key: String,
+    base_url: String,
+    enabled: bool,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+}
+
+impl std::fmt::Debug for StoredChatProviderRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredChatProviderRow")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatModelConfigRow {
+    id: Uuid,
+    provider: String,
+    model: String,
+    display_name: String,
+    enabled: bool,
+    is_default: bool,
+    context_limit: i64,
+    compression_threshold: i32,
+    options: Value,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
 }
 
 #[derive(Debug, FromRow)]
@@ -1718,6 +1762,35 @@ fn chat_message_record_from_row(
     })
 }
 
+fn chat_provider_record_from_row(row: StoredChatProviderRow) -> ChatProviderRecord {
+    ChatProviderRecord {
+        id: row.id,
+        provider: row.provider,
+        display_name: row.display_name,
+        api_key: row.api_key,
+        base_url: row.base_url,
+        enabled: row.enabled,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn chat_model_config_record_from_row(row: StoredChatModelConfigRow) -> ChatModelConfigRecord {
+    ChatModelConfigRecord {
+        id: row.id,
+        provider: row.provider,
+        model: row.model,
+        display_name: row.display_name,
+        enabled: row.enabled,
+        is_default: row.is_default,
+        context_limit: row.context_limit,
+        compression_threshold: row.compression_threshold,
+        options: row.options,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
 fn inbox_notification_from_row(
     row: StoredInboxNotificationRow,
 ) -> Result<InboxNotification, StorageError> {
@@ -1966,6 +2039,17 @@ fn escape_like(input: &str) -> String {
 }
 
 fn storage_error(error: sqlx::Error) -> StorageError {
+    StorageError::unavailable(error.to_string())
+}
+
+/// Like [`storage_error`] but maps [`sqlx::Error::RowNotFound`] to
+/// [`StorageError::NotFound`] instead of [`StorageError::Unavailable`].
+/// Use this only for queries where a missing row is an expected
+/// "not found" condition (e.g. UPDATE ... RETURNING on a specific row).
+fn storage_error_or_not_found(error: sqlx::Error) -> StorageError {
+    if matches!(error, sqlx::Error::RowNotFound) {
+        return StorageError::not_found(error.to_string());
+    }
     StorageError::unavailable(error.to_string())
 }
 

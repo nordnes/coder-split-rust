@@ -460,9 +460,38 @@ pub fn build_router(
                     post(upload_chat_file).layer(DefaultBodyLimit::max(MAX_CHAT_FILE_SIZE)),
                 )
                 .route("/chats/files/{file}", get(get_chat_file))
+                .route(
+                    "/chats/{chat}/messages/{message}",
+                    patch(patch_chat_message),
+                )
+                .route(
+                    "/chats/{chat}/queue/{queuedMessage}",
+                    delete(delete_chat_queued_message),
+                )
+                .route(
+                    "/chats/{chat}/queue/{queuedMessage}/promote",
+                    post(promote_chat_queued_message),
+                )
                 .route("/chats/{chat}/archive", post(archive_chat_handler))
                 .route("/chats/{chat}/unarchive", post(unarchive_chat_handler))
                 .route("/chats/{chat}/git/watch", get(watch_chat_git))
+                .route(
+                    "/chats/providers",
+                    get(list_chat_providers).post(create_chat_provider),
+                )
+                .route(
+                    "/chats/providers/{providerConfig}",
+                    patch(update_chat_provider).delete(delete_chat_provider),
+                )
+                .route(
+                    "/chats/model-configs",
+                    get(list_chat_model_configs).post(create_chat_model_config),
+                )
+                .route(
+                    "/chats/model-configs/{modelConfig}",
+                    patch(update_chat_model_config).delete(delete_chat_model_config),
+                )
+                // TODO: Add handler-level tests for chat CRUD, provider, and model-config routes
                 // Notifications domain
                 .route(
                     "/notifications/settings",
@@ -1350,6 +1379,10 @@ mod tests {
         chat_messages: Mutex<Vec<ChatMessageRecord>>,
         chat_message_next_id: Mutex<i64>,
         chat_files: Mutex<HashMap<Uuid, coder_core::ChatFileRecord>>,
+        chat_queued_messages: Mutex<Vec<ChatQueuedMessageRecord>>,
+        chat_queued_message_next_id: Mutex<i64>,
+        chat_providers: Mutex<HashMap<Uuid, coder_core::ChatProviderRecord>>,
+        chat_model_configs: Mutex<HashMap<Uuid, coder_core::ChatModelConfigRecord>>,
         notifications_settings: Mutex<coder_core::NotificationsSettings>,
         notification_templates: Mutex<Vec<coder_core::NotificationTemplate>>,
         notification_preferences: Mutex<HashMap<(Uuid, Uuid), coder_core::NotificationPreference>>,
@@ -1443,6 +1476,10 @@ mod tests {
                 chat_messages: Mutex::new(Vec::new()),
                 chat_message_next_id: Mutex::new(1),
                 chat_files: Mutex::new(HashMap::new()),
+                chat_queued_messages: Mutex::new(Vec::new()),
+                chat_queued_message_next_id: Mutex::new(1),
+                chat_providers: Mutex::new(HashMap::new()),
+                chat_model_configs: Mutex::new(HashMap::new()),
                 notifications_settings: Mutex::new(coder_core::NotificationsSettings::default()),
                 notification_templates: Mutex::new(Vec::new()),
                 notification_preferences: Mutex::new(HashMap::new()),
@@ -4177,9 +4214,19 @@ mod tests {
 
         async fn list_chat_queued_messages(
             &self,
-            _chat_id: Uuid,
+            chat_id: Uuid,
         ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
-            Ok(Vec::new())
+            let msgs = self
+                .chat_queued_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<ChatQueuedMessageRecord> = msgs
+                .iter()
+                .filter(|m| m.chat_id == chat_id)
+                .cloned()
+                .collect();
+            result.sort_by_key(|m| m.created_at);
+            Ok(result)
         }
 
         async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
@@ -4230,6 +4277,235 @@ mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .get(&id)
                 .cloned())
+        }
+
+        // -----------------------------------------------------------------
+        // Chat message editing, queue, providers, model configs
+        // -----------------------------------------------------------------
+
+        async fn update_chat_message_content(
+            &self,
+            input: coder_core::UpdateChatMessageContentInput,
+        ) -> Result<ChatMessageRecord, StorageError> {
+            let mut msgs = self
+                .chat_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let msg = msgs
+                .iter_mut()
+                .find(|m| m.id == input.message_id && m.chat_id == input.chat_id)
+                .ok_or_else(|| StorageError::not_found("chat message not found"))?;
+            msg.content = input.content;
+            Ok(msg.clone())
+        }
+
+        async fn delete_chat_queued_message(
+            &self,
+            chat_id: Uuid,
+            queued_message_id: i64,
+        ) -> Result<(), StorageError> {
+            let mut msgs = self
+                .chat_queued_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            msgs.retain(|m| !(m.id == queued_message_id && m.chat_id == chat_id));
+            Ok(())
+        }
+
+        async fn promote_chat_queued_message(
+            &self,
+            chat_id: Uuid,
+            queued_message_id: i64,
+        ) -> Result<ChatQueuedMessageRecord, StorageError> {
+            let mut msgs = self
+                .chat_queued_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let earliest = msgs
+                .iter()
+                .filter(|m| m.chat_id == chat_id)
+                .map(|m| m.created_at)
+                .min()
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            let promoted_at = earliest - time::Duration::seconds(1);
+            let msg = msgs
+                .iter_mut()
+                .find(|m| m.id == queued_message_id && m.chat_id == chat_id)
+                .ok_or_else(|| StorageError::not_found("queued message not found"))?;
+            msg.created_at = promoted_at;
+            Ok(msg.clone())
+        }
+
+        async fn list_chat_providers(
+            &self,
+        ) -> Result<Vec<coder_core::ChatProviderRecord>, StorageError> {
+            let providers = self
+                .chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<coder_core::ChatProviderRecord> =
+                providers.values().cloned().collect();
+            result.sort_by(|a, b| a.provider.cmp(&b.provider));
+            Ok(result)
+        }
+
+        async fn insert_chat_provider(
+            &self,
+            input: coder_core::InsertChatProviderInput,
+        ) -> Result<coder_core::ChatProviderRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let id = Uuid::new_v4();
+            let record = coder_core::ChatProviderRecord {
+                id,
+                provider: input.provider,
+                display_name: input.display_name,
+                api_key: input.api_key,
+                base_url: input.base_url,
+                enabled: input.enabled,
+                created_at: now,
+                updated_at: now,
+            };
+            self.chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn update_chat_provider(
+            &self,
+            input: coder_core::UpdateChatProviderInput,
+        ) -> Result<coder_core::ChatProviderRecord, StorageError> {
+            let mut providers = self
+                .chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let provider = providers
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::not_found("chat provider not found"))?;
+            provider.display_name = input.display_name;
+            provider.api_key = input.api_key;
+            provider.base_url = input.base_url;
+            provider.enabled = input.enabled;
+            provider.updated_at = OffsetDateTime::now_utc();
+            Ok(provider.clone())
+        }
+
+        async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
+            self.chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&provider_id);
+            Ok(())
+        }
+
+        async fn list_chat_model_configs(
+            &self,
+            enabled_only: bool,
+        ) -> Result<Vec<coder_core::ChatModelConfigRecord>, StorageError> {
+            let configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<coder_core::ChatModelConfigRecord> = configs
+                .values()
+                .filter(|c| !enabled_only || c.enabled)
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.model.cmp(&b.model)));
+            Ok(result)
+        }
+
+        async fn insert_chat_model_config(
+            &self,
+            input: coder_core::InsertChatModelConfigInput,
+        ) -> Result<coder_core::ChatModelConfigRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let id = Uuid::new_v4();
+            let record = coder_core::ChatModelConfigRecord {
+                id,
+                provider: input.provider,
+                model: input.model,
+                display_name: input.display_name,
+                enabled: input.enabled,
+                is_default: input.is_default,
+                context_limit: input.context_limit,
+                compression_threshold: input.compression_threshold,
+                options: input.options,
+                created_at: now,
+                updated_at: now,
+            };
+            self.chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn update_chat_model_config(
+            &self,
+            input: coder_core::UpdateChatModelConfigInput,
+        ) -> Result<coder_core::ChatModelConfigRecord, StorageError> {
+            let mut configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let config = configs
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::not_found("chat model config not found"))?;
+            config.provider = input.provider;
+            config.model = input.model;
+            config.display_name = input.display_name;
+            config.enabled = input.enabled;
+            config.is_default = input.is_default;
+            config.context_limit = input.context_limit;
+            config.compression_threshold = input.compression_threshold;
+            config.options = input.options;
+            config.updated_at = OffsetDateTime::now_utc();
+            Ok(config.clone())
+        }
+
+        // NOTE: FakeStore performs a hard delete (HashMap::remove) while
+        // PostgresStore does a soft delete (sets deleted = true, deleted_at = now()).
+        // FakeStore also does not filter by a `deleted` flag in list queries.
+        // This divergence is acceptable for unit tests but should be kept in mind
+        // when writing integration tests that rely on soft-delete semantics.
+        async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
+            self.chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&config_id);
+            Ok(())
+        }
+
+        async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+            let mut configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let has_enabled_default = configs.values().any(|c| c.is_default && c.enabled);
+            if !has_enabled_default {
+                if let Some(config) = configs
+                    .values_mut()
+                    .filter(|c| c.enabled)
+                    .min_by_key(|c| c.created_at)
+                {
+                    config.is_default = true;
+                    config.updated_at = OffsetDateTime::now_utc();
+                }
+            }
+            Ok(())
+        }
+
+        async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+            let mut configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for config in configs.values_mut() {
+                config.is_default = false;
+            }
+            Ok(())
         }
 
         // -------------------------------------------------------------------

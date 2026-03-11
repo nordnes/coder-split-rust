@@ -3887,7 +3887,7 @@ impl AppStore for PostgresStore {
             "SELECT id, chat_id, content, created_at
              FROM chat_queued_messages
              WHERE chat_id = $1
-             ORDER BY id ASC",
+             ORDER BY created_at ASC",
         )
         .bind(chat_id)
         .fetch_all(&self.pool)
@@ -3973,6 +3973,282 @@ impl AppStore for PostgresStore {
             mimetype: r.mimetype,
             data: r.data,
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Provider & Model Config
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_chat_message_content(
+        &self,
+        input: UpdateChatMessageContentInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        let row: StoredChatMessageRow = sqlx::query_as(
+            "UPDATE chat_messages SET content = $1
+             WHERE id = $2 AND chat_id = $3
+             RETURNING id, chat_id, model_config_id, created_at, role, content, visibility::text, input_tokens, output_tokens, total_tokens, reasoning_tokens, cache_creation_tokens, cache_read_tokens, context_limit, compressed",
+        )
+        .bind(&input.content)
+        .bind(input.message_id)
+        .bind(input.chat_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error_or_not_found)?;
+
+        chat_message_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM chat_queued_messages WHERE id = $1 AND chat_id = $2")
+            .bind(queued_message_id)
+            .bind(chat_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn promote_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<ChatQueuedMessageRecord, StorageError> {
+        let row: StoredChatQueuedMessageRow = sqlx::query_as(
+            "UPDATE chat_queued_messages
+             SET created_at = (
+                 SELECT COALESCE(MIN(created_at), now()) - INTERVAL '1 second'
+                 FROM chat_queued_messages WHERE chat_id = $2
+             )
+             WHERE id = $1 AND chat_id = $2
+             RETURNING id, chat_id, content, created_at",
+        )
+        .bind(queued_message_id)
+        .bind(chat_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error_or_not_found)?;
+
+        Ok(ChatQueuedMessageRecord {
+            id: row.id,
+            chat_id: row.chat_id,
+            content: row.content,
+            created_at: row.created_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
+        let rows: Vec<StoredChatProviderRow> = sqlx::query_as(
+            "SELECT id, provider, display_name, api_key, base_url, enabled, created_at, updated_at
+             FROM chat_providers
+             ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(chat_provider_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_chat_provider(
+        &self,
+        input: InsertChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let row: StoredChatProviderRow = sqlx::query_as(
+            "INSERT INTO chat_providers (provider, display_name, api_key, base_url, enabled)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, provider, display_name, api_key, base_url, enabled, created_at, updated_at",
+        )
+        .bind(&input.provider)
+        .bind(&input.display_name)
+        .bind(&input.api_key)
+        .bind(&input.base_url)
+        .bind(input.enabled)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(chat_provider_record_from_row(row))
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_chat_provider(
+        &self,
+        input: UpdateChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let row: StoredChatProviderRow = sqlx::query_as(
+            "UPDATE chat_providers
+             SET display_name = $2,
+                 api_key = $3,
+                 base_url = $4,
+                 enabled = $5,
+                 updated_at = now()
+             WHERE id = $1
+             RETURNING id, provider, display_name, api_key, base_url, enabled, created_at, updated_at",
+        )
+        .bind(input.id)
+        .bind(&input.display_name)
+        .bind(&input.api_key)
+        .bind(&input.base_url)
+        .bind(input.enabled)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error_or_not_found)?;
+
+        Ok(chat_provider_record_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_chat_provider(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM chat_providers WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_chat_model_configs(
+        &self,
+        enabled_only: bool,
+    ) -> Result<Vec<ChatModelConfigRecord>, StorageError> {
+        let rows: Vec<StoredChatModelConfigRow> = sqlx::query_as(
+            "SELECT id, provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options, created_at, updated_at
+             FROM chat_model_configs
+             WHERE deleted_at IS NULL AND ($1 = false OR enabled = true)
+             ORDER BY created_at ASC",
+        )
+        .bind(enabled_only)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(chat_model_config_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_chat_model_config(
+        &self,
+        input: InsertChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let row: StoredChatModelConfigRow = sqlx::query_as(
+            "INSERT INTO chat_model_configs (provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+             RETURNING id, provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options, created_at, updated_at",
+        )
+        .bind(&input.provider)
+        .bind(&input.model)
+        .bind(&input.display_name)
+        .bind(input.enabled)
+        .bind(input.is_default)
+        .bind(input.context_limit)
+        .bind(input.compression_threshold)
+        .bind(&input.options)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(chat_model_config_record_from_row(row))
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_chat_model_config(
+        &self,
+        input: UpdateChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let row: StoredChatModelConfigRow = sqlx::query_as(
+            "UPDATE chat_model_configs
+             SET provider = $2,
+                 model = $3,
+                 display_name = $4,
+                 enabled = $5,
+                 is_default = $6,
+                 context_limit = $7,
+                 compression_threshold = $8,
+                 options = $9,
+                 updated_at = now()
+             WHERE id = $1 AND deleted_at IS NULL
+             RETURNING id, provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options, created_at, updated_at",
+        )
+        .bind(input.id)
+        .bind(&input.provider)
+        .bind(&input.model)
+        .bind(&input.display_name)
+        .bind(input.enabled)
+        .bind(input.is_default)
+        .bind(input.context_limit)
+        .bind(input.compression_threshold)
+        .bind(&input.options)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error_or_not_found)?;
+
+        Ok(chat_model_config_record_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_chat_model_config(&self, id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chat_model_configs SET deleted_at = now() WHERE id = $1 AND deleted_at IS NULL",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chat_model_configs
+             SET is_default = true, updated_at = now()
+             WHERE id = (
+                 SELECT id FROM chat_model_configs
+                 WHERE deleted_at IS NULL AND enabled = true
+                 ORDER BY created_at ASC
+                 LIMIT 1
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM chat_model_configs
+                 WHERE is_default = true AND deleted_at IS NULL AND enabled = true
+             )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chat_model_configs SET is_default = false, updated_at = now() WHERE is_default = true AND deleted_at IS NULL",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------

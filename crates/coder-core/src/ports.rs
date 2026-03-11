@@ -185,6 +185,135 @@ pub struct InsertChatFileInput {
     pub data: Vec<u8>,
 }
 
+/// Input for updating a chat message's content.
+#[derive(Clone, Debug)]
+pub struct UpdateChatMessageContentInput {
+    pub message_id: i64,
+    pub chat_id: Uuid,
+    pub content: Option<Value>,
+}
+
+/// A chat provider record as stored in the database.
+#[derive(Clone)]
+pub struct ChatProviderRecord {
+    pub id: Uuid,
+    pub provider: String,
+    pub display_name: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub enabled: bool,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+// Custom Debug that redacts api_key to prevent accidental secret leakage in
+// tracing output or error messages.
+impl std::fmt::Debug for ChatProviderRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatProviderRecord")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+/// Input for inserting a new chat provider.
+#[derive(Clone)]
+pub struct InsertChatProviderInput {
+    pub provider: String,
+    pub display_name: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub enabled: bool,
+    pub created_by: Option<Uuid>,
+}
+
+/// Input for updating a chat provider.
+#[derive(Clone)]
+pub struct UpdateChatProviderInput {
+    pub id: Uuid,
+    pub display_name: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub enabled: bool,
+}
+
+impl std::fmt::Debug for InsertChatProviderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InsertChatProviderInput")
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .field("created_by", &self.created_by)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for UpdateChatProviderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateChatProviderInput")
+            .field("id", &self.id)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// A chat model config record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct ChatModelConfigRecord {
+    pub id: Uuid,
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    pub options: Value,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+/// Input for inserting a new chat model config.
+#[derive(Clone, Debug)]
+pub struct InsertChatModelConfigInput {
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    pub options: Value,
+    pub created_by: Option<Uuid>,
+}
+
+/// Input for updating a chat model config.
+#[derive(Clone, Debug)]
+pub struct UpdateChatModelConfigInput {
+    pub id: Uuid,
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    pub options: Value,
+    pub updated_by: Option<Uuid>,
+}
+
 /// Deployment metadata required by the HTTP layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeploymentMetadata {
@@ -885,6 +1014,9 @@ pub enum StorageError {
     /// The backing store is unavailable.
     #[error("storage unavailable: {message}")]
     Unavailable { message: String },
+    /// The requested row/entity was not found.
+    #[error("not found: {message}")]
+    NotFound { message: String },
     /// Stored data exists but is invalid.
     #[error("stored data is invalid: {message}")]
     InvalidData { message: String },
@@ -895,6 +1027,14 @@ impl StorageError {
     #[must_use]
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::Unavailable {
+            message: message.into(),
+        }
+    }
+
+    /// Creates a not-found error.
+    #[must_use]
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound {
             message: message.into(),
         }
     }
@@ -3147,6 +3287,141 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
         let _ = id;
         Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Updates the content of an existing chat message.
+    async fn update_chat_message_content(
+        &self,
+        input: UpdateChatMessageContentInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat message editing is not implemented",
+        ))
+    }
+
+    /// Deletes a queued message.
+    async fn delete_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<(), StorageError> {
+        let _ = (chat_id, queued_message_id);
+        Err(StorageError::unavailable(
+            "chat queue operations are not implemented",
+        ))
+    }
+
+    /// Promotes a queued message (moves it to the front of the queue).
+    async fn promote_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<ChatQueuedMessageRecord, StorageError> {
+        let _ = (chat_id, queued_message_id);
+        Err(StorageError::unavailable(
+            "chat queue operations are not implemented",
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Providers
+    // -----------------------------------------------------------------------
+
+    /// Lists all chat provider configurations.
+    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    /// Creates a new chat provider configuration.
+    async fn insert_chat_provider(
+        &self,
+        input: InsertChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    /// Updates an existing chat provider configuration.
+    async fn update_chat_provider(
+        &self,
+        input: UpdateChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    /// Deletes a chat provider configuration.
+    async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
+        let _ = provider_id;
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Model Configs
+    // -----------------------------------------------------------------------
+
+    /// Lists chat model configs. If `enabled_only` is true, returns only enabled configs.
+    async fn list_chat_model_configs(
+        &self,
+        enabled_only: bool,
+    ) -> Result<Vec<ChatModelConfigRecord>, StorageError> {
+        let _ = enabled_only;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Creates a new chat model config.
+    async fn insert_chat_model_config(
+        &self,
+        input: InsertChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Updates an existing chat model config.
+    async fn update_chat_model_config(
+        &self,
+        input: UpdateChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Deletes a chat model config (soft-delete).
+    async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
+        let _ = config_id;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Ensures at least one default chat model config exists.
+    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Unsets all default chat model configs.
+    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
     }
 
     // -----------------------------------------------------------------------

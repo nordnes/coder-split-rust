@@ -2915,6 +2915,166 @@ pub struct UploadChatFileResponse {
     pub id: Uuid,
 }
 
+/// EditChatMessageRequest is the request to edit a user message in a chat.
+#[derive(Clone, Debug, Deserialize)]
+pub struct EditChatMessageRequest {
+    pub content: Vec<ChatInputPart>,
+}
+
+/// ChatProviderConfigSource describes how a provider entry is sourced.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatProviderConfigSource {
+    Database,
+    EnvPreset,
+    Supported,
+}
+
+/// ChatProviderConfigResponse is an admin-managed provider configuration.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatProviderConfigResponse {
+    pub id: Uuid,
+    pub provider: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub has_api_key: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
+    pub source: ChatProviderConfigSource,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// CreateChatProviderConfigRequest creates a chat provider config.
+#[derive(Clone, Deserialize)]
+pub struct CreateChatProviderConfigRequest {
+    pub provider: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for CreateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateChatProviderConfigRequest")
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// UpdateChatProviderConfigRequest updates a chat provider config.
+#[derive(Clone, Deserialize)]
+pub struct UpdateChatProviderConfigRequest {
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for UpdateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateChatProviderConfigRequest")
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// ChatModelCallConfig configures per-call model behavior defaults.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatModelCallConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<Value>,
+}
+
+/// ChatModelConfigResponse is an admin-managed model configuration.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatModelConfigResponse {
+    pub id: Uuid,
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_config: Option<ChatModelCallConfig>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// CreateChatModelConfigRequest creates a chat model config.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateChatModelConfigRequest {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
+    #[serde(default)]
+    pub context_limit: Option<i64>,
+    #[serde(default)]
+    pub compression_threshold: Option<i32>,
+    #[serde(default)]
+    pub model_config: Option<ChatModelCallConfig>,
+}
+
+/// UpdateChatModelConfigRequest updates a chat model config.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateChatModelConfigRequest {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
+    #[serde(default)]
+    pub context_limit: Option<i64>,
+    #[serde(default)]
+    pub compression_threshold: Option<i32>,
+    #[serde(default)]
+    pub model_config: Option<ChatModelCallConfig>,
+}
+
 // ---------------------------------------------------------------------------
 // Workspace Agent types
 // ---------------------------------------------------------------------------
