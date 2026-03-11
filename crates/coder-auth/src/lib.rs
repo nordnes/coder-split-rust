@@ -2630,6 +2630,42 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
     }
 }
 
+fn external_auth_installations_from_value(value: &Value) -> Vec<ExternalAuthAppInstallation> {
+    let items = value
+        .get("installations")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let id = item
+                .get("id")
+                .and_then(Value::as_i64)
+                .and_then(|raw| i32::try_from(raw).ok())
+                .unwrap_or_default();
+            if id == 0 {
+                return None;
+            }
+            Some(ExternalAuthAppInstallation {
+                id,
+                account: item
+                    .get("account")
+                    .and_then(external_auth_user_from_value)
+                    .unwrap_or_default(),
+                configure_url: item
+                    .get("configure_url")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("html_url").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2663,7 +2699,7 @@ mod tests {
 
     #[derive(Default, Clone)]
     struct MockStore {
-        inner: std::sync::Arc<Mutex<MockStoreInner>>,
+        inner: Arc<Mutex<MockStoreInner>>,
     }
 
     fn make_user(id: Uuid, email: &str, username: &str, name: &str) -> UserRecord {
@@ -2729,7 +2765,7 @@ mod tests {
             let user = make_user(user_id, &input.email, &input.username, &input.name);
             inner.users.push(user.clone());
             inner.password_users.push(PasswordUserRecord {
-                user: user,
+                user,
                 password_hash: input.password_hash,
                 one_time_passcode_hash: None,
                 one_time_passcode_expires_at: None,
@@ -2911,7 +2947,7 @@ mod tests {
 
         async fn token_config(&self, _user_id: Uuid) -> Result<TokenConfigRecord, StorageError> {
             Ok(TokenConfigRecord {
-                max_token_lifetime: std::time::Duration::from_secs(60 * 60 * 24 * 365),
+                max_token_lifetime: Duration::from_secs(60 * 60 * 24 * 365),
             })
         }
 
@@ -3168,40 +3204,4 @@ mod tests {
         let bad_result = service.login_with_password(&bad_login).await;
         assert!(bad_result.is_err(), "wrong password must be rejected");
     }
-}
-
-fn external_auth_installations_from_value(value: &Value) -> Vec<ExternalAuthAppInstallation> {
-    let items = value
-        .get("installations")
-        .and_then(Value::as_array)
-        .or_else(|| value.as_array())
-        .cloned()
-        .unwrap_or_default();
-
-    items
-        .into_iter()
-        .filter_map(|item| {
-            let id = item
-                .get("id")
-                .and_then(Value::as_i64)
-                .and_then(|raw| i32::try_from(raw).ok())
-                .unwrap_or_default();
-            if id == 0 {
-                return None;
-            }
-            Some(ExternalAuthAppInstallation {
-                id,
-                account: item
-                    .get("account")
-                    .and_then(external_auth_user_from_value)
-                    .unwrap_or_default(),
-                configure_url: item
-                    .get("configure_url")
-                    .and_then(Value::as_str)
-                    .or_else(|| item.get("html_url").and_then(Value::as_str))
-                    .unwrap_or_default()
-                    .to_owned(),
-            })
-        })
-        .collect()
 }

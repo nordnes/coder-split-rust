@@ -8014,17 +8014,6 @@ fn not_implemented_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
-fn not_implemented_detail_response(
-    message: impl Into<String>,
-    detail: impl Into<String>,
-) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::error(message.into(), detail.into())),
-    )
-        .into_response()
-}
-
 /// Accept a WebSocket upgrade then immediately close with a "not implemented" reason.
 /// Used for endpoints that require tailnet/pubsub integration not yet available.
 async fn ws_close_not_implemented(mut socket: WebSocket, reason: &str) {
