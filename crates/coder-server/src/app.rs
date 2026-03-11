@@ -1,5 +1,6 @@
 //! Router construction and HTTP handlers.
 
+use metrics_exporter_prometheus::PrometheusHandle;
 use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
@@ -150,6 +151,8 @@ pub struct AppState {
     pub coordinator: Arc<dyn TailnetCoordinator>,
     /// DERP relay traffic tracker.
     pub derp_tracker: Arc<DerpTrafficTracker>,
+    /// Optional Prometheus metrics handle for rendering metrics.
+    pub prometheus_handle: Option<PrometheusHandle>,
     pub(crate) auth: AuthService<Arc<dyn AppStore>>,
     pub(crate) identity: IdentityService<Arc<dyn AppStore>>,
     pub(crate) deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
@@ -171,6 +174,7 @@ impl AppState {
         agent_provider: Arc<dyn AgentProvider>,
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
+        prometheus_handle: Option<PrometheusHandle>,
     ) -> Result<Self, reqwest::Error> {
         let auth = AuthService::new(store.clone());
         let identity = IdentityService::new(store.clone());
@@ -189,6 +193,7 @@ impl AppState {
             agent_provider,
             coordinator,
             derp_tracker,
+            prometheus_handle,
             auth,
             identity,
             deployment_stats,
@@ -222,6 +227,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/", get(server_root))
         .route("/healthz", get(healthz))
         .route("/latency-check", get(latency_check))
+        .route("/metrics", get(get_prometheus_metrics))
         .route(
             "/external-auth/{externalauth}/callback",
             get(get_external_auth_callback_by_id),
@@ -856,6 +862,25 @@ pub fn build_router(state: AppState) -> Router {
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
         .layer(NormalizePathLayer::trim_trailing_slash())
         .with_state(state)
+}
+
+/// Handler: render Prometheus text exposition format from the installed recorder.
+async fn get_prometheus_metrics(State(state): State<AppState>) -> Response {
+    match state.prometheus_handle {
+        Some(ref handle) => {
+            let body = handle.render();
+            (
+                StatusCode::OK,
+                [(
+                    http::header::CONTENT_TYPE,
+                    "text/plain; version=0.0.4; charset=utf-8",
+                )],
+                body,
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "metrics recorder not installed").into_response(),
+    }
 }
 
 async fn server_root() -> impl IntoResponse {
@@ -7111,6 +7136,7 @@ mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                None,
             )?,
             store,
         ))

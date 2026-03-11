@@ -79,6 +79,21 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const REGULAR_MAX_TOKEN_LIFETIME_SECS: u64 = 60 * 60 * 24 * 30;
 const OWNER_MAX_TOKEN_LIFETIME_SECS: u64 = 60 * 60 * 24 * 365;
 
+/// Records a database query metric with operation name, duration, and success/failure.
+///
+/// Emits two metrics:
+/// - `db_query_duration_ms` (histogram): query latency in milliseconds, labelled by
+///   `operation` and `success`.
+/// - `db_queries_total` (counter): total number of queries, labelled by `operation` and
+///   `success`.
+fn record_db_query(operation: &str, duration_ms: f64, success: bool) {
+    let success_str = if success { "true" } else { "false" };
+    metrics::histogram!("db_query_duration_ms", "operation" => operation.to_owned(), "success" => success_str)
+        .record(duration_ms);
+    metrics::counter!("db_queries_total", "operation" => operation.to_owned(), "success" => success_str)
+        .increment(1);
+}
+
 /// Database initialization failures.
 #[derive(Debug, Error)]
 pub enum DatabaseInitError {
@@ -1056,6 +1071,8 @@ impl AppStore for PostgresStore {
         &self,
         token_hash: &[u8],
     ) -> Result<Option<AuthenticatedUser>, StorageError> {
+        let query_start = std::time::Instant::now();
+        let result: Result<Option<AuthenticatedUser>, StorageError> = async {
         let row = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
@@ -1109,6 +1126,14 @@ impl AppStore for PostgresStore {
 
         auth_user.org_roles = org_roles;
         Ok(Some(auth_user))
+        }.await;
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query(
+            "find_user_by_session_token_hash",
+            query_duration,
+            result.is_ok(),
+        );
+        result
     }
 
     #[instrument(skip(self, token_hash), err(level = tracing::Level::WARN))]
@@ -1304,7 +1329,8 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn find_user_by_id(&self, user_id: Uuid) -> Result<Option<UserRecord>, StorageError> {
-        sqlx::query_as::<_, StoredUserRow>(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
                 u.email,
@@ -1331,9 +1357,11 @@ impl AppStore for PostgresStore {
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(storage_error)?
-        .map(user_record_from_row)
-        .transpose()
+        .map_err(storage_error)
+        .and_then(|opt| opt.map(user_record_from_row).transpose());
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("find_user_by_id", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2503,7 +2531,8 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
     async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
-        sqlx::query(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query(
             "INSERT INTO audit_logs (
                 id,
                 request_id,
@@ -2548,9 +2577,12 @@ impl AppStore for PostgresStore {
         .bind(input.user_id)
         .execute(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map(|_| ())
+        .map_err(storage_error);
 
-        Ok(())
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("insert_audit_log", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -5518,6 +5550,8 @@ impl AppStore for PostgresStore {
         &self,
         filter: WorkspaceListFilter,
     ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        let query_start = std::time::Instant::now();
+        let result: Result<(Vec<WorkspaceRecord>, i64), StorageError> = async {
         let search = filter
             .name
             .as_deref()
@@ -5606,6 +5640,10 @@ impl AppStore for PostgresStore {
         let workspaces: Vec<WorkspaceRecord> =
             rows.into_iter().map(workspace_record_from_row).collect();
         Ok((workspaces, total))
+        }.await;
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("list_workspaces", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -5614,7 +5652,8 @@ impl AppStore for PostgresStore {
         workspace_id: Uuid,
         viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        sqlx::query_as::<_, StoredWorkspaceRow>(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query_as::<_, StoredWorkspaceRow>(
             "SELECT w.id, w.created_at, w.updated_at, w.deleted, w.owner_id, w.organization_id,
                     w.template_id, w.name, w.autostart_schedule, w.ttl, w.last_used_at,
                     w.dormant_at, w.deleting_at, w.automatic_updates,
@@ -5629,7 +5668,10 @@ impl AppStore for PostgresStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
-        .map(|opt| opt.map(workspace_record_from_row))
+        .map(|opt| opt.map(workspace_record_from_row));
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("find_workspace_by_id", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]

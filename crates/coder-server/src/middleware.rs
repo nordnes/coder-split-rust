@@ -140,8 +140,9 @@ pub(crate) async fn csrf_middleware(request: axum::extract::Request, next: Next)
     next.run(request).await
 }
 
-/// Middleware: record basic Prometheus-style HTTP metrics using the `metrics`
+/// Middleware: record Prometheus-compatible HTTP metrics using the `metrics`
 /// crate.  Counters and histograms are registered lazily on first use.
+/// Tracks per-request latency, status codes, and active connection count.
 pub(crate) async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> Response {
     let method = request.method().to_string();
     let path = request
@@ -150,26 +151,16 @@ pub(crate) async fn prometheus_middleware(request: axum::extract::Request, next:
         .map(|m| m.as_str().to_owned())
         .unwrap_or_else(|| "unmatched".to_owned());
 
+    metrics::gauge!("active_connections").increment(1.0);
+
     let start = std::time::Instant::now();
     let response = next.run(request).await;
-    let elapsed = start.elapsed().as_secs_f64();
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let status = response.status().as_u16().to_string();
+    metrics::gauge!("active_connections").decrement(1.0);
 
-    metrics::counter!(
-        "coderd_api_requests_processed_total",
-        "code" => status,
-        "method" => method.clone(),
-        "path" => path.clone(),
-    )
-    .increment(1);
-
-    metrics::histogram!(
-        "coderd_api_request_latencies_seconds",
-        "method" => method,
-        "path" => path,
-    )
-    .record(elapsed);
+    let status = response.status().as_u16();
+    crate::metrics::record_request(&method, &path, status, elapsed_ms);
 
     response
 }
