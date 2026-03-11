@@ -81,19 +81,13 @@ fn split_api_token(token: &str) -> Option<(&str, &str)> {
 
 /// Extracts the raw token string from request headers.
 ///
-/// Priority order (matching Go's `APITokenFromRequest`):
-/// 1. `coder_session_token` cookie
-/// 2. `Coder-Session-Token` header
-/// 3. `Authorization: Bearer <token>` header
+/// Priority order (matching the existing Rust codebase patterns in
+/// `helpers.rs`, `extractors.rs`, and `coder-auth/lib.rs`):
+/// 1. `Coder-Session-Token` header
+/// 2. `coder_session_token` cookie
+/// 3. `Authorization: Bearer <token>` header (case-insensitive per RFC 6750)
 fn extract_token_from_headers(headers: &HeaderMap) -> Option<String> {
-    // Cookie first (Go checks cookie before header).
-    if let Some(cookie_val) = cookie_from_headers(headers, "coder_session_token") {
-        if !cookie_val.is_empty() {
-            return Some(cookie_val);
-        }
-    }
-
-    // Custom header.
+    // Custom header first (matches helpers.rs, extractors.rs, coder-auth/lib.rs).
     if let Some(header_val) = headers
         .get("coder-session-token")
         .and_then(|v| v.to_str().ok())
@@ -103,15 +97,22 @@ fn extract_token_from_headers(headers: &HeaderMap) -> Option<String> {
         }
     }
 
-    // RFC 6750 Bearer token.
+    // Cookie second.
+    if let Some(cookie_val) = cookie_from_headers(headers, "coder_session_token") {
+        if !cookie_val.is_empty() {
+            return Some(cookie_val);
+        }
+    }
+
+    // RFC 6750 Bearer token (case-insensitive scheme per RFC 7235).
     if let Some(auth_header) = headers.get("authorization").and_then(|v| v.to_str().ok()) {
-        if let Some(token) = auth_header
-            .strip_prefix("Bearer ")
-            .or_else(|| auth_header.strip_prefix("bearer "))
-        {
-            let token = token.trim();
-            if !token.is_empty() {
-                return Some(token.to_owned());
+        let mut parts = auth_header.splitn(2, char::is_whitespace);
+        if let (Some(scheme), Some(rest)) = (parts.next(), parts.next()) {
+            if scheme.eq_ignore_ascii_case("bearer") {
+                let token = rest.trim();
+                if !token.is_empty() {
+                    return Some(token.to_owned());
+                }
             }
         }
     }
@@ -139,10 +140,9 @@ pub(crate) async fn api_key_auth_middleware(
     mut request: axum::extract::Request,
     next: Next,
 ) -> Response {
-    let headers = request.headers().clone();
-
     // --- Extract token --------------------------------------------------
-    let token = match extract_token_from_headers(&headers) {
+    // Borrow headers immutably for token extraction; no clone needed.
+    let token = match extract_token_from_headers(request.headers()) {
         Some(t) => t,
         None => {
             // No token at all — pass through for public routes.
@@ -259,31 +259,36 @@ async fn validate_api_key(
         .ok_or_else(|| unauthorized_json("API key is invalid."))?;
 
     // Constant-time secret comparison (SHA-256 of secret vs stored hash).
+    //
+    // All API key validation failures intentionally return the same generic
+    // message to prevent key-ID enumeration.
     let mut hasher = Sha256::new();
     hasher.update(key_secret.as_bytes());
     let secret_hash = hasher.finalize();
     if secret_hash.ct_eq(&key.hashed_secret).unwrap_u8() != 1 {
-        return Err(unauthorized_json("API key secret is invalid."));
+        return Err(unauthorized_json("API key is invalid."));
     }
 
     // Expiry check.
     let now = OffsetDateTime::now_utc();
     if key.expires_at < now {
-        return Err(unauthorized_json("API key has expired."));
+        return Err(unauthorized_json("API key is invalid."));
     }
 
     // Parse scopes.
+    //
+    // Go's `expandRBACScope` returns an error when no scopes are provided
+    // (modelmethods.go) rather than defaulting to ScopeAll.  We reject
+    // keys with no recognised scopes to avoid silently granting full
+    // access when an unrecognised scope string is stored in the DB.
     let scopes: Vec<ApiKeyScope> = key
         .scopes
         .iter()
         .filter_map(|s| ApiKeyScope::from_scope_string(s))
         .collect();
-    // Default to All if no recognised scopes.
-    let scopes = if scopes.is_empty() {
-        vec![ApiKeyScope::All]
-    } else {
-        scopes
-    };
+    if scopes.is_empty() {
+        return Err(unauthorized_json("API key has no recognised scopes."));
+    }
 
     // --- Last-used debounce & expiry refresh ----------------------------
     let mut updated_key = key.clone();
@@ -295,14 +300,15 @@ async fn validate_api_key(
         changed = true;
     }
 
-    // Refresh expiry for session-type keys: if a significant fraction of the
-    // lifetime has elapsed, push the expiry forward (mirrors Go behaviour
-    // where session keys are refreshed on activity).
-    if key.login_type == coder_core::LoginType::Password {
+    // Refresh session expiry.  Go's `ValidateAPIKey` refreshes the expiry
+    // for ALL key types (not just Password) when
+    // `DisableSessionExpiryRefresh` is false (apikey.go lines 430-436).
+    // We replicate that behaviour here.
+    {
         let lifetime = time::Duration::seconds(key.lifetime_seconds);
-        let new_expires_at = now + lifetime;
-        if new_expires_at > updated_key.expires_at {
-            updated_key.expires_at = new_expires_at;
+        let remaining = updated_key.expires_at - now;
+        if remaining <= lifetime - time::Duration::hours(1) {
+            updated_key.expires_at = now + lifetime;
             changed = true;
         }
     }
@@ -335,8 +341,15 @@ async fn validate_api_key(
             warn!(error = %e, "store error looking up user for API key");
             internal_error_json("A database error occurred.", &e.to_string())
         })?
-        .ok_or_else(|| unauthorized_json("User associated with API key not found."))?;
+        .ok_or_else(|| unauthorized_json("API key is invalid."))?;
 
+    // NOTE: `AuthenticatedUser::from(UserRecord)` produces empty `org_roles`.
+    // This means API-key-authenticated requests currently lack organisation
+    // role information for RBAC.  The session-auth path populates org_roles
+    // via `list_user_memberships` in the identity service.  Populating them
+    // here would require an additional DB query per API-key request; this is
+    // left as a known limitation during porting and will be addressed when
+    // the handler migration to extension-based auth is complete.
     let auth_user = AuthenticatedUser::from(user);
     let actor = coder_auth::actor_from_user(&auth_user);
 
@@ -455,10 +468,13 @@ pub(crate) fn require_scope(
     } else {
         Err((
             StatusCode::FORBIDDEN,
-            Json(ApiResponse::ok(format!(
-                "API key does not have the required scope: {}.",
-                required.as_str()
-            ))),
+            Json(ApiResponse::error(
+                format!(
+                    "API key does not have the required scope: {}.",
+                    required.as_str()
+                ),
+                String::new(),
+            )),
         )
             .into_response())
     }
@@ -471,7 +487,7 @@ pub(crate) fn require_scope(
 fn unauthorized_json(message: &str) -> Response {
     (
         StatusCode::UNAUTHORIZED,
-        Json(ApiResponse::ok(message.to_owned())),
+        Json(ApiResponse::error(message.to_owned(), String::new())),
     )
         .into_response()
 }
@@ -556,7 +572,7 @@ mod tests {
     }
 
     #[test]
-    fn test_extract_token_cookie_takes_priority() {
+    fn test_extract_token_header_takes_priority_over_cookie() {
         let mut headers = HeaderMap::new();
         headers.insert(
             http::header::COOKIE,
@@ -567,7 +583,18 @@ mod tests {
             http::HeaderValue::from_static("header-token"),
         );
         let token = extract_token_from_headers(&headers);
-        assert_eq!(token.as_deref(), Some("cookie-token"));
+        assert_eq!(token.as_deref(), Some("header-token"));
+    }
+
+    #[test]
+    fn test_extract_token_bearer_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "authorization",
+            http::HeaderValue::from_static("BEARER my-bearer-token"),
+        );
+        let token = extract_token_from_headers(&headers);
+        assert_eq!(token.as_deref(), Some("my-bearer-token"));
     }
 
     #[test]
