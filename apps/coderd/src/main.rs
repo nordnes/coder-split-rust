@@ -17,6 +17,7 @@ use coder_core::{
 };
 use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
 use coder_server::{AppState, build_router};
+use metrics_exporter_prometheus::PrometheusBuilder;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tracing::{error, info, warn};
@@ -209,6 +210,10 @@ async fn run() -> Result<(), MainError> {
     let derp_map = build_derp_map_from_config(&config.derp_regions);
     let coordinator = InMemoryCoordinator::new(derp_map);
     let derp_tracker = DerpTrafficTracker::new();
+    let prometheus_handle = PrometheusBuilder::new()
+        .install_recorder()
+        .map_err(|error| MainError::Config(format!("install prometheus recorder: {error}")))?;
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -219,6 +224,7 @@ async fn run() -> Result<(), MainError> {
         agent_provider,
         coordinator,
         derp_tracker,
+        Some(prometheus_handle),
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 

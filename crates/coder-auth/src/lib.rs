@@ -248,6 +248,7 @@ where
             .find_user_by_session_token_hash(&session_token_hash)
             .await?
         else {
+            metrics::counter!("auth_events_total", "type" => "session_expired").increment(1);
             return Ok(None);
         };
 
@@ -312,6 +313,7 @@ where
             .find_password_user_by_email(request.email.trim())
             .await?
         else {
+            metrics::counter!("auth_events_total", "type" => "login_failure").increment(1);
             return Err(AuthServiceError::unauthorized(
                 "Incorrect email or password.",
             ));
@@ -322,6 +324,7 @@ where
             || user_record.user.login_type != LoginType::Password
             || user_record.user.status != UserStatus::Active
         {
+            metrics::counter!("auth_events_total", "type" => "login_failure").increment(1);
             return Err(AuthServiceError::unauthorized(
                 "Incorrect email or password.",
             ));
@@ -330,6 +333,7 @@ where
         let password_matches = verify_password(&user_record.password_hash, &request.password)
             .map_err(|error| StorageError::invalid_data(error.to_string()))?;
         if !password_matches {
+            metrics::counter!("auth_events_total", "type" => "login_failure").increment(1);
             return Err(AuthServiceError::unauthorized(
                 "Incorrect email or password.",
             ));
@@ -341,6 +345,7 @@ where
             .insert_auth_session(&session_token_hash, user_record.user.id)
             .await?;
 
+        metrics::counter!("auth_events_total", "type" => "login_success").increment(1);
         Ok(LoginOutcome {
             user: AuthenticatedUser::from(user_record.user),
             response: LoginWithPasswordResponse { session_token },
@@ -351,6 +356,7 @@ where
     pub async fn logout(&self, session_token: &str) -> Result<(), StorageError> {
         let token_hash = hash_session_token(session_token);
         self.store.delete_auth_session(&token_hash).await?;
+        metrics::counter!("auth_events_total", "type" => "logout").increment(1);
         Ok(())
     }
 

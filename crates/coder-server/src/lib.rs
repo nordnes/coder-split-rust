@@ -3,5 +3,6 @@
 
 mod app;
 mod error;
+pub mod metrics;
 
 pub use app::{AppState, build_router};

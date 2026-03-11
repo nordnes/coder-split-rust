@@ -1055,6 +1055,7 @@ impl AppStore for PostgresStore {
         &self,
         token_hash: &[u8],
     ) -> Result<Option<AuthenticatedUser>, StorageError> {
+        let query_start = std::time::Instant::now();
         let row = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
@@ -1107,6 +1108,9 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)?;
 
         auth_user.org_roles = org_roles;
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        metrics::histogram!("db_query_duration_ms", "operation" => "find_user_by_session_token_hash", "success" => "true").record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "find_user_by_session_token_hash", "success" => "true").increment(1);
         Ok(Some(auth_user))
     }
 
@@ -1303,7 +1307,8 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn find_user_by_id(&self, user_id: Uuid) -> Result<Option<UserRecord>, StorageError> {
-        sqlx::query_as::<_, StoredUserRow>(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
                 u.email,
@@ -1332,7 +1337,12 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?
         .map(user_record_from_row)
-        .transpose()
+        .transpose();
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        let success = result.is_ok();
+        metrics::histogram!("db_query_duration_ms", "operation" => "find_user_by_id", "success" => if success { "true" } else { "false" }).record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "find_user_by_id", "success" => if success { "true" } else { "false" }).increment(1);
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -2498,6 +2508,7 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
     async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
+        let query_start = std::time::Instant::now();
         sqlx::query(
             "INSERT INTO audit_logs (
                 id,
@@ -2545,6 +2556,9 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        metrics::histogram!("db_query_duration_ms", "operation" => "insert_audit_log", "success" => "true").record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "insert_audit_log", "success" => "true").increment(1);
         Ok(())
     }
 
@@ -5513,6 +5527,7 @@ impl AppStore for PostgresStore {
         &self,
         filter: WorkspaceListFilter,
     ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        let query_start = std::time::Instant::now();
         let search = filter
             .name
             .as_deref()
@@ -5600,6 +5615,9 @@ impl AppStore for PostgresStore {
 
         let workspaces: Vec<WorkspaceRecord> =
             rows.into_iter().map(workspace_record_from_row).collect();
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        metrics::histogram!("db_query_duration_ms", "operation" => "list_workspaces", "success" => "true").record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "list_workspaces", "success" => "true").increment(1);
         Ok((workspaces, total))
     }
 
@@ -5609,7 +5627,8 @@ impl AppStore for PostgresStore {
         workspace_id: Uuid,
         viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        sqlx::query_as::<_, StoredWorkspaceRow>(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query_as::<_, StoredWorkspaceRow>(
             "SELECT w.id, w.created_at, w.updated_at, w.deleted, w.owner_id, w.organization_id,
                     w.template_id, w.name, w.autostart_schedule, w.ttl, w.last_used_at,
                     w.dormant_at, w.deleting_at, w.automatic_updates,
@@ -5624,7 +5643,12 @@ impl AppStore for PostgresStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
-        .map(|opt| opt.map(workspace_record_from_row))
+        .map(|opt| opt.map(workspace_record_from_row));
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        let success = result.is_ok();
+        metrics::histogram!("db_query_duration_ms", "operation" => "find_workspace_by_id", "success" => if success { "true" } else { "false" }).record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "find_workspace_by_id", "success" => if success { "true" } else { "false" }).increment(1);
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]

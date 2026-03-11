@@ -94,6 +94,7 @@ use coder_provisioner::{InitScriptError, render_init_script};
 use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
 use coder_workspaces::DeploymentStatsService;
 use futures_util::StreamExt;
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -196,6 +197,8 @@ pub struct AppState {
     pub coordinator: Arc<dyn TailnetCoordinator>,
     /// DERP relay traffic tracker.
     pub derp_tracker: Arc<DerpTrafficTracker>,
+    /// Handle to render Prometheus metrics text exposition.
+    pub prometheus_handle: Option<PrometheusHandle>,
     auth: AuthService<Arc<dyn AppStore>>,
     identity: IdentityService<Arc<dyn AppStore>>,
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
@@ -217,6 +220,7 @@ impl AppState {
         agent_provider: Arc<dyn AgentProvider>,
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
+        prometheus_handle: Option<PrometheusHandle>,
     ) -> Result<Self, reqwest::Error> {
         let auth = AuthService::new(store.clone());
         let identity = IdentityService::new(store.clone());
@@ -235,6 +239,7 @@ impl AppState {
             agent_provider,
             coordinator,
             derp_tracker,
+            prometheus_handle,
             auth,
             identity,
             deployment_stats,
@@ -357,6 +362,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(server_root))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(get_prometheus_metrics))
         .route("/latency-check", get(latency_check))
         .route(
             "/external-auth/{externalauth}/callback",
@@ -13795,9 +13801,30 @@ async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Respons
     next.run(request).await
 }
 
-/// Middleware: record basic Prometheus-style HTTP metrics using the `metrics`
+/// Handler: render Prometheus text exposition format from the installed recorder.
+async fn get_prometheus_metrics(State(state): State<AppState>) -> Response {
+    match state.prometheus_handle {
+        Some(ref handle) => {
+            let body = handle.render();
+            (
+                StatusCode::OK,
+                [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+                body,
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "metrics recorder not installed").into_response(),
+    }
+}
+
+/// Middleware: record Prometheus-compatible HTTP metrics using the `metrics`
 /// crate.  Counters and histograms are registered lazily on first use.
+/// Tracks per-request latency, status codes, and active connection count.
 async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> Response {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
+
     let method = request.method().to_string();
     let path = request
         .extensions()
@@ -13805,26 +13832,18 @@ async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> R
         .map(|m| m.as_str().to_owned())
         .unwrap_or_else(|| "unmatched".to_owned());
 
+    let current = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
+    crate::metrics::set_active_connections(current);
+
     let start = std::time::Instant::now();
     let response = next.run(request).await;
-    let elapsed = start.elapsed().as_secs_f64();
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let status = response.status().as_u16().to_string();
+    let current = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed) - 1;
+    crate::metrics::set_active_connections(current);
 
-    metrics::counter!(
-        "coderd_api_requests_processed_total",
-        "code" => status,
-        "method" => method.clone(),
-        "path" => path.clone(),
-    )
-    .increment(1);
-
-    metrics::histogram!(
-        "coderd_api_request_latencies_seconds",
-        "method" => method,
-        "path" => path,
-    )
-    .record(elapsed);
+    let status = response.status().as_u16();
+    crate::metrics::record_request(&method, &path, status, elapsed_ms);
 
     response
 }
@@ -19723,6 +19742,7 @@ mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                None,
             )?,
             store,
         ))
