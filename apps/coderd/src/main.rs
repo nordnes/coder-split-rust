@@ -100,6 +100,30 @@ struct ServerArgs {
     /// Output format for logs.
     #[arg(long, env = "CODER_LOG_FORMAT", value_enum, default_value_t = LogFormatArg::Pretty)]
     log_format: LogFormatArg,
+
+    /// Session cache TTL in seconds.
+    #[arg(long, env = "CODER_SESSION_CACHE_TTL_SECS", default_value_t = 30)]
+    session_cache_ttl_secs: u64,
+
+    /// Audit batch flush interval in milliseconds.
+    #[arg(
+        long,
+        env = "CODER_AUDIT_BATCH_FLUSH_INTERVAL_MS",
+        default_value_t = 500
+    )]
+    audit_batch_flush_interval_ms: u64,
+
+    /// Maximum number of audit events per batch.
+    #[arg(long, env = "CODER_AUDIT_BATCH_MAX_SIZE", default_value_t = 50)]
+    audit_batch_max_size: usize,
+
+    /// Maximum number of concurrent HTTP requests before returning 503.
+    #[arg(long, env = "CODER_MAX_CONCURRENT_REQUESTS", default_value_t = 1024)]
+    max_concurrent_requests: usize,
+
+    /// Maximum number of concurrent database queries.
+    #[arg(long, env = "CODER_MAX_CONCURRENT_DB_QUERIES", default_value_t = 0)]
+    max_concurrent_db_queries: usize,
 }
 
 #[derive(Debug, Error)]
@@ -285,11 +309,15 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             LogFormatArg::Pretty => LogFormat::Pretty,
             LogFormatArg::Json => LogFormat::Json,
         },
-        session_cache_ttl_secs: 30,
-        audit_batch_flush_interval_ms: 500,
-        audit_batch_max_size: 50,
-        max_concurrent_requests: 1024,
-        max_concurrent_db_queries: args.db_max_connections as usize * 2,
+        session_cache_ttl_secs: args.session_cache_ttl_secs,
+        audit_batch_flush_interval_ms: args.audit_batch_flush_interval_ms,
+        audit_batch_max_size: args.audit_batch_max_size,
+        max_concurrent_requests: args.max_concurrent_requests,
+        max_concurrent_db_queries: if args.max_concurrent_db_queries > 0 {
+            args.max_concurrent_db_queries
+        } else {
+            args.db_max_connections as usize * 2
+        },
     })
 }
 

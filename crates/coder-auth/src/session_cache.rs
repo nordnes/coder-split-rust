@@ -46,7 +46,8 @@ impl SessionCache {
     /// Looks up a cached session by its hashed token.
     ///
     /// Returns `Some(user)` on a cache hit within TTL, or `None` on miss/expiry.
-    /// Expired entries are lazily evicted on the next `insert` or `evict` call.
+    /// Expired entries are cleaned up during `insert()` calls to prevent
+    /// unbounded memory growth.
     #[instrument(skip(self, token_hash))]
     pub async fn get(&self, token_hash: &[u8]) -> Option<AuthenticatedUser> {
         let entries = self.entries.read().await;
@@ -64,9 +65,19 @@ impl SessionCache {
     }
 
     /// Inserts or replaces a cached session entry.
+    ///
+    /// Also sweeps all expired entries from the cache to prevent unbounded
+    /// memory growth.  This is safe because we already hold the write lock.
     #[instrument(skip(self, token_hash, user))]
     pub async fn insert(&self, token_hash: Vec<u8>, user: AuthenticatedUser) {
         let mut entries = self.entries.write().await;
+        let ttl = self.ttl;
+        let before = entries.len();
+        entries.retain(|_, cached| cached.cached_at.elapsed() < ttl);
+        let swept = before.saturating_sub(entries.len());
+        if swept > 0 {
+            counter!("session_cache_evictions").increment(swept as u64);
+        }
         entries.insert(
             token_hash,
             CachedSession {
