@@ -41,6 +41,7 @@ use coder_core::{
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
+use coder_workspaces::AutobuildExecutor;
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
@@ -48,6 +49,7 @@ use opentelemetry_sdk::trace::SdkTracerProvider;
 use shutdown::ShutdownCoordinator;
 use thiserror::Error;
 use time::OffsetDateTime;
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::layer::SubscriberExt;
@@ -787,6 +789,11 @@ async fn run() -> Result<(), MainError> {
         NotificationDispatchService::new(store.clone(), NotificationConfig::default())
             .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
 
+    // Start the autobuild lifecycle executor (workspace auto-start/stop).
+    let autobuild_cancel = CancellationToken::new();
+    let (_autobuild_executor, autobuild_handle) =
+        AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -861,7 +868,17 @@ async fn run() -> Result<(), MainError> {
         drop(notification_service);
     });
 
-    // 5. Flush and shut down the OpenTelemetry tracer provider so buffered
+    // 5. Cancel the autobuild lifecycle executor and wait for in-flight
+    //    evaluations to finish so database writes complete before the pool
+    //    is closed later.
+    coordinator.register("autobuild", async move {
+        autobuild_cancel.cancel();
+        if let Err(e) = autobuild_handle.await {
+            warn!(error = %e, "autobuild executor task panicked during shutdown");
+        }
+    });
+
+    // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
     //    sends to a remote collector (gRPC), not to the database, so this
     //    is safe to run before closing the DB pool.

@@ -1036,6 +1036,55 @@ pub struct InsertFileResult {
     pub id: Uuid,
 }
 
+/// A denormalized row returned by the eligible-for-transition query.
+///
+/// Mirrors Go's `GetWorkspacesEligibleForTransitionRow` — it carries every
+/// field the autobuild executor needs so that no extra queries are required
+/// inside the hot loop.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceTransitionRow {
+    /// Workspace identifier.
+    pub id: Uuid,
+    /// Workspace name.
+    pub name: String,
+    /// Owner identifier.
+    pub owner_id: Uuid,
+    /// Template identifier.
+    pub template_id: Uuid,
+    /// Autostart cron schedule.
+    pub autostart_schedule: Option<String>,
+    /// TTL in nanoseconds.
+    pub ttl_ns: Option<i64>,
+    /// Last used time.
+    pub last_used_at: OffsetDateTime,
+    /// Dormant timestamp.
+    pub dormant_at: Option<OffsetDateTime>,
+    /// Scheduled deletion time.
+    pub deleting_at: Option<OffsetDateTime>,
+    /// Whether the workspace is soft-deleted.
+    pub deleted: bool,
+    /// Latest build transition (start / stop / delete).
+    pub build_transition: String,
+    /// Latest build deadline.
+    pub build_deadline: Option<OffsetDateTime>,
+    /// Latest provisioner job status.
+    pub job_status: String,
+    /// Latest provisioner job completed time.
+    pub job_completed_at: Option<OffsetDateTime>,
+    /// Template: allow user autostart.
+    pub template_allow_user_autostart: bool,
+    /// Template: default TTL (ns).
+    pub template_default_ttl: i64,
+    /// Template: failure TTL (ns).
+    pub template_failure_ttl: i64,
+    /// Template: time til dormant (ns).
+    pub template_time_til_dormant: i64,
+    /// Template: time til dormant auto-delete (ns).
+    pub template_time_til_dormant_autodelete: i64,
+    /// Owner's account status (e.g. "active", "suspended").
+    pub owner_status: String,
+}
+
 /// Errors surfaced by storage backends.
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum StorageError {
@@ -3862,6 +3911,34 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("workspaces are not implemented"))
     }
 
+    /// Returns workspaces that are candidates for an autobuild transition.
+    ///
+    /// The returned rows carry denormalized data (workspace + latest build +
+    /// template + owner status) so the autobuild executor can decide each
+    /// workspace's next transition without extra queries.
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        _now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        Err(StorageError::unavailable(
+            "autobuild transition query is not implemented",
+        ))
+    }
+
+    /// Atomically sets `dormant_at` and recomputes `deleting_at` for a workspace.
+    ///
+    /// When `dormant_at` is set and the template has a dormant auto-delete
+    /// threshold, `deleting_at` is derived automatically.  Clearing `dormant_at`
+    /// (passing `None`) also clears `deleting_at`.
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        let _ = (workspace_id, dormant_at);
+        Err(StorageError::unavailable("workspaces are not implemented"))
+    }
+
     /// Creates a new group.
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
         let _ = input;
@@ -5368,6 +5445,19 @@ pub trait WorkspaceStore: Send + Sync {
 
     /// Soft-deletes a workspace.
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
+
+    /// Returns workspaces that are candidates for an autobuild transition.
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError>;
+
+    /// Atomically sets `dormant_at` and recomputes `deleting_at` for a workspace.
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Creates a new group.
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError>;
@@ -7219,6 +7309,21 @@ where
         AppStore::soft_delete_workspace(self, workspace_id).await
     }
 
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        AppStore::get_workspaces_eligible_for_transition(self, now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::update_workspace_dormant_deleting_at(self, workspace_id, dormant_at).await
+    }
+
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
         AppStore::create_group(self, input).await
     }
@@ -7566,6 +7671,23 @@ where
 
     async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
         (**self).soft_delete_workspace(workspace_id).await
+    }
+
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        (**self).get_workspaces_eligible_for_transition(now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self)
+            .update_workspace_dormant_deleting_at(workspace_id, dormant_at)
+            .await
     }
 
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
