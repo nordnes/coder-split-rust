@@ -1518,9 +1518,9 @@ pub struct LicenseResponse {
     pub uuid: Uuid,
     /// When the license was uploaded (RFC 3339).
     #[serde(with = "time::serde::rfc3339")]
-    pub uploaded_at: time::OffsetDateTime,
+    pub uploaded_at: OffsetDateTime,
     /// Parsed claims as a JSON value.
-    pub claims: serde_json::Value,
+    pub claims: Value,
 }
 
 // ---------------------------------------------------------------------------

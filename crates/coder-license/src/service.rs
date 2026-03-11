@@ -129,6 +129,8 @@ impl<S: LicenseStore> LicenseService<S> {
         let mut ents = Entitlements::new_unlicensed();
         ents.refreshed_at = now;
 
+        let mut valid_claims: Vec<LicenseClaims> = Vec::new();
+
         for license in &licenses {
             match self.validator.validate(&license.jwt) {
                 Ok(claims) => {
@@ -137,6 +139,7 @@ impl<S: LicenseStore> LicenseService<S> {
                         continue;
                     }
                     self.apply_claims(&mut ents, &claims, now);
+                    valid_claims.push(claims);
                 }
                 Err(e) => {
                     ents.errors
@@ -145,18 +148,28 @@ impl<S: LicenseStore> LicenseService<S> {
             }
         }
 
-        // Add expiry warnings.
-        self.add_expiry_warnings(&mut ents, &licenses, now);
+        // Add expiry warnings using the already-validated claims.
+        self.add_expiry_warnings(&mut ents, &valid_claims, now);
 
         self.entitlements.update(ents);
         Ok(())
     }
 
     /// Applies a single license's claims to the entitlements snapshot.
+    ///
+    /// # Precondition
+    ///
+    /// The caller should filter out fully expired licenses before invoking
+    /// this method.  As a safety net an explicit expiry check is included;
+    /// expired claims are silently ignored.
     fn apply_claims(&self, ents: &mut Entitlements, claims: &LicenseClaims, now: OffsetDateTime) {
+        // Safety guard — skip fully expired licenses even if the caller
+        // forgot to filter them.
+        if claims.is_expired(now) {
+            return;
+        }
+
         // Determine the entitlement level for features from this license.
-        // Callers must filter out fully expired licenses before calling this
-        // method (see `refresh_entitlements`).
         let entitlement = if claims.in_grace_period(now) {
             Entitlement::GracePeriod
         } else {
@@ -194,11 +207,8 @@ impl<S: LicenseStore> LicenseService<S> {
             );
         }
 
-        // Add per-feature claims (al-la-carte).
+        // Add per-feature claims (a la carte).
         for (name_str, &value) in &claims.features {
-            if value < 0 {
-                continue;
-            }
             let Some(feature_name) = parse_feature_name(name_str) else {
                 continue;
             };
@@ -233,21 +243,23 @@ impl<S: LicenseStore> LicenseService<S> {
     }
 
     /// Adds license expiry warnings to the entitlements snapshot.
+    ///
+    /// `valid_claims` should contain the already-validated, non-expired
+    /// claims produced during [`refresh_entitlements`] to avoid
+    /// re-validating every license JWT a second time.
     fn add_expiry_warnings(
         &self,
         ents: &mut Entitlements,
-        licenses: &[LicenseRecord],
+        valid_claims: &[LicenseClaims],
         now: OffsetDateTime,
     ) {
         // Find the latest license_expires among valid licenses.
         // The latest expiry determines when actual coverage ends.
         let mut latest_expiry: Option<OffsetDateTime> = None;
-        for license in licenses {
-            if let Ok(claims) = self.validator.validate(&license.jwt) {
-                let expires = claims.license_expires_at();
-                if latest_expiry.is_none_or(|e| expires > e) {
-                    latest_expiry = Some(expires);
-                }
+        for claims in valid_claims {
+            let expires = claims.license_expires_at();
+            if latest_expiry.is_none_or(|e| expires > e) {
+                latest_expiry = Some(expires);
             }
         }
 

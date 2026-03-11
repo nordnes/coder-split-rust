@@ -66,7 +66,7 @@ pub enum FeatureName {
 }
 
 /// All known feature names, matching Go's `FeatureNames` slice ordering.
-pub const ALL_FEATURE_NAMES: &[FeatureName] = &[
+pub(crate) const ALL_FEATURE_NAMES: &[FeatureName] = &[
     FeatureName::UserLimit,
     FeatureName::AuditLog,
     FeatureName::ConnectionLog,

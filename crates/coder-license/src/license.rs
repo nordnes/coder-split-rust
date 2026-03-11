@@ -5,18 +5,13 @@
 
 use std::collections::HashMap;
 
-use jsonwebtoken::{Algorithm, DecodingKey, Validation};
+use jsonwebtoken::{DecodingKey, Validation};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::OffsetDateTime;
 
 /// Current license schema version that must be present in the claims.
-pub const CURRENT_VERSION: u64 = 3;
-
-/// Grace period duration added after `license_expires`.  The standard JWT
-/// `exp` claim is set to `license_expires + GRACE_PERIOD` so that JWT
-/// libraries consider the token valid during the grace window.
-pub const GRACE_PERIOD_DAYS: i64 = 30;
+pub(crate) const CURRENT_VERSION: u64 = 3;
 
 // ---------------------------------------------------------------------------
 // Errors
