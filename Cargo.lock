@@ -560,6 +560,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

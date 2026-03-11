@@ -113,4 +113,6 @@ pub(crate) mod organizations;
 pub(crate) mod tasks;
 pub(crate) mod templates;
 pub(crate) mod users;
+#[allow(dead_code, unreachable_pub)]
+pub(crate) mod workspace_apps;
 pub(crate) mod workspaces;

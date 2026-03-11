@@ -58,6 +58,7 @@ use crate::handlers::organizations::*;
 use crate::handlers::tasks::*;
 use crate::handlers::templates::*;
 use crate::handlers::users::*;
+use crate::handlers::workspace_apps::workspace_apps_proxy_path;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
@@ -244,6 +245,11 @@ pub fn build_router(
         .route("/healthz", get(healthz))
         .route("/latency-check", get(latency_check))
         .route("/metrics", get(get_prometheus_metrics))
+        // Workspace app path-based proxying.
+        .route(
+            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/*rest",
+            axum::routing::any(workspace_apps_proxy_path),
+        )
         .route(
             "/external-auth/{externalauth}/callback",
             get(get_external_auth_callback_by_id),
