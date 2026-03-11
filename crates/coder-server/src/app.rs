@@ -107,6 +107,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::extractors::{AgentAuth, Auth};
 
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
 const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
@@ -195,7 +196,7 @@ pub struct AppState {
     pub coordinator: Arc<dyn TailnetCoordinator>,
     /// DERP relay traffic tracker.
     pub derp_tracker: Arc<DerpTrafficTracker>,
-    auth: AuthService<Arc<dyn AppStore>>,
+    pub(crate) auth: AuthService<Arc<dyn AppStore>>,
     identity: IdentityService<Arc<dyn AppStore>>,
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
     health: HealthService<Arc<dyn AppStore>>,
@@ -1040,14 +1041,10 @@ async fn build_info(State(state): State<AppState>) -> Json<coder_core::BuildInfo
 }
 
 async fn post_csp_report(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
     payload: Result<Json<CspViolationReport>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(report) = match payload {
         Ok(payload) => payload,
         Err(error) => {
@@ -1185,12 +1182,9 @@ async fn get_init_script(
 
 async fn list_audit_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<AuditQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read audit logs.
     // This replaces the previous can_view_operational_data() check, which was
     // redundant — role_auditor() and role_owner() both grant AuditLog::Read at
@@ -1223,13 +1217,9 @@ async fn list_audit_logs(
 
 async fn post_generate_test_audit_log(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTestAuditLogRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create audit log entries.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1302,11 +1292,8 @@ async fn post_generate_test_audit_log(
 
 async fn deployment_stats(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment statistics.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1335,12 +1322,9 @@ async fn deployment_ssh(State(state): State<AppState>) -> Json<SshConfigResponse
 
 async fn debug_health(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<DebugHealthQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment health information.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1394,11 +1378,8 @@ async fn debug_health(
 
 async fn get_health_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1419,13 +1400,9 @@ async fn get_health_settings(
 
 async fn put_health_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<HealthSettings>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1489,24 +1466,16 @@ async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
 }
 
 async fn get_enabled_experiments(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     Ok(Json(Vec::<String>::new()).into_response())
 }
 
 async fn get_available_experiments(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     Ok(Json(AvailableExperiments { safe: Vec::new() }).into_response())
 }
 
@@ -1516,12 +1485,8 @@ async fn auth_methods() -> Json<AuthMethods> {
 
 async fn list_external_auths(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     Ok(Json(
         state
             .external_auth
@@ -1533,12 +1498,9 @@ async fn list_external_auths(
 
 async fn get_external_auth_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(provider): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(config) = find_external_auth_provider(&state, &provider) else {
         return Ok(resource_not_found_response());
     };
@@ -1560,13 +1522,9 @@ async fn get_external_auth_by_id(
 
 async fn delete_external_auth_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(provider): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete their own external auth links.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1609,12 +1567,9 @@ async fn delete_external_auth_by_id(
 
 async fn get_external_auth_device_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(provider): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(config) = find_external_auth_provider(&state, &provider) else {
         return Ok(resource_not_found_response());
     };
@@ -1632,14 +1587,10 @@ async fn get_external_auth_device_by_id(
 
 async fn post_external_auth_device_exchange(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(provider): Path<String>,
     payload: Result<Json<ExternalAuthDeviceExchangeRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update their own external auth links.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1836,10 +1787,7 @@ async fn login_with_password(
     Ok((StatusCode::CREATED, Json(outcome.response)).into_response())
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+async fn logout(State(state): State<AppState>, Auth(context): Auth) -> Result<Response, AppError> {
     state.auth.logout(&context.session_token).await?;
     record_audit(
         &state,
@@ -1946,12 +1894,9 @@ async fn get_oidc_callback_disabled() -> Response {
 
 async fn get_user_debug_link(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(requested_user): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &requested_user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -1983,12 +1928,9 @@ async fn get_user_debug_link(
 
 async fn list_users(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<UsersQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: only owners can enumerate all users (preserves can_list_users() semantics).
     if !context.actor.is_owner() {
         return Ok(forbidden_response("You are not authorized to list users."));
@@ -2032,13 +1974,9 @@ async fn list_users(
 
 async fn post_user(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateUserRequestWithOrgs>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create users.
     let authorizer = Authorizer::new();
     if authorizer
@@ -2076,11 +2014,8 @@ async fn post_user(
 async fn get_user_login_type(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let response = state
         .auth
         .get_user_login_type(&context.actor, &context.user, &user)
@@ -2092,11 +2027,8 @@ async fn get_user_login_type(
 async fn get_user_git_ssh_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -2132,11 +2064,8 @@ async fn get_user_git_ssh_key(
 async fn put_user_git_ssh_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -2192,12 +2121,9 @@ async fn put_user_git_ssh_key(
 async fn get_user_autofill_parameters(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -2245,13 +2171,9 @@ async fn get_user_autofill_parameters(
 async fn put_user_profile(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserProfileRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2278,29 +2200,25 @@ async fn put_user_profile(
 async fn put_suspend_user_account(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    put_user_status(state, user, headers, UserStatus::Suspended).await
+    put_user_status(state, user, context, UserStatus::Suspended).await
 }
 
 async fn put_activate_user_account(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    put_user_status(state, user, headers, UserStatus::Active).await
+    put_user_status(state, user, context, UserStatus::Active).await
 }
 
 async fn put_user_status(
     state: AppState,
     user: String,
-    headers: HeaderMap,
+    context: AuthenticatedRequest,
     status: UserStatus,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update user status.
     let authorizer = Authorizer::new();
     if authorizer
@@ -2337,11 +2255,8 @@ async fn put_user_status(
 async fn get_user_appearance(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let settings = state
         .identity
         .get_user_appearance(&context.actor, &context.user, &user)
@@ -2359,13 +2274,9 @@ async fn get_user_appearance(
 async fn put_user_appearance(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserAppearanceSettingsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2399,11 +2310,8 @@ async fn put_user_appearance(
 async fn get_user_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let settings = state
         .identity
         .get_user_preferences(&context.actor, &context.user, &user)
@@ -2420,13 +2328,9 @@ async fn get_user_preferences(
 async fn put_user_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserPreferenceSettingsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2459,13 +2363,9 @@ async fn put_user_preferences(
 async fn put_user_password(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserPasswordRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -2492,13 +2392,9 @@ async fn put_user_password(
 async fn post_convert_login(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<ConvertLoginRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // NOTE: RBAC is enforced inside AuthService::convert_login.
     let Json(request) = match payload {
         Ok(request) => request,
@@ -2514,12 +2410,8 @@ async fn post_convert_login(
 async fn get_user(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = state
         .identity
         .get_user(&context.actor, &context.user, &user)
@@ -2530,11 +2422,8 @@ async fn get_user(
 
 async fn list_site_roles(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let roles = state.identity.list_site_roles(&context.actor)?;
 
     Ok((StatusCode::OK, Json(roles)).into_response())
@@ -2543,11 +2432,8 @@ async fn list_site_roles(
 async fn get_user_roles(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let (target_user, organization_roles) = state
         .identity
         .get_user_roles(&context.actor, &context.user, &user)
@@ -2570,13 +2456,9 @@ async fn get_user_roles(
 async fn put_user_roles(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateRolesRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can assign user roles (admin-only).
     let authorizer = Authorizer::new();
     if authorizer
@@ -2616,12 +2498,8 @@ async fn put_user_roles(
 
 async fn list_organizations(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let organizations = state.identity.list_organizations(&context.actor).await?;
 
     Ok((
@@ -2639,12 +2517,8 @@ async fn list_organizations(
 async fn get_organization(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_organization = state
         .identity
         .get_organization(&context.actor, &organization)
@@ -2660,11 +2534,8 @@ async fn get_organization(
 async fn list_organization_roles(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let roles = state
         .identity
         .list_organization_roles(&context.actor, &organization)
@@ -2676,12 +2547,9 @@ async fn list_organization_roles(
 async fn list_organization_members(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<MembersQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let members = state
         .identity
         .list_organization_members(
@@ -2708,12 +2576,9 @@ async fn list_organization_members(
 async fn list_paginated_organization_members(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<MembersQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let (members, count) = state
         .identity
         .list_organization_members_page(
@@ -2741,11 +2606,8 @@ async fn list_paginated_organization_members(
 async fn get_organization_member(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let member = state
         .identity
         .get_organization_member(&context.actor, &context.user, &organization, &user)
@@ -2761,12 +2623,8 @@ async fn get_organization_member(
 async fn post_organization_member(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can add members to this organization.
     let Some(org) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -2810,12 +2668,8 @@ async fn post_organization_member(
 async fn delete_organization_member(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can remove members from this organization.
     let Some(org) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -2855,13 +2709,9 @@ async fn delete_organization_member(
 async fn put_organization_member_roles(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateRolesRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can assign roles in this organization.
     let Some(org) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -2918,12 +2768,8 @@ async fn put_organization_member_roles(
 async fn create_session_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -2963,13 +2809,9 @@ async fn create_session_api_key(
 async fn create_token_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTokenRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create token API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -3013,12 +2855,9 @@ async fn create_token_api_key(
 async fn list_token_api_keys(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<TokenListQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let keys = state
         .auth
         .list_token_api_keys(
@@ -3036,11 +2875,8 @@ async fn list_token_api_keys(
 async fn get_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let key = state
         .auth
         .get_api_key(&context.actor, &context.user, &user, &keyid)
@@ -3052,11 +2888,8 @@ async fn get_api_key(
 async fn get_api_key_by_name(
     State(state): State<AppState>,
     Path((user, keyname)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let key = state
         .auth
         .get_api_key_by_name(&context.actor, &context.user, &user, &keyname)
@@ -3068,12 +2901,8 @@ async fn get_api_key_by_name(
 async fn delete_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -3113,12 +2942,8 @@ async fn delete_api_key(
 async fn expire_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can expire API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -3158,11 +2983,8 @@ async fn expire_api_key(
 async fn get_token_config(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let config = state
         .auth
         .get_token_config(&context.actor, &context.user, &user)
@@ -3173,11 +2995,8 @@ async fn get_token_config(
 async fn list_user_organizations(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let organizations = state
         .identity
         .list_user_organizations(&context.actor, &context.user, &user)
@@ -3198,11 +3017,8 @@ async fn list_user_organizations(
 async fn get_user_organization_by_name(
     State(state): State<AppState>,
     Path((user, organizationname)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let target_organization = state
         .identity
         .get_user_organization_by_name(&context.actor, &context.user, &user, &organizationname)
@@ -3218,12 +3034,8 @@ async fn get_user_organization_by_name(
 async fn delete_user(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete users.
     let authorizer = Authorizer::new();
     if authorizer
@@ -3268,11 +3080,8 @@ async fn delete_user(
 async fn list_provisioner_daemons(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
     let org = state
         .identity
@@ -3305,11 +3114,8 @@ async fn list_provisioner_daemons(
 async fn list_provisioner_jobs(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
     let org = state
         .identity
@@ -3342,11 +3148,8 @@ async fn list_provisioner_jobs(
 async fn get_provisioner_job(
     State(state): State<AppState>,
     Path((organization, _job)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
     let org = state
         .identity
@@ -3380,11 +3183,8 @@ async fn get_provisioner_job(
 async fn cancel_provisioner_job(
     State(state): State<AppState>,
     Path((organization, job)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
     let org = state
         .identity
@@ -3478,11 +3278,8 @@ async fn get_provisioner_job_logs(
     State(state): State<AppState>,
     Path((organization, job)): Path<(String, String)>,
     Query(query): Query<ProvisionerJobLogsQuery>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
     let org = state
         .identity
@@ -3557,12 +3354,9 @@ async fn get_provisioner_job_logs(
 // applications (currently empty).
 // ---------------------------------------------------------------------------
 async fn applications_host(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     Ok((
         StatusCode::OK,
         Json(AppHostResponse {
@@ -3577,12 +3371,9 @@ async fn applications_host(
 // Stub: returns 400 because subdomain apps are not supported yet.
 // ---------------------------------------------------------------------------
 async fn applications_auth_redirect(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     Ok((
         StatusCode::BAD_REQUEST,
         Json(ApiResponse::error(
@@ -3678,12 +3469,8 @@ async fn deprecated_workspace_agent_git_auth(
 async fn deprecated_workspace_agent_startup_logs(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -3722,12 +3509,8 @@ struct TasksQuery {
 async fn list_tasks(
     State(state): State<AppState>,
     Query(query): Query<TasksQuery>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Always scope to the authenticated user — no cross-user enumeration.
     let filter = TaskListFilter {
         owner_id: Some(context.user.id),
@@ -3750,13 +3533,9 @@ async fn list_tasks(
 async fn create_task(
     State(state): State<AppState>,
     Path(user_param): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Resolve the user from the path parameter.
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
@@ -3840,12 +3619,8 @@ async fn resolve_task(
 async fn get_task(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -3866,13 +3641,9 @@ async fn get_task(
 async fn patch_task_input(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<coder_core::UpdateTaskInputRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -3934,12 +3705,8 @@ async fn patch_task_input(
 async fn delete_task(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -3981,12 +3748,8 @@ async fn delete_task(
 async fn get_task_logs(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4039,13 +3802,9 @@ async fn get_task_logs(
 async fn post_task_send(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<TaskSendRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4130,12 +3889,8 @@ async fn post_task_send(
 async fn post_task_pause(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4185,12 +3940,8 @@ async fn post_task_pause(
 async fn post_task_resume(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4328,12 +4079,8 @@ struct ChatsQuery {
 async fn list_chats(
     State(state): State<AppState>,
     Query(query): Query<ChatsQuery>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let chats = state
         .store
         .list_chats_by_owner(context.user.id, query.archived)
@@ -4346,13 +4093,9 @@ async fn list_chats(
 
 async fn create_chat(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<CreateChatRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create a chat.
     let authorizer = Authorizer::new();
     if authorizer
@@ -4410,12 +4153,8 @@ async fn create_chat(
 async fn get_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4447,12 +4186,8 @@ async fn get_chat(
 async fn delete_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4485,13 +4220,9 @@ async fn delete_chat(
 async fn post_chat_message(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<CreateChatMessageRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4659,14 +4390,11 @@ struct ChatFileUploadQuery {
 /// POST /api/v2/chats/files – upload a chat file.
 async fn upload_chat_file(
     State(state): State<AppState>,
+    Auth(context): Auth,
     headers: HeaderMap,
     Query(query): Query<ChatFileUploadQuery>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Require organization query parameter.
     let org_id_str = match query.organization {
         Some(ref s) if !s.is_empty() => s.as_str(),
@@ -4812,13 +4540,9 @@ async fn upload_chat_file(
 /// GET /api/v2/chats/files/{file} – retrieve a chat file by ID.
 async fn get_chat_file(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(file) = state.store.find_chat_file_by_id(file_id).await? else {
         return Ok(not_found_response("Chat file not found."));
     };
@@ -4850,12 +4574,8 @@ async fn get_chat_file(
 async fn archive_chat_handler(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4897,12 +4617,8 @@ async fn archive_chat_handler(
 async fn unarchive_chat_handler(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4956,13 +4672,9 @@ async fn unarchive_chat_handler(
 async fn watch_chat_git(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -5059,12 +4771,8 @@ struct InboxNotificationsQuery {
 
 async fn get_notifications_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5086,13 +4794,9 @@ async fn get_notifications_settings(
 
 async fn put_notifications_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<coder_core::NotificationsSettings>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5120,12 +4824,8 @@ async fn put_notifications_settings(
 
 async fn get_system_notification_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
     // to any non-owner role, but any authenticated user should be able to view
     // available notification templates (e.g., to configure preferences).
@@ -5139,12 +4839,8 @@ async fn get_system_notification_templates(
 
 async fn get_custom_notification_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
     // to any non-owner role, but any authenticated user should be able to view
     // available notification templates (e.g., to configure preferences).
@@ -5158,12 +4854,8 @@ async fn get_custom_notification_templates(
 
 async fn post_test_notification(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5192,13 +4884,9 @@ async fn post_test_notification(
 async fn put_notification_template_method(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateNotificationTemplateMethod>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update notification templates.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5248,12 +4936,8 @@ async fn put_notification_template_method(
 
 async fn get_notification_dispatch_methods(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5280,12 +4964,8 @@ async fn get_notification_dispatch_methods(
 async fn get_user_notification_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5309,13 +4989,9 @@ async fn get_user_notification_preferences(
 async fn put_user_notification_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserNotificationPreferences>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5368,13 +5044,9 @@ async fn put_user_notification_preferences(
 
 async fn list_inbox_notifications(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(params): Query<InboxNotificationsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read their own notifications.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5491,12 +5163,8 @@ async fn list_inbox_notifications(
 
 async fn put_mark_all_inbox_notifications_read(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update their own notifications.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5522,12 +5190,8 @@ async fn put_mark_all_inbox_notifications_read(
 
 async fn watch_inbox_notifications(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Return initial state. Real-time push requires pub/sub infrastructure not yet available.
     let notifications = state
         .store
@@ -5552,13 +5216,9 @@ async fn watch_inbox_notifications(
 async fn put_inbox_notification_read_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateInboxNotificationReadStatusRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update their own notifications.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5628,13 +5288,9 @@ async fn put_inbox_notification_read_status(
 async fn post_user_webpush_subscription(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<WebpushSubscription>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5669,13 +5325,9 @@ async fn post_user_webpush_subscription(
 async fn delete_user_webpush_subscription(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<coder_core::DeleteWebpushSubscription>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5709,12 +5361,8 @@ async fn delete_user_webpush_subscription(
 async fn post_user_webpush_test(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -6008,13 +5656,9 @@ async fn build_tv_response(
 async fn list_org_templates(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<TemplateFilter>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6053,12 +5697,9 @@ async fn list_org_templates(
 async fn post_org_template(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTemplateRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6144,12 +5785,8 @@ async fn post_org_template(
 async fn get_org_template_by_name(
     State(state): State<AppState>,
     Path((org, name)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6174,12 +5811,8 @@ async fn get_org_template_by_name(
 async fn get_org_template_version_by_name(
     State(state): State<AppState>,
     Path((org, tname, vname)): Path<(String, String, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6209,12 +5842,8 @@ async fn get_org_template_version_by_name(
 async fn get_org_template_examples(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6242,12 +5871,8 @@ async fn get_org_template_examples(
 async fn get_org_previous_template_version(
     State(state): State<AppState>,
     Path((org, tname, vname)): Path<(String, String, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6277,12 +5902,9 @@ async fn get_org_previous_template_version(
 async fn post_org_template_version(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6366,13 +5988,9 @@ async fn post_org_template_version(
 /// GET /templates
 async fn list_all_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<TemplateFilter>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let templates = state
         .store
         .list_templates(TemplateListFilter {
@@ -6401,12 +6019,8 @@ async fn list_all_templates(
 /// GET /templates/examples
 async fn get_all_template_examples(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: check that the actor can read templates in any organization.
     let authorizer = Authorizer::new();
     let obj = Object::new(ResourceType::Template).any_organization();
@@ -6425,12 +6039,8 @@ async fn get_all_template_examples(
 async fn get_template(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let template = state.store.find_template_by_id(template_id).await?;
     match template {
         Some(t) if !t.deleted => Ok((StatusCode::OK, Json(template_response(&t))).into_response()),
@@ -6442,12 +6052,8 @@ async fn get_template(
 async fn delete_template(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template to get org info for RBAC.
     let Some(template) = state.store.find_template_by_id(template_id).await? else {
         return Ok(not_found_response("Template not found."));
@@ -6496,12 +6102,9 @@ async fn delete_template(
 async fn patch_template(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateTemplateMeta>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6625,12 +6228,8 @@ async fn patch_template(
 async fn get_template_daus(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let rows = state.store.template_daus(template_id).await?;
     let entries: Vec<DAUEntry> = rows
         .iter()
@@ -6650,11 +6249,8 @@ async fn get_template_daus(
 async fn get_template_examples(
     State(state): State<AppState>,
     Path(_template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Template examples are static / built-in. Return empty list for now.
     let examples: Vec<TemplateExample> = Vec::new();
     Ok((StatusCode::OK, Json(examples)).into_response())
@@ -6664,13 +6260,9 @@ async fn get_template_examples(
 async fn list_template_versions(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Query(query): Query<TemplateVersionsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let versions = state
         .store
         .list_template_versions(TemplateVersionListFilter {
@@ -6692,12 +6284,8 @@ async fn list_template_versions(
 async fn get_template_version_by_name(
     State(state): State<AppState>,
     Path((template_id, vname)): Path<(Uuid, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = state
         .store
         .find_template_version_by_template_and_name(template_id, &vname)
@@ -6718,12 +6306,8 @@ async fn get_template_version_by_name(
 async fn get_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = state.store.find_template_version_by_id(version_id).await?;
     match ver {
         Some(v) => {
@@ -6738,12 +6322,9 @@ async fn get_template_version(
 async fn patch_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<PatchTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6801,12 +6382,8 @@ async fn patch_template_version(
 async fn post_archive_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the version to get template info for RBAC.
     let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
@@ -6843,12 +6420,8 @@ async fn post_archive_template_version(
 async fn patch_cancel_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -6894,12 +6467,9 @@ async fn patch_cancel_template_version(
 async fn post_template_version_dry_run(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTemplateVersionDryRunRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6960,12 +6530,8 @@ async fn post_template_version_dry_run(
 async fn get_template_version_dry_run(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let job = state.store.find_provisioner_job(job_id).await?;
     match job {
         Some(j) => Ok((StatusCode::OK, Json(provisioner_job_response(&j))).into_response()),
@@ -6977,12 +6543,8 @@ async fn get_template_version_dry_run(
 async fn patch_template_version_dry_run(
     State(state): State<AppState>,
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template version for org-scoped RBAC.
     let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
         return Ok(not_found_response("Template version not found."));
@@ -7026,12 +6588,8 @@ async fn patch_template_version_dry_run(
 async fn patch_cancel_template_version_dry_run(
     State(state): State<AppState>,
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template version for org-scoped RBAC.
     let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
         return Ok(not_found_response("Template version not found."));
@@ -7074,12 +6632,8 @@ async fn patch_cancel_template_version_dry_run(
 async fn get_template_version_dry_run_logs(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Verify the job exists.
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
@@ -7095,12 +6649,8 @@ async fn get_template_version_dry_run_logs(
 async fn get_template_version_dry_run_resources(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
@@ -7115,12 +6665,8 @@ async fn get_template_version_dry_run_resources(
 async fn get_template_version_dry_run_matched_provisioners(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
@@ -7139,12 +6685,8 @@ async fn get_template_version_dry_run_matched_provisioners(
 async fn get_template_version_dynamic_parameters(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7159,13 +6701,9 @@ async fn get_template_version_dynamic_parameters(
 async fn post_template_version_dynamic_parameters_evaluate(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     body: Result<Json<DynamicParametersRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7210,13 +6748,9 @@ async fn post_template_version_dynamic_parameters_evaluate(
 async fn patch_active_template_version(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     body: Result<Json<UpdateActiveTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let template = match state.store.find_template_by_id(template_id).await? {
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
@@ -7286,13 +6820,9 @@ async fn patch_active_template_version(
 async fn post_archive_template_versions(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     body: Result<Json<ArchiveTemplateVersionsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let template = match state.store.find_template_by_id(template_id).await? {
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
@@ -7342,12 +6872,8 @@ async fn post_archive_template_versions(
 async fn get_template_version_external_auth(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Verify the version exists.
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
@@ -7363,12 +6889,8 @@ async fn get_template_version_external_auth(
 async fn get_template_version_logs(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7382,30 +6904,25 @@ async fn get_template_version_logs(
 async fn get_template_version_parameters(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    get_template_version_rich_parameters_impl(&state, &headers, version_id).await
+    get_template_version_rich_parameters_impl(&state, version_id).await
 }
 
 /// GET /templateversions/{templateversion}/rich-parameters
 async fn get_template_version_rich_parameters(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    get_template_version_rich_parameters_impl(&state, &headers, version_id).await
+    get_template_version_rich_parameters_impl(&state, version_id).await
 }
 
 /// Shared implementation for parameters / rich-parameters endpoints.
 async fn get_template_version_rich_parameters_impl(
     state: &AppState,
-    headers: &HeaderMap,
     version_id: Uuid,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(state, headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let params = state
         .store
         .list_template_version_parameters(version_id)
@@ -7445,12 +6962,8 @@ async fn get_template_version_rich_parameters_impl(
 async fn get_template_version_presets(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let presets = state
         .store
         .list_template_version_presets(version_id)
@@ -7476,12 +6989,8 @@ async fn get_template_version_presets(
 async fn get_template_version_preset_parameters(
     State(state): State<AppState>,
     Path((_version_id, preset_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let params = state
         .store
         .list_template_version_preset_parameters(preset_id)
@@ -7504,12 +7013,8 @@ async fn get_template_version_preset_parameters(
 async fn get_template_version_resources(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7524,12 +7029,8 @@ async fn get_template_version_resources(
 async fn get_template_version_schema(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7544,12 +7045,8 @@ async fn get_template_version_schema(
 async fn post_unarchive_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template version for org-scoped RBAC.
     let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
         return Ok(not_found_response("Template version not found."));
@@ -7585,12 +7082,8 @@ async fn post_unarchive_template_version(
 async fn get_template_version_variables(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let vars = state
         .store
         .list_template_version_variables(version_id)
@@ -7626,13 +7119,9 @@ async fn get_template_version_variables(
 
 async fn post_authcheck(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<AuthorizationRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8077,13 +7566,9 @@ struct BuildLogsQuery {
 /// GET /workspaces — filtered, paginated workspace listing.
 async fn list_workspaces(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<WorkspacesQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let owner_id = if let Some(ref owner) = query.owner {
         if owner == "me" {
             Some(context.user.id)
@@ -8150,13 +7635,9 @@ async fn list_workspaces(
 /// GET /workspaces/{workspace}
 async fn get_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8171,13 +7652,10 @@ async fn get_workspace(
 /// PATCH /workspaces/{workspace}
 async fn patch_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8226,14 +7704,10 @@ async fn patch_workspace(
 /// GET /workspaces/{workspace}/builds
 async fn list_workspace_builds_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<WorkspaceBuildsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8258,13 +7732,10 @@ async fn list_workspace_builds_handler(
 /// POST /workspaces/{workspace}/builds — start/stop/delete transition.
 async fn post_workspace_build(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8400,13 +7871,10 @@ async fn post_workspace_build(
 /// PUT /workspaces/{workspace}/autostart
 async fn put_workspace_autostart(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8454,13 +7922,10 @@ async fn put_workspace_autostart(
 /// PUT /workspaces/{workspace}/ttl
 async fn put_workspace_ttl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8506,13 +7971,10 @@ async fn put_workspace_ttl(
 /// PUT /workspaces/{workspace}/dormant
 async fn put_workspace_dormant(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8568,13 +8030,10 @@ async fn put_workspace_dormant(
 /// PUT /workspaces/{workspace}/extend
 async fn put_workspace_extend(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8655,13 +8114,10 @@ async fn put_workspace_extend(
 /// PUT /workspaces/{workspace}/autoupdates
 async fn put_workspace_autoupdates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8709,13 +8165,9 @@ async fn put_workspace_autoupdates(
 /// PUT /workspaces/{workspace}/favorite
 async fn put_workspace_favorite(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8753,13 +8205,9 @@ async fn put_workspace_favorite(
 /// DELETE /workspaces/{workspace}/favorite
 async fn delete_workspace_favorite(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8797,13 +8245,9 @@ async fn delete_workspace_favorite(
 /// GET /workspaces/{workspace}/port-share
 async fn list_workspace_port_shares(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8832,13 +8276,10 @@ async fn list_workspace_port_shares(
 /// POST /workspaces/{workspace}/port-share
 async fn post_workspace_port_share(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8914,13 +8355,10 @@ async fn post_workspace_port_share(
 /// DELETE /workspaces/{workspace}/port-share
 async fn delete_workspace_port_share(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8969,13 +8407,9 @@ async fn delete_workspace_port_share(
 /// GET /workspaces/{workspace}/acl
 async fn get_workspace_acl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9042,13 +8476,10 @@ async fn get_workspace_acl(
 /// PATCH /workspaces/{workspace}/acl
 async fn patch_workspace_acl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<UpdateWorkspaceACLRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(req) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -9095,13 +8526,9 @@ async fn patch_workspace_acl(
 /// DELETE /workspaces/{workspace}/acl
 async fn delete_workspace_acl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9136,13 +8563,9 @@ async fn delete_workspace_acl(
 /// GET /workspaces/{workspace}/resolve-autostart
 async fn get_workspace_resolve_autostart(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9166,13 +8589,9 @@ async fn get_workspace_resolve_autostart(
 /// in `coderd/workspacebuilds.go`.
 async fn get_workspace_timings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(latest_build) = state
         .store
         .find_latest_workspace_build(workspace_id)
@@ -9196,13 +8615,9 @@ async fn get_workspace_timings(
 /// POST /workspaces/{workspace}/usage — updates last_used_at.
 async fn post_workspace_usage(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9244,15 +8659,11 @@ async fn post_workspace_usage(
 /// Mirrors the Go `watchWorkspace` handler in `coderd/workspaces.go`.
 async fn get_workspace_watch(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
     use axum::body::Body;
     use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
-
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
 
     let Some(workspace) = state
         .store
@@ -9360,16 +8771,12 @@ async fn get_workspace_watch(
 /// Mirrors the Go `watchWorkspaceWS` handler.
 async fn get_workspace_watch_ws(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     use axum::extract::ws::Message;
     use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
-
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
 
     let Some(workspace) = state
         .store
@@ -9450,13 +8857,9 @@ async fn get_workspace_watch_ws(
 /// GET /workspacebuilds/{build}
 async fn get_workspace_build(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9467,13 +8870,9 @@ async fn get_workspace_build(
 /// PATCH /workspacebuilds/{build}/cancel
 async fn patch_cancel_workspace_build(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9527,14 +8926,10 @@ async fn patch_cancel_workspace_build(
 /// GET /workspacebuilds/{build}/logs
 async fn get_workspace_build_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
     Query(query): Query<BuildLogsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9563,13 +8958,9 @@ async fn get_workspace_build_logs(
 /// GET /workspacebuilds/{build}/parameters
 async fn get_workspace_build_parameters(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9593,13 +8984,9 @@ async fn get_workspace_build_parameters(
 /// GET /workspacebuilds/{build}/resources
 async fn get_workspace_build_resources(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9655,13 +9042,9 @@ async fn get_workspace_build_resources(
 /// GET /workspacebuilds/{build}/state
 async fn get_workspace_build_state(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9681,14 +9064,10 @@ async fn get_workspace_build_state(
 /// PUT /workspacebuilds/{build}/state
 async fn put_workspace_build_state(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(build_id): Path<Uuid>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9731,13 +9110,9 @@ async fn put_workspace_build_state(
 /// GET /workspacebuilds/{build}/timings
 async fn get_workspace_build_timings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9749,13 +9124,9 @@ async fn get_workspace_build_timings(
 /// GET /users/{user}/workspace/{name}
 async fn get_user_workspace_by_name(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((user, name)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9789,13 +9160,9 @@ async fn get_user_workspace_by_name(
 /// GET /users/{user}/workspace/{name}/builds/{number}
 async fn get_user_workspace_build_by_number(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((user, name, number)): Path<(String, String, i64)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9822,13 +9189,10 @@ async fn get_user_workspace_build_by_number(
 /// POST /users/{user}/workspaces — create workspace + initial build.
 async fn post_user_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(user): Path<String>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -9985,13 +9349,10 @@ async fn post_user_workspace(
 /// logic used by `post_user_workspace`.
 async fn post_org_member_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((organization, user)): Path<(String, String)>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -10162,13 +9523,9 @@ async fn post_org_member_workspace(
 /// Mirrors the Go `workspaceAvailableUsers` handler.
 async fn get_org_member_workspace_available_users(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path((organization, _user)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Validate the organization exists.
     let Some(_org_record) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -10325,12 +9682,8 @@ fn build_to_json(b: &coder_core::WorkspaceBuildRecord) -> Value {
 
 async fn list_oauth2_provider_apps(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read OAuth2 provider apps.
     // The member site role grants Oauth2App::Read, so all authenticated users
     // with the default member role retain access (backward compatible).
@@ -10356,13 +9709,9 @@ async fn list_oauth2_provider_apps(
 
 async fn post_oauth2_provider_app(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<PostOAuth2ProviderAppRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create OAuth2 provider apps.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10410,12 +9759,8 @@ async fn post_oauth2_provider_app(
 async fn get_oauth2_provider_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read OAuth2 provider apps.
     // The member site role grants Oauth2App::Read, so all authenticated users
     // with the default member role retain access (backward compatible).
@@ -10446,13 +9791,9 @@ async fn get_oauth2_provider_app(
 async fn put_oauth2_provider_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<PutOAuth2ProviderAppRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update OAuth2 provider apps.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10506,12 +9847,8 @@ async fn put_oauth2_provider_app(
 async fn delete_oauth2_provider_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete OAuth2 provider apps.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10553,12 +9890,8 @@ async fn delete_oauth2_provider_app(
 async fn list_oauth2_provider_app_secrets(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read OAuth2 provider app secrets.
     let authorizer = Authorizer::new();
     if authorizer
@@ -10589,12 +9922,8 @@ async fn list_oauth2_provider_app_secrets(
 async fn post_oauth2_provider_app_secret(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create OAuth2 provider app secrets.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10641,12 +9970,8 @@ async fn post_oauth2_provider_app_secret(
 async fn delete_oauth2_provider_app_secret(
     State(state): State<AppState>,
     Path((app_id, secret_id)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete OAuth2 provider app secrets.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10700,12 +10025,8 @@ async fn delete_oauth2_provider_app_secret(
 async fn delete_oauth2_provider_app_tokens(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // No RBAC check here: this is a self-service endpoint where any
     // authenticated user can revoke their own OAuth2 app authorizations.
     // The downstream revoke_tokens() call is scoped to context.user.id,
@@ -10740,12 +10061,9 @@ async fn delete_oauth2_provider_app_tokens(
 
 async fn get_oauth2_authorize(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(params): Query<OAuth2AuthorizeRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -10813,12 +10131,9 @@ async fn get_oauth2_authorize(
 
 async fn post_oauth2_authorize(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<OAuth2AuthorizeRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(params) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -10993,12 +10308,9 @@ fn oauth2_secret_response(
 
 async fn insights_daus(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsDausQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment statistics.
     let authorizer = Authorizer::new();
     if authorizer
@@ -11045,12 +10357,9 @@ fn parse_rfc3339(raw: &Option<String>) -> Option<OffsetDateTime> {
 
 async fn insights_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsTemplatesQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment statistics.
     let authorizer = Authorizer::new();
     if authorizer
@@ -11139,12 +10448,9 @@ async fn insights_templates(
 
 async fn insights_user_activity(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsUserActivityQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment statistics.
     let authorizer = Authorizer::new();
     if authorizer
@@ -11195,12 +10501,9 @@ async fn insights_user_activity(
 
 async fn insights_user_latency(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsUserLatencyQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment statistics.
     let authorizer = Authorizer::new();
     if authorizer
@@ -11251,12 +10554,9 @@ async fn insights_user_latency(
 
 async fn insights_user_status_counts(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsUserStatusCountsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read deployment statistics.
     let authorizer = Authorizer::new();
     if authorizer
@@ -11320,11 +10620,8 @@ async fn insights_user_status_counts(
 /// backend does not yet have a tailnet coordination layer, so we return 501.
 async fn debug_coordinator(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read debug information.
     // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
@@ -11362,11 +10659,8 @@ async fn debug_coordinator(
 /// have a workspace-agent provider, so we return 501.
 async fn debug_tailnet(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read debug information.
     // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
@@ -11396,11 +10690,8 @@ async fn debug_tailnet(
 /// include a DERP relay, so we return 501.
 async fn debug_derp_traffic(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read debug information.
     // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
@@ -11430,11 +10721,8 @@ async fn debug_derp_traffic(
 /// on other platforms.
 async fn debug_expvar(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read debug information.
     // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
@@ -11515,11 +10803,8 @@ fn parse_proc_kb(val: &str) -> Option<u64> {
 async fn debug_pprof(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read debug information.
     // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
@@ -11596,12 +10881,9 @@ async fn debug_pprof(
 /// three numbered text messages, verifying each is echoed correctly.
 async fn debug_websocket(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read debug information.
     // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
@@ -11661,11 +10943,8 @@ async fn websocket_echo(mut socket: WebSocket) {
 /// delegate to it.
 async fn debug_metrics(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read debug information.
     // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
@@ -11817,12 +11096,8 @@ async fn derp_map_updates(
 /// workspace-proxy regions.
 async fn get_regions(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let region_id = state
         .store
         .ensure_deployment_metadata()
@@ -12009,13 +11284,9 @@ const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
 /// handler currently returns 204 No Content after validation succeeds.
 async fn post_custom_notification(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<coder_core::CustomNotificationRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create notification messages.
     // In Go, postCustomNotification checks policy.ActionCreate on
     // rbac.ResourceNotificationMessage at site level. Only the owner role
@@ -12358,13 +11629,9 @@ async fn build_agent_response(
 /// GET /api/v2/workspaceagents/{agent} — get agent info.
 async fn get_workspace_agent(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12376,13 +11643,9 @@ async fn get_workspace_agent(
 /// GET /api/v2/workspaceagents/{agent}/connection — per-agent connection info.
 async fn get_workspace_agent_connection(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(_agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
@@ -12390,13 +11653,9 @@ async fn get_workspace_agent_connection(
 /// GET /api/v2/workspaceagents/{agent}/containers — list containers.
 async fn get_workspace_agent_containers(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12430,13 +11689,9 @@ async fn get_workspace_agent_containers(
 /// POST /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc}/recreate — recreate devcontainer.
 async fn post_workspace_agent_recreate_devcontainer(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12491,13 +11746,9 @@ async fn post_workspace_agent_recreate_devcontainer(
 /// DELETE /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc} — delete devcontainer.
 async fn delete_workspace_agent_devcontainer(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12552,14 +11803,10 @@ async fn delete_workspace_agent_devcontainer(
 /// GET /api/v2/workspaceagents/{agent}/containers/watch — SSE container watch.
 async fn get_workspace_agent_containers_watch(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12664,14 +11911,10 @@ async fn get_workspace_agent_containers_watch(
 /// WebSocket messages and outgoing coordinator responses.
 async fn get_workspace_agent_coordinate(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12779,13 +12022,9 @@ async fn get_workspace_agent_coordinate(
 /// GET /api/v2/workspaceagents/{agent}/listening-ports — list listening ports.
 async fn get_workspace_agent_listening_ports(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12801,14 +12040,10 @@ async fn get_workspace_agent_listening_ports(
 /// GET /api/v2/workspaceagents/{agent}/logs — streaming agent logs.
 async fn get_workspace_agent_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     Query(query): Query<AgentLogsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12946,14 +12181,10 @@ async fn get_workspace_agent_logs(
 /// GET /api/v2/workspaceagents/{agent}/pty — WebSocket terminal.
 async fn get_workspace_agent_pty(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -13047,13 +12278,9 @@ async fn get_workspace_agent_pty(
 /// GET /api/v2/workspaceagents/{agent}/watch-metadata — SSE metadata watch.
 async fn get_workspace_agent_watch_metadata(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -13081,14 +12308,10 @@ async fn get_workspace_agent_watch_metadata(
 /// GET /api/v2/workspaceagents/{agent}/watch-metadata-ws — WebSocket metadata watch.
 async fn get_workspace_agent_watch_metadata_ws(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -13228,12 +12451,8 @@ fn build_workspace_agent_connection_info(state: &AppState) -> WorkspaceAgentConn
 
 async fn get_workspace_agents_connection_info(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
@@ -13241,13 +12460,9 @@ async fn get_workspace_agents_connection_info(
 /// PATCH /api/v2/workspaceagents/me/app-status — update app status (agent-authenticated).
 async fn patch_workspace_agent_app_status(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     body: Result<Json<PatchAppStatusRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let Json(request) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -13310,14 +12525,10 @@ async fn patch_workspace_agent_app_status(
 
 /// GET /api/v2/workspaceagents/me/external-auth — agent external auth.
 async fn get_workspace_agent_external_auth(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    AgentAuth(_agent): AgentAuth,
     Query(query): Query<AgentExternalAuthQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     // Validate that either id or match is provided.
     if query.id.is_empty() {
         return Ok((
@@ -13338,13 +12549,9 @@ async fn get_workspace_agent_external_auth(
 /// POST /api/v2/workspaceagents/me/log-source — create agent log source.
 async fn post_workspace_agent_log_source(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     body: Result<Json<CreateLogSourceRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let Json(request) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -13374,13 +12581,9 @@ async fn post_workspace_agent_log_source(
 /// PATCH /api/v2/workspaceagents/me/logs — append agent logs.
 async fn patch_workspace_agent_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     body: Result<Json<PatchAgentLogsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let Json(request) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -13440,14 +12643,10 @@ async fn patch_workspace_agent_logs(
 /// streams events as they arrive.
 async fn get_workspace_agent_reinit(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
 ) -> Result<Response, AppError> {
     use axum::body::Body;
     use coder_core::pubsub::workspace_agent_reinit_channel;
-
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
 
     let channel = workspace_agent_reinit_channel(agent.id);
     let mut subscription = state.pubsub.subscribe(&channel).await.map_err(|e| {
@@ -13512,13 +12711,9 @@ async fn get_workspace_agent_reinit(
 /// open and cleaned up when the agent disconnects.
 async fn get_workspace_agent_rpc(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let agent_id = agent.id;
     let provider = state.agent_provider.clone();
     let store = state.store.clone();
@@ -13952,13 +13147,10 @@ const WINDOWS_ZIP_MIME_TYPE: &str = "application/x-zip-compressed";
 /// POST /api/v2/files – upload a binary file, deduplicate by SHA-256 hash.
 async fn post_file(
     State(state): State<AppState>,
+    Auth(context): Auth,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can upload files.
     // In Go, postFile checks rbac.ActionCreate on rbac.ResourceFile at the
     // site level (no org/owner scoping). This intentionally differs from
@@ -14042,13 +13234,9 @@ async fn post_file(
 /// GET /api/v2/files/{fileid} – retrieve a file by UUID.
 async fn get_file_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let file = state.store.get_file_by_id(file_id).await?;
     let Some(file) = file else {
         return Ok(resource_not_found_response());
