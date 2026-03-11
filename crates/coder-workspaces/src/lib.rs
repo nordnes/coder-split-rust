@@ -41,7 +41,11 @@ where
         service
     }
 
-    /// Signals the background refresh loop to stop and waits for it to exit.
+    /// Signals the background refresh loop to stop.
+    ///
+    /// Note: this only sets the cancellation token; it does **not** wait for
+    /// the background task to finish.  The loop will exit on its next
+    /// iteration after it observes the token.
     ///
     /// Calling this more than once is harmless — subsequent calls return
     /// immediately because the token is already cancelled.
