@@ -250,12 +250,12 @@ pub fn build_router(
         .nest(
             "/api/v2",
             Router::new()
-                .route("/", get(api_root))
+                // -------------------------------------------------------
+                // Protected routes — covered by the API-key auth middleware.
+                // -------------------------------------------------------
                 .route("/audit", get(list_audit_logs))
                 .route("/audit/testgenerate", post(post_generate_test_audit_log))
                 .route("/auth/scopes", get(list_api_key_scopes))
-                .route("/buildinfo", get(build_info))
-                .route("/csp/reports", post(post_csp_report))
                 .route("/deployment/config", get(deployment_config))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
@@ -349,29 +349,7 @@ pub fn build_router(
                     get(get_org_member_workspace_available_users),
                 )
                 .route("/users", get(list_users).post(post_user))
-                .route("/users/authmethods", get(auth_methods))
-                .route("/updatecheck", get(update_check))
-                .route("/users/first", get(get_first_user).post(post_first_user))
-                .route("/users/login", post(login_with_password))
                 .route("/users/logout", post(logout))
-                .route(
-                    "/users/validate-password",
-                    post(post_validate_user_password),
-                )
-                .route("/users/otp/request", post(post_request_one_time_passcode))
-                .route(
-                    "/users/otp/change-password",
-                    post(post_change_password_with_one_time_passcode),
-                )
-                .route(
-                    "/users/oauth2/github/device",
-                    get(get_github_oauth_device_disabled),
-                )
-                .route(
-                    "/users/oauth2/github/callback",
-                    get(get_github_oauth_callback_disabled),
-                )
-                .route("/users/oidc/callback", get(get_oidc_callback_disabled))
                 .route("/users/roles", get(list_site_roles))
                 .route("/users/{user}/keys", post(create_session_api_key))
                 .route(
@@ -758,9 +736,40 @@ pub fn build_router(
                     state.clone(),
                     crate::auth_middleware::api_key_auth_middleware,
                 ))
-                // Routes below are NOT covered by the API-key middleware
-                // because they use agent-token authentication handled
+                // -------------------------------------------------------
+                // Public / unauthenticated routes — NOT covered by the
+                // API-key auth middleware.  Users with expired cookies must
+                // still be able to reach these endpoints.
+                // -------------------------------------------------------
+                .route("/", get(api_root))
+                .route("/buildinfo", get(build_info))
+                .route("/updatecheck", get(update_check))
+                .route("/csp/reports", post(post_csp_report))
+                .route("/users/first", get(get_first_user).post(post_first_user))
+                .route("/users/login", post(login_with_password))
+                .route("/users/authmethods", get(auth_methods))
+                .route(
+                    "/users/validate-password",
+                    post(post_validate_user_password),
+                )
+                .route("/users/otp/request", post(post_request_one_time_passcode))
+                .route(
+                    "/users/otp/change-password",
+                    post(post_change_password_with_one_time_passcode),
+                )
+                .route(
+                    "/users/oauth2/github/device",
+                    get(get_github_oauth_device_disabled),
+                )
+                .route(
+                    "/users/oauth2/github/callback",
+                    get(get_github_oauth_callback_disabled),
+                )
+                .route("/users/oidc/callback", get(get_oidc_callback_disabled))
+                // -------------------------------------------------------
+                // Agent routes — use agent-token authentication handled
                 // inside the handler itself.
+                // -------------------------------------------------------
                 .route("/tailnet", get(tailnet_rpc_conn))
                 .route("/applications/host", get(applications_host))
                 .route(
