@@ -3,6 +3,7 @@
 
 mod app;
 mod error;
+mod extractors;
 mod handlers;
 pub(crate) mod helpers;
 pub(crate) mod middleware;
