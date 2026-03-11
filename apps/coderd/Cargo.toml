@@ -20,6 +20,7 @@ coder-core = { path = "../../crates/coder-core" }
 coder-db = { path = "../../crates/coder-db" }
 coder-rbac = { path = "../../crates/coder-rbac" }
 coder-server = { path = "../../crates/coder-server" }
+coder-telemetry = { path = "../../crates/coder-telemetry" }
 metrics-exporter-prometheus.workspace = true
 opentelemetry.workspace = true
 opentelemetry_sdk.workspace = true

@@ -52,10 +52,12 @@ use crate::handlers::external_auth::*;
 use crate::handlers::files::*;
 use crate::handlers::health::*;
 use crate::handlers::insights::*;
+use crate::handlers::mcp::*;
 use crate::handlers::notifications::*;
 use crate::handlers::oauth2::*;
 use crate::handlers::organizations::*;
 use crate::handlers::tasks::*;
+use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
 use crate::handlers::users::*;
 use crate::handlers::workspaces::*;
@@ -160,6 +162,8 @@ pub struct AppState {
     pub(crate) health: HealthService<Arc<dyn AppStore>>,
     pub(crate) external_auth: ExternalAuthService<Arc<dyn AppStore>>,
     pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
+    /// Telemetry event reporter for submitting events to the background worker.
+    pub telemetry_reporter: coder_telemetry::TelemetryReporter,
     /// Shared HTTP client for outbound requests (connection pooling).
     pub http_client: reqwest::Client,
 }
@@ -178,6 +182,7 @@ impl AppState {
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
         prometheus_handle: Option<PrometheusHandle>,
+        telemetry_reporter: coder_telemetry::TelemetryReporter,
     ) -> Result<Self, reqwest::Error> {
         let audit = Arc::new(BatchedAuditSink::new(
             audit,
@@ -206,6 +211,7 @@ impl AppState {
             coordinator,
             derp_tracker,
             prometheus_handle,
+            telemetry_reporter,
             auth,
             identity,
             deployment_stats,
@@ -244,6 +250,7 @@ pub fn build_router(
         .route("/healthz", get(healthz))
         .route("/latency-check", get(latency_check))
         .route("/metrics", get(get_prometheus_metrics))
+        .route("/mcp/http", post(mcp_http_handler))
         .route(
             "/external-auth/{externalauth}/callback",
             get(get_external_auth_callback_by_id),
@@ -260,6 +267,7 @@ pub fn build_router(
                 // -------------------------------------------------------
                 .route("/audit", get(list_audit_logs))
                 .route("/audit/testgenerate", post(post_generate_test_audit_log))
+                .route("/telemetry", get(get_telemetry_status))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
                 .route("/debug/health", get(debug_health))
@@ -7690,6 +7698,7 @@ pub(crate) mod tests {
                 coordinator,
                 derp_tracker,
                 None,
+                coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             )?,
             store,
         ))
@@ -30322,6 +30331,7 @@ pub(crate) mod tests {
             coordinator,
             derp_tracker,
             None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
     }
 
@@ -30363,6 +30373,7 @@ pub(crate) mod tests {
             coordinator,
             derp_tracker,
             None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
     }
 
@@ -30521,6 +30532,7 @@ pub(crate) mod tests {
             coordinator,
             derp_tracker,
             None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
     }
 
@@ -30815,6 +30827,162 @@ pub(crate) mod tests {
                 .get("access-control-allow-origin")
                 .is_none(),
             "all-invalid origins should block all cross-origin requests"
+        );
+        Ok(())
+    }
+
+    // --- MCP HTTP transport tests ---
+
+    #[tokio::test]
+    async fn mcp_http_unauthenticated_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/http")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05"},"id":1}"#,
+            ))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_http_initialize_returns_capabilities() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/http")
+            .header(CONTENT_TYPE, "application/json")
+            .header(SESSION_TOKEN_HEADER, &token)
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"initialize","params":{"protocolVersion":"2024-11-05"},"id":1}"#,
+            ))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Should be a JSON-RPC success response with MCP capabilities.
+        assert_eq!(body.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+        let result = body.get("result");
+        assert!(result.is_some(), "initialize should return a result");
+        let result = result.ok_or("missing result")?;
+        assert_eq!(
+            result.get("protocolVersion").and_then(Value::as_str),
+            Some("2024-11-05")
+        );
+        assert!(
+            result.get("capabilities").is_some(),
+            "should include capabilities"
+        );
+        assert!(
+            result.get("serverInfo").is_some(),
+            "should include serverInfo"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_http_tools_list_returns_tools() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/http")
+            .header(CONTENT_TYPE, "application/json")
+            .header(SESSION_TOKEN_HEADER, &token)
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"tools/list","id":2}"#,
+            ))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+        let result = body.get("result").ok_or("missing result")?;
+        let tools = result.get("tools").and_then(Value::as_array);
+        assert!(tools.is_some(), "tools/list should return a tools array");
+        let tools = tools.ok_or("missing tools")?;
+        assert!(
+            tools.len() >= 4,
+            "should have at least 4 registered tools, got {}",
+            tools.len()
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_http_tools_call_dispatches_whoami() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/http")
+            .header(CONTENT_TYPE, "application/json")
+            .header(SESSION_TOKEN_HEADER, &token)
+            .body(Body::from(
+                r#"{"jsonrpc":"2.0","method":"tools/call","params":{"name":"coder_whoami"},"id":3}"#,
+            ))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("jsonrpc").and_then(Value::as_str), Some("2.0"));
+        // Should have a result (not an error).
+        assert!(
+            body.get("result").is_some(),
+            "tools/call should return a result"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn mcp_http_invalid_json_returns_parse_error() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/mcp/http")
+            .header(CONTENT_TYPE, "application/json")
+            .header(SESSION_TOKEN_HEADER, &token)
+            .body(Body::from("not valid json"))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Should be a JSON-RPC error response with parse error code.
+        let error = body.get("error").ok_or("missing error")?;
+        assert_eq!(error.get("code").and_then(Value::as_i64), Some(-32700));
+        Ok(())
+    }
+
+    // --- Telemetry status tests ---
+
+    #[tokio::test]
+    async fn telemetry_status_unauthenticated_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::GET, "/api/v2/telemetry")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn telemetry_status_returns_deployment_info() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/telemetry", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        // Should include enabled flag and deployment_id.
+        assert!(
+            body.get("enabled").is_some(),
+            "response should include 'enabled' field"
+        );
+        assert!(
+            body.get("deployment_id").is_some(),
+            "response should include 'deployment_id' field"
         );
         Ok(())
     }

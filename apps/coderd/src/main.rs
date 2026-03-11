@@ -757,6 +757,16 @@ async fn run() -> Result<(), MainError> {
     let derp_map = build_derp_map_from_config(&config.derp_regions);
     let coordinator = InMemoryCoordinator::new(derp_map);
     let derp_tracker = DerpTrafficTracker::new();
+    // Start the telemetry background worker.
+    let telemetry_config = coder_telemetry::TelemetryConfig {
+        enabled: config.telemetry_enabled,
+        deployment_id: deployment_metadata.deployment_id,
+        version: BuildMetadata::default().version.clone(),
+        ..coder_telemetry::TelemetryConfig::default()
+    };
+    let (mut telemetry_worker, telemetry_reporter) =
+        coder_telemetry::TelemetryWorker::start(telemetry_config);
+
     let prometheus_handle = PrometheusBuilder::new()
         .install_recorder()
         .map_err(|error| MainError::Config(format!("install prometheus recorder: {error}")))?;
@@ -772,6 +782,7 @@ async fn run() -> Result<(), MainError> {
         coordinator,
         derp_tracker,
         Some(prometheus_handle),
+        telemetry_reporter,
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
@@ -809,6 +820,12 @@ async fn run() -> Result<(), MainError> {
     let audit_sink = state.audit.clone();
     coordinator.register("audit", async move {
         audit_sink.close().await;
+    });
+
+    // 1b. Flush and shut down the telemetry background worker so buffered
+    //     events are submitted before the process exits.
+    coordinator.register("telemetry", async move {
+        telemetry_worker.shutdown().await;
     });
 
     // 2. Close pub/sub background listener and release its PgListener connection.
