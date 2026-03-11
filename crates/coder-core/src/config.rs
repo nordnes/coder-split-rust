@@ -26,6 +26,8 @@ pub struct ServerConfig {
     pub shutdown_grace_period_secs: u64,
     /// Log format used by the binary.
     pub log_format: LogFormat,
+    /// Rate-limiting configuration for the HTTP layer.
+    pub rate_limit: RateLimitConfig,
 }
 
 impl ServerConfig {

@@ -243,6 +243,122 @@ mod tests {
         assert_eq!(strategy.delay_for_attempt(4), Duration::from_millis(500));
     }
 
+    #[tokio::test]
+    async fn exponential_backoff_retries_correct_number_of_times() {
+        let counter = AtomicUsize::new(0);
+
+        let result: Result<&str, String> = retry_with_strategy(
+            RetryStrategy::ExponentialBackoff {
+                initial_delay: Duration::from_millis(1),
+                max_attempts: 4,
+                max_delay: Duration::from_millis(50),
+            },
+            |_| true,
+            || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Err("transient".to_owned()) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            4,
+            "exponential backoff should attempt exactly max_attempts times"
+        );
+    }
+
+    #[tokio::test]
+    async fn exponential_backoff_succeeds_after_retries() {
+        let counter = AtomicUsize::new(0);
+
+        let result: Result<&str, String> = retry_with_strategy(
+            RetryStrategy::ExponentialBackoff {
+                initial_delay: Duration::from_millis(1),
+                max_attempts: 5,
+                max_delay: Duration::from_millis(50),
+            },
+            |_| true,
+            || {
+                let attempt = counter.fetch_add(1, Ordering::SeqCst);
+                async move {
+                    if attempt < 3 {
+                        Err(format!("transient failure {attempt}"))
+                    } else {
+                        Ok("recovered")
+                    }
+                }
+            },
+        )
+        .await;
+
+        assert_eq!(result, Ok("recovered"));
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            4,
+            "should succeed on the 4th attempt (index 3)"
+        );
+    }
+
+    #[tokio::test]
+    async fn exponential_backoff_non_retryable_stops_immediately() {
+        let counter = AtomicUsize::new(0);
+
+        let result: Result<&str, String> = retry_with_strategy(
+            RetryStrategy::ExponentialBackoff {
+                initial_delay: Duration::from_millis(1),
+                max_attempts: 5,
+                max_delay: Duration::from_millis(50),
+            },
+            |error: &String| error.contains("transient"),
+            || {
+                counter.fetch_add(1, Ordering::SeqCst);
+                async { Err("fatal error".to_owned()) }
+            },
+        )
+        .await;
+
+        assert!(result.is_err());
+        assert_eq!(
+            counter.load(Ordering::SeqCst),
+            1,
+            "non-retryable error should stop after first attempt"
+        );
+    }
+
+    #[test]
+    fn fixed_strategy_delay_is_constant() {
+        let strategy = RetryStrategy::Fixed {
+            delay: Duration::from_millis(200),
+            max_attempts: 5,
+        };
+
+        for attempt in 0..5 {
+            assert_eq!(
+                strategy.delay_for_attempt(attempt),
+                Duration::from_millis(200),
+                "fixed strategy should always return the same delay"
+            );
+        }
+    }
+
+    #[test]
+    fn exponential_backoff_delays_increase() {
+        let strategy = RetryStrategy::ExponentialBackoff {
+            initial_delay: Duration::from_millis(100),
+            max_attempts: 4,
+            max_delay: Duration::from_secs(60),
+        };
+
+        let d0 = strategy.delay_for_attempt(0);
+        let d1 = strategy.delay_for_attempt(1);
+        let d2 = strategy.delay_for_attempt(2);
+
+        assert!(d1 > d0, "delay should increase: {d1:?} > {d0:?}");
+        assert!(d2 > d1, "delay should increase: {d2:?} > {d1:?}");
+    }
+
     #[test]
     fn jitter_stays_within_bounds() {
         let base = Duration::from_millis(1000);
