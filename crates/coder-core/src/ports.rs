@@ -185,6 +185,135 @@ pub struct InsertChatFileInput {
     pub data: Vec<u8>,
 }
 
+/// Input for updating a chat message's content.
+#[derive(Clone, Debug)]
+pub struct UpdateChatMessageContentInput {
+    pub message_id: i64,
+    pub chat_id: Uuid,
+    pub content: Option<Value>,
+}
+
+/// A chat provider record as stored in the database.
+#[derive(Clone)]
+pub struct ChatProviderRecord {
+    pub id: Uuid,
+    pub provider: String,
+    pub display_name: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub enabled: bool,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+// Custom Debug that redacts api_key to prevent accidental secret leakage in
+// tracing output or error messages.
+impl std::fmt::Debug for ChatProviderRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ChatProviderRecord")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
+}
+
+/// Input for inserting a new chat provider.
+#[derive(Clone)]
+pub struct InsertChatProviderInput {
+    pub provider: String,
+    pub display_name: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub enabled: bool,
+    pub created_by: Option<Uuid>,
+}
+
+/// Input for updating a chat provider.
+#[derive(Clone)]
+pub struct UpdateChatProviderInput {
+    pub id: Uuid,
+    pub display_name: String,
+    pub api_key: String,
+    pub base_url: String,
+    pub enabled: bool,
+}
+
+impl std::fmt::Debug for InsertChatProviderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InsertChatProviderInput")
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .field("created_by", &self.created_by)
+            .finish()
+    }
+}
+
+impl std::fmt::Debug for UpdateChatProviderInput {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateChatProviderInput")
+            .field("id", &self.id)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// A chat model config record as stored in the database.
+#[derive(Clone, Debug)]
+pub struct ChatModelConfigRecord {
+    pub id: Uuid,
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    pub options: Value,
+    pub created_at: OffsetDateTime,
+    pub updated_at: OffsetDateTime,
+}
+
+/// Input for inserting a new chat model config.
+#[derive(Clone, Debug)]
+pub struct InsertChatModelConfigInput {
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    pub options: Value,
+    pub created_by: Option<Uuid>,
+}
+
+/// Input for updating a chat model config.
+#[derive(Clone, Debug)]
+pub struct UpdateChatModelConfigInput {
+    pub id: Uuid,
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    pub options: Value,
+    pub updated_by: Option<Uuid>,
+}
+
 /// Deployment metadata required by the HTTP layer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct DeploymentMetadata {
@@ -885,6 +1014,9 @@ pub enum StorageError {
     /// The backing store is unavailable.
     #[error("storage unavailable: {message}")]
     Unavailable { message: String },
+    /// The requested row/entity was not found.
+    #[error("not found: {message}")]
+    NotFound { message: String },
     /// Stored data exists but is invalid.
     #[error("stored data is invalid: {message}")]
     InvalidData { message: String },
@@ -895,6 +1027,14 @@ impl StorageError {
     #[must_use]
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::Unavailable {
+            message: message.into(),
+        }
+    }
+
+    /// Creates a not-found error.
+    #[must_use]
+    pub fn not_found(message: impl Into<String>) -> Self {
+        Self::NotFound {
             message: message.into(),
         }
     }
@@ -1040,6 +1180,27 @@ pub trait AuthStore: Send + Sync {
         user_id: Uuid,
         link: &UpsertExternalAuthLinkInput,
     ) -> Result<ExternalAuthLinkRecord, StorageError>;
+
+    /// Updates an API key's `last_used` and `expires_at` timestamps.
+    ///
+    /// Used by the auth middleware to track key activity with a 1-hour
+    /// debounce window (matching Go's `updateAPIKeyLastUsed`).
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Updates the `last_seen_at` timestamp for a user.
+    ///
+    /// Called alongside `update_api_key_last_used` when the debounce
+    /// window has elapsed.
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
 }
 
 /// Narrow storage contract for identity-owned domain logic.
@@ -1177,6 +1338,39 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<Option<OrganizationMemberRecord>, StorageError>;
 
     // ----- User identity supplements -----
+
+    /// Finds a user by their external linked ID (login_type + linked_id).
+    ///
+    /// Returns the user record if a user link with the given login type and
+    /// linked ID exists. Used by OAuth/OIDC callbacks to look up users by
+    /// their provider-specific identifier.
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: crate::identity::LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (login_type, linked_id);
+        Err(StorageError::unavailable(
+            "find_user_by_linked_id is not implemented",
+        ))
+    }
+
+    /// Finds an active, non-deleted user by email AND login_type.
+    ///
+    /// Only returns users where `deleted = false`, `is_system = false`,
+    /// `status = Active`, AND `login_type` matches the requested type.
+    /// This prevents account takeover where an OAuth callback matches a
+    /// password-based user by email.
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: crate::identity::LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (email, login_type);
+        Err(StorageError::unavailable(
+            "find_active_user_by_email_and_login_type is not implemented",
+        ))
+    }
 
     /// Lists user links for a user.
     async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
@@ -2399,6 +2593,30 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     // ----- User identity supplements -----
 
+    /// Finds a user by their external linked ID (login_type + linked_id).
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: crate::identity::LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (login_type, linked_id);
+        Err(StorageError::unavailable(
+            "find_user_by_linked_id is not implemented",
+        ))
+    }
+
+    /// Finds an active, non-deleted user by email AND login_type.
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: crate::identity::LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (email, login_type);
+        Err(StorageError::unavailable(
+            "find_active_user_by_email_and_login_type is not implemented",
+        ))
+    }
+
     /// Lists user links for a user.
     async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
         let _ = user_id;
@@ -2614,6 +2832,21 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     /// Returns token-lifetime settings for the given user.
     async fn token_config(&self, user_id: Uuid) -> Result<TokenConfigRecord, StorageError>;
+
+    /// Updates an API key's `last_used` and `expires_at` timestamps.
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Updates the `last_seen_at` timestamp for a user.
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
 
     /// Lists audit logs using the supplied filter.
     async fn list_audit_logs(
@@ -3140,6 +3373,140 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("chats are not implemented"))
     }
 
+    /// Updates the content of an existing chat message.
+    async fn update_chat_message_content(
+        &self,
+        input: UpdateChatMessageContentInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat message editing is not implemented",
+        ))
+    }
+
+    /// Deletes a queued message.
+    async fn delete_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<(), StorageError> {
+        let _ = (chat_id, queued_message_id);
+        Err(StorageError::unavailable(
+            "chat queue operations are not implemented",
+        ))
+    }
+
+    /// Promotes a queued message (moves it to the front of the queue).
+    async fn promote_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<ChatQueuedMessageRecord, StorageError> {
+        let _ = (chat_id, queued_message_id);
+        Err(StorageError::unavailable(
+            "chat queue operations are not implemented",
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Providers
+    // -----------------------------------------------------------------------
+
+    /// Lists all chat provider configurations.
+    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    /// Creates a new chat provider configuration.
+    async fn insert_chat_provider(
+        &self,
+        input: InsertChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    /// Updates an existing chat provider configuration.
+    async fn update_chat_provider(
+        &self,
+        input: UpdateChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    /// Deletes a chat provider configuration.
+    async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
+        let _ = provider_id;
+        Err(StorageError::unavailable(
+            "chat providers are not implemented",
+        ))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat Model Configs
+    // -----------------------------------------------------------------------
+
+    /// Lists chat model configs. If `enabled_only` is true, returns only enabled configs.
+    async fn list_chat_model_configs(
+        &self,
+        enabled_only: bool,
+    ) -> Result<Vec<ChatModelConfigRecord>, StorageError> {
+        let _ = enabled_only;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Creates a new chat model config.
+    async fn insert_chat_model_config(
+        &self,
+        input: InsertChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Updates an existing chat model config.
+    async fn update_chat_model_config(
+        &self,
+        input: UpdateChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let _ = input;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Deletes a chat model config (soft-delete).
+    async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
+        let _ = config_id;
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Ensures at least one default chat model config exists.
+    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
+
+    /// Unsets all default chat model configs.
+    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+        Err(StorageError::unavailable(
+            "chat model configs are not implemented",
+        ))
+    }
     // -----------------------------------------------------------------------
     // Chat Files
     // -----------------------------------------------------------------------
@@ -5253,6 +5620,23 @@ where
     ) -> Result<ExternalAuthLinkRecord, StorageError> {
         AppStore::upsert_external_auth_link(self, user_id, link).await
     }
+
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        AppStore::update_api_key_last_used(self, id, last_used, expires_at).await
+    }
+
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        AppStore::update_user_last_seen_at(self, user_id, last_seen_at).await
+    }
 }
 
 #[async_trait]
@@ -5406,6 +5790,27 @@ where
         link: &UpsertExternalAuthLinkInput,
     ) -> Result<ExternalAuthLinkRecord, StorageError> {
         (**self).upsert_external_auth_link(user_id, link).await
+    }
+
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_api_key_last_used(id, last_used, expires_at)
+            .await
+    }
+
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_user_last_seen_at(user_id, last_seen_at)
+            .await
     }
 }
 

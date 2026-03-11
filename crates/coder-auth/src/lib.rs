@@ -1,6 +1,7 @@
 //! Authentication, sessions, and external-auth lifecycle helpers.
 #![forbid(unsafe_code)]
 
+pub mod oauth_login;
 pub mod session_cache;
 
 use std::{sync::Arc, time::Duration};
@@ -382,6 +383,24 @@ where
             user: AuthenticatedUser::from(user_record.user),
             response: LoginWithPasswordResponse { session_token },
         })
+    }
+
+    /// Creates a session for an OAuth/OIDC-authenticated user.
+    ///
+    /// This is called after the OAuth callback has verified the user's identity
+    /// and either found an existing user or created a new one.
+    #[tracing::instrument(skip(self))]
+    pub async fn create_oauth_session(
+        &self,
+        user: &UserRecord,
+    ) -> Result<String, AuthServiceError> {
+        let session_token = new_session_token();
+        let session_token_hash = hash_session_token(&session_token);
+        self.store
+            .insert_auth_session(&session_token_hash, user.id)
+            .await?;
+        metrics::counter!("auth_events_total", "type" => "oauth_login_success").increment(1);
+        Ok(session_token)
     }
 
     /// Revokes the current session token and evicts it from the cache.
@@ -1026,7 +1045,7 @@ where
     }
 }
 
-fn actor_from_user(user: &AuthenticatedUser) -> Actor {
+pub fn actor_from_user(user: &AuthenticatedUser) -> Actor {
     Actor {
         user_id: user.id,
         username: user.username.clone(),
@@ -2114,12 +2133,15 @@ where
     }
 
     /// Creates a new OAuth2 provider application.
+    ///
+    /// `created_by` is `None` for dynamically registered clients (RFC 7591)
+    /// which have no user context, matching Go's `InsertOAuth2ProviderApp`.
     pub async fn create_app(
         &self,
         name: &str,
         icon: &str,
         callback_url: &str,
-        created_by: Uuid,
+        created_by: Option<Uuid>,
     ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, OAuth2ProviderError> {
         if name.trim().is_empty() {
             return Err(OAuth2ProviderError::bad_request("App name is required."));
@@ -3099,6 +3121,38 @@ mod tests {
             _link: &UpsertExternalAuthLinkInput,
         ) -> Result<ExternalAuthLinkRecord, StorageError> {
             Err(StorageError::unavailable("not implemented"))
+        }
+
+        async fn update_api_key_last_used(
+            &self,
+            id: &str,
+            last_used: OffsetDateTime,
+            expires_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            if let Some(key) = inner.api_keys.iter_mut().find(|k| k.id == id) {
+                key.last_used = last_used;
+                key.expires_at = expires_at;
+            }
+            Ok(())
+        }
+
+        async fn update_user_last_seen_at(
+            &self,
+            user_id: Uuid,
+            last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            if let Some(user) = inner.users.iter_mut().find(|u| u.id == user_id) {
+                user.last_seen_at = Some(last_seen_at);
+            }
+            Ok(())
         }
     }
 

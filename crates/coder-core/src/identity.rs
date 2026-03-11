@@ -8,6 +8,38 @@ use uuid::Uuid;
 
 use crate::{api::ApiAllowListTarget, ports::StorageError};
 
+/// Scopes that may be attached to an API key.
+///
+/// Mirrors the Go `APIKeyScope` constants used by `SplitAPIToken` / `ExtractAPIKeyMW`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyScope {
+    /// Full access – equivalent to Go's `ScopeAll`.
+    All,
+    /// Restricted to application-connect operations.
+    ApplicationConnect,
+}
+
+impl ApiKeyScope {
+    /// Parse from the wire-format string stored in the database.
+    pub fn from_scope_string(s: &str) -> Option<Self> {
+        match s {
+            "all" => Some(Self::All),
+            "application_connect" => Some(Self::ApplicationConnect),
+            _ => None,
+        }
+    }
+
+    /// Returns the wire-format string value.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::ApplicationConnect => "application_connect",
+        }
+    }
+}
+
 /// Supported login types for the Rust identity slice.
 #[derive(
     Clone, Copy, Debug, Hash, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type,
@@ -738,7 +770,11 @@ pub struct OAuth2ProviderAppRecord {
     /// Additional redirect URIs.
     pub redirect_uris: Vec<String>,
     /// User who created the application.
-    pub created_by: Uuid,
+    ///
+    /// `None` for dynamically registered clients (RFC 7591) which have no
+    /// user context. The Go reference uses `InsertOAuth2ProviderApp` without
+    /// a `created_by` column for dynamic registrations.
+    pub created_by: Option<Uuid>,
 }
 
 /// Input for creating an OAuth2 provider app.
@@ -751,7 +787,9 @@ pub struct CreateOAuth2ProviderAppInput {
     /// Primary callback URL.
     pub callback_url: String,
     /// User who created the application.
-    pub created_by: Uuid,
+    ///
+    /// `None` for dynamically registered clients (RFC 7591).
+    pub created_by: Option<Uuid>,
 }
 
 /// Input for updating an OAuth2 provider app.

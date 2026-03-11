@@ -65,6 +65,11 @@ impl IntoResponse for AppError {
                 )
                     .into_response()
             }
+            Self::Storage(StorageError::NotFound { message }) => (
+                StatusCode::NOT_FOUND,
+                Json(ApiResponse::error("Resource not found.", message)),
+            )
+                .into_response(),
             Self::Storage(StorageError::InvalidData { .. }) => {
                 error!(error = %self, "request failed because stored data is invalid");
                 (

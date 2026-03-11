@@ -1065,3 +1065,783 @@ pub(crate) async fn watch_chat_git(
             .await;
     }))
 }
+
+// ---------------------------------------------------------------------------
+// PATCH /api/v2/chats/{chat}/messages/{message}
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn patch_chat_message(
+    State(state): State<AppState>,
+    Path((chat_id, message_id)): Path<(Uuid, i64)>,
+    headers: HeaderMap,
+    payload: Result<Json<EditChatMessageRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok(not_found_response("Chat not found."));
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok(not_found_response("Chat not found."));
+    }
+
+    if message_id <= 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid chat message ID.",
+                "Message ID must be a positive integer.",
+            )),
+        )
+            .into_response());
+    }
+
+    let content_value = serde_json::to_value(&request.content)
+        .map(Some)
+        .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+
+    let input = UpdateChatMessageContentInput {
+        message_id,
+        chat_id,
+        content: content_value,
+    };
+
+    let message = match state.store.update_chat_message_content(input).await {
+        Ok(m) => m,
+        Err(StorageError::NotFound { .. }) => {
+            return Ok(not_found_response(
+                "Chat message not found or not editable.",
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Json(chat_message_response_from_record(message)?).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/v2/chats/{chat}/queue/{queuedMessage}
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn delete_chat_queued_message(
+    State(state): State<AppState>,
+    Path((chat_id, queued_message_id)): Path<(Uuid, i64)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok(not_found_response("Chat not found."));
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok(not_found_response("Chat not found."));
+    }
+
+    if queued_message_id <= 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid queued message ID.",
+                "Queued message ID must be a positive integer.",
+            )),
+        )
+            .into_response());
+    }
+
+    state
+        .store
+        .delete_chat_queued_message(chat_id, queued_message_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v2/chats/{chat}/queue/{queuedMessage}/promote
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn promote_chat_queued_message(
+    State(state): State<AppState>,
+    Path((chat_id, queued_message_id)): Path<(Uuid, i64)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok(not_found_response("Chat not found."));
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok(not_found_response("Chat not found."));
+    }
+
+    if queued_message_id <= 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid queued message ID.",
+                "Queued message ID must be a positive integer.",
+            )),
+        )
+            .into_response());
+    }
+
+    let promoted = match state
+        .store
+        .promote_chat_queued_message(chat_id, queued_message_id)
+        .await
+    {
+        Ok(record) => record,
+        Err(StorageError::NotFound { .. }) => {
+            return Ok(not_found_response("Queued message not found."));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    Ok(Json(chat_queued_message_response_from_record(promoted)?).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Conversion helpers for provider and model config responses
+// ---------------------------------------------------------------------------
+
+fn chat_provider_config_response_from_record(
+    record: ChatProviderRecord,
+) -> ChatProviderConfigResponse {
+    let has_api_key = !record.api_key.trim().is_empty();
+    let display_name = if record.display_name.trim().is_empty() {
+        record.provider.clone()
+    } else {
+        record.display_name.trim().to_string()
+    };
+    ChatProviderConfigResponse {
+        id: record.id,
+        provider: record.provider,
+        display_name,
+        enabled: record.enabled,
+        has_api_key,
+        base_url: record.base_url.trim().to_string(),
+        source: ChatProviderConfigSource::Database,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
+fn chat_model_config_response_from_record(
+    record: ChatModelConfigRecord,
+) -> ChatModelConfigResponse {
+    let model_config: Option<ChatModelCallConfig> =
+        match serde_json::from_value::<ChatModelCallConfig>(record.options.clone()) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                tracing::warn!(
+                    config_id = %record.id,
+                    error = %e,
+                    "failed to deserialize chat model config options"
+                );
+                None
+            }
+        }
+        .and_then(|cfg: ChatModelCallConfig| {
+            if cfg.max_output_tokens.is_none()
+                && cfg.temperature.is_none()
+                && cfg.top_p.is_none()
+                && cfg.top_k.is_none()
+                && cfg.presence_penalty.is_none()
+                && cfg.frequency_penalty.is_none()
+                && cfg.provider_options.is_none()
+            {
+                None
+            } else {
+                Some(cfg)
+            }
+        });
+    ChatModelConfigResponse {
+        id: record.id,
+        provider: record.provider,
+        model: record.model,
+        display_name: record.display_name,
+        enabled: record.enabled,
+        is_default: record.is_default,
+        context_limit: record.context_limit,
+        compression_threshold: record.compression_threshold,
+        model_config,
+        created_at: record.created_at,
+        updated_at: record.updated_at,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v2/chats/providers
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn list_chat_providers(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view chat providers.",
+        ));
+    }
+
+    let providers = state.store.list_chat_providers().await?;
+    let response: Vec<ChatProviderConfigResponse> = providers
+        .into_iter()
+        .map(chat_provider_config_response_from_record)
+        .collect();
+    Ok(Json(response).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v2/chats/providers
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn create_chat_provider(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateChatProviderConfigRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create chat providers.",
+        ));
+    }
+
+    let provider = request.provider.trim().to_string();
+    if provider.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid provider.",
+                "Provider must not be empty.",
+            )),
+        )
+            .into_response());
+    }
+
+    // Validate provider against the allowed set (matches DB CHECK constraint).
+    const ALLOWED_PROVIDERS: &[&str] = &[
+        "anthropic",
+        "azure",
+        "bedrock",
+        "google",
+        "openai",
+        "openai-compat",
+        "openrouter",
+        "vercel",
+    ];
+    if !ALLOWED_PROVIDERS.contains(&provider.as_str()) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid provider.",
+                format!("Provider must be one of: {}.", ALLOWED_PROVIDERS.join(", ")),
+            )),
+        )
+            .into_response());
+    }
+
+    let enabled = request.enabled.unwrap_or(true);
+
+    let input = InsertChatProviderInput {
+        provider,
+        display_name: request.display_name.trim().to_string(),
+        api_key: request.api_key.trim().to_string(),
+        base_url: request.base_url.trim().to_string(),
+        enabled,
+        created_by: Some(context.user.id),
+    };
+
+    let record = state.store.insert_chat_provider(input).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(chat_provider_config_response_from_record(record)),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/v2/chats/providers/{provider}
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn update_chat_provider(
+    State(state): State<AppState>,
+    Path(provider_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateChatProviderConfigRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update chat providers.",
+        ));
+    }
+
+    // Fetch existing provider to merge optional fields.
+    let providers = state.store.list_chat_providers().await?;
+    let Some(existing) = providers.into_iter().find(|p| p.id == provider_id) else {
+        return Ok(not_found_response("Chat provider not found."));
+    };
+
+    let display_name = {
+        let trimmed = request.display_name.trim();
+        if trimmed.is_empty() {
+            existing.display_name
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let enabled = request.enabled.unwrap_or(existing.enabled);
+    let api_key = match &request.api_key {
+        Some(k) => k.trim().to_string(),
+        None => existing.api_key,
+    };
+    let base_url = match &request.base_url {
+        Some(u) => u.trim().to_string(),
+        None => existing.base_url,
+    };
+
+    let input = UpdateChatProviderInput {
+        id: provider_id,
+        display_name,
+        api_key,
+        base_url,
+        enabled,
+    };
+
+    let record = state.store.update_chat_provider(input).await?;
+    Ok(Json(chat_provider_config_response_from_record(record)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/v2/chats/providers/{provider}
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn delete_chat_provider(
+    State(state): State<AppState>,
+    Path(provider_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete chat providers.",
+        ));
+    }
+
+    // Verify the provider exists.
+    let providers = state.store.list_chat_providers().await?;
+    if !providers.iter().any(|p| p.id == provider_id) {
+        return Ok(not_found_response("Chat provider not found."));
+    }
+
+    state.store.delete_chat_provider(provider_id).await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v2/chats/model-configs
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn list_chat_model_configs(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Admin users see all configs; non-admin users see only enabled ones.
+    let authorizer = Authorizer::new();
+    let is_admin = authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_ok();
+
+    let enabled_only = !is_admin;
+    let configs = state.store.list_chat_model_configs(enabled_only).await?;
+    let response: Vec<ChatModelConfigResponse> = configs
+        .into_iter()
+        .map(chat_model_config_response_from_record)
+        .collect();
+    Ok(Json(response).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v2/chats/model-configs
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn create_chat_model_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateChatModelConfigRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create chat model configs.",
+        ));
+    }
+
+    let provider = request.provider.trim().to_string();
+    if provider.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid provider.",
+                "Provider must not be empty.",
+            )),
+        )
+            .into_response());
+    }
+
+    let model = request.model.trim().to_string();
+    if model.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Model is required.", "")),
+        )
+            .into_response());
+    }
+
+    let enabled = request.enabled.unwrap_or(true);
+    let is_default = request.is_default.unwrap_or(false);
+
+    let context_limit = match request.context_limit {
+        Some(limit) if limit > 0 => limit,
+        _ => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Context limit is required.",
+                    "context_limit must be greater than zero.",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    let compression_threshold = request.compression_threshold.unwrap_or(80);
+    if !(0..=100).contains(&compression_threshold) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid compression threshold.",
+                "compression_threshold must be between 0 and 100.",
+            )),
+        )
+            .into_response());
+    }
+
+    let options = match &request.model_config {
+        Some(cfg) => {
+            serde_json::to_value(cfg).map_err(|e| StorageError::invalid_data(e.to_string()))?
+        }
+        None => serde_json::json!({}),
+    };
+
+    // Disabled configs cannot be the default.
+    let mut set_as_default = if enabled { is_default } else { false };
+    // If no enabled default currently exists, make this one the default (if enabled).
+    if !set_as_default && enabled {
+        let existing = state.store.list_chat_model_configs(false).await?;
+        if !existing.iter().any(|c| c.is_default && c.enabled) {
+            set_as_default = true;
+        }
+    }
+
+    if set_as_default {
+        state.store.unset_default_chat_model_configs().await?;
+    }
+
+    let input = InsertChatModelConfigInput {
+        provider,
+        model,
+        display_name: request.display_name.trim().to_string(),
+        enabled,
+        is_default: set_as_default,
+        context_limit,
+        compression_threshold,
+        options,
+        created_by: Some(context.user.id),
+    };
+
+    let record = match state.store.insert_chat_model_config(input).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Recover: re-establish a default since we may have already unset them.
+            let _recovery = state.store.ensure_default_chat_model_config().await;
+            return Err(e.into());
+        }
+    };
+    state.store.ensure_default_chat_model_config().await?;
+
+    // NOTE: The `record` returned by insert may have a stale `is_default`
+    // value if `ensure_default_chat_model_config` promoted this record to
+    // the default after insert. This matches the Go reference behaviour
+    // which also returns the record from the INSERT without re-fetching.
+    Ok((
+        StatusCode::CREATED,
+        Json(chat_model_config_response_from_record(record)),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// PATCH /api/v2/chats/model-configs/{config}
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn update_chat_model_config(
+    State(state): State<AppState>,
+    Path(config_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateChatModelConfigRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update chat model configs.",
+        ));
+    }
+
+    // Fetch existing config to merge optional fields.
+    let configs = state.store.list_chat_model_configs(false).await?;
+    let Some(existing) = configs.into_iter().find(|c| c.id == config_id) else {
+        return Ok(not_found_response("Chat model config not found."));
+    };
+
+    let provider = {
+        let trimmed = request.provider.trim();
+        if trimmed.is_empty() {
+            existing.provider
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let model = {
+        let trimmed = request.model.trim();
+        if trimmed.is_empty() {
+            existing.model
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let display_name = {
+        let trimmed = request.display_name.trim();
+        if trimmed.is_empty() {
+            existing.display_name
+        } else {
+            trimmed.to_string()
+        }
+    };
+    let enabled = request.enabled.unwrap_or(existing.enabled);
+    // Disabled configs cannot be the default.
+    let is_default = if enabled {
+        request.is_default.unwrap_or(existing.is_default)
+    } else {
+        false
+    };
+
+    let context_limit = match request.context_limit {
+        Some(limit) => {
+            if limit <= 0 {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(
+                        "Context limit must be greater than zero.",
+                        "",
+                    )),
+                )
+                    .into_response());
+            }
+            limit
+        }
+        None => existing.context_limit,
+    };
+
+    let compression_threshold = request
+        .compression_threshold
+        .unwrap_or(existing.compression_threshold);
+    if !(0..=100).contains(&compression_threshold) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid compression threshold.",
+                "compression_threshold must be between 0 and 100.",
+            )),
+        )
+            .into_response());
+    }
+
+    let options = match &request.model_config {
+        Some(cfg) => {
+            serde_json::to_value(cfg).map_err(|e| StorageError::invalid_data(e.to_string()))?
+        }
+        None => existing.options,
+    };
+
+    // Handle default logic: if setting as new default, unset others first.
+    if is_default && !existing.is_default {
+        state.store.unset_default_chat_model_configs().await?;
+    }
+
+    let input = UpdateChatModelConfigInput {
+        id: config_id,
+        provider,
+        model,
+        display_name,
+        enabled,
+        is_default,
+        context_limit,
+        compression_threshold,
+        options,
+        updated_by: Some(context.user.id),
+    };
+
+    let record = match state.store.update_chat_model_config(input).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Recover: re-establish a default since we may have already unset them.
+            let _recovery = state.store.ensure_default_chat_model_config().await;
+            return Err(e.into());
+        }
+    };
+    state.store.ensure_default_chat_model_config().await?;
+
+    Ok(Json(chat_model_config_response_from_record(record)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// DELETE /api/v2/chats/model-configs/{config}
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn delete_chat_model_config(
+    State(state): State<AppState>,
+    Path(config_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete chat model configs.",
+        ));
+    }
+
+    // Verify the config exists.
+    let configs = state.store.list_chat_model_configs(false).await?;
+    if !configs.iter().any(|c| c.id == config_id) {
+        return Ok(not_found_response("Chat model config not found."));
+    }
+
+    state.store.delete_chat_model_config(config_id).await?;
+    state.store.ensure_default_chat_model_config().await?;
+    Ok(StatusCode::NO_CONTENT.into_response())
+}

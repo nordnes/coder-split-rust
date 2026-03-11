@@ -54,9 +54,13 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-w
 tokio = { version = "1.44", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", default-features = false, features = ["normalize-path", "request-id", "trace", "util"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "normalize-path", "request-id", "trace", "util"] }
+opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
+opentelemetry_sdk = { version = "0.31", default-features = false, features = ["rt-tokio", "trace"] }
+opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
+tracing-opentelemetry = { version = "0.32", default-features = false }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "registry", "time"] }
 url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.8", features = ["serde", "v4"] }
 

@@ -78,6 +78,9 @@ pub struct BuildInfoResponse {
     pub upgrade_message: String,
     /// Stable deployment identifier.
     pub deployment_id: String,
+    /// Web Push public key (VAPID), omitted when not configured.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub webpush_public_key: String,
 }
 
 /// Update-check information surfaced through `/api/v2/updatecheck`.
@@ -99,7 +102,9 @@ pub struct SshConfigResponse {
     /// Hostname suffix used for workspace SSH hostnames.
     pub hostname_suffix: String,
     /// Extra SSH config directives the client should write.
-    pub ssh_config_options: Vec<(String, String)>,
+    ///
+    /// Serialized as a JSON object to match Go's `map[string]string`.
+    pub ssh_config_options: HashMap<String, String>,
 }
 
 /// Deployment configuration surfaced through `/api/v2/deployment/config`.
@@ -1644,6 +1649,314 @@ pub struct OAuth2TokenResponse {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth2 RFC Compliance API types
+// ---------------------------------------------------------------------------
+
+/// RFC 8414 OAuth 2.0 Authorization Server Metadata.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2AuthorizationServerMetadata {
+    /// Authorization server issuer identifier.
+    pub issuer: String,
+    /// URL of the authorization endpoint.
+    pub authorization_endpoint: String,
+    /// URL of the token endpoint.
+    pub token_endpoint: String,
+    /// URL of the dynamic client registration endpoint (RFC 7591).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub registration_endpoint: String,
+    /// URL of the token revocation endpoint (RFC 7009).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub revocation_endpoint: String,
+    /// Supported response types.
+    pub response_types_supported: Vec<String>,
+    /// Supported grant types.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grant_types_supported: Vec<String>,
+    /// Supported PKCE code challenge methods.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub code_challenge_methods_supported: Vec<String>,
+    /// Supported scopes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes_supported: Vec<String>,
+    /// Supported token endpoint auth methods.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub token_endpoint_auth_methods_supported: Vec<String>,
+}
+
+/// RFC 9728 OAuth 2.0 Protected Resource Metadata.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ProtectedResourceMetadata {
+    /// Protected resource identifier.
+    pub resource: String,
+    /// Authorization servers that protect this resource.
+    pub authorization_servers: Vec<String>,
+    /// Supported scopes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes_supported: Vec<String>,
+    /// Supported bearer methods.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bearer_methods_supported: Vec<String>,
+}
+
+/// RFC 7591 Dynamic Client Registration Request.
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct OAuth2ClientRegistrationRequest {
+    /// Redirect URIs.
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
+    /// Human-readable client name.
+    #[serde(default)]
+    pub client_name: String,
+    /// Client home page URI.
+    #[serde(default)]
+    pub client_uri: String,
+    /// Client logo URI.
+    #[serde(default)]
+    pub logo_uri: String,
+    /// Terms of service URI.
+    #[serde(default)]
+    pub tos_uri: String,
+    /// Privacy policy URI.
+    #[serde(default)]
+    pub policy_uri: String,
+    /// JWKS URI for client authentication.
+    #[serde(default)]
+    pub jwks_uri: String,
+    /// JWKS inline for client authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<Value>,
+    /// Software identifier.
+    #[serde(default)]
+    pub software_id: String,
+    /// Software version.
+    #[serde(default)]
+    pub software_version: String,
+    /// Requested grant types.
+    #[serde(default)]
+    pub grant_types: Vec<String>,
+    /// Requested response types.
+    #[serde(default)]
+    pub response_types: Vec<String>,
+    /// Token endpoint auth method.
+    #[serde(default)]
+    pub token_endpoint_auth_method: String,
+    /// Requested scope (space-delimited).
+    #[serde(default)]
+    pub scope: String,
+    /// Contact emails.
+    #[serde(default)]
+    pub contacts: Vec<String>,
+}
+
+impl OAuth2ClientRegistrationRequest {
+    /// Apply RFC 7591 defaults for missing fields.
+    ///
+    /// **Ordering note:** This method sets `client_name` to a default when
+    /// empty, which means a subsequent call to [`generate_client_name()`] will
+    /// see a non-empty name and skip the URI-derived fallback logic. This
+    /// matches Go's `ApplyDefaults()` → `GenerateClientName()` ordering, where
+    /// the same behavior occurs intentionally.
+    pub fn apply_defaults(mut self) -> Self {
+        if self.grant_types.is_empty() {
+            self.grant_types = vec!["authorization_code".to_owned(), "refresh_token".to_owned()];
+        }
+        if self.response_types.is_empty() {
+            self.response_types = vec!["code".to_owned()];
+        }
+        if self.token_endpoint_auth_method.is_empty() {
+            self.token_endpoint_auth_method = "client_secret_basic".to_owned();
+        }
+        if self.client_name.is_empty() {
+            self.client_name = "Dynamically Registered Client".to_owned();
+        }
+        self
+    }
+
+    /// Validate the registration request.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.redirect_uris.is_empty() {
+            return Err("redirect_uris is required".to_owned());
+        }
+        for uri in &self.redirect_uris {
+            if url::Url::parse(uri).is_err() {
+                return Err(format!("invalid redirect_uri: {uri}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate a client name, falling back to URI-derived names.
+    pub fn generate_client_name(&self) -> String {
+        use sha2::Digest as _;
+        if !self.client_name.is_empty() {
+            if self.client_name.len() > 64 {
+                let hash = format!("{:x}", sha2::Sha256::digest(self.client_name.as_bytes()));
+                let hash_prefix = &hash[..8];
+                let max_prefix = 64 - 1 - hash_prefix.len();
+                let prefix: String = self
+                    .client_name
+                    .char_indices()
+                    .take_while(|&(i, c)| i + c.len_utf8() <= max_prefix)
+                    .map(|(_, c)| c)
+                    .collect();
+                return format!("{prefix}-{hash_prefix}");
+            }
+            return self.client_name.clone();
+        }
+        if !self.client_uri.is_empty() {
+            if let Ok(uri) = url::Url::parse(&self.client_uri) {
+                if let Some(host) = uri.host_str() {
+                    return truncate_name_to_64(&format!("Client ({host})"));
+                }
+            }
+        }
+        if let Some(first_uri) = self.redirect_uris.first() {
+            if let Ok(uri) = url::Url::parse(first_uri) {
+                if let Some(host) = uri.host_str() {
+                    return truncate_name_to_64(&format!("Client ({host})"));
+                }
+            }
+        }
+        "Dynamically Registered Client".to_owned()
+    }
+}
+
+/// Truncate a name to at most 64 characters, respecting UTF-8 char boundaries.
+fn truncate_name_to_64(name: &str) -> String {
+    if name.len() <= 64 {
+        return name.to_owned();
+    }
+    name.char_indices()
+        .take_while(|&(i, c)| i + c.len_utf8() <= 64)
+        .map(|(_, c)| c)
+        .collect()
+}
+
+/// RFC 7591 Dynamic Client Registration Response.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ClientRegistrationResponse {
+    /// Unique client identifier.
+    pub client_id: String,
+    /// Client secret (only returned on creation).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_secret: String,
+    /// Timestamp when client_id was issued (Unix seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id_issued_at: Option<i64>,
+    /// Timestamp when client_secret expires (0 = no expiration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret_expires_at: Option<i64>,
+    /// Registered redirect URIs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redirect_uris: Vec<String>,
+    /// Client name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_name: String,
+    /// Client URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_uri: String,
+    /// Logo URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub logo_uri: String,
+    /// Terms of service URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tos_uri: String,
+    /// Policy URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub policy_uri: String,
+    /// Grant types.
+    pub grant_types: Vec<String>,
+    /// Response types.
+    pub response_types: Vec<String>,
+    /// Token endpoint auth method.
+    pub token_endpoint_auth_method: String,
+    /// Scope.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Contacts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contacts: Vec<String>,
+    /// Registration access token for RFC 7592 management.
+    pub registration_access_token: String,
+    /// Registration client URI for RFC 7592 management.
+    pub registration_client_uri: String,
+}
+
+/// RFC 7592 Client Configuration (read response).
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ClientConfiguration {
+    /// Client identifier.
+    pub client_id: String,
+    /// Timestamp when client_id was issued (Unix seconds).
+    pub client_id_issued_at: i64,
+    /// Timestamp when client_secret expires (0 = no expiration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret_expires_at: Option<i64>,
+    /// Registered redirect URIs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redirect_uris: Vec<String>,
+    /// Client name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_name: String,
+    /// Client URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_uri: String,
+    /// Logo URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub logo_uri: String,
+    /// Terms of service URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tos_uri: String,
+    /// Policy URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub policy_uri: String,
+    /// Grant types.
+    pub grant_types: Vec<String>,
+    /// Response types.
+    pub response_types: Vec<String>,
+    /// Token endpoint auth method.
+    pub token_endpoint_auth_method: String,
+    /// Scope.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Contacts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contacts: Vec<String>,
+    /// Registration access token (empty in GET responses for security).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub registration_access_token: String,
+    /// Registration client URI.
+    pub registration_client_uri: String,
+}
+
+/// OAuth2 error response per RFC 6749.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ErrorResponse {
+    /// Error code.
+    pub error: String,
+    /// Human-readable error description.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error_description: String,
+}
+
+/// OAuth2 token revocation request per RFC 7009.
+#[derive(Clone, Debug, Deserialize)]
+pub struct OAuth2TokenRevocationRequest {
+    /// The token to revoke.
+    #[serde(default)]
+    pub token: String,
+    /// Hint about the token type.
+    #[serde(default)]
+    pub token_type_hint: String,
+    /// Client identifier.
+    #[serde(default)]
+    pub client_id: String,
+    /// Client secret.
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+// ---------------------------------------------------------------------------
 // User Identity Supplement API types
 // ---------------------------------------------------------------------------
 
@@ -2600,6 +2913,166 @@ pub struct CreateChatMessageApiResponse {
 #[derive(Clone, Debug, Serialize)]
 pub struct UploadChatFileResponse {
     pub id: Uuid,
+}
+
+/// EditChatMessageRequest is the request to edit a user message in a chat.
+#[derive(Clone, Debug, Deserialize)]
+pub struct EditChatMessageRequest {
+    pub content: Vec<ChatInputPart>,
+}
+
+/// ChatProviderConfigSource describes how a provider entry is sourced.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatProviderConfigSource {
+    Database,
+    EnvPreset,
+    Supported,
+}
+
+/// ChatProviderConfigResponse is an admin-managed provider configuration.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatProviderConfigResponse {
+    pub id: Uuid,
+    pub provider: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub has_api_key: bool,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub base_url: String,
+    pub source: ChatProviderConfigSource,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// CreateChatProviderConfigRequest creates a chat provider config.
+#[derive(Clone, Deserialize)]
+pub struct CreateChatProviderConfigRequest {
+    pub provider: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub api_key: String,
+    #[serde(default)]
+    pub base_url: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for CreateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateChatProviderConfigRequest")
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// UpdateChatProviderConfigRequest updates a chat provider config.
+#[derive(Clone, Deserialize)]
+pub struct UpdateChatProviderConfigRequest {
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub api_key: Option<String>,
+    #[serde(default)]
+    pub base_url: Option<String>,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for UpdateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateChatProviderConfigRequest")
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
+/// ChatModelCallConfig configures per-call model behavior defaults.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatModelCallConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_tokens: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_k: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub presence_penalty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frequency_penalty: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider_options: Option<Value>,
+}
+
+/// ChatModelConfigResponse is an admin-managed model configuration.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatModelConfigResponse {
+    pub id: Uuid,
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+    pub enabled: bool,
+    pub is_default: bool,
+    pub context_limit: i64,
+    pub compression_threshold: i32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model_config: Option<ChatModelCallConfig>,
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+}
+
+/// CreateChatModelConfigRequest creates a chat model config.
+#[derive(Clone, Debug, Deserialize)]
+pub struct CreateChatModelConfigRequest {
+    pub provider: String,
+    pub model: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
+    #[serde(default)]
+    pub context_limit: Option<i64>,
+    #[serde(default)]
+    pub compression_threshold: Option<i32>,
+    #[serde(default)]
+    pub model_config: Option<ChatModelCallConfig>,
+}
+
+/// UpdateChatModelConfigRequest updates a chat model config.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateChatModelConfigRequest {
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub display_name: String,
+    #[serde(default)]
+    pub enabled: Option<bool>,
+    #[serde(default)]
+    pub is_default: Option<bool>,
+    #[serde(default)]
+    pub context_limit: Option<i64>,
+    #[serde(default)]
+    pub compression_threshold: Option<i32>,
+    #[serde(default)]
+    pub model_config: Option<ChatModelCallConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -4997,4 +5470,155 @@ pub struct CustomNotificationContent {
 pub struct CustomNotificationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<CustomNotificationContent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // generate_client_name() unit tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn generate_client_name_empty_with_redirect_uri() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://myapp.example.com/callback".to_owned()],
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Client (myapp.example.com)");
+    }
+
+    #[test]
+    fn generate_client_name_explicit_name() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://example.com/callback".to_owned()],
+            client_name: "My App".to_owned(),
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "My App");
+    }
+
+    #[test]
+    fn generate_client_name_long_name_truncated_with_hash() {
+        let long_name = "A".repeat(100);
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://example.com/callback".to_owned()],
+            client_name: long_name.clone(),
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert!(
+            name.len() <= 64,
+            "name should be at most 64 bytes, got {}",
+            name.len()
+        );
+        assert!(name.contains('-'), "truncated name should have hash suffix");
+    }
+
+    #[test]
+    fn generate_client_name_long_multibyte_name() {
+        // Each emoji is 4 bytes, so 20 emojis = 80 bytes > 64
+        let emoji_name = "🎉".repeat(20);
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://example.com/callback".to_owned()],
+            client_name: emoji_name,
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert!(
+            name.len() <= 64,
+            "name should be at most 64 bytes, got {}",
+            name.len()
+        );
+    }
+
+    #[test]
+    fn generate_client_name_fallback_to_client_uri() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://other.example.com/callback".to_owned()],
+            client_uri: "https://myapp.dev".to_owned(),
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Client (myapp.dev)");
+    }
+
+    #[test]
+    fn generate_client_name_fallback_to_redirect_uri_host() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://redirect.example.org/cb".to_owned()],
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Client (redirect.example.org)");
+    }
+
+    #[test]
+    fn generate_client_name_ultimate_fallback() {
+        // Empty redirect_uris won't reach this in practice (validation rejects it),
+        // but the function itself falls back to a default.
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec![],
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Dynamically Registered Client");
+    }
+
+    // ---------------------------------------------------------------
+    // truncate_name_to_64() unit tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn truncate_name_short_ascii() {
+        let name = "Hello World";
+        let result = truncate_name_to_64(name);
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn truncate_name_exactly_64_bytes() {
+        let name = "A".repeat(64);
+        let result = truncate_name_to_64(&name);
+        assert_eq!(result.len(), 64);
+        assert_eq!(result, name);
+    }
+
+    #[test]
+    fn truncate_name_over_64_ascii() {
+        let name = "B".repeat(100);
+        let result = truncate_name_to_64(&name);
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn truncate_name_multibyte_utf8_over_64() {
+        // Each '€' is 3 bytes. 22 * 3 = 66 bytes > 64
+        let name = "€".repeat(22);
+        let result = truncate_name_to_64(&name);
+        assert!(
+            result.len() <= 64,
+            "result length {} exceeds 64",
+            result.len()
+        );
+        // Should truncate to 21 * 3 = 63 bytes (can't fit 22nd char within 64)
+        assert_eq!(result.len(), 63);
+    }
+
+    #[test]
+    fn truncate_name_4byte_chars() {
+        // Each '🎉' is 4 bytes. 17 * 4 = 68 > 64
+        let name = "🎉".repeat(17);
+        let result = truncate_name_to_64(&name);
+        assert!(
+            result.len() <= 64,
+            "result length {} exceeds 64",
+            result.len()
+        );
+        // Should truncate to 16 * 4 = 64 bytes
+        assert_eq!(result.len(), 64);
+    }
 }

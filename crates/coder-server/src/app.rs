@@ -61,7 +61,8 @@ use crate::handlers::users::*;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
-    csp_middleware, csrf_middleware, hsts_middleware, prometheus_middleware, real_ip_middleware,
+    build_cors_layer, csp_middleware, csrf_middleware, hsts_middleware,
+    otel_trace_context_middleware, prometheus_middleware, real_ip_middleware,
 };
 
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
@@ -159,6 +160,8 @@ pub struct AppState {
     pub(crate) health: HealthService<Arc<dyn AppStore>>,
     pub(crate) external_auth: ExternalAuthService<Arc<dyn AppStore>>,
     pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
+    /// Shared HTTP client for outbound requests (connection pooling).
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -190,6 +193,7 @@ impl AppState {
         let health = HealthService::new(store.clone())?;
         let external_auth = ExternalAuthService::new(store.clone())?;
         let oauth2_provider = OAuth2ProviderService::new(store.clone());
+        let http_client = reqwest::Client::new();
 
         Ok(Self {
             config,
@@ -208,6 +212,7 @@ impl AppState {
             health,
             external_auth,
             oauth2_provider,
+            http_client,
         })
     }
 
@@ -234,7 +239,7 @@ pub fn build_router(
 ) -> Router {
     let request_id_header = HeaderName::from_static("x-request-id");
 
-    Router::new()
+    let router = Router::new()
         .route("/", get(server_root))
         .route("/healthz", get(healthz))
         .route("/latency-check", get(latency_check))
@@ -250,13 +255,11 @@ pub fn build_router(
         .nest(
             "/api/v2",
             Router::new()
-                .route("/", get(api_root))
+                // -------------------------------------------------------
+                // Protected routes — covered by the API-key auth middleware.
+                // -------------------------------------------------------
                 .route("/audit", get(list_audit_logs))
                 .route("/audit/testgenerate", post(post_generate_test_audit_log))
-                .route("/auth/scopes", get(list_api_key_scopes))
-                .route("/buildinfo", get(build_info))
-                .route("/csp/reports", post(post_csp_report))
-                .route("/deployment/config", get(deployment_config))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
                 .route("/debug/health", get(debug_health))
@@ -349,29 +352,7 @@ pub fn build_router(
                     get(get_org_member_workspace_available_users),
                 )
                 .route("/users", get(list_users).post(post_user))
-                .route("/users/authmethods", get(auth_methods))
-                .route("/updatecheck", get(update_check))
-                .route("/users/first", get(get_first_user).post(post_first_user))
-                .route("/users/login", post(login_with_password))
                 .route("/users/logout", post(logout))
-                .route(
-                    "/users/validate-password",
-                    post(post_validate_user_password),
-                )
-                .route("/users/otp/request", post(post_request_one_time_passcode))
-                .route(
-                    "/users/otp/change-password",
-                    post(post_change_password_with_one_time_passcode),
-                )
-                .route(
-                    "/users/oauth2/github/device",
-                    get(get_github_oauth_device_disabled),
-                )
-                .route(
-                    "/users/oauth2/github/callback",
-                    get(get_github_oauth_callback_disabled),
-                )
-                .route("/users/oidc/callback", get(get_oidc_callback_disabled))
                 .route("/users/roles", get(list_site_roles))
                 .route("/users/{user}/keys", post(create_session_api_key))
                 .route(
@@ -460,9 +441,38 @@ pub fn build_router(
                     post(upload_chat_file).layer(DefaultBodyLimit::max(MAX_CHAT_FILE_SIZE)),
                 )
                 .route("/chats/files/{file}", get(get_chat_file))
+                .route(
+                    "/chats/{chat}/messages/{message}",
+                    patch(patch_chat_message),
+                )
+                .route(
+                    "/chats/{chat}/queue/{queuedMessage}",
+                    delete(delete_chat_queued_message),
+                )
+                .route(
+                    "/chats/{chat}/queue/{queuedMessage}/promote",
+                    post(promote_chat_queued_message),
+                )
                 .route("/chats/{chat}/archive", post(archive_chat_handler))
                 .route("/chats/{chat}/unarchive", post(unarchive_chat_handler))
                 .route("/chats/{chat}/git/watch", get(watch_chat_git))
+                .route(
+                    "/chats/providers",
+                    get(list_chat_providers).post(create_chat_provider),
+                )
+                .route(
+                    "/chats/providers/{providerConfig}",
+                    patch(update_chat_provider).delete(delete_chat_provider),
+                )
+                .route(
+                    "/chats/model-configs",
+                    get(list_chat_model_configs).post(create_chat_model_config),
+                )
+                .route(
+                    "/chats/model-configs/{modelConfig}",
+                    patch(update_chat_model_config).delete(delete_chat_model_config),
+                )
+                // TODO: Add handler-level tests for chat CRUD, provider, and model-config routes
                 // Notifications domain
                 .route(
                     "/notifications/settings",
@@ -760,6 +770,47 @@ pub fn build_router(
                 .route("/files/{fileid}", get(get_file_by_id))
                 .route("/derp-map", get(derp_map_updates))
                 .route("/regions", get(get_regions))
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::auth_middleware::api_key_auth_middleware,
+                ))
+                // -------------------------------------------------------
+                // Public / unauthenticated routes — NOT covered by the
+                // API-key auth middleware.  Users with expired cookies must
+                // still be able to reach these endpoints.
+                // -------------------------------------------------------
+                .route("/", get(api_root))
+                .route("/buildinfo", get(build_info))
+                .route("/updatecheck", get(update_check))
+                .route("/csp/reports", post(post_csp_report))
+                .route("/users/first", get(get_first_user).post(post_first_user))
+                .route("/users/login", post(login_with_password))
+                .route("/users/authmethods", get(auth_methods))
+                .route(
+                    "/users/validate-password",
+                    post(post_validate_user_password),
+                )
+                .route("/users/otp/request", post(post_request_one_time_passcode))
+                .route(
+                    "/users/otp/change-password",
+                    post(post_change_password_with_one_time_passcode),
+                )
+                .route(
+                    "/users/oauth2/github/device",
+                    get(get_github_oauth_device_disabled)
+                        .post(post_github_oauth_device),
+                )
+                .route(
+                    "/users/oauth2/github/callback",
+                    get(get_github_oauth_callback),
+                )
+                .route("/users/oidc/callback", get(get_oidc_callback))
+                .route("/auth/scopes", get(list_api_key_scopes))
+                .route("/deployment/config", get(deployment_config))
+                // -------------------------------------------------------
+                // Agent routes — use agent-token authentication handled
+                // inside the handler itself.
+                // -------------------------------------------------------
                 .route("/tailnet", get(tailnet_rpc_conn))
                 .route("/applications/host", get(applications_host))
                 .route(
@@ -860,14 +911,45 @@ pub fn build_router(
                 ),
         )
         .route(
+            "/.well-known/oauth-authorization-server",
+            get(get_oauth2_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(get_oauth2_protected_resource_metadata),
+        )
+        .route("/oauth2/register", post(post_oauth2_register))
+        .route(
+            "/oauth2/clients/{client_id}",
+            get(get_oauth2_client_configuration)
+                .put(put_oauth2_client_configuration)
+                .delete(delete_oauth2_client_configuration),
+        )
+        .route("/oauth2/revoke", post(post_oauth2_revoke))
+        .route(
             "/oauth2/authorize",
             get(get_oauth2_authorize).post(post_oauth2_authorize),
         )
         .route("/oauth2/tokens", post(post_oauth2_token))
         // route_layer runs *after* routing so MatchedPath is populated.
-        .route_layer(middleware::from_fn(prometheus_middleware))
-        .layer(middleware::from_fn_with_state(rate_limit_state, crate::rate_limit::rate_limit_middleware))
+        .route_layer(middleware::from_fn(prometheus_middleware));
+
+    // Only add the OTel trace-context propagation middleware when OTel is
+    // enabled.  This avoids any per-request overhead (header extraction,
+    // propagator calls) in the default disabled configuration.
+    let router = if state.config.otel.enabled {
+        router.layer(middleware::from_fn(otel_trace_context_middleware))
+    } else {
+        router
+    };
+
+    router
+        .layer(middleware::from_fn_with_state(
+            rate_limit_state,
+            crate::rate_limit::rate_limit_middleware,
+        ))
         .layer(middleware::from_fn(csrf_middleware))
+        .layer(build_cors_layer(&state.config.cors))
         .layer(middleware::from_fn(csp_middleware))
         .layer(middleware::from_fn(hsts_middleware))
         .layer(middleware::from_fn(real_ip_middleware))
@@ -1189,7 +1271,7 @@ impl AgentConnection for WebSocketAgentConnection {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::HashMap,
         error::Error,
@@ -1324,6 +1406,10 @@ mod tests {
         chat_messages: Mutex<Vec<ChatMessageRecord>>,
         chat_message_next_id: Mutex<i64>,
         chat_files: Mutex<HashMap<Uuid, coder_core::ChatFileRecord>>,
+        chat_queued_messages: Mutex<Vec<ChatQueuedMessageRecord>>,
+        chat_queued_message_next_id: Mutex<i64>,
+        chat_providers: Mutex<HashMap<Uuid, coder_core::ChatProviderRecord>>,
+        chat_model_configs: Mutex<HashMap<Uuid, coder_core::ChatModelConfigRecord>>,
         notifications_settings: Mutex<coder_core::NotificationsSettings>,
         notification_templates: Mutex<Vec<coder_core::NotificationTemplate>>,
         notification_preferences: Mutex<HashMap<(Uuid, Uuid), coder_core::NotificationPreference>>,
@@ -1417,6 +1503,10 @@ mod tests {
                 chat_messages: Mutex::new(Vec::new()),
                 chat_message_next_id: Mutex::new(1),
                 chat_files: Mutex::new(HashMap::new()),
+                chat_queued_messages: Mutex::new(Vec::new()),
+                chat_queued_message_next_id: Mutex::new(1),
+                chat_providers: Mutex::new(HashMap::new()),
+                chat_model_configs: Mutex::new(HashMap::new()),
                 notifications_settings: Mutex::new(coder_core::NotificationsSettings::default()),
                 notification_templates: Mutex::new(Vec::new()),
                 notification_preferences: Mutex::new(HashMap::new()),
@@ -3144,6 +3234,41 @@ mod tests {
             Ok(true)
         }
 
+        async fn update_api_key_last_used(
+            &self,
+            id: &str,
+            last_used: OffsetDateTime,
+            expires_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut api_keys = self
+                .api_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let Some(key) = api_keys.get_mut(id) else {
+                return Ok(());
+            };
+            key.last_used = last_used;
+            key.expires_at = expires_at;
+            key.updated_at = OffsetDateTime::now_utc();
+            Ok(())
+        }
+
+        async fn update_user_last_seen_at(
+            &self,
+            user_id: Uuid,
+            last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut users = self
+                .users
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.last_seen_at = Some(last_seen_at);
+                user.updated_at = OffsetDateTime::now_utc();
+            }
+            Ok(())
+        }
+
         async fn token_config(&self, user_id: Uuid) -> Result<TokenConfigRecord, StorageError> {
             let users = self
                 .users
@@ -4151,9 +4276,19 @@ mod tests {
 
         async fn list_chat_queued_messages(
             &self,
-            _chat_id: Uuid,
+            chat_id: Uuid,
         ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
-            Ok(Vec::new())
+            let msgs = self
+                .chat_queued_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<ChatQueuedMessageRecord> = msgs
+                .iter()
+                .filter(|m| m.chat_id == chat_id)
+                .cloned()
+                .collect();
+            result.sort_by_key(|m| m.created_at);
+            Ok(result)
         }
 
         async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
@@ -4267,6 +4402,235 @@ mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .get(&id)
                 .cloned())
+        }
+
+        // -----------------------------------------------------------------
+        // Chat message editing, queue, providers, model configs
+        // -----------------------------------------------------------------
+
+        async fn update_chat_message_content(
+            &self,
+            input: coder_core::UpdateChatMessageContentInput,
+        ) -> Result<ChatMessageRecord, StorageError> {
+            let mut msgs = self
+                .chat_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let msg = msgs
+                .iter_mut()
+                .find(|m| m.id == input.message_id && m.chat_id == input.chat_id)
+                .ok_or_else(|| StorageError::not_found("chat message not found"))?;
+            msg.content = input.content;
+            Ok(msg.clone())
+        }
+
+        async fn delete_chat_queued_message(
+            &self,
+            chat_id: Uuid,
+            queued_message_id: i64,
+        ) -> Result<(), StorageError> {
+            let mut msgs = self
+                .chat_queued_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            msgs.retain(|m| !(m.id == queued_message_id && m.chat_id == chat_id));
+            Ok(())
+        }
+
+        async fn promote_chat_queued_message(
+            &self,
+            chat_id: Uuid,
+            queued_message_id: i64,
+        ) -> Result<ChatQueuedMessageRecord, StorageError> {
+            let mut msgs = self
+                .chat_queued_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let earliest = msgs
+                .iter()
+                .filter(|m| m.chat_id == chat_id)
+                .map(|m| m.created_at)
+                .min()
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            let promoted_at = earliest - time::Duration::seconds(1);
+            let msg = msgs
+                .iter_mut()
+                .find(|m| m.id == queued_message_id && m.chat_id == chat_id)
+                .ok_or_else(|| StorageError::not_found("queued message not found"))?;
+            msg.created_at = promoted_at;
+            Ok(msg.clone())
+        }
+
+        async fn list_chat_providers(
+            &self,
+        ) -> Result<Vec<coder_core::ChatProviderRecord>, StorageError> {
+            let providers = self
+                .chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<coder_core::ChatProviderRecord> =
+                providers.values().cloned().collect();
+            result.sort_by(|a, b| a.provider.cmp(&b.provider));
+            Ok(result)
+        }
+
+        async fn insert_chat_provider(
+            &self,
+            input: coder_core::InsertChatProviderInput,
+        ) -> Result<coder_core::ChatProviderRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let id = Uuid::new_v4();
+            let record = coder_core::ChatProviderRecord {
+                id,
+                provider: input.provider,
+                display_name: input.display_name,
+                api_key: input.api_key,
+                base_url: input.base_url,
+                enabled: input.enabled,
+                created_at: now,
+                updated_at: now,
+            };
+            self.chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn update_chat_provider(
+            &self,
+            input: coder_core::UpdateChatProviderInput,
+        ) -> Result<coder_core::ChatProviderRecord, StorageError> {
+            let mut providers = self
+                .chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let provider = providers
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::not_found("chat provider not found"))?;
+            provider.display_name = input.display_name;
+            provider.api_key = input.api_key;
+            provider.base_url = input.base_url;
+            provider.enabled = input.enabled;
+            provider.updated_at = OffsetDateTime::now_utc();
+            Ok(provider.clone())
+        }
+
+        async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
+            self.chat_providers
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&provider_id);
+            Ok(())
+        }
+
+        async fn list_chat_model_configs(
+            &self,
+            enabled_only: bool,
+        ) -> Result<Vec<coder_core::ChatModelConfigRecord>, StorageError> {
+            let configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<coder_core::ChatModelConfigRecord> = configs
+                .values()
+                .filter(|c| !enabled_only || c.enabled)
+                .cloned()
+                .collect();
+            result.sort_by(|a, b| a.provider.cmp(&b.provider).then(a.model.cmp(&b.model)));
+            Ok(result)
+        }
+
+        async fn insert_chat_model_config(
+            &self,
+            input: coder_core::InsertChatModelConfigInput,
+        ) -> Result<coder_core::ChatModelConfigRecord, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            let id = Uuid::new_v4();
+            let record = coder_core::ChatModelConfigRecord {
+                id,
+                provider: input.provider,
+                model: input.model,
+                display_name: input.display_name,
+                enabled: input.enabled,
+                is_default: input.is_default,
+                context_limit: input.context_limit,
+                compression_threshold: input.compression_threshold,
+                options: input.options,
+                created_at: now,
+                updated_at: now,
+            };
+            self.chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+            Ok(record)
+        }
+
+        async fn update_chat_model_config(
+            &self,
+            input: coder_core::UpdateChatModelConfigInput,
+        ) -> Result<coder_core::ChatModelConfigRecord, StorageError> {
+            let mut configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let config = configs
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::not_found("chat model config not found"))?;
+            config.provider = input.provider;
+            config.model = input.model;
+            config.display_name = input.display_name;
+            config.enabled = input.enabled;
+            config.is_default = input.is_default;
+            config.context_limit = input.context_limit;
+            config.compression_threshold = input.compression_threshold;
+            config.options = input.options;
+            config.updated_at = OffsetDateTime::now_utc();
+            Ok(config.clone())
+        }
+
+        // NOTE: FakeStore performs a hard delete (HashMap::remove) while
+        // PostgresStore does a soft delete (sets deleted = true, deleted_at = now()).
+        // FakeStore also does not filter by a `deleted` flag in list queries.
+        // This divergence is acceptable for unit tests but should be kept in mind
+        // when writing integration tests that rely on soft-delete semantics.
+        async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
+            self.chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .remove(&config_id);
+            Ok(())
+        }
+
+        async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+            let mut configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let has_enabled_default = configs.values().any(|c| c.is_default && c.enabled);
+            if !has_enabled_default {
+                if let Some(config) = configs
+                    .values_mut()
+                    .filter(|c| c.enabled)
+                    .min_by_key(|c| c.created_at)
+                {
+                    config.is_default = true;
+                    config.updated_at = OffsetDateTime::now_utc();
+                }
+            }
+            Ok(())
+        }
+
+        async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+            let mut configs = self
+                .chat_model_configs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for config in configs.values_mut() {
+                config.is_default = false;
+            }
+            Ok(())
         }
 
         // -------------------------------------------------------------------
@@ -6640,6 +7004,54 @@ mod tests {
         }
 
         // -----------------------------------------------------------------
+        // User Lookup by Linked ID / Email
+        // -----------------------------------------------------------------
+
+        async fn find_user_by_linked_id(
+            &self,
+            login_type: LoginType,
+            linked_id: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let links = self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for link in links.values() {
+                if link.login_type == login_type && link.linked_id == linked_id {
+                    if let Some(user) = users.get(&link.user_id) {
+                        return Ok(Some(user.clone()));
+                    }
+                }
+            }
+            Ok(None)
+        }
+
+        async fn find_active_user_by_email_and_login_type(
+            &self,
+            email: &str,
+            login_type: LoginType,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(users
+                .values()
+                .find(|u| {
+                    u.email.eq_ignore_ascii_case(email)
+                        && !u.deleted
+                        && !u.is_system
+                        && u.status == UserStatus::Active
+                        && u.login_type == login_type
+                })
+                .cloned())
+        }
+
+        // -----------------------------------------------------------------
         // User Links
         // -----------------------------------------------------------------
 
@@ -7199,7 +7611,10 @@ mod tests {
             ssh: SshConfig {
                 hostname_prefix: "coder".to_owned(),
                 hostname_suffix: "example.internal".to_owned(),
-                ssh_config_options: vec![("StrictHostKeyChecking".to_owned(), "no".to_owned())],
+                ssh_config_options: HashMap::from([(
+                    "StrictHostKeyChecking".to_owned(),
+                    "no".to_owned(),
+                )]),
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
@@ -7211,6 +7626,10 @@ mod tests {
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
+            github_oauth: None,
+            oidc: None,
+            otel: coder_core::config::OtelConfig::default(),
+            cors: coder_core::config::CorsConfig::default(),
         })
     }
 
@@ -7246,7 +7665,7 @@ mod tests {
         ))
     }
 
-    fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
+    pub(crate) fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
         test_state_with_store(health_ok).map(|(state, _)| state)
     }
 
@@ -7330,7 +7749,7 @@ mod tests {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
+    pub(crate) async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
         let create_response = call(
             app.clone(),
             json_request(
@@ -7432,9 +7851,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert_eq!(body.get("current").and_then(Value::as_bool), Some(true));
-        assert_eq!(
-            body.get("version").and_then(Value::as_str),
-            Some(env!("CARGO_PKG_VERSION"))
+        // Version now uses BuildMetadata format (e.g. "v0.1.0+commit")
+        let version = body.get("version").and_then(Value::as_str);
+        assert!(
+            version.is_some_and(|v| v.contains(env!("CARGO_PKG_VERSION"))),
+            "version should contain the crate version"
         );
         assert_eq!(
             body.get("url").and_then(Value::as_str),
@@ -7551,12 +7972,19 @@ mod tests {
         let response = call(app, request(Method::GET, "/api/v2/users/first")?).await?;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            response
-                .headers()
-                .get(BUILD_VERSION_HEADER)
-                .and_then(|value| value.to_str().ok()),
-            Some(env!("CARGO_PKG_VERSION"))
+        // The build version header now uses the full version string (e.g. "v0.1.0+commit")
+        // from BuildMetadata::default(), so just verify it is present and non-empty.
+        let header_value = response
+            .headers()
+            .get(BUILD_VERSION_HEADER)
+            .and_then(|value| value.to_str().ok());
+        assert!(
+            header_value.is_some(),
+            "build version header should be present"
+        );
+        assert!(
+            header_value.is_some_and(|v| v.contains(env!("CARGO_PKG_VERSION"))),
+            "build version header should contain the crate version"
         );
         Ok(())
     }
@@ -16883,9 +17311,14 @@ mod tests {
     #[tokio::test]
     async fn deployment_config_returns_config_and_options() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
 
-        // deployment_config does not require authentication
-        let response = call(app, request(Method::GET, "/api/v2/deployment/config")?).await?;
+        // deployment_config requires authentication (owner role)
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/config", &session_token)?,
+        )
+        .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert!(body.get("config").is_some());
@@ -20454,6 +20887,489 @@ mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    // =====================================================================
+    // OAuth2 RFC Compliance Tests (8414, 9728, 7591, 7592, 7009)
+    // =====================================================================
+
+    #[tokio::test]
+    async fn rfc8414_authorization_server_metadata() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, "/.well-known/oauth-authorization-server")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+
+        // RFC 8414 REQUIRED fields
+        assert!(
+            body.get("issuer").and_then(Value::as_str).is_some(),
+            "missing issuer"
+        );
+        assert!(
+            body.get("authorization_endpoint")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing authorization_endpoint"
+        );
+        assert!(
+            body.get("token_endpoint").and_then(Value::as_str).is_some(),
+            "missing token_endpoint"
+        );
+        assert!(
+            body.get("response_types_supported")
+                .and_then(Value::as_array)
+                .is_some(),
+            "missing response_types_supported"
+        );
+
+        // Verify issuer matches access_url (no trailing slash)
+        let issuer = body
+            .get("issuer")
+            .and_then(Value::as_str)
+            .ok_or("no issuer")?;
+        assert!(!issuer.ends_with('/'), "issuer should not end with /");
+
+        // Verify endpoints are well-formed
+        let auth_ep = body
+            .get("authorization_endpoint")
+            .and_then(Value::as_str)
+            .ok_or("no auth ep")?;
+        assert!(
+            auth_ep.ends_with("/oauth2/authorize"),
+            "unexpected authorization_endpoint: {auth_ep}"
+        );
+        let token_ep = body
+            .get("token_endpoint")
+            .and_then(Value::as_str)
+            .ok_or("no token ep")?;
+        assert!(
+            token_ep.ends_with("/oauth2/tokens"),
+            "unexpected token_endpoint: {token_ep}"
+        );
+
+        // Verify scopes_supported is sorted
+        let scopes = body
+            .get("scopes_supported")
+            .and_then(Value::as_array)
+            .ok_or("no scopes")?;
+        let scope_strings: Vec<&str> = scopes.iter().filter_map(Value::as_str).collect();
+        let mut sorted = scope_strings.clone();
+        sorted.sort();
+        assert_eq!(scope_strings, sorted, "scopes_supported should be sorted");
+
+        // Verify grant_types_supported
+        let grants = body
+            .get("grant_types_supported")
+            .and_then(Value::as_array)
+            .ok_or("no grants")?;
+        let grant_strings: Vec<&str> = grants.iter().filter_map(Value::as_str).collect();
+        assert!(
+            grant_strings.contains(&"authorization_code"),
+            "missing authorization_code grant"
+        );
+        assert!(
+            grant_strings.contains(&"refresh_token"),
+            "missing refresh_token grant"
+        );
+
+        // Verify code_challenge_methods_supported includes S256
+        let methods = body
+            .get("code_challenge_methods_supported")
+            .and_then(Value::as_array)
+            .ok_or("no methods")?;
+        let method_strings: Vec<&str> = methods.iter().filter_map(Value::as_str).collect();
+        assert!(
+            method_strings.contains(&"S256"),
+            "missing S256 code challenge method"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc9728_protected_resource_metadata() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, "/.well-known/oauth-protected-resource")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+
+        // RFC 9728 REQUIRED fields
+        assert!(
+            body.get("resource").and_then(Value::as_str).is_some(),
+            "missing resource"
+        );
+        assert!(
+            body.get("authorization_servers")
+                .and_then(Value::as_array)
+                .is_some(),
+            "missing authorization_servers"
+        );
+
+        // Verify resource matches access_url
+        let resource = body
+            .get("resource")
+            .and_then(Value::as_str)
+            .ok_or("no resource")?;
+        assert!(!resource.ends_with('/'), "resource should not end with /");
+
+        // Verify authorization_servers contains the resource itself
+        let servers = body
+            .get("authorization_servers")
+            .and_then(Value::as_array)
+            .ok_or("no servers")?;
+        let server_strings: Vec<&str> = servers.iter().filter_map(Value::as_str).collect();
+        assert!(
+            server_strings.contains(&resource),
+            "authorization_servers should contain resource"
+        );
+
+        // Verify bearer_methods_supported
+        let bearer = body
+            .get("bearer_methods_supported")
+            .and_then(Value::as_array)
+            .ok_or("no bearer")?;
+        let bearer_strings: Vec<&str> = bearer.iter().filter_map(Value::as_str).collect();
+        assert!(
+            bearer_strings.contains(&"header"),
+            "missing header bearer method"
+        );
+        assert!(
+            bearer_strings.contains(&"query"),
+            "missing query bearer method"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_happy_path() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["https://example.com/callback"]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+
+        // RFC 7591 §3.2.1 REQUIRED fields
+        assert!(
+            body.get("client_id").and_then(Value::as_str).is_some(),
+            "missing client_id"
+        );
+        assert!(
+            body.get("client_secret").and_then(Value::as_str).is_some(),
+            "missing client_secret"
+        );
+        assert!(
+            body.get("registration_access_token")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing registration_access_token"
+        );
+        assert!(
+            body.get("registration_client_uri")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing registration_client_uri"
+        );
+
+        // Verify client_id is a valid UUID
+        let client_id = body
+            .get("client_id")
+            .and_then(Value::as_str)
+            .ok_or("no client_id")?;
+        assert!(
+            Uuid::parse_str(client_id).is_ok(),
+            "client_id should be a valid UUID"
+        );
+
+        // Verify registration_client_uri contains client_id
+        let reg_uri = body
+            .get("registration_client_uri")
+            .and_then(Value::as_str)
+            .ok_or("no reg uri")?;
+        assert!(
+            reg_uri.contains(client_id),
+            "registration_client_uri should contain client_id"
+        );
+
+        // Verify client_id_issued_at is present
+        assert!(
+            body.get("client_id_issued_at").is_some(),
+            "missing client_id_issued_at"
+        );
+
+        // Verify client_secret_expires_at is 0 (no expiration)
+        assert_eq!(
+            body.get("client_secret_expires_at").and_then(Value::as_i64),
+            Some(0),
+            "client_secret_expires_at should be 0"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_with_client_name() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["https://example.com/callback"],
+                    "client_name": "My Custom App"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("client_name").and_then(Value::as_str),
+            Some("My Custom App"),
+            "client_name should be echoed back"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_missing_redirect_uris() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(Method::POST, "/oauth2/register", &json!({}))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+            "error code should be invalid_client_metadata"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_invalid_redirect_uri() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["not-a-valid-uri"]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+        );
+        let desc = body
+            .get("error_description")
+            .and_then(Value::as_str)
+            .ok_or("no desc")?;
+        assert!(
+            desc.contains("invalid redirect_uri"),
+            "error should mention invalid redirect_uri, got: {desc}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_invalid_json() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("not valid json"))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_get_client_without_auth_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, &format!("/oauth2/clients/{}", Uuid::new_v4()))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_get_client_with_bearer_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/oauth2/clients/{}", Uuid::new_v4()))
+            .header("authorization", "Bearer some-fake-token")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+        let desc = body
+            .get("error_description")
+            .and_then(Value::as_str)
+            .ok_or("no desc")?;
+        assert!(
+            desc.contains("not yet implemented"),
+            "should say not yet implemented, got: {desc}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_delete_client_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/oauth2/clients/{}", Uuid::new_v4()))
+            .header("authorization", "Bearer some-token")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_missing_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("client_id=abc"))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_request")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_invalid_client_id_returns_200() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("token=some-token&client_id=not-a-uuid"))?;
+        let response = call(app, req).await?;
+        // RFC 7009: return 200 even for invalid client_id to not reveal info
+        assert_eq!(response.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_valid_format_returns_unsupported() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // First create an app so the client_id is valid
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Revoke Test App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("token=some-token&client_id={app_id}")))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("unsupported_token_type"),
+            "should return unsupported_token_type"
+        );
+
         Ok(())
     }
 
@@ -29263,6 +30179,612 @@ mod tests {
                 .unwrap_or("")
                 .contains("authorization_code"),
             "expected detail listing supported grant types"
+        );
+        Ok(())
+    }
+
+    // ── GitHub OAuth / OIDC handler tests ──────────────────────
+
+    #[tokio::test]
+    async fn github_device_disabled_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        // GET returns the disabled stub
+        let response = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_device_post_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        // POST to the real handler also returns bad request when not configured
+        let response = call(
+            app,
+            request(Method::POST, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oidc/callback?code=test&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("OIDC is not enabled.")
+        );
+        Ok(())
+    }
+
+    fn test_state_with_github_oauth() -> Result<AppState, Box<dyn Error>> {
+        let mut config = test_config()?;
+        config.github_oauth = Some(coder_core::config::GithubOAuthConfig {
+            client_id: "test-client-id".to_owned(),
+            client_secret: "test-client-secret".to_owned(),
+            allow_signups: true,
+            allow_everyone: true,
+            allowed_orgs: Vec::new(),
+            allowed_teams: Vec::new(),
+            api_url: Url::parse("http://127.0.0.1:9999")?,
+        });
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        Ok(AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    fn test_state_with_oidc() -> Result<AppState, Box<dyn Error>> {
+        let mut config = test_config()?;
+        config.oidc = Some(coder_core::config::OidcConfig {
+            issuer_url: Url::parse("http://127.0.0.1:9999")?,
+            client_id: "test-oidc-client".to_owned(),
+            client_secret: "test-oidc-secret".to_owned(),
+            scopes: vec![
+                "openid".to_owned(),
+                "profile".to_owned(),
+                "email".to_owned(),
+            ],
+            allow_signups: true,
+            email_domain: Vec::new(),
+            username_field: "preferred_username".to_owned(),
+            email_field: "email".to_owned(),
+            name_field: "name".to_owned(),
+            ignore_email_verified: false,
+        });
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        Ok(AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_state_mismatch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Send a callback with a state that does not match the cookie
+        let response = call(
+            app,
+            request_with_cookies(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test-code&state=wrong-state",
+                &[(OAUTH2_STATE_COOKIE, "correct-state")],
+            )?,
+        )
+        .await?;
+        // Should redirect to login with an error message
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message, got: {location}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_missing_state_cookie() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Send a callback with no state cookie at all
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test-code&state=some-state",
+            )?,
+        )
+        .await?;
+        // Should redirect to login with state mismatch error
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_provider_error() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Simulate GitHub returning an error
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?error=access_denied&error_description=User+denied+access&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_redirects_on_state_mismatch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_oidc()?, None);
+        let response = call(
+            app,
+            request_with_cookies(
+                Method::GET,
+                "/api/v2/users/oidc/callback?code=test-code&state=wrong-state",
+                &[(OAUTH2_STATE_COOKIE, "correct-state")],
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message, got: {location}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_redirects_on_provider_error() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_oidc()?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oidc/callback?error=server_error&error_description=Something+went+wrong&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // CORS middleware tests
+    // -----------------------------------------------------------------------
+
+    fn test_config_with_cors(
+        cors: coder_core::config::CorsConfig,
+    ) -> Result<ServerConfig, url::ParseError> {
+        let mut config = test_config()?;
+        config.cors = cors;
+        Ok(config)
+    }
+
+    fn test_state_with_cors(
+        cors: coder_core::config::CorsConfig,
+    ) -> Result<AppState, Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+
+        Ok(AppState::new(
+            test_config_with_cors(cors)?,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_returns_headers() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .header("access-control-request-method", "GET")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://example.com"),
+        );
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-methods")
+                .is_some(),
+            "preflight should include allow-methods"
+        );
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .is_some(),
+            "preflight should include allow-headers"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_configured_origin_reflected() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://app.example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 7200,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://app.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.example.com"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_credentials_header_set_when_configured() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://creds.example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://creds.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_wildcard_when_no_origins_configured() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec![],
+            allow_credentials: false,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://any-origin.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+        );
+        // Credentials must NOT be set with wildcard origin.
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .is_none(),
+            "credentials header must not be present with wildcard origin"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_non_matching_origin_not_reflected() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://good.example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://evil.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "non-matching origin must NOT receive access-control-allow-origin"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_multiple_origins_reflects_correct_one() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec![
+                "https://alpha.example.com".to_owned(),
+                "https://beta.example.com".to_owned(),
+            ],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://beta.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://beta.example.com"),
+            "second configured origin should be reflected"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_includes_max_age() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: false,
+            max_age_secs: 7200,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .header("access-control-request-method", "GET")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-max-age")
+                .and_then(|v| v.to_str().ok()),
+            Some("7200"),
+            "preflight must include max-age from config"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_expose_headers_set_on_response() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: false,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        let exposed = response
+            .headers()
+            .get("access-control-expose-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        assert!(
+            exposed.contains("content-range"),
+            "expose-headers should include content-range, got: {exposed}"
+        );
+        assert!(
+            exposed.contains("x-content-type-options"),
+            "expose-headers should include x-content-type-options, got: {exposed}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_all_invalid_origins_blocks_requests() -> Result<(), Box<dyn Error>> {
+        // Configure origins that are not valid HTTP header values (contain
+        // non-visible-ASCII).  build_cors_layer must NOT fall back to wildcard.
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec![
+                "https://bad\x01origin.example.com".to_owned(),
+                "https://also\x7Fbad.example.com".to_owned(),
+            ],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://any-origin.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        // Must NOT produce wildcard – the operator intended to restrict.
+        assert_ne!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "all-invalid origins must not fall back to wildcard"
+        );
+        // In fact, no origin header should be returned at all.
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "all-invalid origins should block all cross-origin requests"
         );
         Ok(())
     }
