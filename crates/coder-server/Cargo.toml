@@ -25,6 +25,7 @@ coder-workspaces = { path = "../coder-workspaces" }
 futures-util.workspace = true
 http.workspace = true
 metrics.workspace = true
+metrics-exporter-prometheus.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 sha2.workspace = true

@@ -20,6 +20,7 @@ coder-core = { path = "../../crates/coder-core" }
 coder-db = { path = "../../crates/coder-db" }
 coder-rbac = { path = "../../crates/coder-rbac" }
 coder-server = { path = "../../crates/coder-server" }
+metrics-exporter-prometheus.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true

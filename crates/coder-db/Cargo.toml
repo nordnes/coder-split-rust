@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 coder-core = { path = "../coder-core" }
+metrics.workspace = true
 coder-identity = { path = "../coder-identity" }
 serde_json.workspace = true
 sqlx.workspace = true
