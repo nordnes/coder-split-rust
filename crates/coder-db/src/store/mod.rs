@@ -747,7 +747,7 @@ struct StoredOAuth2ProviderAppRow {
     icon: String,
     callback_url: String,
     redirect_uris: Vec<String>,
-    created_by: Uuid,
+    created_by: Option<Uuid>,
 }
 
 #[derive(Debug, FromRow)]
@@ -2432,7 +2432,7 @@ mod tests {
                 name: format!("test-app-{}", uniq()),
                 icon: "https://example.com/icon.png".to_string(),
                 callback_url: "https://example.com/callback".to_string(),
-                created_by: user_id,
+                created_by: Some(user_id),
             })
             .await?;
 
@@ -2487,7 +2487,7 @@ mod tests {
                 name: format!("code-app-{}", uniq()),
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
-                created_by: user_id,
+                created_by: Some(user_id),
             })
             .await?;
 
@@ -2546,7 +2546,7 @@ mod tests {
                 name: format!("token-app-{}", uniq()),
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
-                created_by: user_id,
+                created_by: Some(user_id),
             })
             .await?;
 
@@ -2625,7 +2625,7 @@ mod tests {
                 name: format!("cascade-app-{}", uniq()),
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
-                created_by: user_id,
+                created_by: Some(user_id),
             })
             .await?;
 
@@ -4627,7 +4627,7 @@ mod tests {
                 name: format!("refresh-app-{}", uniq()),
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
-                created_by: user_id,
+                created_by: Some(user_id),
             })
             .await?;
 
@@ -4748,7 +4748,7 @@ mod tests {
                 name: format!("casc-full-{}", uniq()),
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
-                created_by: user_id,
+                created_by: Some(user_id),
             })
             .await?;
 

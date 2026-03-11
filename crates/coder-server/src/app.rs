@@ -855,6 +855,22 @@ pub fn build_router(
                 ),
         )
         .route(
+            "/.well-known/oauth-authorization-server",
+            get(get_oauth2_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(get_oauth2_protected_resource_metadata),
+        )
+        .route("/oauth2/register", post(post_oauth2_register))
+        .route(
+            "/oauth2/clients/{client_id}",
+            get(get_oauth2_client_configuration)
+                .put(put_oauth2_client_configuration)
+                .delete(delete_oauth2_client_configuration),
+        )
+        .route("/oauth2/revoke", post(post_oauth2_revoke))
+        .route(
             "/oauth2/authorize",
             get(get_oauth2_authorize).post(post_oauth2_authorize),
         )
@@ -19894,6 +19910,489 @@ mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    // =====================================================================
+    // OAuth2 RFC Compliance Tests (8414, 9728, 7591, 7592, 7009)
+    // =====================================================================
+
+    #[tokio::test]
+    async fn rfc8414_authorization_server_metadata() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, "/.well-known/oauth-authorization-server")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+
+        // RFC 8414 REQUIRED fields
+        assert!(
+            body.get("issuer").and_then(Value::as_str).is_some(),
+            "missing issuer"
+        );
+        assert!(
+            body.get("authorization_endpoint")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing authorization_endpoint"
+        );
+        assert!(
+            body.get("token_endpoint").and_then(Value::as_str).is_some(),
+            "missing token_endpoint"
+        );
+        assert!(
+            body.get("response_types_supported")
+                .and_then(Value::as_array)
+                .is_some(),
+            "missing response_types_supported"
+        );
+
+        // Verify issuer matches access_url (no trailing slash)
+        let issuer = body
+            .get("issuer")
+            .and_then(Value::as_str)
+            .ok_or("no issuer")?;
+        assert!(!issuer.ends_with('/'), "issuer should not end with /");
+
+        // Verify endpoints are well-formed
+        let auth_ep = body
+            .get("authorization_endpoint")
+            .and_then(Value::as_str)
+            .ok_or("no auth ep")?;
+        assert!(
+            auth_ep.ends_with("/oauth2/authorize"),
+            "unexpected authorization_endpoint: {auth_ep}"
+        );
+        let token_ep = body
+            .get("token_endpoint")
+            .and_then(Value::as_str)
+            .ok_or("no token ep")?;
+        assert!(
+            token_ep.ends_with("/oauth2/tokens"),
+            "unexpected token_endpoint: {token_ep}"
+        );
+
+        // Verify scopes_supported is sorted
+        let scopes = body
+            .get("scopes_supported")
+            .and_then(Value::as_array)
+            .ok_or("no scopes")?;
+        let scope_strings: Vec<&str> = scopes.iter().filter_map(Value::as_str).collect();
+        let mut sorted = scope_strings.clone();
+        sorted.sort();
+        assert_eq!(scope_strings, sorted, "scopes_supported should be sorted");
+
+        // Verify grant_types_supported
+        let grants = body
+            .get("grant_types_supported")
+            .and_then(Value::as_array)
+            .ok_or("no grants")?;
+        let grant_strings: Vec<&str> = grants.iter().filter_map(Value::as_str).collect();
+        assert!(
+            grant_strings.contains(&"authorization_code"),
+            "missing authorization_code grant"
+        );
+        assert!(
+            grant_strings.contains(&"refresh_token"),
+            "missing refresh_token grant"
+        );
+
+        // Verify code_challenge_methods_supported includes S256
+        let methods = body
+            .get("code_challenge_methods_supported")
+            .and_then(Value::as_array)
+            .ok_or("no methods")?;
+        let method_strings: Vec<&str> = methods.iter().filter_map(Value::as_str).collect();
+        assert!(
+            method_strings.contains(&"S256"),
+            "missing S256 code challenge method"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc9728_protected_resource_metadata() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, "/.well-known/oauth-protected-resource")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+
+        // RFC 9728 REQUIRED fields
+        assert!(
+            body.get("resource").and_then(Value::as_str).is_some(),
+            "missing resource"
+        );
+        assert!(
+            body.get("authorization_servers")
+                .and_then(Value::as_array)
+                .is_some(),
+            "missing authorization_servers"
+        );
+
+        // Verify resource matches access_url
+        let resource = body
+            .get("resource")
+            .and_then(Value::as_str)
+            .ok_or("no resource")?;
+        assert!(!resource.ends_with('/'), "resource should not end with /");
+
+        // Verify authorization_servers contains the resource itself
+        let servers = body
+            .get("authorization_servers")
+            .and_then(Value::as_array)
+            .ok_or("no servers")?;
+        let server_strings: Vec<&str> = servers.iter().filter_map(Value::as_str).collect();
+        assert!(
+            server_strings.contains(&resource),
+            "authorization_servers should contain resource"
+        );
+
+        // Verify bearer_methods_supported
+        let bearer = body
+            .get("bearer_methods_supported")
+            .and_then(Value::as_array)
+            .ok_or("no bearer")?;
+        let bearer_strings: Vec<&str> = bearer.iter().filter_map(Value::as_str).collect();
+        assert!(
+            bearer_strings.contains(&"header"),
+            "missing header bearer method"
+        );
+        assert!(
+            bearer_strings.contains(&"query"),
+            "missing query bearer method"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_happy_path() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["https://example.com/callback"]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+
+        // RFC 7591 §3.2.1 REQUIRED fields
+        assert!(
+            body.get("client_id").and_then(Value::as_str).is_some(),
+            "missing client_id"
+        );
+        assert!(
+            body.get("client_secret").and_then(Value::as_str).is_some(),
+            "missing client_secret"
+        );
+        assert!(
+            body.get("registration_access_token")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing registration_access_token"
+        );
+        assert!(
+            body.get("registration_client_uri")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing registration_client_uri"
+        );
+
+        // Verify client_id is a valid UUID
+        let client_id = body
+            .get("client_id")
+            .and_then(Value::as_str)
+            .ok_or("no client_id")?;
+        assert!(
+            Uuid::parse_str(client_id).is_ok(),
+            "client_id should be a valid UUID"
+        );
+
+        // Verify registration_client_uri contains client_id
+        let reg_uri = body
+            .get("registration_client_uri")
+            .and_then(Value::as_str)
+            .ok_or("no reg uri")?;
+        assert!(
+            reg_uri.contains(client_id),
+            "registration_client_uri should contain client_id"
+        );
+
+        // Verify client_id_issued_at is present
+        assert!(
+            body.get("client_id_issued_at").is_some(),
+            "missing client_id_issued_at"
+        );
+
+        // Verify client_secret_expires_at is 0 (no expiration)
+        assert_eq!(
+            body.get("client_secret_expires_at").and_then(Value::as_i64),
+            Some(0),
+            "client_secret_expires_at should be 0"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_with_client_name() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["https://example.com/callback"],
+                    "client_name": "My Custom App"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("client_name").and_then(Value::as_str),
+            Some("My Custom App"),
+            "client_name should be echoed back"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_missing_redirect_uris() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(Method::POST, "/oauth2/register", &json!({}))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+            "error code should be invalid_client_metadata"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_invalid_redirect_uri() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["not-a-valid-uri"]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+        );
+        let desc = body
+            .get("error_description")
+            .and_then(Value::as_str)
+            .ok_or("no desc")?;
+        assert!(
+            desc.contains("invalid redirect_uri"),
+            "error should mention invalid redirect_uri, got: {desc}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_invalid_json() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("not valid json"))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_get_client_without_auth_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, &format!("/oauth2/clients/{}", Uuid::new_v4()))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_get_client_with_bearer_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/oauth2/clients/{}", Uuid::new_v4()))
+            .header("authorization", "Bearer some-fake-token")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+        let desc = body
+            .get("error_description")
+            .and_then(Value::as_str)
+            .ok_or("no desc")?;
+        assert!(
+            desc.contains("not yet implemented"),
+            "should say not yet implemented, got: {desc}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_delete_client_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/oauth2/clients/{}", Uuid::new_v4()))
+            .header("authorization", "Bearer some-token")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_missing_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("client_id=abc"))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_request")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_invalid_client_id_returns_200() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("token=some-token&client_id=not-a-uuid"))?;
+        let response = call(app, req).await?;
+        // RFC 7009: return 200 even for invalid client_id to not reveal info
+        assert_eq!(response.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_valid_format_returns_unsupported() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // First create an app so the client_id is valid
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Revoke Test App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("token=some-token&client_id={app_id}")))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("unsupported_token_type"),
+            "should return unsupported_token_type"
+        );
+
         Ok(())
     }
 

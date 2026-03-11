@@ -72,7 +72,7 @@ pub(crate) async fn post_oauth2_provider_app(
             &request.name,
             &request.icon,
             &request.callback_url,
-            context.user.id,
+            Some(context.user.id),
         )
         .await
     {
@@ -681,6 +681,611 @@ pub(crate) async fn post_oauth2_token(
         )
             .into_response()),
     }
+}
+
+// ---------------------------------------------------------------------------
+// RFC 8414 — Authorization Server Metadata
+// ---------------------------------------------------------------------------
+
+/// GET /.well-known/oauth-authorization-server
+pub(crate) async fn get_oauth2_authorization_server_metadata(
+    State(state): State<AppState>,
+) -> Json<OAuth2AuthorizationServerMetadata> {
+    let access_url = state.config.access_url.to_string();
+    let access_url = access_url.trim_end_matches('/');
+    Json(OAuth2AuthorizationServerMetadata {
+        issuer: access_url.to_owned(),
+        authorization_endpoint: format!("{access_url}/oauth2/authorize"),
+        token_endpoint: format!("{access_url}/oauth2/tokens"),
+        registration_endpoint: format!("{access_url}/oauth2/register"),
+        // NOTE: Token revocation is not yet implemented — the handler returns
+        // an error instead of silently succeeding. We still advertise the
+        // endpoint to match Go's metadata response (which also includes it),
+        // so clients can discover it for future use.
+        revocation_endpoint: format!("{access_url}/oauth2/revoke"),
+        response_types_supported: vec!["code".to_owned()],
+        grant_types_supported: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
+        code_challenge_methods_supported: vec!["S256".to_owned()],
+        scopes_supported: external_scope_names(),
+        token_endpoint_auth_methods_supported: vec![
+            "client_secret_basic".to_owned(),
+            "client_secret_post".to_owned(),
+        ],
+    })
+}
+
+// ---------------------------------------------------------------------------
+// RFC 9728 — Protected Resource Metadata
+// ---------------------------------------------------------------------------
+
+/// GET /.well-known/oauth-protected-resource
+pub(crate) async fn get_oauth2_protected_resource_metadata(
+    State(state): State<AppState>,
+) -> Json<OAuth2ProtectedResourceMetadata> {
+    let access_url = state.config.access_url.to_string();
+    let access_url = access_url.trim_end_matches('/');
+    Json(OAuth2ProtectedResourceMetadata {
+        resource: access_url.to_owned(),
+        authorization_servers: vec![access_url.to_owned()],
+        scopes_supported: external_scope_names(),
+        bearer_methods_supported: vec!["header".to_owned(), "query".to_owned()],
+    })
+}
+
+// ---------------------------------------------------------------------------
+// RFC 7591 — Dynamic Client Registration
+// ---------------------------------------------------------------------------
+
+/// POST /oauth2/register
+pub(crate) async fn post_oauth2_register(
+    State(state): State<AppState>,
+    payload: Result<Json<OAuth2ClientRegistrationRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Json(req) = match payload {
+        Ok(r) => r,
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client_metadata",
+                "Invalid JSON body",
+            ));
+        }
+    };
+
+    // Validate
+    if let Err(msg) = req.validate() {
+        return Ok(oauth2_registration_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_metadata",
+            &msg,
+        ));
+    }
+
+    // Apply defaults
+    let req = req.apply_defaults();
+    let client_name = req.generate_client_name();
+
+    // Create the app via the existing OAuth2 provider service.
+    // Dynamic registration uses a system-level context (no user auth required),
+    // matching Go's use of `dbauthz.AsSystemRestricted(ctx)` with `InsertOAuth2ProviderApp`.
+    //
+    // NOTE: The existing store only supports a single callback_url.
+    // The response echoes back all redirect_uris from the request, but only
+    // the first one is persisted as the app's callback_url. This matches
+    // Go behavior where only the primary redirect_uri is stored.
+    let callback_url = req.redirect_uris.first().cloned().unwrap_or_default();
+
+    let app = match state
+        .oauth2_provider
+        .create_app(&client_name, &req.logo_uri, &callback_url, None)
+        .await
+    {
+        Ok(app) => app,
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to store client registration",
+            ));
+        }
+    };
+
+    // Create a client secret for the app.
+    let (client_secret, _secret_record) =
+        match state.oauth2_provider.create_app_secret(app.id).await {
+            Ok(result) => result,
+            Err(_) => {
+                return Ok(oauth2_registration_error(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "server_error",
+                    "Failed to generate client secret",
+                ));
+            }
+        };
+
+    let access_url = state.config.access_url.to_string();
+    let access_url = access_url.trim_end_matches('/');
+
+    // Generate a random registration access token for RFC 7592 client management.
+    // NOTE: This token is NOT persisted or verified — the RFC 7592 endpoints
+    // (GET/PUT/DELETE /oauth2/clients/{client_id}) currently reject all requests
+    // because the DB lacks a registration_access_token_hash column.
+    // A future migration will add token storage and hash verification.
+    let registration_access_token = generate_registration_token();
+    let registration_client_uri = format!("{access_url}/oauth2/clients/{}", app.id);
+
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+
+    let response = OAuth2ClientRegistrationResponse {
+        client_id: app.id.to_string(),
+        client_secret,
+        client_id_issued_at: Some(now),
+        client_secret_expires_at: Some(0),
+        redirect_uris: req.redirect_uris,
+        client_name,
+        client_uri: req.client_uri,
+        logo_uri: req.logo_uri,
+        tos_uri: req.tos_uri,
+        policy_uri: req.policy_uri,
+        grant_types: req.grant_types,
+        response_types: req.response_types,
+        token_endpoint_auth_method: req.token_endpoint_auth_method,
+        scope: req.scope,
+        contacts: req.contacts,
+        registration_access_token,
+        registration_client_uri,
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::Oauth2ProviderApp,
+        None,
+        Some(app.id.to_string()),
+        "dynamic client registration (RFC 7591)",
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(response)).into_response())
+}
+
+// ---------------------------------------------------------------------------
+// RFC 7592 — Client Configuration (GET / PUT / DELETE)
+// ---------------------------------------------------------------------------
+
+/// GET /oauth2/clients/{client_id}
+pub(crate) async fn get_oauth2_client_configuration(
+    State(state): State<AppState>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    // Validate registration access token
+    if let Some(err_response) = validate_registration_token(&headers) {
+        return Ok(err_response);
+    }
+
+    let client_uuid = match Uuid::parse_str(&client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client_metadata",
+                "Invalid client ID format",
+            ));
+        }
+    };
+
+    let app = match state.oauth2_provider.get_app(client_uuid).await {
+        Ok(app) => app,
+        Err(OAuth2ProviderError::NotFound { .. }) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Client not found",
+            ));
+        }
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to retrieve client",
+            ));
+        }
+    };
+
+    let access_url = state.config.access_url.to_string();
+    let access_url = access_url.trim_end_matches('/');
+
+    let response = OAuth2ClientConfiguration {
+        client_id: app.id.to_string(),
+        client_id_issued_at: app.created_at.unix_timestamp(),
+        client_secret_expires_at: Some(0),
+        redirect_uris: app.redirect_uris,
+        client_name: app.name,
+        client_uri: String::new(),
+        logo_uri: app.icon,
+        tos_uri: String::new(),
+        policy_uri: String::new(),
+        grant_types: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
+        response_types: vec!["code".to_owned()],
+        token_endpoint_auth_method: "client_secret_basic".to_owned(),
+        scope: String::new(),
+        contacts: Vec::new(),
+        registration_access_token: String::new(), // RFC 7592: Not returned in GET for security
+        registration_client_uri: format!("{access_url}/oauth2/clients/{}", app.id),
+    };
+
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// PUT /oauth2/clients/{client_id}
+pub(crate) async fn put_oauth2_client_configuration(
+    State(state): State<AppState>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<OAuth2ClientRegistrationRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    // Validate registration access token
+    if let Some(err_response) = validate_registration_token(&headers) {
+        return Ok(err_response);
+    }
+
+    let client_uuid = match Uuid::parse_str(&client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client_metadata",
+                "Invalid client ID format",
+            ));
+        }
+    };
+
+    let Json(req) = match payload {
+        Ok(r) => r,
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client_metadata",
+                "Invalid JSON body",
+            ));
+        }
+    };
+
+    // Validate
+    if let Err(msg) = req.validate() {
+        return Ok(oauth2_registration_error(
+            StatusCode::BAD_REQUEST,
+            "invalid_client_metadata",
+            &msg,
+        ));
+    }
+
+    let req = req.apply_defaults();
+    let client_name = req.generate_client_name();
+    let callback_url = req.redirect_uris.first().cloned().unwrap_or_default();
+
+    let app = match state
+        .oauth2_provider
+        .update_app(client_uuid, &client_name, &req.logo_uri, &callback_url)
+        .await
+    {
+        Ok(app) => app,
+        Err(OAuth2ProviderError::NotFound { .. }) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Client not found",
+            ));
+        }
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to update client",
+            ));
+        }
+    };
+
+    let access_url = state.config.access_url.to_string();
+    let access_url = access_url.trim_end_matches('/');
+
+    let response = OAuth2ClientConfiguration {
+        client_id: app.id.to_string(),
+        client_id_issued_at: app.created_at.unix_timestamp(),
+        client_secret_expires_at: Some(0),
+        redirect_uris: app.redirect_uris,
+        client_name: app.name,
+        client_uri: req.client_uri,
+        logo_uri: app.icon,
+        tos_uri: req.tos_uri,
+        policy_uri: req.policy_uri,
+        grant_types: req.grant_types,
+        response_types: req.response_types,
+        token_endpoint_auth_method: req.token_endpoint_auth_method,
+        scope: req.scope,
+        contacts: req.contacts,
+        registration_access_token: String::new(), // RFC 7592: Not returned for security
+        registration_client_uri: format!("{access_url}/oauth2/clients/{}", app.id),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Oauth2ProviderApp,
+        None,
+        Some(app.id.to_string()),
+        "updated client configuration (RFC 7592)",
+    )
+    .await;
+
+    Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// DELETE /oauth2/clients/{client_id}
+pub(crate) async fn delete_oauth2_client_configuration(
+    State(state): State<AppState>,
+    Path(client_id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    // Validate registration access token
+    if let Some(err_response) = validate_registration_token(&headers) {
+        return Ok(err_response);
+    }
+
+    let client_uuid = match Uuid::parse_str(&client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::BAD_REQUEST,
+                "invalid_client_metadata",
+                "Invalid client ID format",
+            ));
+        }
+    };
+
+    // Verify app exists before deleting
+    match state.oauth2_provider.get_app(client_uuid).await {
+        Ok(_) => {}
+        Err(OAuth2ProviderError::NotFound { .. }) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Client not found",
+            ));
+        }
+        Err(_) => {
+            return Ok(oauth2_registration_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to retrieve client",
+            ));
+        }
+    }
+
+    if state.oauth2_provider.delete_app(client_uuid).await.is_err() {
+        return Ok(oauth2_registration_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "Failed to delete client",
+        ));
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Oauth2ProviderApp,
+        None,
+        Some(client_id),
+        "deleted client registration (RFC 7592)",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// ---------------------------------------------------------------------------
+// RFC 7009 — Token Revocation
+// ---------------------------------------------------------------------------
+
+/// POST /oauth2/revoke
+pub(crate) async fn post_oauth2_revoke(
+    State(state): State<AppState>,
+    Form(req): Form<OAuth2TokenRevocationRequest>,
+) -> Result<Response, AppError> {
+    // RFC 7009 requires the 'token' parameter.
+    if req.token.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(OAuth2ErrorResponse {
+                error: "invalid_request".to_owned(),
+                error_description: "Missing token parameter".to_owned(),
+            }),
+        )
+            .into_response());
+    }
+
+    // Parse client_id to find the app.
+    let client_id = match Uuid::parse_str(&req.client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            // RFC 7009: return 200 even for invalid requests to not reveal info.
+            return Ok(StatusCode::OK.into_response());
+        }
+    };
+
+    // Verify the app exists.
+    match state.oauth2_provider.get_app(client_id).await {
+        Ok(_) => {}
+        Err(_) => {
+            // RFC 7009: return 200 regardless.
+            return Ok(StatusCode::OK.into_response());
+        }
+    }
+
+    // Token revocation is not yet fully implemented. The Go reference
+    // implementation looks up tokens by hash and revokes the associated
+    // API key + refresh token, but the Rust store lacks the necessary
+    // token-to-user lookup.  Return `unsupported_token_type` so callers
+    // know the token was NOT revoked, instead of silently returning 200
+    // which would mislead clients into believing revocation succeeded.
+    Ok((
+        StatusCode::BAD_REQUEST,
+        Json(OAuth2ErrorResponse {
+            error: "unsupported_token_type".to_owned(),
+            error_description: "Token revocation is not yet implemented".to_owned(),
+        }),
+    )
+        .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Helper functions for RFC compliance endpoints
+// ---------------------------------------------------------------------------
+
+/// Returns the sorted list of external scope names (matching Go's rbac.ExternalScopeNames).
+///
+/// Uses `LazyLock` so the list is sorted and allocated only once.
+fn external_scope_names() -> Vec<String> {
+    use std::sync::LazyLock;
+
+    static SCOPE_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
+        let mut names = vec![
+            "all".to_owned(),
+            "application_connect".to_owned(),
+            // Low-level workspace scopes
+            "workspace:read".to_owned(),
+            "workspace:create".to_owned(),
+            "workspace:update".to_owned(),
+            "workspace:delete".to_owned(),
+            "workspace:ssh".to_owned(),
+            "workspace:start".to_owned(),
+            "workspace:stop".to_owned(),
+            "workspace:application_connect".to_owned(),
+            "workspace:*".to_owned(),
+            // Template scopes
+            "template:read".to_owned(),
+            "template:create".to_owned(),
+            "template:update".to_owned(),
+            "template:delete".to_owned(),
+            "template:use".to_owned(),
+            "template:*".to_owned(),
+            // API key scopes
+            "api_key:read".to_owned(),
+            "api_key:create".to_owned(),
+            "api_key:update".to_owned(),
+            "api_key:delete".to_owned(),
+            "api_key:*".to_owned(),
+            // File scopes
+            "file:read".to_owned(),
+            "file:create".to_owned(),
+            "file:*".to_owned(),
+            // User scopes
+            "user:read_personal".to_owned(),
+            "user:update_personal".to_owned(),
+            "user.*".to_owned(),
+            // User secret scopes
+            "user_secret:read".to_owned(),
+            "user_secret:create".to_owned(),
+            "user_secret:update".to_owned(),
+            "user_secret:delete".to_owned(),
+            "user_secret:*".to_owned(),
+            // Task scopes
+            "task:create".to_owned(),
+            "task:read".to_owned(),
+            "task:update".to_owned(),
+            "task:delete".to_owned(),
+            "task:*".to_owned(),
+            // Organization scopes
+            "organization:read".to_owned(),
+            "organization:update".to_owned(),
+            "organization:delete".to_owned(),
+            "organization:*".to_owned(),
+            // Composite scopes
+            "coder:workspaces.create".to_owned(),
+            "coder:workspaces.operate".to_owned(),
+            "coder:workspaces.delete".to_owned(),
+            "coder:workspaces.access".to_owned(),
+            "coder:templates.build".to_owned(),
+            "coder:templates.author".to_owned(),
+            "coder:apikeys.manage_self".to_owned(),
+        ];
+        names.sort();
+        names
+    });
+
+    SCOPE_NAMES.clone()
+}
+
+/// Generate a random registration access token for RFC 7592.
+fn generate_registration_token() -> String {
+    use base64::Engine as _;
+    // Use two UUIDs concatenated to get 32 bytes of randomness without needing `rand`.
+    let a = Uuid::new_v4();
+    let b = Uuid::new_v4();
+    let mut raw_bytes = [0u8; 32];
+    raw_bytes[..16].copy_from_slice(a.as_bytes());
+    raw_bytes[16..].copy_from_slice(b.as_bytes());
+    base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(raw_bytes)
+}
+
+/// Write an RFC 7591 / 7592 compliant error response.
+fn oauth2_registration_error(status: StatusCode, error_code: &str, description: &str) -> Response {
+    (
+        status,
+        Json(OAuth2ErrorResponse {
+            error: error_code.to_owned(),
+            error_description: description.to_owned(),
+        }),
+    )
+        .into_response()
+}
+
+/// Validate the Authorization: Bearer <token> header for RFC 7592 endpoints.
+///
+/// Currently **always rejects** because registration access tokens are not
+/// persisted (the DB has no `registration_access_token_hash` column yet).
+/// Once token storage is added, this should verify the token's SHA-256 hash
+/// against the stored value, matching Go's `apikey.ValidateHash()` approach.
+fn validate_registration_token(headers: &HeaderMap) -> Option<Response> {
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
+
+    let Some(auth_header) = auth_header else {
+        return Some(oauth2_registration_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Missing Authorization header",
+        ));
+    };
+
+    if !auth_header.starts_with("Bearer ") {
+        return Some(oauth2_registration_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Authorization header must use Bearer scheme",
+        ));
+    }
+
+    let token = &auth_header["Bearer ".len()..];
+    if token.is_empty() {
+        return Some(oauth2_registration_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Missing registration access token",
+        ));
+    }
+
+    // Registration access token verification is not yet implemented.
+    // The token generated during POST /oauth2/register is not persisted,
+    // so we cannot verify it. Reject all requests until a DB migration
+    // adds the `registration_access_token_hash` column and the store
+    // gains verification support.
+    let _ = token;
+    Some(oauth2_registration_error(
+        StatusCode::UNAUTHORIZED,
+        "invalid_token",
+        "Registration access token verification is not yet implemented",
+    ))
 }
 
 pub(crate) fn handle_oauth2_provider_error(

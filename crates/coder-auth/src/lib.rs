@@ -2114,12 +2114,15 @@ where
     }
 
     /// Creates a new OAuth2 provider application.
+    ///
+    /// `created_by` is `None` for dynamically registered clients (RFC 7591)
+    /// which have no user context, matching Go's `InsertOAuth2ProviderApp`.
     pub async fn create_app(
         &self,
         name: &str,
         icon: &str,
         callback_url: &str,
-        created_by: Uuid,
+        created_by: Option<Uuid>,
     ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, OAuth2ProviderError> {
         if name.trim().is_empty() {
             return Err(OAuth2ProviderError::bad_request("App name is required."));
