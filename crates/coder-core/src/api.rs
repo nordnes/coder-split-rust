@@ -2948,7 +2948,7 @@ pub struct ChatProviderConfigResponse {
 }
 
 /// CreateChatProviderConfigRequest creates a chat provider config.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct CreateChatProviderConfigRequest {
     pub provider: String,
     #[serde(default)]
@@ -2961,8 +2961,20 @@ pub struct CreateChatProviderConfigRequest {
     pub enabled: Option<bool>,
 }
 
+impl std::fmt::Debug for CreateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CreateChatProviderConfigRequest")
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
+}
+
 /// UpdateChatProviderConfigRequest updates a chat provider config.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Deserialize)]
 pub struct UpdateChatProviderConfigRequest {
     #[serde(default)]
     pub display_name: String,
@@ -2972,6 +2984,17 @@ pub struct UpdateChatProviderConfigRequest {
     pub base_url: Option<String>,
     #[serde(default)]
     pub enabled: Option<bool>,
+}
+
+impl std::fmt::Debug for UpdateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("UpdateChatProviderConfigRequest")
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .finish()
+    }
 }
 
 /// ChatModelCallConfig configures per-call model behavior defaults.
