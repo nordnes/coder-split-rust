@@ -11,6 +11,7 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 coder-core = { path = "../coder-core" }
@@ -23,6 +24,5 @@ tracing.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
-async-trait.workspace = true
 tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 time = { workspace = true, features = ["macros"] }
