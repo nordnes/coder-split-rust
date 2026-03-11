@@ -11,6 +11,7 @@ pub mod password;
 pub mod ports;
 pub mod provisioner;
 pub mod pubsub;
+pub mod retry;
 pub mod template;
 
 pub use api::{

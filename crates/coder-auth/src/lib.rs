@@ -1698,7 +1698,57 @@ fn to_public_link(link: ExternalAuthLinkRecord) -> ExternalAuthLink {
     }
 }
 
+/// Returns `true` when the error represents a transient HTTP failure that
+/// should be retried (429, 5xx, or connection-level errors).
+fn is_retryable_external_auth_error(error: &ExternalAuthServiceError) -> bool {
+    match error {
+        ExternalAuthServiceError::Internal(detail) => {
+            // Connection errors from reqwest and retryable server status codes.
+            detail.contains("status 429")
+                || detail.contains("status 500")
+                || detail.contains("status 502")
+                || detail.contains("status 503")
+                || detail.contains("status 504")
+                || detail.contains("connection")
+                || detail.contains("timed out")
+                || detail.contains("dns error")
+        }
+        // BadRequest / Storage errors are never retryable.
+        _ => false,
+    }
+}
+
+/// Retry strategy used for external auth provider HTTP calls.
+fn external_auth_retry_strategy() -> coder_core::retry::RetryStrategy {
+    coder_core::retry::RetryStrategy::ExponentialBackoff {
+        initial_delay: Duration::from_secs(1),
+        max_attempts: 3,
+        max_delay: Duration::from_secs(10),
+    }
+}
+
 async fn bearer_get(
+    http_client: &reqwest::Client,
+    url: &str,
+    access_token: &str,
+) -> Result<Value, ExternalAuthServiceError> {
+    let url_owned = url.to_owned();
+    let token_owned = access_token.to_owned();
+
+    coder_core::retry::retry_with_strategy(
+        external_auth_retry_strategy(),
+        is_retryable_external_auth_error,
+        || {
+            let u = url_owned.clone();
+            let t = token_owned.clone();
+            let client = http_client.clone();
+            async move { bearer_get_once(&client, &u, &t).await }
+        },
+    )
+    .await
+}
+
+async fn bearer_get_once(
     http_client: &reqwest::Client,
     url: &str,
     access_token: &str,
@@ -1746,18 +1796,40 @@ async fn post_form(
     fields: &[(&str, String)],
     bearer_token: Option<&str>,
 ) -> Result<Value, ExternalAuthServiceError> {
-    let form = fields
+    let url_owned = url.to_owned();
+    let fields_owned: Vec<(String, String)> = fields
         .iter()
         .filter(|(_, value)| !value.is_empty())
         .map(|(key, value)| ((*key).to_owned(), value.clone()))
-        .collect::<Vec<_>>();
+        .collect();
+    let token_owned = bearer_token.map(str::to_owned);
 
+    coder_core::retry::retry_with_strategy(
+        external_auth_retry_strategy(),
+        is_retryable_external_auth_error,
+        || {
+            let u = url_owned.clone();
+            let f = fields_owned.clone();
+            let t = token_owned.clone();
+            let client = http_client.clone();
+            async move { post_form_once(&client, &u, &f, t.as_deref()).await }
+        },
+    )
+    .await
+}
+
+async fn post_form_once(
+    http_client: &reqwest::Client,
+    url: &str,
+    form: &[(String, String)],
+    bearer_token: Option<&str>,
+) -> Result<Value, ExternalAuthServiceError> {
     let mut request = http_client.post(url).header("Accept", "application/json");
     if let Some(token) = bearer_token.filter(|value| !value.is_empty()) {
         request = request.bearer_auth(token);
     }
     let response = request
-        .form(&form)
+        .form(form)
         .send()
         .await
         .map_err(|error| ExternalAuthServiceError::Internal(error.to_string()))?;

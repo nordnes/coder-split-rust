@@ -29,6 +29,7 @@ chrono = { version = "0.4", default-features = false }
 chrono-tz = "0.10"
 cron = "0.15"
 axum = { version = "0.8", default-features = false, features = ["form", "http1", "json", "matched-path", "original-uri", "query", "tokio", "ws"] }
+governor = { version = "0.7", default-features = false, features = ["std", "dashmap", "jitter"] }
 futures-util = { version = "0.3", default-features = false, features = ["sink"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-tungstenite = "0.26"

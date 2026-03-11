@@ -229,7 +229,10 @@ async fn run() -> Result<(), MainError> {
             source,
         })?;
 
-    let application = build_router(state);
+    let rate_limit_state =
+        coder_server::RateLimitState::new(&coder_core::config::RateLimitConfig::default())
+            .map(Arc::new);
+    let application = build_router(state, rate_limit_state);
     info!(
         listen_addr = %config.listen_addr,
         access_url = %config.access_url,

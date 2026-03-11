@@ -203,11 +203,10 @@ where
             };
         };
 
-        match self.http_client.get(url).send().await {
-            Ok(response) => {
-                let status_code = i32::from(response.status().as_u16());
-                let healthy = response.status().is_success();
-                let body = response.text().await.unwrap_or_default();
+        match health_probe_get(&self.http_client, url).await {
+            Ok(result) => {
+                let status_code = i32::from(result.status_code);
+                let healthy = (200..300).contains(&result.status_code);
 
                 AccessUrlHealthReport {
                     base: BaseHealthReport {
@@ -228,12 +227,12 @@ where
                     access_url,
                     reachable: healthy,
                     status_code,
-                    healthz_response: body,
+                    healthz_response: result.body,
                 }
             }
             Err(error) => AccessUrlHealthReport {
                 base: BaseHealthReport {
-                    error: Some(error.to_string()),
+                    error: Some(error.message),
                     severity: HealthSeverity::Error,
                     warnings: Vec::new(),
                     dismissed: false,
@@ -264,11 +263,10 @@ where
             };
         };
 
-        match self.http_client.get(url).send().await {
-            Ok(response) => {
-                let code = i32::from(response.status().as_u16());
-                let healthy = response.status().is_success();
-                let body = response.text().await.unwrap_or_default();
+        match health_probe_get(&self.http_client, url).await {
+            Ok(result) => {
+                let code = i32::from(result.status_code);
+                let healthy = (200..300).contains(&result.status_code);
 
                 WebsocketHealthReport {
                     healthy,
@@ -286,14 +284,14 @@ where
                         warnings: Vec::new(),
                         dismissed: false,
                     },
-                    body,
+                    body: result.body,
                     code,
                 }
             }
             Err(error) => WebsocketHealthReport {
                 healthy: false,
                 base: BaseHealthReport {
-                    error: Some(error.to_string()),
+                    error: Some(error.message),
                     severity: HealthSeverity::Error,
                     warnings: Vec::new(),
                     dismissed: false,
@@ -317,23 +315,19 @@ where
 
             for node in &region.nodes {
                 total_nodes = total_nodes.saturating_add(1);
-                match self.http_client.get(node.url.clone()).send().await {
-                    Ok(response) if response.status().is_success() => {
+                match health_probe_get(&self.http_client, node.url.clone()).await {
+                    Ok(result) if (200..300).contains(&result.status_code) => {
                         healthy_nodes = healthy_nodes.saturating_add(1);
                         logs.push(format!(
                             "region={} node={} status=ok code={}",
-                            region.name,
-                            node.name,
-                            response.status().as_u16()
+                            region.name, node.name, result.status_code
                         ));
                     }
-                    Ok(response) => {
+                    Ok(result) => {
                         severity = HealthSeverity::Error;
                         let message = format!(
                             "region={} node={} status=error code={}",
-                            region.name,
-                            node.name,
-                            response.status().as_u16()
+                            region.name, node.name, result.status_code
                         );
                         error = Some(message.clone());
                         logs.push(message);
@@ -341,8 +335,8 @@ where
                     Err(probe_error) => {
                         severity = HealthSeverity::Error;
                         let message = format!(
-                            "region={} node={} status=unreachable error={probe_error}",
-                            region.name, node.name
+                            "region={} node={} status=unreachable error={}",
+                            region.name, node.name, probe_error.message
                         );
                         error = Some(message.clone());
                         logs.push(message);
@@ -402,29 +396,25 @@ where
                 continue;
             }
 
-            let outcome = reqwest::Url::parse(&proxy.path_app_url)
+            let healthz_url = reqwest::Url::parse(&proxy.path_app_url)
                 .and_then(|url| url.join("/healthz"))
-                .ok()
-                .map(|url| async {
-                    match self.http_client.get(url).send().await {
-                        Ok(response) if response.status().is_success() => {
-                            Ok::<String, String>(format!("{}: ok", proxy.name))
-                        }
-                        Ok(response) => Err(format!(
-                            "{}: unhealthy ({})",
-                            proxy.name,
-                            response.status().as_u16()
-                        )),
-                        Err(probe_error) => {
-                            Err(format!("{}: unreachable ({probe_error})", proxy.name))
-                        }
-                    }
-                });
+                .ok();
 
-            match outcome {
-                Some(future) => match future.await {
-                    Ok(item) => items.push(item),
-                    Err(item_error) => {
+            match healthz_url {
+                Some(url) => match health_probe_get(&self.http_client, url).await {
+                    Ok(result) if (200..300).contains(&result.status_code) => {
+                        items.push(format!("{}: ok", proxy.name));
+                    }
+                    Ok(result) => {
+                        let item_error =
+                            format!("{}: unhealthy ({})", proxy.name, result.status_code);
+                        items.push(item_error.clone());
+                        error = Some(item_error);
+                        severity = HealthSeverity::Error;
+                    }
+                    Err(probe_error) => {
+                        let item_error =
+                            format!("{}: unreachable ({})", proxy.name, probe_error.message);
                         items.push(item_error.clone());
                         error = Some(item_error);
                         severity = HealthSeverity::Error;
@@ -488,6 +478,76 @@ where
             items,
         })
     }
+}
+
+/// Result of a single health probe HTTP GET request.
+struct HealthProbeResult {
+    status_code: u16,
+    body: String,
+}
+
+/// Error from a health probe HTTP GET request.
+#[derive(Debug)]
+struct HealthProbeError {
+    message: String,
+    /// True when the error is a client-side 4xx that should not be retried.
+    is_client_error: bool,
+}
+
+impl std::fmt::Display for HealthProbeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+/// Executes a GET request with health-probe retry semantics.
+///
+/// Uses `Fixed { delay: 2s, max_attempts: 2 }`.  4xx responses are NOT
+/// retried because they indicate genuine failures.
+async fn health_probe_get(
+    client: &reqwest::Client,
+    url: reqwest::Url,
+) -> Result<HealthProbeResult, HealthProbeError> {
+    let url_clone = url.clone();
+    let client_clone = client.clone();
+
+    coder_core::retry::retry_with_strategy(
+        coder_core::retry::RetryStrategy::Fixed {
+            delay: Duration::from_secs(2),
+            max_attempts: 2,
+        },
+        |err: &HealthProbeError| !err.is_client_error,
+        || {
+            let u = url_clone.clone();
+            let c = client_clone.clone();
+            async move {
+                match c.get(u).send().await {
+                    Ok(response) => {
+                        let status_code = response.status().as_u16();
+                        let body = response.text().await.unwrap_or_default();
+                        if (400..500).contains(&status_code) {
+                            Err(HealthProbeError {
+                                message: format!("HTTP {status_code}: {body}"),
+                                is_client_error: true,
+                            })
+                        } else if status_code >= 500 {
+                            Err(HealthProbeError {
+                                message: format!("HTTP {status_code}: {body}"),
+                                is_client_error: false,
+                            })
+                        } else {
+                            Ok(HealthProbeResult { status_code, body })
+                        }
+                    }
+                    Err(error) => Err(HealthProbeError {
+                        message: error.to_string(),
+                        is_client_error: false,
+                    }),
+                }
+            }
+        },
+    )
+    .await
 }
 
 fn max_severity(left: HealthSeverity, right: HealthSeverity) -> HealthSeverity {
