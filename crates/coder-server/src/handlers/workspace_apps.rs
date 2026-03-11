@@ -1316,19 +1316,6 @@ async fn authenticate_app_request(
 // Proxy implementation
 // ---------------------------------------------------------------------------
 
-/// Non-canonical WebSocket header mappings.
-///
-/// Some applications are sensitive to the case of WebSocket headers. Rust's
-/// `http` crate canonicalizes headers, so we need to fix certain headers
-/// before forwarding them to the workspace agent.
-const NON_CANONICAL_HEADERS: &[(&str, &str)] = &[
-    ("sec-websocket-accept", "Sec-WebSocket-Accept"),
-    ("sec-websocket-extensions", "Sec-WebSocket-Extensions"),
-    ("sec-websocket-key", "Sec-WebSocket-Key"),
-    ("sec-websocket-protocol", "Sec-WebSocket-Protocol"),
-    ("sec-websocket-version", "Sec-WebSocket-Version"),
-];
-
 /// Proxies a workspace app request to the appropriate agent.
 ///
 /// This function:
@@ -1443,14 +1430,13 @@ async fn proxy_workspace_app(
     let mut builder = Response::builder().status(status);
 
     // Copy response headers.
+    // NOTE: The `http` crate's `HeaderName` always lowercases header names,
+    // so non-canonical WebSocket header casing (e.g. `Sec-WebSocket-Accept`)
+    // cannot be preserved through axum's `Response::builder()`. This is a
+    // known limitation — the Go implementation uses a custom HTTP/1.1 writer
+    // to emit mixed-case headers for sensitive WebSocket clients. A future
+    // improvement could use hyper's lower-level API to emit raw header names.
     for (key, value) in response.headers() {
-        // Apply non-canonical header fixups for WebSocket headers.
-        let header_name = key.as_str();
-        let _canonical_name = NON_CANONICAL_HEADERS
-            .iter()
-            .find(|(k, _)| *k == header_name)
-            .map(|(_, v)| *v);
-
         if let Ok(val) = HeaderValue::from_bytes(value.as_bytes()) {
             builder = builder.header(key.clone(), val);
         }
