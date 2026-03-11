@@ -754,6 +754,13 @@ pub fn build_router(
                 .route("/files/{fileid}", get(get_file_by_id))
                 .route("/derp-map", get(derp_map_updates))
                 .route("/regions", get(get_regions))
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::auth_middleware::api_key_auth_middleware,
+                ))
+                // Routes below are NOT covered by the API-key middleware
+                // because they use agent-token authentication handled
+                // inside the handler itself.
                 .route("/tailnet", get(tailnet_rpc_conn))
                 .route("/applications/host", get(applications_host))
                 .route(
@@ -1178,7 +1185,7 @@ impl AgentConnection for WebSocketAgentConnection {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::HashMap,
         error::Error,
@@ -3131,6 +3138,41 @@ mod tests {
             key.expires_at = now;
             key.updated_at = now;
             Ok(true)
+        }
+
+        async fn update_api_key_last_used(
+            &self,
+            id: &str,
+            last_used: OffsetDateTime,
+            expires_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut api_keys = self
+                .api_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let Some(key) = api_keys.get_mut(id) else {
+                return Ok(());
+            };
+            key.last_used = last_used;
+            key.expires_at = expires_at;
+            key.updated_at = OffsetDateTime::now_utc();
+            Ok(())
+        }
+
+        async fn update_user_last_seen_at(
+            &self,
+            user_id: Uuid,
+            last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut users = self
+                .users
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.last_seen_at = Some(last_seen_at);
+                user.updated_at = OffsetDateTime::now_utc();
+            }
+            Ok(())
         }
 
         async fn token_config(&self, user_id: Uuid) -> Result<TokenConfigRecord, StorageError> {
@@ -7172,7 +7214,7 @@ mod tests {
         ))
     }
 
-    fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
+    pub(crate) fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
         test_state_with_store(health_ok).map(|(state, _)| state)
     }
 
@@ -7256,7 +7298,7 @@ mod tests {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
+    pub(crate) async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
         let create_response = call(
             app.clone(),
             json_request(

@@ -1026,7 +1026,7 @@ where
     }
 }
 
-fn actor_from_user(user: &AuthenticatedUser) -> Actor {
+pub fn actor_from_user(user: &AuthenticatedUser) -> Actor {
     Actor {
         user_id: user.id,
         username: user.username.clone(),
@@ -3099,6 +3099,38 @@ mod tests {
             _link: &UpsertExternalAuthLinkInput,
         ) -> Result<ExternalAuthLinkRecord, StorageError> {
             Err(StorageError::unavailable("not implemented"))
+        }
+
+        async fn update_api_key_last_used(
+            &self,
+            id: &str,
+            last_used: OffsetDateTime,
+            expires_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            if let Some(key) = inner.api_keys.iter_mut().find(|k| k.id == id) {
+                key.last_used = last_used;
+                key.expires_at = expires_at;
+            }
+            Ok(())
+        }
+
+        async fn update_user_last_seen_at(
+            &self,
+            user_id: Uuid,
+            last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            if let Some(user) = inner.users.iter_mut().find(|u| u.id == user_id) {
+                user.last_seen_at = Some(last_seen_at);
+            }
+            Ok(())
         }
     }
 

@@ -2428,6 +2428,48 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE api_keys
+             SET last_used = $2, expires_at = $3, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(id)
+        .bind(last_used)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE users
+             SET last_seen_at = $2, updated_at = NOW()
+             WHERE id = $1",
+        )
+        .bind(user_id)
+        .bind(last_seen_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn token_config(&self, user_id: Uuid) -> Result<TokenConfigRecord, StorageError> {
         let is_owner = sqlx::query_scalar::<_, bool>(
             "SELECT EXISTS(
