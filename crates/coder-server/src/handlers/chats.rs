@@ -714,6 +714,12 @@ pub(crate) async fn stream_chat(
         return Ok(not_found_response("Chat not found."));
     }
 
+    // Subscribe to pub/sub BEFORE fetching the snapshot to avoid missing
+    // events that arrive between the initial fetch and the subscription.
+    // This matches the established pattern in agents.rs and workspaces.rs.
+    let channel = format!("chat:stream:{chat_id}");
+    let subscription = state.pubsub.subscribe(&channel).await.ok();
+
     // Load initial message snapshot (optionally filtered by after_id).
     let after_id = query.after_id.unwrap_or(0);
     let messages = state.store.list_chat_messages(chat_id, after_id).await?;
@@ -766,10 +772,6 @@ pub(crate) async fn stream_chat(
             queued_messages: queued_responses,
         });
     }
-
-    // Subscribe to live events on the chat's pub/sub channel.
-    let channel = format!("chat:stream:{chat_id}");
-    let subscription = state.pubsub.subscribe(&channel).await.ok();
 
     let stream = async_stream::stream! {
         // Send snapshot in batches (up to 256 events per SSE message).
