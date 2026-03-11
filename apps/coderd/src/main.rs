@@ -302,16 +302,10 @@ async fn run() -> Result<(), MainError> {
     let cli = Cli::parse();
     let Command::Server(args) = cli.command;
 
-    let otel_config = OtelConfig {
-        enabled: args.otel_enabled,
-        endpoint: args.otel_endpoint.clone(),
-        service_name: "coderd".to_owned(),
-        sample_ratio: args.otel_sample_ratio,
-    };
-    let tracer_provider = init_tracing(args.log_format, &otel_config);
-    init_panic_hook();
-
+    let log_format = args.log_format;
     let config = build_config(args)?;
+    let tracer_provider = init_tracing(log_format, &config.otel);
+    init_panic_hook();
 
     let store = PostgresStore::connect(&config.database).await?;
     store.migrate().await?;

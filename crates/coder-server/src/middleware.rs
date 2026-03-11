@@ -163,9 +163,9 @@ pub(crate) async fn otel_trace_context_middleware(
 
     // Attach the extracted context to the current tracing span so that the
     // OTel layer records it as the parent.
-    if let Err(e) = tracing::Span::current().set_parent(parent_cx) {
-        tracing::warn!(error = %e, "failed to set trace parent context");
-    }
+    // `set_parent` returns Err when no OTel layer is registered (the
+    // default).  This is expected and not worth logging on every request.
+    let _ = tracing::Span::current().set_parent(parent_cx);
 
     let mut response = next.run(request).await;
 
