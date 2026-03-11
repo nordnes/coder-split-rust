@@ -151,7 +151,7 @@ struct ServerArgs {
     rate_limit_unauthenticated_per_minute: u32,
 
     /// Run database migrations and exit without starting the server.
-    #[arg(long, env = "CODER_MIGRATE_ONLY")]
+    #[arg(long, env = "CODER_MIGRATE_ONLY", default_value_t = false)]
     migrate_only: bool,
 }
 
