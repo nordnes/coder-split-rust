@@ -304,10 +304,7 @@ async fn run() -> Result<(), MainError> {
             "applied new database migrations"
         );
     } else {
-        info!(
-            total = report.total_count,
-            "database schema is up to date"
-        );
+        info!(total = report.total_count, "database schema is up to date");
     }
 
     if migrate_only {
