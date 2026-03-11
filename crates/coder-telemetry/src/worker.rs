@@ -264,14 +264,10 @@ async fn submit_snapshot(
         .send()
         .await?;
 
-    // We don't treat non-2xx as a hard error — the telemetry server may
-    // return 429 or 503 transiently.  Log but don't retry.
-    if !resp.status().is_success() {
-        warn!(
-            status = resp.status().as_u16(),
-            "telemetry endpoint returned non-success status"
-        );
-    }
+    // Treat non-2xx as an error so that `flush_batch` increments
+    // `submission_errors` and the events are correctly accounted for.
+    let resp = resp.error_for_status()?;
+    drop(resp);
 
     Ok(())
 }
