@@ -953,7 +953,7 @@ mod tests {
             ssh: coder_core::SshConfig {
                 hostname_prefix: String::new(),
                 hostname_suffix: String::new(),
-                ssh_config_options: Vec::new(),
+                ssh_config_options: std::collections::HashMap::new(),
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
@@ -973,6 +973,7 @@ mod tests {
     fn test_build_metadata() -> BuildMetadata {
         BuildMetadata {
             version: "0.0.0-test".to_owned(),
+            git_commit: "test".to_owned(),
             external_url: String::new(),
             agent_api_version: String::new(),
             provisioner_api_version: String::new(),

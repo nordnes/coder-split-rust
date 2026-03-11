@@ -7141,7 +7141,10 @@ mod tests {
             ssh: SshConfig {
                 hostname_prefix: "coder".to_owned(),
                 hostname_suffix: "example.internal".to_owned(),
-                ssh_config_options: vec![("StrictHostKeyChecking".to_owned(), "no".to_owned())],
+                ssh_config_options: HashMap::from([(
+                    "StrictHostKeyChecking".to_owned(),
+                    "no".to_owned(),
+                )]),
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
@@ -7376,9 +7379,11 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert_eq!(body.get("current").and_then(Value::as_bool), Some(true));
-        assert_eq!(
-            body.get("version").and_then(Value::as_str),
-            Some(env!("CARGO_PKG_VERSION"))
+        // Version now uses BuildMetadata format (e.g. "v0.1.0+commit")
+        let version = body.get("version").and_then(Value::as_str);
+        assert!(
+            version.is_some_and(|v| v.contains(env!("CARGO_PKG_VERSION"))),
+            "version should contain the crate version"
         );
         assert_eq!(
             body.get("url").and_then(Value::as_str),
@@ -7495,12 +7500,19 @@ mod tests {
         let response = call(app, request(Method::GET, "/api/v2/users/first")?).await?;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
-        assert_eq!(
-            response
-                .headers()
-                .get(BUILD_VERSION_HEADER)
-                .and_then(|value| value.to_str().ok()),
-            Some(env!("CARGO_PKG_VERSION"))
+        // The build version header now uses the full version string (e.g. "v0.1.0+commit")
+        // from BuildMetadata::default(), so just verify it is present and non-empty.
+        let header_value = response
+            .headers()
+            .get(BUILD_VERSION_HEADER)
+            .and_then(|value| value.to_str().ok());
+        assert!(
+            header_value.is_some(),
+            "build version header should be present"
+        );
+        assert!(
+            header_value.is_some_and(|v| v.contains(env!("CARGO_PKG_VERSION"))),
+            "build version header should contain the crate version"
         );
         Ok(())
     }
@@ -16827,9 +16839,14 @@ mod tests {
     #[tokio::test]
     async fn deployment_config_returns_config_and_options() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
 
-        // deployment_config does not require authentication
-        let response = call(app, request(Method::GET, "/api/v2/deployment/config")?).await?;
+        // deployment_config requires authentication (owner role)
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/config", &session_token)?,
+        )
+        .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert!(body.get("config").is_some());

@@ -2,6 +2,7 @@
 
 mod shutdown;
 
+use std::collections::HashMap;
 use std::time::Duration;
 use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
@@ -487,7 +488,10 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         ssh: SshConfig {
             hostname_prefix: args.ssh_hostname_prefix,
             hostname_suffix: args.ssh_hostname_suffix,
-            ssh_config_options: vec![("StrictHostKeyChecking".to_owned(), "no".to_owned())],
+            ssh_config_options: HashMap::from([(
+                "StrictHostKeyChecking".to_owned(),
+                "no".to_owned(),
+            )]),
         },
         external_auth_providers: serde_json::from_str::<Vec<ExternalAuthLinkProvider>>(
             &args.external_auth_providers_json,

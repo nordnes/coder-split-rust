@@ -14,11 +14,36 @@ pub(crate) async fn build_info(
 
 pub(crate) async fn deployment_config(
     State(state): State<AppState>,
-) -> Json<DeploymentConfigResponse> {
-    Json(DeploymentConfigResponse {
-        config: state.config.public(),
-        options: ServerConfig::supported_options(),
-    })
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // RBAC: verify the actor can read deployment configuration (matches Go's
+    // `api.Authorize(r, policy.ActionRead, rbac.ResourceDeploymentConfig)`).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view deployment configuration.",
+        ));
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(DeploymentConfigResponse {
+            config: state.config.public(),
+            options: ServerConfig::supported_options(),
+        }),
+    )
+        .into_response())
 }
 
 pub(crate) async fn update_check(State(state): State<AppState>) -> Json<UpdateCheckResponse> {

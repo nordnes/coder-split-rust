@@ -1,5 +1,7 @@
 //! Runtime configuration models for the Rust backend slice.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 use url::Url;
 
@@ -317,7 +319,9 @@ pub struct SshConfig {
     /// Suffix appended to workspace hostnames.
     pub hostname_suffix: String,
     /// Additional SSH config directives.
-    pub ssh_config_options: Vec<(String, String)>,
+    ///
+    /// Serialized as a JSON object to match Go's `map[string]string`.
+    pub ssh_config_options: HashMap<String, String>,
 }
 
 /// One DERP region exposed to the Rust health service.
