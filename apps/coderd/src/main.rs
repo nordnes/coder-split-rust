@@ -18,7 +18,7 @@ use coder_core::{
     ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError, config::RateLimitConfig,
 };
-use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
+use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_server::{AppState, build_router};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
@@ -171,6 +171,10 @@ struct ServerArgs {
     )]
     rate_limit_unauthenticated_per_minute: u32,
 
+    /// Run database migrations and exit without starting the server.
+    #[arg(long, env = "CODER_MIGRATE_ONLY", default_value_t = false)]
+    migrate_only: bool,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -197,6 +201,8 @@ enum MainError {
     Config(String),
     #[error(transparent)]
     DatabaseInit(#[from] DatabaseInitError),
+    #[error(transparent)]
+    Migration(#[from] MigrationError),
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error("listen on {listen_addr}: {source}")]
@@ -322,12 +328,31 @@ async fn run() -> Result<(), MainError> {
     let Command::Server(args) = cli.command;
 
     let log_format = args.log_format;
+    let migrate_only = args.migrate_only;
     let config = build_config(args)?;
     let tracer_provider = init_tracing(log_format, &config.otel);
     init_panic_hook();
 
     let store = PostgresStore::connect(&config.database).await?;
-    store.migrate().await?;
+    let pool = store.pool();
+    let report = run_migrations(&pool).await?;
+
+    if report.applied_count > 0 {
+        info!(
+            applied = report.applied_count,
+            total = report.total_count,
+            "applied new database migrations"
+        );
+    } else {
+        info!(total = report.total_count, "database schema is up to date");
+    }
+
+    if migrate_only {
+        info!("--migrate-only requested, exiting after migrations");
+        pool.close().await;
+        return Ok(());
+    }
+
     let deployment_metadata = store.ensure_deployment_metadata().await?;
     let store_pool = store.pool();
     let store: Arc<dyn AppStore> = Arc::new(store);
@@ -675,5 +700,52 @@ fn resource_kind_name(resource: coder_rbac::ResourceKind) -> &'static str {
         coder_rbac::ResourceKind::WorkspaceApp => "workspace_app",
         coder_rbac::ResourceKind::PrebuildsSettings => "prebuilds_settings",
         coder_rbac::ResourceKind::Task => "task",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn cli_parse_server_defaults() {
+        let cli = Cli::parse_from([
+            "coderd",
+            "server",
+            "--postgres-url",
+            "postgres://localhost/test",
+        ]);
+        let Command::Server(args) = cli.command;
+        assert!(!args.migrate_only);
+        assert_eq!(args.listen_addr.to_string(), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn cli_parse_migrate_only_flag() {
+        let cli = Cli::parse_from([
+            "coderd",
+            "server",
+            "--postgres-url",
+            "postgres://localhost/test",
+            "--migrate-only",
+        ]);
+        let Command::Server(args) = cli.command;
+        assert!(args.migrate_only);
+    }
+
+    #[test]
+    fn cli_parse_without_migrate_only() {
+        // When --migrate-only is not passed, it defaults to false.
+        let cli = Cli::parse_from([
+            "coderd",
+            "server",
+            "--postgres-url",
+            "postgres://localhost/test",
+        ]);
+        let Command::Server(args) = cli.command;
+        assert!(!args.migrate_only);
+        assert_eq!(args.db_max_connections, 20);
     }
 }
