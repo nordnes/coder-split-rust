@@ -4209,9 +4209,19 @@ mod tests {
 
         async fn list_chat_queued_messages(
             &self,
-            _chat_id: Uuid,
+            chat_id: Uuid,
         ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
-            Ok(Vec::new())
+            let msgs = self
+                .chat_queued_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<ChatQueuedMessageRecord> = msgs
+                .iter()
+                .filter(|m| m.chat_id == chat_id)
+                .cloned()
+                .collect();
+            result.sort_by_key(|m| m.created_at);
+            Ok(result)
         }
 
         async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {

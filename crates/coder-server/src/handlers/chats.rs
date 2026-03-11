@@ -836,6 +836,17 @@ pub(crate) async fn promote_chat_queued_message(
         return Ok(not_found_response("Chat not found."));
     }
 
+    if queued_message_id <= 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid queued message ID.",
+                "Queued message ID must be a positive integer.",
+            )),
+        )
+            .into_response());
+    }
+
     let promoted = match state
         .store
         .promote_chat_queued_message(chat_id, queued_message_id)
