@@ -32,7 +32,11 @@ use coder_core::{
     AppStore, BuildMetadata, CorsConfig, DatabaseConfig, DeploymentStore, DerpRegionConfig,
     ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError,
-    config::{GithubOAuthConfig, OidcConfig, RateLimitConfig},
+    config::{
+        DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig, LoggingConfig,
+        NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SessionLifetimeConfig,
+        TelemetryConfig, TlsConfig, WorkspaceConfig,
+    },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
@@ -100,9 +104,77 @@ struct ServerArgs {
     #[arg(long, env = "CODER_DB_ACQUIRE_TIMEOUT_SECS", default_value_t = 10)]
     db_acquire_timeout_secs: u64,
 
+    /// Wildcard hostname for workspace application routing.
+    #[arg(long, env = "CODER_WILDCARD_ACCESS_URL", default_value = "")]
+    wildcard_access_url: String,
+
+    // ----- TLS -----
+    /// Enable TLS termination.
+    #[arg(long, env = "CODER_TLS_ENABLE", default_value_t = false)]
+    tls_enable: bool,
+
+    /// Bind address for the HTTPS listener.
+    #[arg(long, env = "CODER_TLS_ADDRESS", default_value = "127.0.0.1:3443")]
+    tls_address: String,
+
+    /// Redirect HTTP requests to HTTPS when TLS is enabled.
+    #[arg(long, env = "CODER_TLS_REDIRECT_HTTP_TO_HTTPS", default_value_t = true)]
+    tls_redirect_http: bool,
+
+    /// Comma-separated paths to TLS certificate files.
+    #[arg(long, env = "CODER_TLS_CERT_FILE", default_value = "")]
+    tls_cert_files: String,
+
+    /// Comma-separated paths to TLS private key files.
+    #[arg(long, env = "CODER_TLS_KEY_FILE", default_value = "")]
+    tls_key_files: String,
+
+    /// Minimum TLS version accepted (tls10, tls11, tls12, tls13).
+    #[arg(long, env = "CODER_TLS_MIN_VERSION", default_value = "tls12")]
+    tls_min_version: String,
+
+    // ----- Networking -----
+    /// Redirect requests that do not match the access URL host.
+    #[arg(long, env = "CODER_REDIRECT_TO_ACCESS_URL", default_value_t = false)]
+    redirect_to_access_url: bool,
+
+    /// Comma-separated HTTP headers to trust from a reverse proxy.
+    #[arg(long, env = "CODER_PROXY_TRUSTED_HEADERS", default_value = "")]
+    proxy_trusted_headers: String,
+
+    /// Comma-separated trusted proxy origin addresses (CIDR or IP).
+    #[arg(long, env = "CODER_PROXY_TRUSTED_ORIGINS", default_value = "")]
+    proxy_trusted_origins: String,
+
+    // ----- HTTP Cookies -----
+    /// Set the Secure flag on session cookies.
+    #[arg(long, env = "CODER_SECURE_AUTH_COOKIE", default_value_t = false)]
+    secure_auth_cookie: bool,
+
+    /// SameSite attribute for session cookies (lax, strict, none).
+    #[arg(long, env = "CODER_SAMESITE_AUTH_COOKIE", default_value = "lax")]
+    same_site_auth_cookie: String,
+
+    // ----- Telemetry -----
     /// Enable deployment telemetry.
-    #[arg(long, env = "CODER_TELEMETRY_ENABLED", default_value_t = false)]
+    #[arg(
+        long = "telemetry",
+        env = "CODER_TELEMETRY_ENABLE",
+        default_value_t = false
+    )]
     telemetry_enabled: bool,
+
+    /// Enable trace-level telemetry data collection.
+    #[arg(long, env = "CODER_TRACE_ENABLE", default_value_t = false)]
+    telemetry_trace: bool,
+
+    /// URL of the telemetry collection endpoint.
+    #[arg(
+        long,
+        env = "CODER_TELEMETRY_URL",
+        default_value = "https://telemetry.coder.com"
+    )]
+    telemetry_url: String,
 
     /// Deprecated SSH hostname prefix kept for compatibility.
     #[arg(long, env = "CODER_SSH_HOSTNAME_PREFIX", default_value = "coder")]
@@ -277,6 +349,222 @@ struct ServerArgs {
     /// Run database migrations and exit without starting the server.
     #[arg(long, env = "CODER_MIGRATE_ONLY", default_value_t = false)]
     migrate_only: bool,
+
+    // ----- Logging -----
+    /// Enable verbose (debug-level) logging.
+    #[arg(long, env = "CODER_VERBOSE", default_value_t = false)]
+    verbose: bool,
+
+    /// Output path for human-readable logs. Empty disables.
+    #[arg(long, env = "CODER_LOGGING_HUMAN", default_value = "/dev/stderr")]
+    log_human: String,
+
+    /// Output path for JSON-formatted logs. Empty disables.
+    #[arg(long, env = "CODER_LOGGING_JSON", default_value = "")]
+    log_json: String,
+
+    /// Output path for Stackdriver-formatted logs. Empty disables.
+    #[arg(long, env = "CODER_LOGGING_STACKDRIVER", default_value = "")]
+    log_stackdriver: String,
+
+    /// Comma-separated log filter directives.
+    #[arg(long, env = "CODER_LOG_FILTER", default_value = "")]
+    log_filter: String,
+
+    // ----- Provisioner -----
+    /// Number of built-in provisioner daemons to run.
+    #[arg(long, env = "CODER_PROVISIONER_DAEMONS", default_value_t = 3)]
+    provisioner_daemon_count: u32,
+
+    /// Polling interval in milliseconds for provisioner job acquisition.
+    #[arg(
+        long,
+        env = "CODER_PROVISIONER_DAEMON_POLL_INTERVAL",
+        default_value_t = 1000
+    )]
+    provisioner_poll_interval_ms: u64,
+
+    /// Random jitter in milliseconds added to provisioner polling interval.
+    #[arg(
+        long,
+        env = "CODER_PROVISIONER_DAEMON_POLL_JITTER",
+        default_value_t = 100
+    )]
+    provisioner_poll_jitter_ms: u64,
+
+    /// Interval in milliseconds after which a provisioner job is force-cancelled.
+    #[arg(
+        long,
+        env = "CODER_PROVISIONER_FORCE_CANCEL_INTERVAL",
+        default_value_t = 600_000
+    )]
+    provisioner_force_cancel_interval_ms: u64,
+
+    /// Pre-shared key for external provisioner daemon authentication.
+    #[arg(long, env = "CODER_PROVISIONER_DAEMON_PSK", default_value = "")]
+    provisioner_daemon_psk: String,
+
+    // ----- Session Lifetime -----
+    /// Default session duration in hours.
+    #[arg(long, env = "CODER_SESSION_DURATION", default_value_t = 24)]
+    session_duration_hours: u64,
+
+    /// Disable automatic session expiry refresh on activity.
+    #[arg(
+        long,
+        env = "CODER_DISABLE_SESSION_EXPIRY_REFRESH",
+        default_value_t = false
+    )]
+    disable_session_expiry_refresh: bool,
+
+    /// Maximum lifetime in hours for API tokens (default 90 days).
+    #[arg(long, env = "CODER_MAX_TOKEN_LIFETIME", default_value_t = 2160)]
+    max_token_lifetime_hours: u64,
+
+    // ----- Dangerous -----
+    /// DANGEROUS: Allow all CORS origins.
+    #[arg(
+        long,
+        env = "CODER_DANGEROUS_ALLOW_CORS_REQUESTS",
+        default_value_t = false
+    )]
+    dangerous_allow_all_cors: bool,
+
+    /// DANGEROUS: Allow sharing path-based workspace applications.
+    #[arg(
+        long,
+        env = "CODER_DANGEROUS_ALLOW_PATH_APP_SHARING",
+        default_value_t = false
+    )]
+    dangerous_allow_path_app_sharing: bool,
+
+    /// DANGEROUS: Allow site owners to access path-based workspace apps.
+    #[arg(
+        long,
+        env = "CODER_DANGEROUS_ALLOW_PATH_APP_SITE_OWNER_ACCESS",
+        default_value_t = false
+    )]
+    dangerous_allow_path_app_site_owner_access: bool,
+
+    // ----- Healthcheck -----
+    /// Interval in seconds between automatic health check refreshes.
+    #[arg(long, env = "CODER_HEALTH_CHECK_REFRESH", default_value_t = 600)]
+    healthcheck_refresh_secs: u64,
+
+    /// Database health check latency threshold in milliseconds.
+    #[arg(
+        long,
+        env = "CODER_HEALTH_CHECK_THRESHOLD_DATABASE",
+        default_value_t = 15
+    )]
+    healthcheck_threshold_database_ms: u64,
+
+    // ----- Workspace -----
+    /// Default quiet hours cron schedule for workspaces.
+    #[arg(
+        long,
+        env = "CODER_QUIET_HOURS_DEFAULT_SCHEDULE",
+        default_value = "CRON_TZ=UTC 0 0 * * *"
+    )]
+    default_quiet_hours_schedule: String,
+
+    /// Whether workspace renames are allowed.
+    #[arg(long, env = "CODER_ALLOW_WORKSPACE_RENAMES", default_value_t = false)]
+    allow_workspace_renames: bool,
+
+    // ----- Security -----
+    /// Only allow browser-based connections to workspaces.
+    #[arg(long, env = "CODER_BROWSER_ONLY", default_value_t = false)]
+    browser_only: bool,
+
+    /// Disable password-based authentication.
+    #[arg(long, env = "CODER_DISABLE_PASSWORD_AUTH", default_value_t = false)]
+    disable_password_auth: bool,
+
+    /// Disable path-based workspace application routing.
+    #[arg(long, env = "CODER_DISABLE_PATH_APPS", default_value_t = false)]
+    disable_path_apps: bool,
+
+    /// Disable workspace exec for site owners.
+    #[arg(
+        long,
+        env = "CODER_DISABLE_OWNER_WORKSPACE_ACCESS",
+        default_value_t = false
+    )]
+    disable_owner_workspace_exec: bool,
+
+    /// Disable workspace sharing.
+    #[arg(long, env = "CODER_DISABLE_WORKSPACE_SHARING", default_value_t = false)]
+    disable_workspace_sharing: bool,
+
+    /// HSTS max-age in seconds. Zero disables HSTS.
+    #[arg(long, env = "CODER_STRICT_TRANSPORT_SECURITY", default_value_t = 0)]
+    strict_transport_security: u64,
+
+    /// Comma-separated additional HSTS options.
+    #[arg(
+        long,
+        env = "CODER_STRICT_TRANSPORT_SECURITY_OPTIONS",
+        default_value = ""
+    )]
+    strict_transport_security_options: String,
+
+    // ----- Swagger / Update / Misc -----
+    /// Whether the /swagger endpoint is accessible.
+    #[arg(long, env = "CODER_SWAGGER_ENABLE", default_value_t = true)]
+    swagger_enabled: bool,
+
+    /// Periodically check for new Coder releases.
+    #[arg(long, env = "CODER_UPDATE_CHECK", default_value_t = false)]
+    update_check: bool,
+
+    /// Algorithm used for SSH key generation.
+    #[arg(long, env = "CODER_SSH_KEYGEN_ALGORITHM", default_value = "ed25519")]
+    ssh_keygen_algorithm: String,
+
+    /// Directory for caching temporary files.
+    #[arg(long, env = "CODER_CACHE_DIRECTORY", default_value = "~/.cache/coder")]
+    cache_dir: String,
+
+    /// Comma-separated list of enabled experiment feature flags.
+    #[arg(long, env = "CODER_EXPERIMENTS", default_value = "")]
+    experiments: String,
+
+    /// Fallback troubleshooting URL shown when agent connections fail.
+    #[arg(
+        long,
+        env = "CODER_AGENT_FALLBACK_TROUBLESHOOTING_URL",
+        default_value = ""
+    )]
+    agent_fallback_troubleshooting_url: String,
+
+    /// URL to terms of service displayed to users.
+    #[arg(long, env = "CODER_TERMS_OF_SERVICE_URL", default_value = "")]
+    terms_of_service_url: String,
+
+    /// Renderer for web terminals (canvas, dom, webgl).
+    #[arg(long, env = "CODER_WEB_TERMINAL_RENDERER", default_value = "")]
+    web_terminal_renderer: String,
+
+    /// Custom documentation URL override.
+    #[arg(
+        long,
+        env = "CODER_DOCS_URL",
+        default_value = "https://coder.com/docs/coder-oss"
+    )]
+    docs_url: String,
+
+    /// SCIM API key for user provisioning. Empty disables SCIM.
+    #[arg(long, env = "CODER_SCIM_AUTH_HEADER", default_value = "")]
+    scim_api_key: String,
+
+    /// Message displayed to users suggesting they upgrade the CLI.
+    #[arg(long, env = "CODER_CLI_UPGRADE_MESSAGE", default_value = "")]
+    cli_upgrade_message: String,
+
+    /// Comma-separated additional Content-Security-Policy directives.
+    #[arg(long, env = "CODER_ADDITIONAL_CSP_POLICY", default_value = "")]
+    additional_csp_policy: String,
 
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
@@ -470,6 +758,16 @@ async fn run() -> Result<(), MainError> {
     let derp_map = build_derp_map_from_config(&config.derp_regions);
     let coordinator = InMemoryCoordinator::new(derp_map);
     let derp_tracker = DerpTrafficTracker::new();
+    // Start the telemetry background worker.
+    let telemetry_config = coder_telemetry::TelemetryConfig {
+        enabled: config.telemetry_enabled,
+        deployment_id: deployment_metadata.deployment_id,
+        version: BuildMetadata::default().version.clone(),
+        ..coder_telemetry::TelemetryConfig::default()
+    };
+    let (mut telemetry_worker, telemetry_reporter) =
+        coder_telemetry::TelemetryWorker::start(telemetry_config);
+
     let prometheus_handle = PrometheusBuilder::new()
         .install_recorder()
         .map_err(|error| MainError::Config(format!("install prometheus recorder: {error}")))?;
@@ -499,6 +797,7 @@ async fn run() -> Result<(), MainError> {
         coordinator,
         derp_tracker,
         Some(prometheus_handle),
+        telemetry_reporter,
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
@@ -536,6 +835,12 @@ async fn run() -> Result<(), MainError> {
     let audit_sink = state.audit.clone();
     coordinator.register("audit", async move {
         audit_sink.close().await;
+    });
+
+    // 1b. Flush and shut down the telemetry background worker so buffered
+    //     events are submitted before the process exits.
+    coordinator.register("telemetry", async move {
+        telemetry_worker.shutdown().await;
     });
 
     // 2. Close pub/sub background listener and release its PgListener connection.
@@ -599,13 +904,35 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
     Ok(ServerConfig {
         listen_addr: args.listen_addr,
         access_url: args.access_url,
+        wildcard_access_url: args.wildcard_access_url,
         database: DatabaseConfig {
             postgres_url: args.postgres_url,
             max_connections: args.db_max_connections,
             min_connections: args.db_min_connections,
             acquire_timeout_secs: args.db_acquire_timeout_secs,
         },
-        telemetry_enabled: args.telemetry_enabled,
+        tls: TlsConfig {
+            enabled: args.tls_enable,
+            address: args.tls_address,
+            redirect_http: args.tls_redirect_http,
+            cert_files: split_csv(&args.tls_cert_files),
+            key_files: split_csv(&args.tls_key_files),
+            min_version: args.tls_min_version,
+        },
+        networking: NetworkingConfig {
+            redirect_to_access_url: args.redirect_to_access_url,
+            proxy_trusted_headers: split_csv(&args.proxy_trusted_headers),
+            proxy_trusted_origins: split_csv(&args.proxy_trusted_origins),
+        },
+        http_cookies: HttpCookieConfig {
+            secure_auth_cookie: args.secure_auth_cookie,
+            same_site: args.same_site_auth_cookie,
+        },
+        telemetry: TelemetryConfig {
+            enabled: args.telemetry_enabled,
+            trace: args.telemetry_trace,
+            url: args.telemetry_url,
+        },
         ssh: SshConfig {
             hostname_prefix: args.ssh_hostname_prefix,
             hostname_suffix: args.ssh_hostname_suffix,
@@ -626,6 +953,13 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         log_format: match args.log_format {
             LogFormatArg::Pretty => LogFormat::Pretty,
             LogFormatArg::Json => LogFormat::Json,
+        },
+        logging: LoggingConfig {
+            verbose: args.verbose,
+            human_path: args.log_human,
+            json_path: args.log_json,
+            stackdriver_path: args.log_stackdriver,
+            log_filter: split_csv(&args.log_filter),
         },
         session_cache_ttl_secs: args.session_cache_ttl_secs,
         audit_batch_flush_interval_ms: args.audit_batch_flush_interval_ms,
@@ -690,6 +1024,50 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             allow_credentials: args.cors_allow_credentials,
             max_age_secs: 3600,
         },
+        provisioner: ProvisionerConfig {
+            daemon_count: args.provisioner_daemon_count,
+            poll_interval_ms: args.provisioner_poll_interval_ms,
+            poll_jitter_ms: args.provisioner_poll_jitter_ms,
+            force_cancel_interval_ms: args.provisioner_force_cancel_interval_ms,
+            daemon_psk: args.provisioner_daemon_psk,
+        },
+        session_lifetime: SessionLifetimeConfig {
+            default_duration_hours: args.session_duration_hours,
+            disable_expiry_refresh: args.disable_session_expiry_refresh,
+            max_token_lifetime_hours: args.max_token_lifetime_hours,
+        },
+        dangerous: DangerousConfig {
+            allow_all_cors: args.dangerous_allow_all_cors,
+            allow_path_app_sharing: args.dangerous_allow_path_app_sharing,
+            allow_path_app_site_owner_access: args.dangerous_allow_path_app_site_owner_access,
+        },
+        healthcheck: HealthcheckConfig {
+            refresh_secs: args.healthcheck_refresh_secs,
+            threshold_database_ms: args.healthcheck_threshold_database_ms,
+        },
+        workspace: WorkspaceConfig {
+            default_quiet_hours_schedule: args.default_quiet_hours_schedule,
+        },
+        swagger_enabled: args.swagger_enabled,
+        update_check: args.update_check,
+        ssh_keygen_algorithm: args.ssh_keygen_algorithm,
+        cache_dir: args.cache_dir,
+        browser_only: args.browser_only,
+        disable_password_auth: args.disable_password_auth,
+        disable_path_apps: args.disable_path_apps,
+        disable_owner_workspace_exec: args.disable_owner_workspace_exec,
+        strict_transport_security: args.strict_transport_security,
+        strict_transport_security_options: split_csv(&args.strict_transport_security_options),
+        experiments: split_csv(&args.experiments),
+        agent_fallback_troubleshooting_url: args.agent_fallback_troubleshooting_url,
+        terms_of_service_url: args.terms_of_service_url,
+        web_terminal_renderer: args.web_terminal_renderer,
+        allow_workspace_renames: args.allow_workspace_renames,
+        additional_csp_policy: split_csv(&args.additional_csp_policy),
+        disable_workspace_sharing: args.disable_workspace_sharing,
+        docs_url: args.docs_url,
+        scim_api_key: args.scim_api_key,
+        cli_upgrade_message: args.cli_upgrade_message,
     })
 }
 

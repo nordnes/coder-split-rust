@@ -112,7 +112,8 @@ pub use api::{
 pub use build_info::BuildMetadata;
 pub use config::{
     CorsConfig, DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, OtelConfig,
-    PublicDatabaseConfig, PublicDeploymentConfig, ServerConfig, SshConfig,
+    PublicDatabaseConfig, PublicDeploymentConfig, PublicProvisionerConfig, PublicTelemetryConfig,
+    PublicTlsConfig, ServerConfig, SshConfig,
 };
 pub use identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyScope, ApiKeyWithOwnerRecord, AuthenticatedUser,
@@ -140,19 +141,19 @@ pub use ports::{
     ExternalAuthLinkRecord, FileRecord, GitSshKeyRecord, IdentityStore, InsertAgentLogInput,
     InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertChatModelConfigInput,
     InsertChatProviderInput, InsertFileInput, InsertFileResult, InsertTaskInput,
-    InsertWorkspaceAppStatusInput, InsightsStore, OperationalStore, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerJobLogRecord,
-    ProvisionerJobStatsInput, ProvisionerJobTimingRecord, ProvisionerStore, StorageError,
-    TaskListFilter, TaskRecord, TaskSnapshotRecord, TemplateStore, UpdateChatMessageContentInput,
-    UpdateChatModelConfigInput, UpdateChatProviderInput, UpsertExternalAuthLinkInput,
-    UpsertPortShareInput, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
-    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
-    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
-    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
-    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
-    WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
-    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
-    WorkspaceStore,
+    InsertWorkspaceAppStatusInput, InsightsStore, LicenseRecord, OperationalStore,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerJobLogRecord, ProvisionerJobStatsInput, ProvisionerJobTimingRecord,
+    ProvisionerStore, StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TemplateStore,
+    UpdateChatMessageContentInput, UpdateChatModelConfigInput, UpdateChatProviderInput,
+    UpsertExternalAuthLinkInput, UpsertPortShareInput, WebpushSubscriptionRecord,
+    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
+    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
+    WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput,
+    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
+    WorkspaceBuildStatsInput, WorkspaceListFilter, WorkspaceProxyHealthInput,
+    WorkspaceProxyHealthRecord, WorkspaceRecord, WorkspaceResourceMetadataRecord,
+    WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput, WorkspaceStore,
 };
 pub use provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
