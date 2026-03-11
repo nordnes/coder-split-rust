@@ -10,7 +10,7 @@ use coder_core::{
     OrganizationMemberRecord, PasswordError, RoleResponse, StorageError, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPreferenceSettingsRequest,
     UpdateUserProfileRequest, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
-    UserConfigRecord, UserLinkRecord, UserPreferenceRecord, UserRecord, UserStatus,
+    UserConfigRecord, UserLinkClaims, UserLinkRecord, UserPreferenceRecord, UserRecord, UserStatus,
     UserStatusChangeRecord, ValidationError, hash_password, normalize_real_name, validate_email,
     validate_password, validate_real_name, validate_username,
 };
@@ -1564,6 +1564,7 @@ mod tests {
             oauth_access_token: "access-token-abc".to_owned(),
             oauth_refresh_token: "refresh-token-xyz".to_owned(),
             oauth_expiry: now,
+            claims: UserLinkClaims::default(),
         };
 
         assert_eq!(link.user_id, user_id);
@@ -1580,6 +1581,7 @@ mod tests {
             oauth_access_token: String::new(),
             oauth_refresh_token: String::new(),
             oauth_expiry: now,
+            claims: UserLinkClaims::default(),
         };
 
         assert_eq!(oidc_link.login_type, LoginType::Oidc);

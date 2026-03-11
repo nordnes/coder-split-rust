@@ -6,7 +6,6 @@ use crate::error::AppError;
 use axum::{
     Json,
     extract::rejection::JsonRejection,
-    extract::ws::{CloseFrame, Message, WebSocket},
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::LOCATION},
     response::{IntoResponse, Response},
 };
@@ -366,39 +365,6 @@ pub(crate) fn unauthorized_response(message: impl Into<String>) -> Response {
 
 pub(crate) fn forbidden_response(message: impl Into<String>) -> Response {
     (StatusCode::FORBIDDEN, Json(ApiResponse::ok(message.into()))).into_response()
-}
-
-pub(crate) fn not_implemented_response(message: impl Into<String>) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::ok(message.into())),
-    )
-        .into_response()
-}
-
-pub(crate) fn not_implemented_detail_response(
-    message: impl Into<String>,
-    detail: impl Into<String>,
-) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::error(message.into(), detail.into())),
-    )
-        .into_response()
-}
-
-/// Accept a WebSocket upgrade then immediately close with a "not implemented" reason.
-/// Used for endpoints that require tailnet/pubsub integration not yet available.
-pub(crate) async fn ws_close_not_implemented(mut socket: WebSocket, reason: &str) {
-    // Send the reason as a text message, then close gracefully.
-    let _ = socket.send(Message::Text(reason.into())).await;
-    let _ = socket
-        .send(Message::Close(Some(CloseFrame {
-            // 4001 = application-level "not implemented" close code (in the 4000-4999 private range).
-            code: 4001,
-            reason: reason.into(),
-        })))
-        .await;
 }
 
 pub(crate) fn not_found_response(message: impl Into<String>) -> Response {
