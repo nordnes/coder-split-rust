@@ -174,6 +174,24 @@ impl ServerConfig {
                 default: Some("40"),
                 description: "Maximum number of concurrent database queries.",
             },
+            ConfigOption {
+                name: "otel-enabled",
+                env: "CODER_OTEL_ENABLED",
+                default: Some("false"),
+                description: "Enable OpenTelemetry distributed tracing with OTLP export.",
+            },
+            ConfigOption {
+                name: "otel-endpoint",
+                env: "CODER_OTEL_ENDPOINT",
+                default: Some("http://localhost:4317"),
+                description: "OTLP gRPC collector endpoint for trace export.",
+            },
+            ConfigOption {
+                name: "otel-sample-ratio",
+                env: "CODER_OTEL_SAMPLE_RATIO",
+                default: Some("1.0"),
+                description: "Trace sampling ratio (0.0 to 1.0). 1.0 samples every request.",
+            },
         ]
     }
 }
