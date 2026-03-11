@@ -4430,8 +4430,8 @@ mod tests {
                 .chat_model_configs
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let has_default = configs.values().any(|c| c.is_default);
-            if !has_default {
+            let has_enabled_default = configs.values().any(|c| c.is_default && c.enabled);
+            if !has_enabled_default {
                 if let Some(config) = configs
                     .values_mut()
                     .filter(|c| c.enabled)

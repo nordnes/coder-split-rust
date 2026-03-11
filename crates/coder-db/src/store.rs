@@ -5017,7 +5017,7 @@ impl AppStore for PostgresStore {
                  LIMIT 1
              )
              AND NOT EXISTS (
-                 SELECT 1 FROM chat_model_configs WHERE deleted = false AND is_default = true
+                 SELECT 1 FROM chat_model_configs WHERE deleted = false AND enabled = true AND is_default = true
              )",
         )
         .execute(&self.pool)

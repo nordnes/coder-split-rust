@@ -1197,9 +1197,9 @@ pub(crate) async fn create_chat_model_config(
     // Handle default logic: if explicitly set as default, unset others first.
     // If no default currently exists, make this one the default.
     let mut set_as_default = is_default;
-    if !set_as_default {
+    if !set_as_default && enabled {
         let existing = state.store.list_chat_model_configs(false).await?;
-        if !existing.iter().any(|c| c.is_default) {
+        if !existing.iter().any(|c| c.is_default && c.enabled) {
             set_as_default = true;
         }
     }
