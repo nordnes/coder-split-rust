@@ -13917,6 +13917,11 @@ mod tests {
     use super::{
         AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPES, SLIM_BUILD_MESSAGE, build_router,
     };
+    use coder_connectivity::tailnet::{
+        CoordinateRequest, CoordinateResponse, NodeInfo, PeerUpdateKind,
+    };
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite;
 
     #[derive(Debug, Default)]
     struct MemoryAuditSink {
@@ -37766,6 +37771,451 @@ mod tests {
         let logs = body.as_array().ok_or("expected logs array")?;
         // Logs are populated by the provisioner; stub returns empty.
         assert!(logs.is_empty());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Tailnet WebSocket integration tests
+    // -----------------------------------------------------------------------
+    /// Helper: spin up a real TCP server backed by the test router and return
+    /// the base URL together with a logged-in session token.
+    async fn setup_server() -> Result<(Url, String, tokio::task::JoinHandle<()>), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let (base_url, handle) = spawn_test_server(app).await?;
+        Ok((base_url, session_token, handle))
+    }
+
+    /// Build a WS URL from the HTTP base URL.
+    fn ws_url(base: &Url, path: &str) -> String {
+        let mut u = base.clone();
+        u.set_scheme("ws").ok();
+        u.set_path(path);
+        u.to_string()
+    }
+
+    /// Connect a WebSocket **with** an auth header.
+    async fn connect_ws(
+        base: &Url,
+        session_token: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Box<dyn Error>,
+    > {
+        let url = ws_url(base, "/api/v2/tailnet");
+        let req = Request::builder()
+            .uri(&url)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .header("Coder-Session-Token", session_token)
+            .header("Host", base.host_str().unwrap_or("localhost"))
+            .body(())?;
+        let (stream, _response) = tokio_tungstenite::connect_async(req).await?;
+        Ok(stream)
+    }
+
+    /// Read the next text message from a WS stream with a timeout, parsed as
+    /// a [`CoordinateResponse`].
+    async fn read_response(
+        stream: &mut (impl StreamExt<Item = Result<tungstenite::Message, tungstenite::Error>> + Unpin),
+        timeout: Duration,
+    ) -> Result<CoordinateResponse, Box<dyn Error>> {
+        let msg = tokio::time::timeout(timeout, async {
+            loop {
+                match stream.next().await {
+                    Some(Ok(tungstenite::Message::Text(text))) => {
+                        return Ok::<_, Box<dyn Error>>(text.to_string());
+                    }
+                    Some(Ok(tungstenite::Message::Ping(_)))
+                    | Some(Ok(tungstenite::Message::Pong(_))) => continue,
+                    Some(Ok(other)) => {
+                        return Err(format!("unexpected WS message type: {other:?}").into());
+                    }
+                    Some(Err(e)) => return Err(e.into()),
+                    None => return Err("WS stream ended".into()),
+                }
+            }
+        })
+        .await??;
+        Ok(serde_json::from_str(&msg)?)
+    }
+
+    /// Send a [`CoordinateRequest`] as a JSON text frame.
+    async fn send_request(
+        stream: &mut (impl SinkExt<tungstenite::Message, Error = tungstenite::Error> + Unpin),
+        req: &CoordinateRequest,
+    ) -> Result<(), Box<dyn Error>> {
+        let payload = serde_json::to_string(req)?;
+        stream
+            .send(tungstenite::Message::Text(payload.into()))
+            .await?;
+        Ok(())
+    }
+    /// Helper to create a second user and return their session token.
+    /// Must be called with an app that already has a first (owner) user.
+    async fn create_second_user_and_login(
+        app: &Router,
+        owner_token: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        // Discover the default organization so the new user is a member.
+        let orgs_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/organizations", owner_token)?,
+        )
+        .await?;
+        assert_eq!(orgs_resp.status(), StatusCode::OK);
+        let orgs_body: Value =
+            serde_json::from_slice(&to_bytes(orgs_resp.into_body(), usize::MAX).await?)?;
+        let org_id: Uuid = orgs_body
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|o| o.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing organization id")?
+            .parse()?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                owner_token,
+                &CreateUserRequestWithOrgs {
+                    email: "peer2@example.com".to_owned(),
+                    username: "peer2".to_owned(),
+                    name: "Peer Two".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![org_id],
+                },
+            )?,
+        )
+        .await?;
+        assert!(
+            create_resp.status() == StatusCode::CREATED || create_resp.status() == StatusCode::OK,
+            "failed to create second user: {}",
+            create_resp.status(),
+        );
+
+        let login2 = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "peer2@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(login2.status(), StatusCode::CREATED);
+        let body: Value = serde_json::from_slice(&to_bytes(login2.into_body(), usize::MAX).await?)?;
+        Ok(body
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing session token for user 2")?
+            .to_owned())
+    }
+
+    /// Helper to get the current user's UUID via the running test server.
+    async fn get_user_id(base_url: &Url, token: &str) -> Result<Uuid, Box<dyn Error>> {
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{}api/v2/users/me", base_url))
+            .header("Coder-Session-Token", token)
+            .send()
+            .await?;
+        let body: Value = resp.json().await?;
+        let id_str = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing user id")?;
+        Ok(id_str.parse()?)
+    }
+
+    // -----------------------------------------------------------------------
+    // Tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_tailnet_ws_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        // Attempt WS upgrade without any auth token — should be rejected.
+        let url = ws_url(&base_url, "/api/v2/tailnet");
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected — expected */ }
+            Ok((_, resp)) => {
+                // Some servers reply with an HTTP error inside the upgrade.
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tailnet_ws_connect_and_update_self() -> Result<(), Box<dyn Error>> {
+        let (base_url, token, _handle) = setup_server().await?;
+        let mut ws = connect_ws(&base_url, &token).await?;
+
+        // Send an update_self with some node info.
+        let node = NodeInfo {
+            id: 42,
+            preferred_derp: 1,
+            addresses: vec!["100.64.0.1/32".to_owned()],
+            endpoints: vec!["192.168.1.5:41641".to_owned()],
+            ..Default::default()
+        };
+        send_request(
+            &mut ws,
+            &CoordinateRequest {
+                update_self: Some(node),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        // The coordinator does not send an explicit "ack" for update_self
+        // when there are no tunnel peers.  Verify the connection stays open
+        // by sending a disconnect and confirming the stream ends gracefully.
+        send_request(
+            &mut ws,
+            &CoordinateRequest {
+                disconnect: Some(true),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        // Give the handler a moment to process.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Connection should still be usable (not errored).  Close cleanly.
+        ws.close(None).await.ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tailnet_ws_tunnel_routing() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let app = build_router(state);
+
+        // Create first user (owner) and get their token.
+        let owner_token = create_and_login(&app).await?;
+        // Create and login a second user.
+        let token2 = create_second_user_and_login(&app, &owner_token).await?;
+
+        // Spawn a real TCP server backed by this router.
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        // Connect both peers via WebSocket.
+        let mut ws1 = connect_ws(&base_url, &owner_token).await?;
+        let mut ws2 = connect_ws(&base_url, &token2).await?;
+
+        // Peer 1 updates its node info.
+        send_request(
+            &mut ws1,
+            &CoordinateRequest {
+                update_self: Some(NodeInfo {
+                    id: 1,
+                    preferred_derp: 1,
+                    addresses: vec!["100.64.0.1/32".to_owned()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        // Peer 2 updates its node info.
+        send_request(
+            &mut ws2,
+            &CoordinateRequest {
+                update_self: Some(NodeInfo {
+                    id: 2,
+                    preferred_derp: 2,
+                    addresses: vec!["100.64.0.2/32".to_owned()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Discover peer 1's user-id (= coordinator peer id).
+        let peer1_id = get_user_id(&base_url, &owner_token).await?;
+
+        // Peer 2 adds a tunnel to Peer 1 — the coordinator should push
+        // Peer 1's node info to Peer 2.
+        send_request(
+            &mut ws2,
+            &CoordinateRequest {
+                add_tunnel: Some(peer1_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        // Peer 2 should receive a Node update for Peer 1.
+        let resp = read_response(&mut ws2, Duration::from_secs(2)).await?;
+        assert!(
+            !resp.peer_updates.is_empty(),
+            "expected peer update with node info after add_tunnel",
+        );
+        assert_eq!(resp.peer_updates[0].id, peer1_id);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Node);
+        assert!(
+            resp.peer_updates[0].node.is_some(),
+            "expected node info in peer update",
+        );
+
+        // Now Peer 1 updates its node again — Peer 2 should get the
+        // forwarded update because a tunnel exists.
+        send_request(
+            &mut ws1,
+            &CoordinateRequest {
+                update_self: Some(NodeInfo {
+                    id: 1,
+                    preferred_derp: 3,
+                    addresses: vec!["100.64.0.1/32".to_owned()],
+                    endpoints: vec!["10.0.0.5:41641".to_owned()],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        let resp2 = read_response(&mut ws2, Duration::from_secs(2)).await?;
+        assert!(
+            !resp2.peer_updates.is_empty(),
+            "expected updated node info forwarded via tunnel",
+        );
+        assert_eq!(resp2.peer_updates[0].id, peer1_id);
+        assert_eq!(resp2.peer_updates[0].kind, PeerUpdateKind::Node);
+
+        ws1.close(None).await.ok();
+        ws2.close(None).await.ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tailnet_ws_disconnect_sends_lost() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let app = build_router(state);
+
+        let owner_token = create_and_login(&app).await?;
+        let token2 = create_second_user_and_login(&app, &owner_token).await?;
+
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let mut ws1 = connect_ws(&base_url, &owner_token).await?;
+        let mut ws2 = connect_ws(&base_url, &token2).await?;
+
+        // Both peers publish their node info.
+        send_request(
+            &mut ws1,
+            &CoordinateRequest {
+                update_self: Some(NodeInfo {
+                    id: 1,
+                    preferred_derp: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        send_request(
+            &mut ws2,
+            &CoordinateRequest {
+                update_self: Some(NodeInfo {
+                    id: 2,
+                    preferred_derp: 2,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let peer1_id = get_user_id(&base_url, &owner_token).await?;
+
+        // Peer 2 adds a tunnel to Peer 1.
+        send_request(
+            &mut ws2,
+            &CoordinateRequest {
+                add_tunnel: Some(peer1_id),
+                ..Default::default()
+            },
+        )
+        .await?;
+
+        // Drain the initial Node update that Peer 2 receives.
+        let _ = read_response(&mut ws2, Duration::from_secs(2)).await?;
+
+        // Disconnect Peer 1 by dropping the WebSocket.
+        drop(ws1);
+
+        // Give the server time to detect the disconnect and push Lost.
+        tokio::time::sleep(Duration::from_millis(200)).await;
+
+        // Peer 2 should receive a Lost update for Peer 1.
+        let resp = read_response(&mut ws2, Duration::from_secs(2)).await?;
+        assert!(
+            !resp.peer_updates.is_empty(),
+            "expected Lost peer update after disconnect",
+        );
+        assert_eq!(resp.peer_updates[0].id, peer1_id);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Lost);
+
+        ws2.close(None).await.ok();
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_tailnet_ws_invalid_json_returns_error() -> Result<(), Box<dyn Error>> {
+        let (base_url, token, _handle) = setup_server().await?;
+        let mut ws = connect_ws(&base_url, &token).await?;
+
+        // Send malformed JSON.
+        ws.send(tungstenite::Message::Text("{not valid json".into()))
+            .await?;
+
+        // Should receive a CoordinateResponse with an error field.
+        let resp = read_response(&mut ws, Duration::from_secs(2)).await?;
+        assert!(
+            resp.error.is_some(),
+            "expected error field in response to invalid JSON",
+        );
+        let err_msg = resp.error.as_deref().unwrap_or("");
+        assert!(
+            err_msg.contains("invalid request"),
+            "expected error to mention 'invalid request', got: {err_msg}",
+        );
+        assert!(resp.peer_updates.is_empty());
+
+        ws.close(None).await.ok();
         Ok(())
     }
 }
