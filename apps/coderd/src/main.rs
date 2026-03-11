@@ -14,7 +14,7 @@ use coder_connectivity::tailnet::{
 };
 use coder_core::pubsub::PubSub;
 use coder_core::{
-    AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
+    AppStore, BuildMetadata, CorsConfig, DatabaseConfig, DeploymentStore, DerpRegionConfig,
     ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError, config::RateLimitConfig,
 };
@@ -170,6 +170,25 @@ struct ServerArgs {
         default_value_t = 60
     )]
     rate_limit_unauthenticated_per_minute: u32,
+
+    /// Comma-separated list of allowed CORS origins.  When empty every origin
+    /// is permitted (wildcard).
+    #[arg(
+        long,
+        env = "CODER_CORS_ALLOWED_ORIGINS",
+        default_value = "",
+        value_delimiter = ','
+    )]
+    cors_allowed_origins: Vec<String>,
+
+    /// Whether cross-origin requests may include credentials.
+    ///
+    /// Note: Credentials are only allowed when one or more explicit origins are
+    /// configured via `--cors-allowed-origins` / `CODER_CORS_ALLOWED_ORIGINS`.
+    /// In wildcard mode (no explicit origins), `Access-Control-Allow-Credentials`
+    /// is not sent, even if this flag is true.
+    #[arg(long, env = "CODER_CORS_ALLOW_CREDENTIALS", default_value_t = false)]
+    cors_allow_credentials: bool,
 }
 
 #[derive(Debug, Error)]
@@ -479,6 +498,16 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             endpoint: args.otel_endpoint,
             service_name: "coderd".to_owned(),
             sample_ratio: args.otel_sample_ratio,
+        },
+        cors: CorsConfig {
+            allowed_origins: args
+                .cors_allowed_origins
+                .into_iter()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            allow_credentials: args.cors_allow_credentials,
+            max_age_secs: 3600,
         },
     })
 }

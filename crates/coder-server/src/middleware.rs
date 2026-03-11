@@ -6,9 +6,95 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use coder_core::config::CorsConfig;
+use http::Method;
 use http::header::HeaderMap;
 use std::net::IpAddr;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
+
+/// Builds a [`CorsLayer`] from the given [`CorsConfig`].
+///
+/// When `allowed_origins` is empty the layer allows every origin (wildcard).
+/// Otherwise only the listed origins are permitted.
+///
+/// If `allowed_origins` is non-empty but **all** entries fail
+/// [`HeaderValue::from_str`] validation, the layer falls back to an empty
+/// allow-list that blocks every cross-origin request rather than silently
+/// opening up to all origins.  A warning is logged for each rejected origin.
+pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
+    // Filter origins up-front so that invalid values (non-visible-ASCII, etc.)
+    // are dropped before we decide between wildcard and explicit-list mode.
+    let valid_origins: Vec<HeaderValue> = config
+        .allowed_origins
+        .iter()
+        .filter_map(|o| match HeaderValue::from_str(o) {
+            Ok(v) => Some(v),
+            Err(err) => {
+                tracing::warn!(
+                    origin = %o,
+                    error = %err,
+                    "ignoring invalid CORS origin (not a valid HTTP header value)"
+                );
+                None
+            }
+        })
+        .collect();
+
+    // Decide between wildcard, explicit-list, or restrictive fallback.
+    let explicitly_configured = !config.allowed_origins.is_empty();
+    let allow_origin = if !explicitly_configured {
+        // Operator did not restrict origins → wildcard.
+        AllowOrigin::any()
+    } else if valid_origins.is_empty() {
+        // Operator intended to restrict origins but every entry was invalid.
+        // Falling back to wildcard would silently weaken security, so we use
+        // an empty list that blocks all cross-origin requests.
+        tracing::warn!(
+            "all configured CORS origins were invalid; \
+             cross-origin requests will be blocked"
+        );
+        AllowOrigin::list(Vec::<HeaderValue>::new())
+    } else {
+        AllowOrigin::list(valid_origins.clone())
+    };
+
+    let allow_methods = AllowMethods::list([
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::HEAD,
+        Method::OPTIONS,
+    ]);
+
+    let allow_headers = AllowHeaders::list([
+        HeaderName::from_static("content-type"),
+        HeaderName::from_static("authorization"),
+        HeaderName::from_static("coder-session-token"),
+        HeaderName::from_static("accept"),
+        HeaderName::from_static("x-csrf-token"),
+    ]);
+
+    let expose_headers = ExposeHeaders::list([
+        HeaderName::from_static("content-range"),
+        HeaderName::from_static("x-content-type-options"),
+    ]);
+
+    let mut layer = CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods(allow_methods)
+        .allow_headers(allow_headers)
+        .expose_headers(expose_headers)
+        .max_age(std::time::Duration::from_secs(config.max_age_secs));
+
+    if config.allow_credentials && !valid_origins.is_empty() {
+        layer = layer.allow_credentials(true);
+    }
+
+    layer
+}
 
 /// Stored in request extensions so downstream handlers can read the real
 /// client IP even when the server is behind a reverse proxy.

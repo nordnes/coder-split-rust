@@ -966,6 +966,7 @@ mod tests {
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
             otel: coder_core::config::OtelConfig::default(),
+            cors: coder_core::config::CorsConfig::default(),
         }
     }
 

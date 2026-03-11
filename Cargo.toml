@@ -53,7 +53,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-w
 tokio = { version = "1.44", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", default-features = false, features = ["normalize-path", "request-id", "trace", "util"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "normalize-path", "request-id", "trace", "util"] }
 opentelemetry = { version = "0.31", default-features = false, features = ["trace"] }
 opentelemetry_sdk = { version = "0.31", default-features = false, features = ["rt-tokio", "trace"] }
 opentelemetry-otlp = { version = "0.31", default-features = false, features = ["grpc-tonic", "trace"] }
