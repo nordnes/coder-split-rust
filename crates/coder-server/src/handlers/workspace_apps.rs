@@ -58,6 +58,7 @@ pub(crate) mod appurl {
     const NAME_REGEX: &str = "[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*";
 
     /// Port regex: 4-5 digit number with optional trailing `s` for HTTPS.
+    #[allow(clippy::expect_used)] // Hardcoded pattern — guaranteed to compile.
     pub(crate) static PORT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^\d{4,5}s?$").expect("PORT_REGEX is a valid hardcoded pattern")
     });
@@ -65,6 +66,7 @@ pub(crate) mod appurl {
     /// Application URL regex supporting optional agent name.
     ///
     /// Format: `{APP_SLUG}[--{AGENT_NAME}]--{WORKSPACE_NAME}--{USERNAME}`
+    #[allow(clippy::expect_used)] // Hardcoded pattern — guaranteed to compile.
     static APP_URL_REGEX: LazyLock<Regex> = LazyLock::new(|| {
         let pattern = format!(
             r"^(?P<AppSlug>{name})(?:--(?P<AgentName>{name}))?--(?P<WorkspaceName>{name})--(?P<Username>{name})$",
@@ -74,6 +76,7 @@ pub(crate) mod appurl {
     });
 
     /// Valid hostname label regex for pattern compilation.
+    #[allow(clippy::expect_used)] // Hardcoded pattern — guaranteed to compile.
     static VALID_HOSTNAME_LABEL: LazyLock<Regex> = LazyLock::new(|| {
         Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
             .expect("VALID_HOSTNAME_LABEL is a valid hardcoded pattern")
@@ -347,6 +350,7 @@ pub(crate) mod appurl {
     }
 
     #[cfg(test)]
+    #[allow(clippy::expect_used)]
     mod tests {
         use super::*;
 
@@ -1564,6 +1568,7 @@ pub(crate) fn strip_coder_cookies(cookie_header: &str) -> String {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
