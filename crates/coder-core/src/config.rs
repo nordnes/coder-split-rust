@@ -42,6 +42,8 @@ pub struct ServerConfig {
     pub github_oauth: Option<GithubOAuthConfig>,
     /// OIDC authentication configuration. `None` means OIDC is disabled.
     pub oidc: Option<OidcConfig>,
+    /// CORS (Cross-Origin Resource Sharing) configuration.
+    pub cors: CorsConfig,
 }
 
 impl ServerConfig {
@@ -176,6 +178,18 @@ impl ServerConfig {
                 default: Some("40"),
                 description: "Maximum number of concurrent database queries.",
             },
+            ConfigOption {
+                name: "cors-allowed-origins",
+                env: "CODER_CORS_ALLOWED_ORIGINS",
+                default: Some(""),
+                description: "Comma-separated list of allowed CORS origins. When empty every origin is permitted (wildcard).",
+            },
+            ConfigOption {
+                name: "cors-allow-credentials",
+                env: "CODER_CORS_ALLOW_CREDENTIALS",
+                default: Some("false"),
+                description: "Whether cross-origin requests may include credentials. Only effective when explicit origins are configured.",
+            },
         ]
     }
 }
@@ -222,6 +236,36 @@ pub struct OidcConfig {
     pub name_field: String,
     /// Whether to ignore the email_verified claim.
     pub ignore_email_verified: bool,
+}
+
+/// CORS (Cross-Origin Resource Sharing) configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorsConfig {
+    /// Allowed origins for cross-origin requests.
+    ///
+    /// When empty, every origin is permitted (wildcard) and the
+    /// `Access-Control-Allow-Credentials` header is **not** sent, regardless
+    /// of the value of [`Self::allow_credentials`].
+    pub allowed_origins: Vec<String>,
+    /// Whether the `Access-Control-Allow-Credentials` header is sent for
+    /// requests from explicitly allowed origins.
+    ///
+    /// This setting is ignored when [`Self::allowed_origins`] is empty
+    /// (wildcard mode), because the CORS specification forbids combining
+    /// `Access-Control-Allow-Origin: *` with credentials.
+    pub allow_credentials: bool,
+    /// How long browsers may cache preflight responses, in seconds.
+    pub max_age_secs: u64,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: Vec::new(),
+            allow_credentials: false,
+            max_age_secs: 3600,
+        }
+    }
 }
 
 /// Rate-limiting configuration for the HTTP layer.
