@@ -854,6 +854,22 @@ pub fn build_router(
                 ),
         )
         .route(
+            "/.well-known/oauth-authorization-server",
+            get(get_oauth2_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(get_oauth2_protected_resource_metadata),
+        )
+        .route("/oauth2/register", post(post_oauth2_register))
+        .route(
+            "/oauth2/clients/{client_id}",
+            get(get_oauth2_client_configuration)
+                .put(put_oauth2_client_configuration)
+                .delete(delete_oauth2_client_configuration),
+        )
+        .route("/oauth2/revoke", post(post_oauth2_revoke))
+        .route(
             "/oauth2/authorize",
             get(get_oauth2_authorize).post(post_oauth2_authorize),
         )

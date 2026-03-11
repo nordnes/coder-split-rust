@@ -1644,6 +1644,298 @@ pub struct OAuth2TokenResponse {
 }
 
 // ---------------------------------------------------------------------------
+// OAuth2 RFC Compliance API types
+// ---------------------------------------------------------------------------
+
+/// RFC 8414 OAuth 2.0 Authorization Server Metadata.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2AuthorizationServerMetadata {
+    /// Authorization server issuer identifier.
+    pub issuer: String,
+    /// URL of the authorization endpoint.
+    pub authorization_endpoint: String,
+    /// URL of the token endpoint.
+    pub token_endpoint: String,
+    /// URL of the dynamic client registration endpoint (RFC 7591).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub registration_endpoint: String,
+    /// URL of the token revocation endpoint (RFC 7009).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub revocation_endpoint: String,
+    /// Supported response types.
+    pub response_types_supported: Vec<String>,
+    /// Supported grant types.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub grant_types_supported: Vec<String>,
+    /// Supported PKCE code challenge methods.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub code_challenge_methods_supported: Vec<String>,
+    /// Supported scopes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes_supported: Vec<String>,
+    /// Supported token endpoint auth methods.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub token_endpoint_auth_methods_supported: Vec<String>,
+}
+
+/// RFC 9728 OAuth 2.0 Protected Resource Metadata.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ProtectedResourceMetadata {
+    /// Protected resource identifier.
+    pub resource: String,
+    /// Authorization servers that protect this resource.
+    pub authorization_servers: Vec<String>,
+    /// Supported scopes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub scopes_supported: Vec<String>,
+    /// Supported bearer methods.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub bearer_methods_supported: Vec<String>,
+}
+
+/// RFC 7591 Dynamic Client Registration Request.
+#[derive(Clone, Debug, Deserialize, Default)]
+pub struct OAuth2ClientRegistrationRequest {
+    /// Redirect URIs.
+    #[serde(default)]
+    pub redirect_uris: Vec<String>,
+    /// Human-readable client name.
+    #[serde(default)]
+    pub client_name: String,
+    /// Client home page URI.
+    #[serde(default)]
+    pub client_uri: String,
+    /// Client logo URI.
+    #[serde(default)]
+    pub logo_uri: String,
+    /// Terms of service URI.
+    #[serde(default)]
+    pub tos_uri: String,
+    /// Privacy policy URI.
+    #[serde(default)]
+    pub policy_uri: String,
+    /// JWKS URI for client authentication.
+    #[serde(default)]
+    pub jwks_uri: String,
+    /// JWKS inline for client authentication.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jwks: Option<Value>,
+    /// Software identifier.
+    #[serde(default)]
+    pub software_id: String,
+    /// Software version.
+    #[serde(default)]
+    pub software_version: String,
+    /// Requested grant types.
+    #[serde(default)]
+    pub grant_types: Vec<String>,
+    /// Requested response types.
+    #[serde(default)]
+    pub response_types: Vec<String>,
+    /// Token endpoint auth method.
+    #[serde(default)]
+    pub token_endpoint_auth_method: String,
+    /// Requested scope (space-delimited).
+    #[serde(default)]
+    pub scope: String,
+    /// Contact emails.
+    #[serde(default)]
+    pub contacts: Vec<String>,
+}
+
+impl OAuth2ClientRegistrationRequest {
+    /// Apply RFC 7591 defaults for missing fields.
+    pub fn apply_defaults(mut self) -> Self {
+        if self.grant_types.is_empty() {
+            self.grant_types = vec!["authorization_code".to_owned(), "refresh_token".to_owned()];
+        }
+        if self.response_types.is_empty() {
+            self.response_types = vec!["code".to_owned()];
+        }
+        if self.token_endpoint_auth_method.is_empty() {
+            self.token_endpoint_auth_method = "client_secret_basic".to_owned();
+        }
+        if self.client_name.is_empty() {
+            self.client_name = "Dynamically Registered Client".to_owned();
+        }
+        self
+    }
+
+    /// Validate the registration request.
+    pub fn validate(&self) -> Result<(), String> {
+        if self.redirect_uris.is_empty() {
+            return Err("redirect_uris is required".to_owned());
+        }
+        for uri in &self.redirect_uris {
+            if url::Url::parse(uri).is_err() {
+                return Err(format!("invalid redirect_uri: {uri}"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Generate a client name, falling back to URI-derived names.
+    pub fn generate_client_name(&self) -> String {
+        use sha2::Digest as _;
+        if !self.client_name.is_empty() {
+            if self.client_name.len() > 64 {
+                let hash = format!("{:x}", sha2::Sha256::digest(self.client_name.as_bytes()));
+                let hash_prefix = &hash[..8];
+                let max_prefix = 64 - 1 - hash_prefix.len();
+                return format!("{}-{}", &self.client_name[..max_prefix], hash_prefix);
+            }
+            return self.client_name.clone();
+        }
+        if !self.client_uri.is_empty() {
+            if let Ok(uri) = url::Url::parse(&self.client_uri) {
+                if let Some(host) = uri.host_str() {
+                    let name = format!("Client ({host})");
+                    if name.len() > 64 {
+                        return name[..64].to_owned();
+                    }
+                    return name;
+                }
+            }
+        }
+        if let Some(first_uri) = self.redirect_uris.first() {
+            if let Ok(uri) = url::Url::parse(first_uri) {
+                if let Some(host) = uri.host_str() {
+                    let name = format!("Client ({host})");
+                    if name.len() > 64 {
+                        return name[..64].to_owned();
+                    }
+                    return name;
+                }
+            }
+        }
+        "Dynamically Registered Client".to_owned()
+    }
+}
+
+/// RFC 7591 Dynamic Client Registration Response.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ClientRegistrationResponse {
+    /// Unique client identifier.
+    pub client_id: String,
+    /// Client secret (only returned on creation).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_secret: String,
+    /// Timestamp when client_id was issued (Unix seconds).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_id_issued_at: Option<i64>,
+    /// Timestamp when client_secret expires (0 = no expiration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret_expires_at: Option<i64>,
+    /// Registered redirect URIs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redirect_uris: Vec<String>,
+    /// Client name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_name: String,
+    /// Client URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_uri: String,
+    /// Logo URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub logo_uri: String,
+    /// Terms of service URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tos_uri: String,
+    /// Policy URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub policy_uri: String,
+    /// Grant types.
+    pub grant_types: Vec<String>,
+    /// Response types.
+    pub response_types: Vec<String>,
+    /// Token endpoint auth method.
+    pub token_endpoint_auth_method: String,
+    /// Scope.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Contacts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contacts: Vec<String>,
+    /// Registration access token for RFC 7592 management.
+    pub registration_access_token: String,
+    /// Registration client URI for RFC 7592 management.
+    pub registration_client_uri: String,
+}
+
+/// RFC 7592 Client Configuration (read response).
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ClientConfiguration {
+    /// Client identifier.
+    pub client_id: String,
+    /// Timestamp when client_id was issued (Unix seconds).
+    pub client_id_issued_at: i64,
+    /// Timestamp when client_secret expires (0 = no expiration).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client_secret_expires_at: Option<i64>,
+    /// Registered redirect URIs.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub redirect_uris: Vec<String>,
+    /// Client name.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_name: String,
+    /// Client URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub client_uri: String,
+    /// Logo URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub logo_uri: String,
+    /// Terms of service URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub tos_uri: String,
+    /// Policy URI.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub policy_uri: String,
+    /// Grant types.
+    pub grant_types: Vec<String>,
+    /// Response types.
+    pub response_types: Vec<String>,
+    /// Token endpoint auth method.
+    pub token_endpoint_auth_method: String,
+    /// Scope.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub scope: String,
+    /// Contacts.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub contacts: Vec<String>,
+    /// Registration access token (empty in GET responses for security).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub registration_access_token: String,
+    /// Registration client URI.
+    pub registration_client_uri: String,
+}
+
+/// OAuth2 error response per RFC 6749.
+#[derive(Clone, Debug, Serialize)]
+pub struct OAuth2ErrorResponse {
+    /// Error code.
+    pub error: String,
+    /// Human-readable error description.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub error_description: String,
+}
+
+/// OAuth2 token revocation request per RFC 7009.
+#[derive(Clone, Debug, Deserialize)]
+pub struct OAuth2TokenRevocationRequest {
+    /// The token to revoke.
+    pub token: String,
+    /// Hint about the token type.
+    #[serde(default)]
+    pub token_type_hint: String,
+    /// Client identifier.
+    #[serde(default)]
+    pub client_id: String,
+    /// Client secret.
+    #[serde(default)]
+    pub client_secret: String,
+}
+
+// ---------------------------------------------------------------------------
 // User Identity Supplement API types
 // ---------------------------------------------------------------------------
 
