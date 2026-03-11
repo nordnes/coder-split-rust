@@ -12,6 +12,8 @@
 //! agent bootstrap scripts with SHA-256 content digests.
 #![forbid(unsafe_code)]
 
+pub mod server;
+
 use std::sync::Arc;
 
 use base64::Engine as _;

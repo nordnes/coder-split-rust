@@ -315,6 +315,10 @@ pub fn build_router(
                     get(list_provisioner_daemons),
                 )
                 .route(
+                    "/organizations/{organization}/provisionerdaemons/serve",
+                    get(serve_provisioner_daemon),
+                )
+                .route(
                     "/organizations/{organization}/provisionerjobs",
                     get(list_provisioner_jobs),
                 )

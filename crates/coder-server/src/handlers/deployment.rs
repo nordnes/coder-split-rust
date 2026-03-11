@@ -902,6 +902,152 @@ pub(crate) async fn get_regions(
         .into_response())
 }
 
+/// GET /api/v2/organizations/{organization}/provisionerdaemons/serve —
+/// WebSocket endpoint for provisioner daemon connections.
+///
+/// Accepts a WebSocket upgrade and bridges the socket to the channel-based
+/// provisioner daemon server.  The daemon sends [`DaemonMessage`]s and
+/// receives [`ServerMessage`]s as JSON text frames.
+pub(crate) async fn serve_provisioner_daemon(
+    State(state): State<AppState>,
+    Path(organization): Path<String>,
+    Query(params): Query<ServeProvisionerDaemonQuery>,
+    headers: HeaderMap,
+    ws: WebSocketUpgrade,
+) -> Result<Response, AppError> {
+    use coder_provisioner::server::{
+        DaemonMessage, DaemonRegistration, DaemonServerConfig, ServerMessage, run_daemon_session,
+    };
+
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // Validate the organization exists and the caller has access.
+    let org = match state
+        .identity
+        .get_organization(&context.actor, &organization)
+        .await
+    {
+        Ok(o) => o,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    // RBAC: verify the actor can create provisioner daemons in this org.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::ProvisionerDaemon).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to serve as a provisioner daemon.",
+        ));
+    }
+
+    let store = state.store.clone();
+
+    let registration = DaemonRegistration {
+        name: params.name.unwrap_or_default(),
+        version: params.version.unwrap_or_default(),
+        api_version: params.api_version.unwrap_or_default(),
+        provisioners: params
+            .provisioners
+            .map(|p| p.split(',').map(String::from).collect())
+            .unwrap_or_default(),
+        tags: params
+            .tags
+            .and_then(|t| serde_json::from_str(&t).ok())
+            .unwrap_or_default(),
+        organization_id: org.id,
+        key_id: params.key_id,
+    };
+
+    let config = DaemonServerConfig::default();
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        let (daemon_tx, daemon_rx) = tokio::sync::mpsc::channel::<DaemonMessage>(64);
+        let (server_tx, mut server_rx) = tokio::sync::mpsc::channel::<ServerMessage>(64);
+
+        // Spawn the session task.
+        let session_handle = tokio::spawn(async move {
+            if let Err(e) = run_daemon_session(store, registration, config, daemon_rx, server_tx).await {
+                tracing::warn!(error = %e, "provisioner daemon session ended with error");
+            }
+        });
+
+        // Bridge WebSocket ↔ channels.
+        loop {
+            tokio::select! {
+                ws_msg = socket.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            match serde_json::from_str::<DaemonMessage>(&text) {
+                                Ok(msg) => {
+                                    if daemon_tx.send(msg).await.is_err() {
+                                        break;
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(error = %e, "invalid daemon message JSON");
+                                    let err_msg = ServerMessage::Error {
+                                        message: format!("invalid message: {e}"),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_msg) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                resp = server_rx.recv() => {
+                    match resp {
+                        Some(server_msg) => {
+                            if let Ok(payload) = serde_json::to_string(&server_msg) {
+                                if socket.send(Message::Text(payload.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        // Drop the sender so the session task's receiver closes.
+        drop(daemon_tx);
+        // Wait for session to finish cleanly.
+        let _ = session_handle.await;
+    }))
+}
+
+/// Query parameters for the provisioner daemon serve endpoint.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ServeProvisionerDaemonQuery {
+    /// Daemon name.
+    pub(crate) name: Option<String>,
+    /// Daemon version.
+    pub(crate) version: Option<String>,
+    /// Provisioner API version.
+    pub(crate) api_version: Option<String>,
+    /// Comma-separated provisioner types (e.g. `"terraform"`).
+    pub(crate) provisioners: Option<String>,
+    /// JSON-encoded tags map.
+    pub(crate) tags: Option<String>,
+    /// Optional provisioner key ID.
+    pub(crate) key_id: Option<Uuid>,
+}
+
 /// GET /api/v2/tailnet — WebSocket RPC connection for tailnet coordination.
 ///
 /// Accepts a WebSocket connection for tailnet coordination protocol.  This is
