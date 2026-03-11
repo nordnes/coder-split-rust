@@ -1,4 +1,14 @@
 //! HTTP middleware functions.
+//!
+//! Provides the following Axum middleware layers:
+//!
+//! * [`build_cors_layer`] — configurable CORS via [`tower_http::cors`]
+//! * [`real_ip_middleware`] — extracts client IP from `X-Forwarded-For` / `X-Real-IP`
+//! * [`csp_middleware`] — sets `Content-Security-Policy` on every response
+//! * [`hsts_middleware`] — adds `Strict-Transport-Security` for HTTPS requests
+//! * [`csrf_middleware`] — requires `X-CSRF-Token` on mutating cookie-auth requests
+//! * [`otel_trace_context_middleware`] — W3C TraceContext propagation (OTel)
+//! * [`prometheus_middleware`] — per-request latency and status-code metrics
 
 use crate::helpers::forbidden_response;
 use axum::{

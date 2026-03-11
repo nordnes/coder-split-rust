@@ -1,4 +1,8 @@
 //! Domain-specific handler modules.
+//!
+//! Each sub-module implements the Axum handler functions for one API domain
+//! (users, workspaces, templates, etc.).  Shared imports and re-exports are
+//! centralised here so individual handler files stay focused on request logic.
 
 pub(crate) use crate::app::*;
 pub(crate) use crate::error::AppError;

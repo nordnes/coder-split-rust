@@ -5,6 +5,18 @@
 //!
 //! Also provides the [`Webpusher`] dispatcher for sending Web Push notifications
 //! to browser subscriptions using VAPID authentication.
+//!
+//! # Key types
+//!
+//! * [`NotificationDispatchService`] — background service that polls
+//!   `acquire_pending_notification_messages` every 10 seconds and routes each
+//!   message to the appropriate transport
+//! * [`NotificationConfig`] — SMTP and webhook configuration
+//! * [`NotificationDispatchError`] — transport-level delivery failures
+//! * [`Webpusher`] — Web Push dispatcher with VAPID key management
+//!
+//! Email dispatch is currently stubbed (requires `lettre` wiring); webhook
+//! and inbox delivery are fully implemented.
 #![forbid(unsafe_code)]
 
 use std::sync::{Arc, Weak};

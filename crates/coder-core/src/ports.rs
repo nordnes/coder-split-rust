@@ -1,4 +1,16 @@
 //! Storage contracts for the Rust backend slice.
+//!
+//! This module defines the trait hierarchy that abstracts all persistence
+//! operations.  The top-level [`AppStore`] super-trait composes domain-specific
+//! sub-traits ([`DeploymentStore`], [`AuthStore`], [`IdentityStore`],
+//! [`OperationalStore`], [`TemplateStore`], [`WorkspaceStore`],
+//! [`InsightsStore`], [`ProvisionerStore`]) so that handler code can accept a
+//! single `Arc<dyn AppStore>` and call any storage method.
+//!
+//! Concrete implementations live in downstream crates:
+//!
+//! * `coder_db::PostgresStore` — production Postgres implementation.
+//! * `FakeStore` (test-only) — in-memory `HashMap`-backed mock.
 
 use std::collections::HashMap;
 use std::sync::Arc;

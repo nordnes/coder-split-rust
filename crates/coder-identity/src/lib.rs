@@ -1,4 +1,17 @@
 //! Identity and organization boundary for the Rust `coderd` rewrite.
+//!
+//! `coder-identity` provides [`IdentityService`], the domain service for:
+//!
+//! * **Users** — CRUD, profile updates, status transitions, soft-delete
+//! * **Organizations** — listing, membership management
+//! * **Roles** — site and org-scoped role assignment via [`coder_rbac`]
+//! * **Groups** — group CRUD and membership
+//! * **Preferences** — appearance settings, terminal font, notification prefs
+//! * **User links** — external IdP link management (OIDC / GitHub)
+//! * **Custom roles** — upsert / delete of custom RBAC roles
+//!
+//! Every public method on [`IdentityService`] enforces RBAC checks via the
+//! [`coder_rbac::Actor`] before touching the store.
 #![forbid(unsafe_code)]
 
 use std::collections::{HashMap, HashSet};

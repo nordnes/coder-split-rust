@@ -3,6 +3,20 @@
 //! This crate implements a full policy evaluation engine that supports
 //! per-resource permissions, scopes, and organization-scoped roles.
 //! It mirrors the Go implementation in `coderd/rbac/`.
+//!
+//! # Key types
+//!
+//! * [`Actor`] — represents an authenticated principal with site roles,
+//!   org memberships, and an optional [`Scope`]
+//! * [`Authorizer`] — stateless evaluator: `authorize(actor, action, object)`
+//! * [`Object`] — the resource (or resource pattern) being checked
+//! * [`Permission`] — a single allow / deny rule in a [`Role`]
+//! * [`Role`] — named bundle of site, user, and org-scoped permissions
+//! * [`Scope`] — API-key restriction layer on top of the user's roles
+//!
+//! Built-in roles ([`ROLE_OWNER`], [`ROLE_MEMBER`], [`ROLE_AUDITOR`], …) are
+//! constructed by the `role_*` helper functions and registered in
+//! [`site_builtin_roles`] / [`organization_builtin_roles`].
 #![forbid(unsafe_code)]
 
 use std::collections::HashMap;
