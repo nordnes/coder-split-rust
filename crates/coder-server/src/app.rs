@@ -52,6 +52,7 @@ use crate::handlers::external_auth::*;
 use crate::handlers::files::*;
 use crate::handlers::health::*;
 use crate::handlers::insights::*;
+use crate::handlers::licenses::*;
 use crate::handlers::mcp::*;
 use crate::handlers::notifications::*;
 use crate::handlers::oauth2::*;
@@ -776,6 +777,10 @@ pub fn build_router(
                     post(post_file).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
                 )
                 .route("/files/{fileid}", get(get_file_by_id))
+                // ----- License & Entitlements routes -----
+                .route("/licenses", get(list_licenses).post(post_license))
+                .route("/licenses/{id}", delete(delete_license_handler))
+                .route("/entitlements", get(get_entitlements))
                 .route("/derp-map", get(derp_map_updates))
                 .route("/regions", get(get_regions))
                 .route_layer(middleware::from_fn_with_state(

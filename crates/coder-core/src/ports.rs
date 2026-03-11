@@ -977,6 +977,22 @@ pub struct UpsertPortShareInput {
     pub protocol: String,
 }
 
+/// Stored license record.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct LicenseRecord {
+    /// Numeric license identifier.
+    pub id: i32,
+    /// Stable UUID for the license.
+    pub uuid: Uuid,
+    /// When the license was uploaded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub uploaded_at: OffsetDateTime,
+    /// Raw JWT string.
+    pub jwt: String,
+    /// Parsed claims as a JSON value.
+    pub claims: Value,
+}
+
 /// Stored file record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct FileRecord {
@@ -4923,6 +4939,35 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = input;
         Err(StorageError::unavailable(
             "custom roles are not implemented",
+        ))
+    }
+
+    // ----- Licenses -----
+
+    /// Lists all stored license records.
+    async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError> {
+        Err(StorageError::unavailable(
+            "license storage is not implemented",
+        ))
+    }
+
+    /// Inserts a new license record from its raw JWT and parsed claims.
+    async fn insert_license(
+        &self,
+        jwt: &str,
+        claims: &Value,
+    ) -> Result<LicenseRecord, StorageError> {
+        let _ = (jwt, claims);
+        Err(StorageError::unavailable(
+            "license storage is not implemented",
+        ))
+    }
+
+    /// Deletes a license record by its numeric identifier.
+    async fn delete_license(&self, id: i32) -> Result<bool, StorageError> {
+        let _ = id;
+        Err(StorageError::unavailable(
+            "license storage is not implemented",
         ))
     }
 }

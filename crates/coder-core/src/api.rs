@@ -1499,6 +1499,31 @@ pub struct UploadFileResponse {
 }
 
 // ---------------------------------------------------------------------------
+// License & Entitlements API types
+// ---------------------------------------------------------------------------
+
+/// Request body for `POST /api/v2/licenses`.
+#[derive(Clone, Debug, Deserialize)]
+pub struct AddLicenseRequest {
+    /// Raw JWT license string.
+    pub license: String,
+}
+
+/// Response for a single license record.
+#[derive(Clone, Debug, Serialize)]
+pub struct LicenseResponse {
+    /// Numeric license identifier.
+    pub id: i32,
+    /// Unique license UUID.
+    pub uuid: Uuid,
+    /// When the license was uploaded (RFC 3339).
+    #[serde(with = "time::serde::rfc3339")]
+    pub uploaded_at: OffsetDateTime,
+    /// Parsed claims as a JSON value.
+    pub claims: Value,
+}
+
+// ---------------------------------------------------------------------------
 // OAuth2 Provider API types
 // ---------------------------------------------------------------------------
 

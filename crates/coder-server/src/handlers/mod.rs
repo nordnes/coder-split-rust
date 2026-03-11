@@ -111,6 +111,7 @@ pub(crate) mod external_auth;
 pub(crate) mod files;
 pub(crate) mod health;
 pub(crate) mod insights;
+pub(crate) mod licenses;
 pub(crate) mod mcp;
 pub(crate) mod notifications;
 pub(crate) mod oauth2;
