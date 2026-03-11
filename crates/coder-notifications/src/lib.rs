@@ -884,7 +884,10 @@ mod tests {
     fn dispatch_error_config_missing_variant() {
         let err = NotificationDispatchError::ConfigMissing("smtp_host".to_owned());
         let msg = err.to_string();
-        assert!(msg.contains("config missing"), "should contain error prefix");
+        assert!(
+            msg.contains("config missing"),
+            "should contain error prefix"
+        );
         assert!(msg.contains("smtp_host"));
     }
 
