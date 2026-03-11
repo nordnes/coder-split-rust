@@ -38,7 +38,10 @@ pub(crate) async fn get_init_script(
         Err(InitScriptError::UnknownTarget { os, arch }) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!("Unknown os/arch: {os}/{arch}"))),
+                Json(ApiResponse::error(
+                    format!("Unknown os/arch: {os}/{arch}"),
+                    "The requested os/arch combination is not supported.",
+                )),
             )
                 .into_response();
         }

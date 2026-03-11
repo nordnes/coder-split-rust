@@ -450,7 +450,10 @@ pub(crate) async fn get_oauth2_authorize(
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -459,7 +462,10 @@ pub(crate) async fn get_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -476,7 +482,10 @@ pub(crate) async fn get_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The callback URL configured for this app is not a valid URL.",
+                )),
             )
                 .into_response());
         }
@@ -525,7 +534,10 @@ pub(crate) async fn post_oauth2_authorize(
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -534,7 +546,10 @@ pub(crate) async fn post_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -551,7 +566,10 @@ pub(crate) async fn post_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The callback URL configured for this app is not a valid URL.",
+                )),
             )
                 .into_response());
         }
@@ -595,7 +613,10 @@ pub(crate) async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
@@ -627,7 +648,10 @@ pub(crate) async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
@@ -650,7 +674,10 @@ pub(crate) async fn post_oauth2_token(
         }
         _ => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Unsupported grant_type.")),
+            Json(ApiResponse::error(
+                "Unsupported grant_type.",
+                "Supported grant types are: authorization_code, refresh_token.",
+            )),
         )
             .into_response()),
     }
@@ -661,9 +688,11 @@ pub(crate) fn handle_oauth2_provider_error(
 ) -> Result<Response, AppError> {
     match error {
         OAuth2ProviderError::Storage(error) => Err(AppError::from(error)),
-        OAuth2ProviderError::BadRequest { message } => {
-            Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
-        }
+        OAuth2ProviderError::BadRequest { message } => Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(message, "")),
+        )
+            .into_response()),
         OAuth2ProviderError::NotFound { message } => Ok(not_found_response(message)),
         OAuth2ProviderError::Unauthorized { message } => Ok(unauthorized_response(message)),
     }

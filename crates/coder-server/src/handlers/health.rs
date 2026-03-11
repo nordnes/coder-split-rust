@@ -55,7 +55,10 @@ pub(crate) async fn debug_health(
             .into_response()),
         Some(other) => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok(format!("Invalid format option {other:?}."))),
+            Json(ApiResponse::error(
+                format!("Invalid format option {other:?}."),
+                "Supported formats are: json, text.",
+            )),
         )
             .into_response()),
     }

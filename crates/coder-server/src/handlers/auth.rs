@@ -191,7 +191,10 @@ pub(crate) async fn post_change_password_with_one_time_passcode(
 pub(crate) async fn get_github_oauth_device_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -199,7 +202,10 @@ pub(crate) async fn get_github_oauth_device_disabled() -> Response {
 pub(crate) async fn get_github_oauth_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -207,7 +213,10 @@ pub(crate) async fn get_github_oauth_callback_disabled() -> Response {
 pub(crate) async fn get_oidc_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("OIDC is not enabled.")),
+        Json(ApiResponse::error(
+            "OIDC is not enabled.",
+            "This deployment does not have OIDC configured.",
+        )),
     )
         .into_response()
 }
