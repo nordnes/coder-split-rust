@@ -452,12 +452,23 @@ pub async fn oidc_discover(
         "{}/.well-known/openid-configuration",
         issuer_url.as_str().trim_end_matches('/')
     );
-    client
+    let response = client
         .get(&url)
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
-        .map_err(|e| OAuthLoginError::Http(e.to_string()))?
+        .map_err(|e| OAuthLoginError::Http(e.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_owned());
+        return Err(OAuthLoginError::Http(format!(
+            "OIDC discovery endpoint returned {status}: {body}"
+        )));
+    }
+    response
         .json::<OidcDiscovery>()
         .await
         .map_err(|e| OAuthLoginError::Http(e.to_string()))
