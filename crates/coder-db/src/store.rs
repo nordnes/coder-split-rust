@@ -474,7 +474,7 @@ struct StoredChatFileRow {
     data: Vec<u8>,
 }
 
-#[derive(Debug, FromRow)]
+#[derive(FromRow)]
 struct StoredChatProviderRow {
     id: Uuid,
     provider: String,
@@ -484,6 +484,21 @@ struct StoredChatProviderRow {
     enabled: bool,
     created_at: OffsetDateTime,
     updated_at: OffsetDateTime,
+}
+
+impl std::fmt::Debug for StoredChatProviderRow {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("StoredChatProviderRow")
+            .field("id", &self.id)
+            .field("provider", &self.provider)
+            .field("display_name", &self.display_name)
+            .field("api_key", &"[REDACTED]")
+            .field("base_url", &self.base_url)
+            .field("enabled", &self.enabled)
+            .field("created_at", &self.created_at)
+            .field("updated_at", &self.updated_at)
+            .finish()
+    }
 }
 
 #[derive(Debug, FromRow)]
