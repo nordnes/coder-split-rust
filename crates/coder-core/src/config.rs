@@ -38,6 +38,10 @@ pub struct ServerConfig {
     pub max_concurrent_db_queries: usize,
     /// Rate-limiting configuration for the HTTP layer.
     pub rate_limit: RateLimitConfig,
+    /// GitHub OAuth2 configuration. `None` means GitHub OAuth is disabled.
+    pub github_oauth: Option<GithubOAuthConfig>,
+    /// OIDC authentication configuration. `None` means OIDC is disabled.
+    pub oidc: Option<OidcConfig>,
 }
 
 impl ServerConfig {
@@ -174,6 +178,50 @@ impl ServerConfig {
             },
         ]
     }
+}
+
+/// GitHub OAuth2 configuration for login.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GithubOAuthConfig {
+    /// GitHub OAuth2 client ID.
+    pub client_id: String,
+    /// GitHub OAuth2 client secret.
+    pub client_secret: String,
+    /// Whether to allow new user signups via GitHub.
+    pub allow_signups: bool,
+    /// Whether all GitHub users are allowed (skip org/team checks).
+    pub allow_everyone: bool,
+    /// Allowed GitHub organization logins. Empty means no org restriction.
+    pub allowed_orgs: Vec<String>,
+    /// Allowed GitHub team slugs in `org/team` format. Empty means no team restriction.
+    pub allowed_teams: Vec<String>,
+    /// GitHub API base URL (defaults to `https://api.github.com`).
+    pub api_url: Url,
+}
+
+/// OIDC authentication configuration for login.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OidcConfig {
+    /// OIDC issuer URL (used for discovery).
+    pub issuer_url: Url,
+    /// OIDC client ID.
+    pub client_id: String,
+    /// OIDC client secret.
+    pub client_secret: String,
+    /// OAuth2 scopes to request.
+    pub scopes: Vec<String>,
+    /// Whether to allow new user signups via OIDC.
+    pub allow_signups: bool,
+    /// Allowed email domains. Empty means allow all.
+    pub email_domain: Vec<String>,
+    /// Claim field to use as the username.
+    pub username_field: String,
+    /// Claim field to use as the email.
+    pub email_field: String,
+    /// Claim field to use as the display name.
+    pub name_field: String,
+    /// Whether to ignore the email_verified claim.
+    pub ignore_email_verified: bool,
 }
 
 /// Rate-limiting configuration for the HTTP layer.

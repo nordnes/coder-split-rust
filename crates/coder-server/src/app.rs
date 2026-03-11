@@ -365,13 +365,14 @@ pub fn build_router(
                 )
                 .route(
                     "/users/oauth2/github/device",
-                    get(get_github_oauth_device_disabled),
+                    get(get_github_oauth_device_disabled)
+                        .post(post_github_oauth_device),
                 )
                 .route(
                     "/users/oauth2/github/callback",
-                    get(get_github_oauth_callback_disabled),
+                    get(get_github_oauth_callback),
                 )
-                .route("/users/oidc/callback", get(get_oidc_callback_disabled))
+                .route("/users/oidc/callback", get(get_oidc_callback))
                 .route("/users/roles", get(list_site_roles))
                 .route("/users/{user}/keys", post(create_session_api_key))
                 .route(
@@ -7137,6 +7138,8 @@ mod tests {
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
+            github_oauth: None,
+            oidc: None,
         })
     }
 

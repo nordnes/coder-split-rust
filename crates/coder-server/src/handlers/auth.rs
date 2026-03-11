@@ -221,6 +221,582 @@ pub(crate) async fn get_oidc_callback_disabled() -> Response {
         .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// Real OAuth2/OIDC handler implementations
+// ---------------------------------------------------------------------------
+
+/// `POST /api/v2/users/oauth2/github/device`
+///
+/// Initiates the GitHub OAuth2 device authorization flow for CLI clients.
+/// Returns a device code and verification URL that the user can use to
+/// authorize the application in their browser.
+#[tracing::instrument(skip_all)]
+pub(crate) async fn post_github_oauth_device(
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    let Some(ref github_config) = state.config.github_oauth else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "GitHub OAuth2 is not enabled.",
+                "This deployment does not have GitHub OAuth2 configured.",
+            )),
+        )
+            .into_response());
+    };
+
+    let client = reqwest::Client::new();
+    let device_response =
+        coder_auth::oauth_login::github_request_device_code(&client, github_config)
+            .await
+            .map_err(|e| {
+                tracing::error!("GitHub device code request failed: {e}");
+                AppError::from(StorageError::unavailable(e.to_string()))
+            })?;
+
+    Ok((StatusCode::OK, Json(device_response)).into_response())
+}
+
+/// `GET /api/v2/users/oauth2/github/callback`
+///
+/// Handles the OAuth2 authorization code callback from GitHub.
+/// Exchanges the code for an access token, fetches the user profile and
+/// verified emails, finds or creates the user, creates a session, and
+/// redirects to the application.
+#[tracing::instrument(skip_all)]
+pub(crate) async fn get_github_oauth_callback(
+    State(state): State<AppState>,
+    Query(query): Query<coder_auth::oauth_login::OAuthCallbackQuery>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Response, AppError> {
+    let Some(ref github_config) = state.config.github_oauth else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "GitHub OAuth2 is not enabled.",
+                "This deployment does not have GitHub OAuth2 configured.",
+            )),
+        )
+            .into_response());
+    };
+
+    // Check for upstream errors from the provider.
+    if let Some(ref err_msg) = query.error {
+        let detail = query
+            .error_description
+            .as_deref()
+            .unwrap_or("Unknown error from GitHub");
+        tracing::warn!("GitHub OAuth error: {err_msg} — {detail}");
+        return Ok(redirect_to_login_response(
+            &uri,
+            &format!("GitHub OAuth error: {detail}"),
+        ));
+    }
+
+    // Validate the state parameter against the stored cookie.
+    let stored_state = cookie_from_headers(&headers, OAUTH2_STATE_COOKIE);
+    match stored_state {
+        Some(ref s) if s == &query.state => {}
+        _ => {
+            tracing::warn!("OAuth state mismatch");
+            return Ok(redirect_to_login_response(
+                &uri,
+                "OAuth state mismatch. Please try again.",
+            ));
+        }
+    }
+
+    let redirect_uri =
+        cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE).unwrap_or_else(|| "/".to_owned());
+
+    // Exchange the authorization code for an access token.
+    let client = reqwest::Client::new();
+    let token_response =
+        coder_auth::oauth_login::github_exchange_code(&client, github_config, &query.code)
+            .await
+            .map_err(|e| {
+                tracing::error!("GitHub code exchange failed: {e}");
+                AppError::from(StorageError::unavailable(e.to_string()))
+            })?;
+
+    let access_token = &token_response.access_token;
+
+    // Fetch user profile and emails concurrently.
+    let (gh_user, gh_emails) = tokio::try_join!(
+        coder_auth::oauth_login::github_fetch_user(&client, &github_config.api_url, access_token),
+        coder_auth::oauth_login::github_fetch_emails(&client, &github_config.api_url, access_token),
+    )
+    .map_err(|e| {
+        tracing::error!("GitHub API fetch failed: {e}");
+        AppError::from(StorageError::unavailable(e.to_string()))
+    })?;
+
+    // Check organization/team membership if restrictions are configured.
+    if !github_config.allow_everyone
+        && (!github_config.allowed_orgs.is_empty() || !github_config.allowed_teams.is_empty())
+    {
+        let (orgs, teams) = tokio::try_join!(
+            coder_auth::oauth_login::github_fetch_orgs(
+                &client,
+                &github_config.api_url,
+                access_token
+            ),
+            coder_auth::oauth_login::github_fetch_teams(
+                &client,
+                &github_config.api_url,
+                access_token
+            ),
+        )
+        .map_err(|e| {
+            tracing::error!("GitHub org/team fetch failed: {e}");
+            AppError::from(StorageError::unavailable(e.to_string()))
+        })?;
+
+        if !coder_auth::oauth_login::github_check_org_membership(github_config, &orgs) {
+            return Ok(redirect_to_login_response(
+                &uri,
+                "Your GitHub account is not a member of an allowed organization.",
+            ));
+        }
+        if !coder_auth::oauth_login::github_check_team_membership(github_config, &teams) {
+            return Ok(redirect_to_login_response(
+                &uri,
+                "Your GitHub account is not a member of an allowed team.",
+            ));
+        }
+    }
+
+    // Find the primary verified email.
+    let primary_email =
+        coder_auth::oauth_login::github_primary_email(&gh_emails).ok_or_else(|| {
+            tracing::warn!("No verified email found for GitHub user {}", gh_user.login);
+            AppError::from(StorageError::unavailable(
+                "No verified email found on your GitHub account.",
+            ))
+        })?;
+
+    let linked_id = coder_auth::oauth_login::github_linked_id(gh_user.id);
+
+    // Look up user by GitHub linked ID or by email.
+    let existing_user = find_user_by_linked_id_or_email(
+        &state,
+        LoginType::Github,
+        &linked_id,
+        &primary_email.email,
+    )
+    .await?;
+
+    let user = match existing_user {
+        Some(user) => {
+            // Existing user found — update the user link.
+            let link_input = coder_core::UpsertUserLinkInput {
+                login_type: LoginType::Github,
+                linked_id: linked_id.clone(),
+                oauth_access_token: access_token.clone(),
+                oauth_refresh_token: String::new(),
+                oauth_expiry: OffsetDateTime::now_utc(),
+                claims: coder_core::UserLinkClaims::default(),
+            };
+            state
+                .store
+                .upsert_user_link(user.id, &link_input)
+                .await
+                .map_err(AppError::from)?;
+            user
+        }
+        None => {
+            // No user found — create new if signups are allowed.
+            if !github_config.allow_signups {
+                return Ok(redirect_to_login_response(
+                    &uri,
+                    "Signups are disabled for GitHub OAuth.",
+                ));
+            }
+            create_oauth_user_and_link(
+                &state,
+                &primary_email.email,
+                &gh_user.login,
+                &gh_user.name.clone().unwrap_or_default(),
+                &gh_user.avatar_url,
+                LoginType::Github,
+                &linked_id,
+                access_token,
+            )
+            .await?
+        }
+    };
+
+    // Create session and redirect.
+    let session_token = state
+        .auth
+        .create_oauth_session(&user)
+        .await
+        .map_err(|e| AppError::from(StorageError::unavailable(e.to_string())))?;
+
+    record_audit(
+        &state,
+        AuditAction::Login,
+        ResourceKind::Authentication,
+        None,
+        Some(user.id.to_string()),
+        "authenticated via GitHub OAuth",
+    )
+    .await;
+
+    Ok(build_oauth_redirect_response(
+        &session_token,
+        &sanitize_redirect_uri(&redirect_uri),
+    ))
+}
+
+/// `GET /api/v2/users/oidc/callback`
+///
+/// Handles the OIDC authorization code callback. Exchanges the code for
+/// tokens, validates the ID token, extracts user claims, finds or creates
+/// the user, creates a session, and redirects to the application.
+#[tracing::instrument(skip_all)]
+pub(crate) async fn get_oidc_callback(
+    State(state): State<AppState>,
+    Query(query): Query<coder_auth::oauth_login::OAuthCallbackQuery>,
+    headers: HeaderMap,
+    OriginalUri(uri): OriginalUri,
+) -> Result<Response, AppError> {
+    let Some(ref oidc_config) = state.config.oidc else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "OIDC is not enabled.",
+                "This deployment does not have OIDC configured.",
+            )),
+        )
+            .into_response());
+    };
+
+    // Check for upstream errors from the provider.
+    if let Some(ref err_msg) = query.error {
+        let detail = query
+            .error_description
+            .as_deref()
+            .unwrap_or("Unknown error from OIDC provider");
+        tracing::warn!("OIDC error: {err_msg} — {detail}");
+        return Ok(redirect_to_login_response(
+            &uri,
+            &format!("OIDC error: {detail}"),
+        ));
+    }
+
+    // Validate the state parameter.
+    let stored_state = cookie_from_headers(&headers, OAUTH2_STATE_COOKIE);
+    match stored_state {
+        Some(ref s) if s == &query.state => {}
+        _ => {
+            tracing::warn!("OIDC state mismatch");
+            return Ok(redirect_to_login_response(
+                &uri,
+                "OAuth state mismatch. Please try again.",
+            ));
+        }
+    }
+
+    let redirect_uri =
+        cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE).unwrap_or_else(|| "/".to_owned());
+
+    // Discover the OIDC endpoints.
+    let client = reqwest::Client::new();
+    let discovery = coder_auth::oauth_login::oidc_discover(&client, &oidc_config.issuer_url)
+        .await
+        .map_err(|e| {
+            tracing::error!("OIDC discovery failed: {e}");
+            AppError::from(StorageError::unavailable(e.to_string()))
+        })?;
+
+    // Build the callback redirect URI for the token exchange.
+    let callback_redirect = format!(
+        "{}/api/v2/users/oidc/callback",
+        state.config.access_url.as_str().trim_end_matches('/')
+    );
+
+    // Exchange the authorization code for tokens.
+    let token_response = coder_auth::oauth_login::oidc_exchange_code(
+        &client,
+        oidc_config,
+        &discovery.token_endpoint,
+        &query.code,
+        &callback_redirect,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("OIDC code exchange failed: {e}");
+        AppError::from(StorageError::unavailable(e.to_string()))
+    })?;
+
+    // Decode and validate the ID token claims.
+    let claims = coder_auth::oauth_login::decode_id_token_claims(&token_response.id_token)
+        .map_err(|e| {
+            tracing::error!("OIDC ID token decode failed: {e}");
+            AppError::from(StorageError::unavailable(e.to_string()))
+        })?;
+
+    coder_auth::oauth_login::validate_oidc_claims(&claims, oidc_config).map_err(|e| {
+        tracing::error!("OIDC claims validation failed: {e}");
+        AppError::from(StorageError::unavailable(e.to_string()))
+    })?;
+
+    // Extract the email from the claims.
+    let email = coder_auth::oauth_login::extract_claim(&claims, &oidc_config.email_field)
+        .ok_or_else(|| {
+            tracing::warn!("No email claim found in OIDC token");
+            AppError::from(StorageError::unavailable("No email found in OIDC claims."))
+        })?;
+
+    // Check email verification if required.
+    if !oidc_config.ignore_email_verified {
+        if let Some(false) = claims.email_verified {
+            return Ok(redirect_to_login_response(
+                &uri,
+                "Your email address has not been verified by the OIDC provider.",
+            ));
+        }
+    }
+
+    // Check email domain restrictions.
+    if !coder_auth::oauth_login::oidc_check_email_domain(oidc_config, &email) {
+        return Ok(redirect_to_login_response(
+            &uri,
+            "Your email domain is not allowed.",
+        ));
+    }
+
+    let linked_id = coder_auth::oauth_login::oidc_linked_id(&claims.sub);
+    let username = coder_auth::oauth_login::oidc_derive_username(&claims, oidc_config);
+    let name = coder_auth::oauth_login::extract_claim(&claims, &oidc_config.name_field)
+        .unwrap_or_default();
+
+    // Look up user by OIDC linked ID or by email.
+    let existing_user =
+        find_user_by_linked_id_or_email(&state, LoginType::Oidc, &linked_id, &email).await?;
+
+    let user_link_claims = coder_auth::oauth_login::build_user_link_claims(&claims);
+
+    let user = match existing_user {
+        Some(user) => {
+            // Update the user link with fresh claims.
+            let link_input = coder_core::UpsertUserLinkInput {
+                login_type: LoginType::Oidc,
+                linked_id: linked_id.clone(),
+                oauth_access_token: token_response.access_token.clone(),
+                oauth_refresh_token: token_response.refresh_token.clone().unwrap_or_default(),
+                oauth_expiry: token_response
+                    .expires_in
+                    .map(|secs| {
+                        time::OffsetDateTime::now_utc()
+                            + time::Duration::seconds(i64::try_from(secs).unwrap_or(3600))
+                    })
+                    .unwrap_or_else(time::OffsetDateTime::now_utc),
+                claims: user_link_claims,
+            };
+            state
+                .store
+                .upsert_user_link(user.id, &link_input)
+                .await
+                .map_err(AppError::from)?;
+            user
+        }
+        None => {
+            // No user found — create if signups allowed.
+            if !oidc_config.allow_signups {
+                return Ok(redirect_to_login_response(
+                    &uri,
+                    "Signups are disabled for OIDC.",
+                ));
+            }
+            create_oauth_user_and_link(
+                &state,
+                &email,
+                &username,
+                &name,
+                "",
+                LoginType::Oidc,
+                &linked_id,
+                &token_response.access_token,
+            )
+            .await?
+        }
+    };
+
+    // Create session and redirect.
+    let session_token = state
+        .auth
+        .create_oauth_session(&user)
+        .await
+        .map_err(|e| AppError::from(StorageError::unavailable(e.to_string())))?;
+
+    record_audit(
+        &state,
+        AuditAction::Login,
+        ResourceKind::Authentication,
+        None,
+        Some(user.id.to_string()),
+        "authenticated via OIDC",
+    )
+    .await;
+
+    Ok(build_oauth_redirect_response(
+        &session_token,
+        &sanitize_redirect_uri(&redirect_uri),
+    ))
+}
+
+// ---------------------------------------------------------------------------
+// Shared OAuth helper functions
+// ---------------------------------------------------------------------------
+
+/// Finds an existing user by external linked ID or by email.
+async fn find_user_by_linked_id_or_email(
+    state: &AppState,
+    login_type: LoginType,
+    linked_id: &str,
+    email: &str,
+) -> Result<Option<coder_core::UserRecord>, AppError> {
+    // First, try to find via user links across all users.
+    // We list all users and check their links. For scalability, a direct
+    // query method would be better, but we use the existing store API.
+    let (users, _count) = state
+        .store
+        .list_users(coder_core::UserListFilter::default())
+        .await
+        .map_err(AppError::from)?;
+
+    for user in &users {
+        let links = state
+            .store
+            .list_user_links(user.id)
+            .await
+            .map_err(AppError::from)?;
+        for link in &links {
+            if link.login_type == login_type && link.linked_id == *linked_id {
+                return Ok(Some(user.clone()));
+            }
+        }
+    }
+
+    // Fall back to email lookup.
+    for user in &users {
+        if user.email.eq_ignore_ascii_case(email) && !user.deleted {
+            return Ok(Some(user.clone()));
+        }
+    }
+
+    Ok(None)
+}
+
+/// Creates a new user account and links it to the OAuth/OIDC provider.
+#[allow(clippy::too_many_arguments)]
+async fn create_oauth_user_and_link(
+    state: &AppState,
+    email: &str,
+    username: &str,
+    name: &str,
+    avatar_url: &str,
+    login_type: LoginType,
+    linked_id: &str,
+    access_token: &str,
+) -> Result<coder_core::UserRecord, AppError> {
+    // Get the default organization to assign the user to.
+    let orgs = state
+        .store
+        .list_organizations(Vec::new())
+        .await
+        .map_err(AppError::from)?;
+    let org_ids: Vec<Uuid> = orgs.iter().take(1).map(|o| o.id).collect();
+
+    let create_input = coder_core::CreateUserInput {
+        email: email.to_owned(),
+        username: username.to_owned(),
+        name: name.to_owned(),
+        password_hash: None,
+        login_type,
+        status: UserStatus::Active,
+        organization_ids: org_ids,
+    };
+
+    let user = state
+        .store
+        .create_user(create_input)
+        .await
+        .map_err(|e| match e {
+            coder_core::CreateUserStoreError::AlreadyExists => AppError::from(
+                StorageError::unavailable("A user with this email or username already exists."),
+            ),
+            coder_core::CreateUserStoreError::Storage(se) => AppError::from(se),
+        })?;
+
+    // Generate and store a Git SSH key for the user.
+    if let Err(e) = store_new_git_ssh_key(state, &user).await {
+        tracing::warn!("Failed to create Git SSH key for new OAuth user: {e}");
+    }
+
+    // Create the user link.
+    let link_input = coder_core::UpsertUserLinkInput {
+        login_type,
+        linked_id: linked_id.to_owned(),
+        oauth_access_token: access_token.to_owned(),
+        oauth_refresh_token: String::new(),
+        oauth_expiry: OffsetDateTime::now_utc(),
+        claims: coder_core::UserLinkClaims::default(),
+    };
+    state
+        .store
+        .upsert_user_link(user.id, &link_input)
+        .await
+        .map_err(AppError::from)?;
+
+    record_audit(
+        state,
+        AuditAction::Create,
+        ResourceKind::User,
+        None,
+        Some(user.id.to_string()),
+        "created user via OAuth",
+    )
+    .await;
+
+    Ok(user)
+}
+
+/// Builds an HTTP 303 redirect response with the session token cookie set.
+fn build_oauth_redirect_response(session_token: &str, redirect_path: &str) -> Response {
+    let cookie_value = format!(
+        "{}={session_token}; Path=/; HttpOnly; SameSite=Lax",
+        coder_auth::SESSION_TOKEN_COOKIE
+    );
+    // Clear the OAuth state and redirect cookies.
+    let clear_state = format!("{}=; Path=/; Max-Age=0", OAUTH2_STATE_COOKIE);
+    let clear_redirect = format!("{}=; Path=/; Max-Age=0", OAUTH2_REDIRECT_COOKIE);
+
+    let mut response = StatusCode::SEE_OTHER.into_response();
+    if let Ok(loc) = HeaderValue::from_str(redirect_path) {
+        response.headers_mut().insert(LOCATION, loc);
+    }
+    if let Ok(v) = HeaderValue::from_str(&cookie_value) {
+        response
+            .headers_mut()
+            .append(HeaderName::from_static("set-cookie"), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&clear_state) {
+        response
+            .headers_mut()
+            .append(HeaderName::from_static("set-cookie"), v);
+    }
+    if let Ok(v) = HeaderValue::from_str(&clear_redirect) {
+        response
+            .headers_mut()
+            .append(HeaderName::from_static("set-cookie"), v);
+    }
+    response
+}
+
 pub(crate) async fn get_user_debug_link(
     State(state): State<AppState>,
     headers: HeaderMap,
