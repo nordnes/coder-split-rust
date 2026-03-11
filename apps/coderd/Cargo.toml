@@ -20,7 +20,6 @@ coder-core = { path = "../../crates/coder-core" }
 coder-db = { path = "../../crates/coder-db" }
 coder-rbac = { path = "../../crates/coder-rbac" }
 coder-server = { path = "../../crates/coder-server" }
-coder-workspaces = { path = "../../crates/coder-workspaces" }
 serde_json.workspace = true
 thiserror.workspace = true
 time.workspace = true

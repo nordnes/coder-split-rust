@@ -213,7 +213,6 @@ async fn run() -> Result<(), MainError> {
     let derp_map = build_derp_map_from_config(&config.derp_regions);
     let coordinator = InMemoryCoordinator::new(derp_map);
     let derp_tracker = DerpTrafficTracker::new();
-    let deployment_stats = coder_workspaces::DeploymentStatsService::new(store.clone());
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -234,7 +233,7 @@ async fn run() -> Result<(), MainError> {
             source,
         })?;
 
-    let application = build_router(state);
+    let application = build_router(state.clone());
     info!(
         listen_addr = %config.listen_addr,
         access_url = %config.access_url,
@@ -269,7 +268,7 @@ async fn run() -> Result<(), MainError> {
 
     // 3. Cancel the deployment-stats background refresh loop.
     coordinator.register("deployment_stats", async move {
-        deployment_stats.close();
+        state.close_deployment_stats();
     });
 
     // 4. Close the database connection pool last so preceding tasks can still

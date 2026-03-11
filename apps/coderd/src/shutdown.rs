@@ -1,8 +1,8 @@
 //! Graceful shutdown coordinator.
 //!
 //! Runs registered shutdown tasks sequentially in dependency order, enforcing
-//! a per-task timeout so that a misbehaving component cannot block the entire
-//! shutdown sequence.
+//! a **total** timeout budget so that the entire shutdown sequence completes
+//! within the configured grace period.
 #![forbid(unsafe_code)]
 
 use std::future::Future;
@@ -18,8 +18,10 @@ type BoxFuture = Pin<Box<dyn Future<Output = ()> + Send>>;
 ///
 /// Components are registered with a human-readable name and a future that
 /// performs their cleanup work.  When [`run`](Self::run) is called the tasks
-/// execute **sequentially** in the order they were registered, each subject to
-/// the supplied per-task timeout.
+/// execute **sequentially** in the order they were registered.  The supplied
+/// `timeout` is a **total** budget shared across all tasks — each task receives
+/// whatever time remains after the previous ones complete, and if the budget is
+/// exhausted the remaining tasks are skipped.
 pub(crate) struct ShutdownCoordinator {
     tasks: Vec<(&'static str, BoxFuture)>,
 }
@@ -42,14 +44,23 @@ impl ShutdownCoordinator {
         self.tasks.push((name, Box::pin(task)));
     }
 
-    /// Executes all registered shutdown tasks sequentially.
+    /// Executes all registered shutdown tasks sequentially within `timeout`.
     ///
-    /// Each task is given up to `timeout` to complete.  If a task exceeds its
-    /// budget a warning is logged and the coordinator moves on to the next task.
+    /// The timeout is a **total** budget.  Each task receives whatever time
+    /// remains after the previous tasks.  If the budget is exhausted a warning
+    /// is logged and the remaining tasks are skipped.
     pub(crate) async fn run(self, timeout: Duration) {
+        let deadline = tokio::time::Instant::now() + timeout;
+
         for (name, task) in self.tasks {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                warn!(component = name, "shutdown budget exhausted, skipping");
+                continue;
+            }
+
             info!(component = name, "shutting down");
-            match tokio::time::timeout(timeout, task).await {
+            match tokio::time::timeout(remaining, task).await {
                 Ok(()) => info!(component = name, "shutdown complete"),
                 Err(_) => warn!(component = name, "shutdown timed out"),
             }
@@ -84,7 +95,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn timed_out_task_does_not_block_others() {
+    async fn timed_out_task_exhausts_budget_for_remaining() {
         let reached = Arc::new(AtomicBool::new(false));
 
         let mut coordinator = ShutdownCoordinator::new();
@@ -99,10 +110,12 @@ mod tests {
             r.store(true, Ordering::SeqCst);
         });
 
-        coordinator.run(Duration::from_millis(50)).await;
+        // Total budget is 100ms; the slow task eats it all, so "fast" gets
+        // skipped because the budget is exhausted.
+        coordinator.run(Duration::from_millis(100)).await;
         assert!(
-            reached.load(Ordering::SeqCst),
-            "fast task should still run after slow times out"
+            !reached.load(Ordering::SeqCst),
+            "fast task should be skipped when budget is exhausted"
         );
     }
 
@@ -110,5 +123,28 @@ mod tests {
     async fn empty_coordinator_completes_immediately() {
         let coordinator = ShutdownCoordinator::new();
         coordinator.run(Duration::from_secs(1)).await;
+    }
+
+    #[tokio::test]
+    async fn total_budget_respected() {
+        let start = tokio::time::Instant::now();
+
+        let mut coordinator = ShutdownCoordinator::new();
+
+        // Two tasks that each try to sleep 200ms, but total budget is 150ms.
+        coordinator.register("a", async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+        coordinator.register("b", async {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        });
+
+        coordinator.run(Duration::from_millis(150)).await;
+
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "total shutdown should complete within the budget, took {elapsed:?}"
+        );
     }
 }
