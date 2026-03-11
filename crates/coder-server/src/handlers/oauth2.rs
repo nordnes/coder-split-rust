@@ -1160,7 +1160,7 @@ fn external_scope_names() -> Vec<String> {
         // User scopes
         "user:read_personal".to_owned(),
         "user:update_personal".to_owned(),
-        "user.*".to_owned(),
+        "user:*".to_owned(),
         // User secret scopes
         "user_secret:read".to_owned(),
         "user_secret:create".to_owned(),
