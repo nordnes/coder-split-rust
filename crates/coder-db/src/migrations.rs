@@ -64,7 +64,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<MigrationReport, MigrationE
         .map_err(|source| MigrationError::Apply { source })?;
 
     let after = count_applied_migrations(pool).await?;
-    let applied_count = (after - before) as usize;
+    let applied_count = (after.saturating_sub(before)) as usize;
     let total_count = after as usize;
 
     if applied_count > 0 {
