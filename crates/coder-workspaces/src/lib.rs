@@ -452,31 +452,37 @@ where
 {
     /// Creates the executor and starts the background evaluation loop.
     ///
-    /// The executor will run until the `CancellationToken` is cancelled
-    /// or the `Arc` is dropped.
+    /// Returns the executor and a [`tokio::task::JoinHandle`] for the
+    /// background loop.  Callers should cancel the token **and** await the
+    /// handle during shutdown to ensure in-flight evaluations complete before
+    /// resources (e.g. the database pool) are released.
     #[must_use]
-    pub fn start(store: S, cancel: CancellationToken) -> Arc<Self> {
+    pub fn start(store: S, cancel: CancellationToken) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         let executor = Arc::new(Self {
             store,
             cancel: cancel.clone(),
             tick_secs: AUTOBUILD_TICK_SECS,
         });
-        Self::spawn_executor_loop(&executor);
-        executor
+        let handle = Self::spawn_executor_loop(&executor);
+        (executor, handle)
     }
 
     /// Creates the executor with a custom tick interval.
     ///
     /// Useful for testing with shorter intervals.
     #[must_use]
-    pub fn start_with_interval(store: S, cancel: CancellationToken, tick_secs: u64) -> Arc<Self> {
+    pub fn start_with_interval(
+        store: S,
+        cancel: CancellationToken,
+        tick_secs: u64,
+    ) -> (Arc<Self>, tokio::task::JoinHandle<()>) {
         let executor = Arc::new(Self {
             store,
             cancel: cancel.clone(),
             tick_secs,
         });
-        Self::spawn_executor_loop(&executor);
-        executor
+        let handle = Self::spawn_executor_loop(&executor);
+        (executor, handle)
     }
 
     /// Evaluates one tick of the autobuild loop.
@@ -579,13 +585,13 @@ where
         Ok(result)
     }
 
-    fn spawn_executor_loop(executor: &Arc<Self>) {
+    fn spawn_executor_loop(executor: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(executor);
         let cancel = executor.cancel.clone();
         let tick_secs = executor.tick_secs;
         tokio::spawn(async move {
             run_autobuild_loop(weak, cancel, tick_secs).await;
-        });
+        })
     }
 }
 
@@ -817,7 +823,7 @@ fn is_eligible_for_autostop(ws: &WorkspaceTransitionRow, now: OffsetDateTime) ->
         return false;
     }
     match ws.build_deadline {
-        Some(deadline) if deadline != OffsetDateTime::UNIX_EPOCH => now >= deadline,
+        Some(deadline) if deadline != OffsetDateTime::UNIX_EPOCH => now > deadline,
         _ => false,
     }
 }
@@ -2033,7 +2039,8 @@ mod tests {
     async fn executor_cancellation() {
         let store = MockWorkspaceStore::new(vec![]);
         let cancel = CancellationToken::new();
-        let _executor = AutobuildExecutor::start_with_interval(store, cancel.clone(), 3600);
+        let (_executor, _handle) =
+            AutobuildExecutor::start_with_interval(store, cancel.clone(), 3600);
 
         cancel.cancel();
         tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;

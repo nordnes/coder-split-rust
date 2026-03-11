@@ -775,7 +775,8 @@ async fn run() -> Result<(), MainError> {
 
     // Start the autobuild lifecycle executor (workspace auto-start/stop).
     let autobuild_cancel = CancellationToken::new();
-    let _autobuild_executor = AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
+    let (_autobuild_executor, autobuild_handle) =
+        AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
 
     let state = AppState::new(
         config.clone(),
@@ -846,9 +847,14 @@ async fn run() -> Result<(), MainError> {
         state.close_deployment_stats();
     });
 
-    // 4. Cancel the autobuild lifecycle executor.
+    // 4. Cancel the autobuild lifecycle executor and wait for in-flight
+    //    evaluations to finish so database writes complete before the pool
+    //    is closed in step 6.
     coordinator.register("autobuild", async move {
         autobuild_cancel.cancel();
+        if let Err(e) = autobuild_handle.await {
+            warn!(error = %e, "autobuild executor task panicked during shutdown");
+        }
     });
 
     // 5. Flush and shut down the OpenTelemetry tracer provider so buffered
