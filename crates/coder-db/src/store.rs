@@ -1357,9 +1357,8 @@ impl AppStore for PostgresStore {
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(storage_error)?
-        .map(user_record_from_row)
-        .transpose();
+        .map_err(storage_error)
+        .and_then(|opt| opt.map(user_record_from_row).transpose());
         let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
         record_db_query("find_user_by_id", query_duration, result.is_ok());
         result
