@@ -8,7 +8,7 @@ pub(crate) async fn build_info(
     Json(state.build_metadata.to_response(
         state.deployment_id,
         &state.config.access_url,
-        state.config.telemetry_enabled,
+        &state.config.telemetry,
     ))
 }
 

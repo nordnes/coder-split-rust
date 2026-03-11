@@ -2,6 +2,23 @@
 //!
 //! Provides the autobuild executor loop, schedule evaluation, and
 //! deployment-stats caching.
+//!
+//! # Key types
+//!
+//! * [`DeploymentStatsService`] — cached deployment statistics with a
+//!   background 60-second refresh loop
+//! * [`AutostartSchedule`] — parsed cron expression with IANA timezone support
+//! * [`AutostopPolicy`] — TTL-based workspace auto-stop evaluation
+//! * [`AutobuildExecutor`] — background loop that evaluates workspace lifecycle
+//!   rules every 30 seconds
+//! * [`TemplateScheduleConstraints`] / [`QuietHoursWindow`] — template-level
+//!   schedule policies
+//! * [`AutobuildAction`] — transition enum (Start / Stop / Dormant / None)
+//!
+//! # Utility functions
+//!
+//! * [`compute_extended_deadline`] — deadline extension with optional max clamp
+//! * [`evaluate_dormancy`] — idle-days threshold check
 #![forbid(unsafe_code)]
 
 use std::str::FromStr;
