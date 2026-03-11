@@ -346,8 +346,8 @@ impl TunnelStore {
 
     /// Check whether a tunnel exists between `a` and `b` in either direction.
     fn tunnel_exists(&self, a: Uuid, b: Uuid) -> bool {
-        self.by_src.get(&a).map_or(false, |dsts| dsts.contains(&b))
-            || self.by_dst.get(&a).map_or(false, |srcs| srcs.contains(&b))
+        self.by_src.get(&a).is_some_and(|dsts| dsts.contains(&b))
+            || self.by_dst.get(&a).is_some_and(|srcs| srcs.contains(&b))
     }
 }
 

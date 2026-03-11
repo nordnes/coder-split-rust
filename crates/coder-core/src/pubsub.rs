@@ -211,6 +211,30 @@ pub fn workspace_agent_reinit_channel(agent_id: Uuid) -> String {
     format!("workspace_agent_reinit:{agent_id}")
 }
 
+/// Returns the pub/sub channel name for workspace agent container state changes.
+#[must_use]
+pub fn workspace_agent_containers_channel(agent_id: Uuid) -> String {
+    format!("workspace_agent_containers:{agent_id}")
+}
+
+/// Returns the pub/sub channel name for workspace agent metadata updates.
+#[must_use]
+pub fn workspace_agent_metadata_channel(agent_id: Uuid) -> String {
+    format!("workspace_agent_metadata:{agent_id}")
+}
+
+/// Returns the pub/sub channel name for workspace agent PTY input (client to agent).
+#[must_use]
+pub fn workspace_agent_pty_input_channel(agent_id: Uuid) -> String {
+    format!("workspace_agent_pty_input:{agent_id}")
+}
+
+/// Returns the pub/sub channel name for workspace agent PTY output (agent to client).
+#[must_use]
+pub fn workspace_agent_pty_output_channel(agent_id: Uuid) -> String {
+    format!("workspace_agent_pty_output:{agent_id}")
+}
+
 /// The kind of workspace event broadcast over the pub/sub channel.
 ///
 /// String representations match the Go `wspubsub.WorkspaceEventKind` constants.
