@@ -72,7 +72,7 @@ pub(crate) async fn post_oauth2_provider_app(
             &request.name,
             &request.icon,
             &request.callback_url,
-            context.user.id,
+            Some(context.user.id),
         )
         .await
     {
@@ -698,6 +698,10 @@ pub(crate) async fn get_oauth2_authorization_server_metadata(
         authorization_endpoint: format!("{access_url}/oauth2/authorize"),
         token_endpoint: format!("{access_url}/oauth2/tokens"),
         registration_endpoint: format!("{access_url}/oauth2/register"),
+        // NOTE: Token revocation is not yet implemented — the handler returns
+        // an error instead of silently succeeding. We still advertise the
+        // endpoint to match Go's metadata response (which also includes it),
+        // so clients can discover it for future use.
         revocation_endpoint: format!("{access_url}/oauth2/revoke"),
         response_types_supported: vec!["code".to_owned()],
         grant_types_supported: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
@@ -762,12 +766,18 @@ pub(crate) async fn post_oauth2_register(
     let client_name = req.generate_client_name();
 
     // Create the app via the existing OAuth2 provider service.
-    // Dynamic registration uses a system-level context (no user auth required).
+    // Dynamic registration uses a system-level context (no user auth required),
+    // matching Go's use of `dbauthz.AsSystemRestricted(ctx)` with `InsertOAuth2ProviderApp`.
+    //
+    // NOTE: The existing store only supports a single callback_url.
+    // The response echoes back all redirect_uris from the request, but only
+    // the first one is persisted as the app's callback_url. This matches
+    // Go behavior where only the primary redirect_uri is stored.
     let callback_url = req.redirect_uris.first().cloned().unwrap_or_default();
 
     let app = match state
         .oauth2_provider
-        .create_app(&client_name, &req.logo_uri, &callback_url, Uuid::nil())
+        .create_app(&client_name, &req.logo_uri, &callback_url, None)
         .await
     {
         Ok(app) => app,
@@ -796,9 +806,11 @@ pub(crate) async fn post_oauth2_register(
     let access_url = state.config.access_url.to_string();
     let access_url = access_url.trim_end_matches('/');
 
-    // For the registration access token, generate a random token.
-    // Since the Rust store doesn't have a dedicated registration_access_token field yet,
-    // we use the client secret as the registration access token for RFC 7592 management.
+    // Generate a random registration access token for RFC 7592 client management.
+    // NOTE: This token is NOT persisted or verified — the RFC 7592 endpoints
+    // (GET/PUT/DELETE /oauth2/clients/{client_id}) currently reject all requests
+    // because the DB lacks a registration_access_token_hash column.
+    // A future migration will add token storage and hash verification.
     let registration_access_token = generate_registration_token();
     let registration_client_uri = format!("{access_url}/oauth2/clients/{}", app.id);
 
@@ -1111,14 +1123,20 @@ pub(crate) async fn post_oauth2_revoke(
         }
     }
 
-    // Try to revoke tokens for this app/user combination.
-    // The actual token lookup and revocation would require matching the token
-    // to a specific user's OAuth2 session. For now, we return 200 OK per RFC 7009
-    // which states the server MUST respond with HTTP 200 for both valid and
-    // invalid tokens.
-
-    // RFC 7009: successful revocation always returns HTTP 200.
-    Ok(StatusCode::OK.into_response())
+    // Token revocation is not yet fully implemented. The Go reference
+    // implementation looks up tokens by hash and revokes the associated
+    // API key + refresh token, but the Rust store lacks the necessary
+    // token-to-user lookup.  Return `unsupported_token_type` so callers
+    // know the token was NOT revoked, instead of silently returning 200
+    // which would mislead clients into believing revocation succeeded.
+    Ok((
+        StatusCode::BAD_REQUEST,
+        Json(OAuth2ErrorResponse {
+            error: "unsupported_token_type".to_owned(),
+            error_description: "Token revocation is not yet implemented".to_owned(),
+        }),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -1126,69 +1144,77 @@ pub(crate) async fn post_oauth2_revoke(
 // ---------------------------------------------------------------------------
 
 /// Returns the sorted list of external scope names (matching Go's rbac.ExternalScopeNames).
+///
+/// Uses `LazyLock` so the list is sorted and allocated only once.
 fn external_scope_names() -> Vec<String> {
-    let mut names = vec![
-        "all".to_owned(),
-        "application_connect".to_owned(),
-        // Low-level workspace scopes
-        "workspace:read".to_owned(),
-        "workspace:create".to_owned(),
-        "workspace:update".to_owned(),
-        "workspace:delete".to_owned(),
-        "workspace:ssh".to_owned(),
-        "workspace:start".to_owned(),
-        "workspace:stop".to_owned(),
-        "workspace:application_connect".to_owned(),
-        "workspace:*".to_owned(),
-        // Template scopes
-        "template:read".to_owned(),
-        "template:create".to_owned(),
-        "template:update".to_owned(),
-        "template:delete".to_owned(),
-        "template:use".to_owned(),
-        "template:*".to_owned(),
-        // API key scopes
-        "api_key:read".to_owned(),
-        "api_key:create".to_owned(),
-        "api_key:update".to_owned(),
-        "api_key:delete".to_owned(),
-        "api_key:*".to_owned(),
-        // File scopes
-        "file:read".to_owned(),
-        "file:create".to_owned(),
-        "file:*".to_owned(),
-        // User scopes
-        "user:read_personal".to_owned(),
-        "user:update_personal".to_owned(),
-        "user:*".to_owned(),
-        // User secret scopes
-        "user_secret:read".to_owned(),
-        "user_secret:create".to_owned(),
-        "user_secret:update".to_owned(),
-        "user_secret:delete".to_owned(),
-        "user_secret:*".to_owned(),
-        // Task scopes
-        "task:create".to_owned(),
-        "task:read".to_owned(),
-        "task:update".to_owned(),
-        "task:delete".to_owned(),
-        "task:*".to_owned(),
-        // Organization scopes
-        "organization:read".to_owned(),
-        "organization:update".to_owned(),
-        "organization:delete".to_owned(),
-        "organization:*".to_owned(),
-        // Composite scopes
-        "coder:workspaces.create".to_owned(),
-        "coder:workspaces.operate".to_owned(),
-        "coder:workspaces.delete".to_owned(),
-        "coder:workspaces.access".to_owned(),
-        "coder:templates.build".to_owned(),
-        "coder:templates.author".to_owned(),
-        "coder:apikeys.manage_self".to_owned(),
-    ];
-    names.sort();
-    names
+    use std::sync::LazyLock;
+
+    static SCOPE_NAMES: LazyLock<Vec<String>> = LazyLock::new(|| {
+        let mut names = vec![
+            "all".to_owned(),
+            "application_connect".to_owned(),
+            // Low-level workspace scopes
+            "workspace:read".to_owned(),
+            "workspace:create".to_owned(),
+            "workspace:update".to_owned(),
+            "workspace:delete".to_owned(),
+            "workspace:ssh".to_owned(),
+            "workspace:start".to_owned(),
+            "workspace:stop".to_owned(),
+            "workspace:application_connect".to_owned(),
+            "workspace:*".to_owned(),
+            // Template scopes
+            "template:read".to_owned(),
+            "template:create".to_owned(),
+            "template:update".to_owned(),
+            "template:delete".to_owned(),
+            "template:use".to_owned(),
+            "template:*".to_owned(),
+            // API key scopes
+            "api_key:read".to_owned(),
+            "api_key:create".to_owned(),
+            "api_key:update".to_owned(),
+            "api_key:delete".to_owned(),
+            "api_key:*".to_owned(),
+            // File scopes
+            "file:read".to_owned(),
+            "file:create".to_owned(),
+            "file:*".to_owned(),
+            // User scopes
+            "user:read_personal".to_owned(),
+            "user:update_personal".to_owned(),
+            "user.*".to_owned(),
+            // User secret scopes
+            "user_secret:read".to_owned(),
+            "user_secret:create".to_owned(),
+            "user_secret:update".to_owned(),
+            "user_secret:delete".to_owned(),
+            "user_secret:*".to_owned(),
+            // Task scopes
+            "task:create".to_owned(),
+            "task:read".to_owned(),
+            "task:update".to_owned(),
+            "task:delete".to_owned(),
+            "task:*".to_owned(),
+            // Organization scopes
+            "organization:read".to_owned(),
+            "organization:update".to_owned(),
+            "organization:delete".to_owned(),
+            "organization:*".to_owned(),
+            // Composite scopes
+            "coder:workspaces.create".to_owned(),
+            "coder:workspaces.operate".to_owned(),
+            "coder:workspaces.delete".to_owned(),
+            "coder:workspaces.access".to_owned(),
+            "coder:templates.build".to_owned(),
+            "coder:templates.author".to_owned(),
+            "coder:apikeys.manage_self".to_owned(),
+        ];
+        names.sort();
+        names
+    });
+
+    SCOPE_NAMES.clone()
 }
 
 /// Generate a random registration access token for RFC 7592.
@@ -1216,7 +1242,11 @@ fn oauth2_registration_error(status: StatusCode, error_code: &str, description: 
 }
 
 /// Validate the Authorization: Bearer <token> header for RFC 7592 endpoints.
-/// Returns None if valid, Some(error_response) if invalid.
+///
+/// Currently **always rejects** because registration access tokens are not
+/// persisted (the DB has no `registration_access_token_hash` column yet).
+/// Once token storage is added, this should verify the token's SHA-256 hash
+/// against the stored value, matching Go's `apikey.ValidateHash()` approach.
 fn validate_registration_token(headers: &HeaderMap) -> Option<Response> {
     let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
@@ -1245,9 +1275,17 @@ fn validate_registration_token(headers: &HeaderMap) -> Option<Response> {
         ));
     }
 
-    // In a full implementation, we would verify this token against the stored hash.
-    // For now, we accept any non-empty Bearer token to enable the endpoint flow.
-    None
+    // Registration access token verification is not yet implemented.
+    // The token generated during POST /oauth2/register is not persisted,
+    // so we cannot verify it. Reject all requests until a DB migration
+    // adds the `registration_access_token_hash` column and the store
+    // gains verification support.
+    let _ = token;
+    Some(oauth2_registration_error(
+        StatusCode::UNAUTHORIZED,
+        "invalid_token",
+        "Registration access token verification is not yet implemented",
+    ))
 }
 
 pub(crate) fn handle_oauth2_provider_error(

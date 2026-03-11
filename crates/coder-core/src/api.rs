@@ -1745,6 +1745,12 @@ pub struct OAuth2ClientRegistrationRequest {
 
 impl OAuth2ClientRegistrationRequest {
     /// Apply RFC 7591 defaults for missing fields.
+    ///
+    /// **Ordering note:** This method sets `client_name` to a default when
+    /// empty, which means a subsequent call to [`generate_client_name()`] will
+    /// see a non-empty name and skip the URI-derived fallback logic. This
+    /// matches Go's `ApplyDefaults()` → `GenerateClientName()` ordering, where
+    /// the same behavior occurs intentionally.
     pub fn apply_defaults(mut self) -> Self {
         if self.grant_types.is_empty() {
             self.grant_types = vec!["authorization_code".to_owned(), "refresh_token".to_owned()];
@@ -1785,7 +1791,7 @@ impl OAuth2ClientRegistrationRequest {
                 let prefix: String = self
                     .client_name
                     .char_indices()
-                    .take_while(|&(i, _)| i < max_prefix)
+                    .take_while(|&(i, c)| i + c.len_utf8() <= max_prefix)
                     .map(|(_, c)| c)
                     .collect();
                 return format!("{prefix}-{hash_prefix}");
@@ -1816,7 +1822,7 @@ fn truncate_name_to_64(name: &str) -> String {
         return name.to_owned();
     }
     name.char_indices()
-        .take_while(|&(i, _)| i < 64)
+        .take_while(|&(i, c)| i + c.len_utf8() <= 64)
         .map(|(_, c)| c)
         .collect()
 }
@@ -1932,6 +1938,7 @@ pub struct OAuth2ErrorResponse {
 #[derive(Clone, Debug, Deserialize)]
 pub struct OAuth2TokenRevocationRequest {
     /// The token to revoke.
+    #[serde(default)]
     pub token: String,
     /// Hint about the token type.
     #[serde(default)]
@@ -5084,4 +5091,155 @@ pub struct CustomNotificationContent {
 pub struct CustomNotificationRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<CustomNotificationContent>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------------------------------------------------------------
+    // generate_client_name() unit tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn generate_client_name_empty_with_redirect_uri() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://myapp.example.com/callback".to_owned()],
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Client (myapp.example.com)");
+    }
+
+    #[test]
+    fn generate_client_name_explicit_name() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://example.com/callback".to_owned()],
+            client_name: "My App".to_owned(),
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "My App");
+    }
+
+    #[test]
+    fn generate_client_name_long_name_truncated_with_hash() {
+        let long_name = "A".repeat(100);
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://example.com/callback".to_owned()],
+            client_name: long_name.clone(),
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert!(
+            name.len() <= 64,
+            "name should be at most 64 bytes, got {}",
+            name.len()
+        );
+        assert!(name.contains('-'), "truncated name should have hash suffix");
+    }
+
+    #[test]
+    fn generate_client_name_long_multibyte_name() {
+        // Each emoji is 4 bytes, so 20 emojis = 80 bytes > 64
+        let emoji_name = "🎉".repeat(20);
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://example.com/callback".to_owned()],
+            client_name: emoji_name,
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert!(
+            name.len() <= 64,
+            "name should be at most 64 bytes, got {}",
+            name.len()
+        );
+    }
+
+    #[test]
+    fn generate_client_name_fallback_to_client_uri() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://other.example.com/callback".to_owned()],
+            client_uri: "https://myapp.dev".to_owned(),
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Client (myapp.dev)");
+    }
+
+    #[test]
+    fn generate_client_name_fallback_to_redirect_uri_host() {
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec!["https://redirect.example.org/cb".to_owned()],
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Client (redirect.example.org)");
+    }
+
+    #[test]
+    fn generate_client_name_ultimate_fallback() {
+        // Empty redirect_uris won't reach this in practice (validation rejects it),
+        // but the function itself falls back to a default.
+        let req = OAuth2ClientRegistrationRequest {
+            redirect_uris: vec![],
+            ..Default::default()
+        };
+        let name = req.generate_client_name();
+        assert_eq!(name, "Dynamically Registered Client");
+    }
+
+    // ---------------------------------------------------------------
+    // truncate_name_to_64() unit tests
+    // ---------------------------------------------------------------
+
+    #[test]
+    fn truncate_name_short_ascii() {
+        let name = "Hello World";
+        let result = truncate_name_to_64(name);
+        assert_eq!(result, "Hello World");
+    }
+
+    #[test]
+    fn truncate_name_exactly_64_bytes() {
+        let name = "A".repeat(64);
+        let result = truncate_name_to_64(&name);
+        assert_eq!(result.len(), 64);
+        assert_eq!(result, name);
+    }
+
+    #[test]
+    fn truncate_name_over_64_ascii() {
+        let name = "B".repeat(100);
+        let result = truncate_name_to_64(&name);
+        assert_eq!(result.len(), 64);
+    }
+
+    #[test]
+    fn truncate_name_multibyte_utf8_over_64() {
+        // Each '€' is 3 bytes. 22 * 3 = 66 bytes > 64
+        let name = "€".repeat(22);
+        let result = truncate_name_to_64(&name);
+        assert!(
+            result.len() <= 64,
+            "result length {} exceeds 64",
+            result.len()
+        );
+        // Should truncate to 21 * 3 = 63 bytes (can't fit 22nd char within 64)
+        assert_eq!(result.len(), 63);
+    }
+
+    #[test]
+    fn truncate_name_4byte_chars() {
+        // Each '🎉' is 4 bytes. 17 * 4 = 68 > 64
+        let name = "🎉".repeat(17);
+        let result = truncate_name_to_64(&name);
+        assert!(
+            result.len() <= 64,
+            "result length {} exceeds 64",
+            result.len()
+        );
+        // Should truncate to 16 * 4 = 64 bytes
+        assert_eq!(result.len(), 64);
+    }
 }
