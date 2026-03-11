@@ -149,15 +149,12 @@ pub async fn rate_limit_middleware(
     match limiter.check_key(&key) {
         Ok(_) => {
             let mut response = next.run(request).await;
-            // Governor's Ok branch with the default NoOpMiddleware does not
-            // expose remaining capacity.  We report the configured limit and
-            // a fixed 60s reset window (buckets are per-minute).
-            inject_rate_limit_headers(
-                response.headers_mut(),
-                limit_per_minute,
-                limit_per_minute,
-                60,
-            );
+            // Governor's GCRA algorithm does not expose remaining capacity on
+            // the Ok branch, so we only emit `x-ratelimit-limit` and
+            // `x-ratelimit-reset`.  Omitting `x-ratelimit-remaining` is more
+            // honest than reporting an inaccurate value that could mislead
+            // clients implementing proactive backoff.
+            inject_rate_limit_headers(response.headers_mut(), limit_per_minute, None, 60);
             response
         }
         Err(not_until) => {
@@ -180,7 +177,12 @@ pub async fn rate_limit_middleware(
 
             let mut response = (StatusCode::TOO_MANY_REQUESTS, body).into_response();
 
-            inject_rate_limit_headers(response.headers_mut(), limit_per_minute, 0, retry_secs);
+            inject_rate_limit_headers(
+                response.headers_mut(),
+                limit_per_minute,
+                Some(0),
+                retry_secs,
+            );
             if let Ok(val) = HeaderValue::from_str(&retry_secs.to_string()) {
                 response.headers_mut().insert(HEADER_RETRY_AFTER, val);
             }
@@ -272,12 +274,23 @@ fn extract_client_ip(headers: &HeaderMap) -> IpAddr {
 }
 
 /// Injects standard `X-RateLimit-*` headers into the response.
-fn inject_rate_limit_headers(headers: &mut HeaderMap, limit: u32, remaining: u32, reset_secs: u64) {
+///
+/// `remaining` is `None` when the governor GCRA algorithm doesn't expose
+/// bucket state (success branch).  In that case the `x-ratelimit-remaining`
+/// header is omitted rather than reporting an inaccurate value.
+fn inject_rate_limit_headers(
+    headers: &mut HeaderMap,
+    limit: u32,
+    remaining: Option<u32>,
+    reset_secs: u64,
+) {
     if let Ok(v) = HeaderValue::from_str(&limit.to_string()) {
         headers.insert(HEADER_RATE_LIMIT, v);
     }
-    if let Ok(v) = HeaderValue::from_str(&remaining.to_string()) {
-        headers.insert(HEADER_RATE_REMAINING, v);
+    if let Some(rem) = remaining {
+        if let Ok(v) = HeaderValue::from_str(&rem.to_string()) {
+            headers.insert(HEADER_RATE_REMAINING, v);
+        }
     }
     if let Ok(v) = HeaderValue::from_str(&reset_secs.to_string()) {
         headers.insert(HEADER_RATE_RESET, v);

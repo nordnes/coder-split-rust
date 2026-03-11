@@ -1700,22 +1700,13 @@ fn to_public_link(link: ExternalAuthLinkRecord) -> ExternalAuthLink {
 
 /// Returns `true` when the error represents a transient HTTP failure that
 /// should be retried (429, 5xx, or connection-level errors).
+///
+/// Both `bearer_get_once` and `post_form_once` already classify errors so
+/// that only transient failures (5xx, 429, connection/timeout) are wrapped
+/// as `Internal`, while client errors (4xx except 429) become `BadRequest`.
+/// Therefore every `Internal` variant is safe to retry.
 fn is_retryable_external_auth_error(error: &ExternalAuthServiceError) -> bool {
-    match error {
-        ExternalAuthServiceError::Internal(detail) => {
-            // Connection errors from reqwest and retryable server status codes.
-            detail.contains("status 429")
-                || detail.contains("status 500")
-                || detail.contains("status 502")
-                || detail.contains("status 503")
-                || detail.contains("status 504")
-                || detail.contains("connection")
-                || detail.contains("timed out")
-                || detail.contains("dns error")
-        }
-        // BadRequest / Storage errors are never retryable.
-        _ => false,
-    }
+    matches!(error, ExternalAuthServiceError::Internal(_))
 }
 
 /// Retry strategy used for external auth provider HTTP calls.
