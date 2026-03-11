@@ -263,4 +263,149 @@ mod tests {
             );
         }
     }
+
+    // ── Empty provider edge cases ───────────────────────────
+
+    #[tokio::test]
+    async fn empty_provider_returns_none() {
+        let provider = InMemoryAgentProvider::new();
+        assert!(
+            provider
+                .get_agent_connection(Uuid::new_v4())
+                .await
+                .is_none(),
+            "empty provider should return None for any ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn empty_provider_debug_info_is_empty() {
+        let provider = InMemoryAgentProvider::new();
+        let info = provider.debug_info().await;
+        assert!(info.is_empty(), "empty provider should have no debug info");
+    }
+
+    // ── Nil UUID agent ──────────────────────────────────────
+
+    #[tokio::test]
+    async fn register_and_lookup_nil_uuid() {
+        let provider = InMemoryAgentProvider::new();
+        let nil_id = Uuid::nil();
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: nil_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        provider.register_agent(nil_id, conn).await;
+        let found = provider.get_agent_connection(nil_id).await;
+        assert!(found.is_some(), "nil UUID should be a valid agent ID");
+        assert_eq!(found.as_ref().map(|c| c.agent_id()), Some(nil_id));
+    }
+
+    // ── Replace connection for same agent ───────────────────
+
+    #[tokio::test]
+    async fn register_replaces_existing_connection() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let t1 = OffsetDateTime::now_utc() - time::Duration::seconds(10);
+        let t2 = OffsetDateTime::now_utc();
+
+        let conn1: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: t1,
+        });
+        let conn2: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: t2,
+        });
+
+        provider.register_agent(agent_id, conn1).await;
+        provider.register_agent(agent_id, conn2).await;
+
+        let found = provider.get_agent_connection(agent_id).await;
+        assert!(found.is_some());
+        // The connection should be the newer one.
+        assert_eq!(
+            found.as_ref().map(|c| c.connected_at()),
+            Some(t2),
+            "second registration should replace first"
+        );
+
+        // Only one entry in debug_info.
+        let info = provider.debug_info().await;
+        assert_eq!(info.len(), 1);
+    }
+
+    // ── Remove non-existent agent is a no-op ────────────────
+
+    #[tokio::test]
+    async fn remove_nonexistent_agent_is_noop() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        // Remove without registering should not panic.
+        provider.remove_agent(agent_id, &conn).await;
+        assert!(provider.get_agent_connection(agent_id).await.is_none());
+    }
+
+    // ── AgentError display messages ─────────────────────────
+
+    #[test]
+    fn agent_error_not_connected_display() {
+        let err = AgentError::NotConnected;
+        assert_eq!(err.to_string(), "agent is not connected");
+    }
+
+    #[test]
+    fn agent_error_send_failed_display() {
+        let err = AgentError::SendFailed("timeout".to_owned());
+        assert!(err.to_string().contains("timeout"));
+        assert!(err.to_string().contains("failed to send command"));
+    }
+
+    #[test]
+    fn agent_error_rejected_display() {
+        let err = AgentError::AgentRejected("not supported".to_owned());
+        assert!(err.to_string().contains("not supported"));
+    }
+
+    // ── StubConnection operations ───────────────────────────
+
+    #[tokio::test]
+    async fn stub_connection_recreate_devcontainer_ok() {
+        let conn = StubConnection {
+            id: Uuid::new_v4(),
+            connected: OffsetDateTime::now_utc(),
+        };
+        let result = conn.recreate_devcontainer("container-123").await;
+        assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn stub_connection_delete_devcontainer_ok() {
+        let conn = StubConnection {
+            id: Uuid::new_v4(),
+            connected: OffsetDateTime::now_utc(),
+        };
+        let result = conn.delete_devcontainer("container-456").await;
+        assert!(result.is_ok());
+    }
+
+    // ── AgentConnectionInfo preserves fields ────────────────
+
+    #[test]
+    fn agent_connection_info_clone_and_debug() {
+        let info = AgentConnectionInfo {
+            agent_id: Uuid::new_v4(),
+            connected_at: OffsetDateTime::now_utc(),
+        };
+        let cloned = info.clone();
+        assert_eq!(info.agent_id, cloned.agent_id);
+        assert_eq!(info.connected_at, cloned.connected_at);
+        let debug = format!("{info:?}");
+        assert!(debug.contains("AgentConnectionInfo"));
+    }
 }

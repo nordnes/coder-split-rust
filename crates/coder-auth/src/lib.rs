@@ -2703,6 +2703,42 @@ fn verify_pkce(code_verifier: &str, code_challenge: &str, method: &str) -> bool 
     }
 }
 
+fn external_auth_installations_from_value(value: &Value) -> Vec<ExternalAuthAppInstallation> {
+    let items = value
+        .get("installations")
+        .and_then(Value::as_array)
+        .or_else(|| value.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    items
+        .into_iter()
+        .filter_map(|item| {
+            let id = item
+                .get("id")
+                .and_then(Value::as_i64)
+                .and_then(|raw| i32::try_from(raw).ok())
+                .unwrap_or_default();
+            if id == 0 {
+                return None;
+            }
+            Some(ExternalAuthAppInstallation {
+                id,
+                account: item
+                    .get("account")
+                    .and_then(external_auth_user_from_value)
+                    .unwrap_or_default(),
+                configure_url: item
+                    .get("configure_url")
+                    .and_then(Value::as_str)
+                    .or_else(|| item.get("html_url").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_owned(),
+            })
+        })
+        .collect()
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -2736,7 +2772,7 @@ mod tests {
 
     #[derive(Default, Clone)]
     struct MockStore {
-        inner: std::sync::Arc<Mutex<MockStoreInner>>,
+        inner: Arc<Mutex<MockStoreInner>>,
     }
 
     fn make_user(id: Uuid, email: &str, username: &str, name: &str) -> UserRecord {
@@ -2802,7 +2838,7 @@ mod tests {
             let user = make_user(user_id, &input.email, &input.username, &input.name);
             inner.users.push(user.clone());
             inner.password_users.push(PasswordUserRecord {
-                user: user,
+                user,
                 password_hash: input.password_hash,
                 one_time_passcode_hash: None,
                 one_time_passcode_expires_at: None,
@@ -2984,7 +3020,7 @@ mod tests {
 
         async fn token_config(&self, _user_id: Uuid) -> Result<TokenConfigRecord, StorageError> {
             Ok(TokenConfigRecord {
-                max_token_lifetime: std::time::Duration::from_secs(60 * 60 * 24 * 365),
+                max_token_lifetime: Duration::from_secs(60 * 60 * 24 * 365),
             })
         }
 
@@ -3241,40 +3277,252 @@ mod tests {
         let bad_result = service.login_with_password(&bad_login).await;
         assert!(bad_result.is_err(), "wrong password must be rejected");
     }
-}
 
-fn external_auth_installations_from_value(value: &Value) -> Vec<ExternalAuthAppInstallation> {
-    let items = value
-        .get("installations")
-        .and_then(Value::as_array)
-        .or_else(|| value.as_array())
-        .cloned()
-        .unwrap_or_default();
+    // ── Authenticate with invalid/empty token ───────────────
 
-    items
-        .into_iter()
-        .filter_map(|item| {
-            let id = item
-                .get("id")
-                .and_then(Value::as_i64)
-                .and_then(|raw| i32::try_from(raw).ok())
-                .unwrap_or_default();
-            if id == 0 {
-                return None;
+    #[tokio::test]
+    async fn test_authenticate_empty_headers_returns_none() {
+        let store = MockStore::default();
+        let service = AuthService::new(store);
+        let headers = HeaderMap::new();
+        let result = service.authenticate(&headers).await;
+        assert!(result.is_ok());
+        assert!(
+            result.unwrap_or(None).is_none(),
+            "empty headers should not authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_authenticate_invalid_token_returns_none() {
+        let store = MockStore::default();
+        let service = AuthService::new(store);
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            SESSION_TOKEN_HEADER,
+            http::HeaderValue::from_static("totally-invalid-token"),
+        );
+        let result = service.authenticate(&headers).await;
+        assert!(result.is_ok());
+        // Token doesn't match any session → None
+        assert!(
+            result.unwrap_or(None).is_none(),
+            "invalid token should not authenticate"
+        );
+    }
+
+    // ── Login with non-existent email ───────────────────────
+
+    #[tokio::test]
+    async fn test_login_nonexistent_email_fails() {
+        let store = MockStore::default();
+        let service = AuthService::new(store);
+        let login_request = LoginWithPasswordRequest {
+            email: "nobody@example.com".to_owned(),
+            password: "anypassword123".to_owned(),
+        };
+        let result = service.login_with_password(&login_request).await;
+        assert!(result.is_err(), "login with non-existent email must fail");
+    }
+
+    // ── Session token hashing consistency ───────────────────
+
+    #[test]
+    fn test_session_token_hash_consistency() {
+        let token = "test-token-value-for-hashing";
+        let hash1 = hash_session_token(token);
+        let hash2 = hash_session_token(token);
+        assert_eq!(hash1, hash2, "same token must produce same hash");
+    }
+
+    #[test]
+    fn test_different_tokens_produce_different_hashes() {
+        let hash1 = hash_session_token("token-a");
+        let hash2 = hash_session_token("token-b");
+        assert_ne!(hash1, hash2, "different tokens must hash differently");
+    }
+
+    // ── Password validation edge cases ──────────────────────
+
+    #[test]
+    fn test_validate_password_exactly_64_chars() {
+        let service = AuthService::new(MockStore::default());
+        let result = service.validate_user_password(&ValidateUserPasswordRequest {
+            password: "a".repeat(64),
+        });
+        assert!(result.valid, "exactly 64 characters should be valid");
+    }
+
+    #[test]
+    fn test_validate_password_exactly_7_chars() {
+        let service = AuthService::new(MockStore::default());
+        let result = service.validate_user_password(&ValidateUserPasswordRequest {
+            password: "1234567".to_owned(),
+        });
+        assert!(!result.valid, "7 characters should be too short");
+        assert!(!result.details.is_empty());
+    }
+
+    // ── Cookie extraction edge cases ────────────────────────
+
+    #[test]
+    fn test_cookie_with_spaces_around_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("coder_session_token=spaced-token"),
+        );
+        assert_eq!(
+            cookie_from_headers(&headers, SESSION_TOKEN_COOKIE),
+            Some("spaced-token".to_owned())
+        );
+    }
+
+    #[test]
+    fn test_cookie_empty_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("coder_session_token="),
+        );
+        // Empty value cookie should still be found
+        assert_eq!(
+            cookie_from_headers(&headers, SESSION_TOKEN_COOKIE),
+            Some(String::new())
+        );
+    }
+
+    #[test]
+    fn test_cookie_multiple_cookies_correct_one_selected() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("a=1; coder_session_token=correct; b=2"),
+        );
+        assert_eq!(
+            cookie_from_headers(&headers, SESSION_TOKEN_COOKIE),
+            Some("correct".to_owned())
+        );
+    }
+
+    // ── First user creation validation ──────────────────────
+
+    #[tokio::test]
+    async fn test_create_first_user_with_short_password() {
+        let store = MockStore::default();
+        let service = AuthService::new(store);
+        let request = CreateFirstUserRequest {
+            email: "admin@example.com".to_owned(),
+            username: "admin".to_owned(),
+            name: "Admin".to_owned(),
+            password: "short".to_owned(),
+        };
+        let result = service.create_first_user(&request).await;
+        assert!(result.is_err(), "short password should be rejected");
+    }
+
+    #[tokio::test]
+    async fn test_create_first_user_with_empty_fields() {
+        let store = MockStore::default();
+        let service = AuthService::new(store);
+        let request = CreateFirstUserRequest {
+            email: String::new(),
+            username: String::new(),
+            name: String::new(),
+            password: "securepassword123".to_owned(),
+        };
+        let result = service.create_first_user(&request).await;
+        assert!(result.is_err(), "empty email/username should be rejected");
+    }
+
+    // ── AuthServiceError constructors ───────────────────────
+
+    #[test]
+    fn test_auth_service_error_variants() {
+        let unauth = AuthServiceError::unauthorized("test");
+        assert!(matches!(unauth, AuthServiceError::Unauthorized { .. }));
+
+        let forbidden = AuthServiceError::forbidden("test");
+        assert!(matches!(forbidden, AuthServiceError::Forbidden { .. }));
+
+        let not_found = AuthServiceError::not_found("test");
+        assert!(matches!(not_found, AuthServiceError::NotFound { .. }));
+
+        let bad_req = AuthServiceError::bad_request("test");
+        assert!(matches!(bad_req, AuthServiceError::BadRequest { .. }));
+    }
+
+    // ── new_session_token uniqueness ────────────────────────
+
+    #[test]
+    fn test_session_tokens_are_unique() {
+        let tokens: Vec<String> = (0..100).map(|_| new_session_token()).collect();
+        for i in 0..tokens.len() {
+            for j in (i + 1)..tokens.len() {
+                assert_ne!(tokens[i], tokens[j], "tokens {i} and {j} should differ");
             }
-            Some(ExternalAuthAppInstallation {
-                id,
-                account: item
-                    .get("account")
-                    .and_then(external_auth_user_from_value)
-                    .unwrap_or_default(),
-                configure_url: item
-                    .get("configure_url")
-                    .and_then(Value::as_str)
-                    .or_else(|| item.get("html_url").and_then(Value::as_str))
-                    .unwrap_or_default()
-                    .to_owned(),
-            })
-        })
-        .collect()
+        }
+    }
+
+    // ── verify_pkce helper ──────────────────────────────────
+
+    #[test]
+    fn test_verify_pkce_plain_method() {
+        let verifier = "my-code-verifier-value";
+        let challenge = "my-code-verifier-value";
+        assert!(verify_pkce(verifier, challenge, "plain"));
+        assert!(verify_pkce(verifier, challenge, ""));
+        assert!(!verify_pkce("wrong", challenge, "plain"));
+    }
+
+    #[test]
+    fn test_verify_pkce_s256_method() {
+        use base64::Engine as _;
+        use sha2::Digest;
+        let verifier = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk";
+        let hash = sha2::Sha256::digest(verifier.as_bytes());
+        let challenge = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash);
+        assert!(verify_pkce(verifier, &challenge, "S256"));
+        assert!(!verify_pkce("wrong-verifier", &challenge, "S256"));
+    }
+
+    #[test]
+    fn test_verify_pkce_unknown_method() {
+        assert!(!verify_pkce("v", "c", "unknown_method"));
+    }
+
+    // ── parse_response_body helper ──────────────────────────
+
+    #[test]
+    fn test_parse_response_body_empty() {
+        let result = parse_response_body(None, "");
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or_else(|_| json!(null)), json!({}));
+    }
+
+    #[test]
+    fn test_parse_response_body_json() {
+        let result = parse_response_body(Some("application/json"), r#"{"key":"value"}"#);
+        assert!(result.is_ok());
+        let parsed = result.unwrap_or_else(|_| json!(null));
+        assert_eq!(parsed["key"], "value");
+    }
+
+    #[test]
+    fn test_parse_response_body_form_urlencoded() {
+        let result = parse_response_body(
+            Some("application/x-www-form-urlencoded"),
+            "access_token=abc123&token_type=bearer",
+        );
+        assert!(result.is_ok());
+        let parsed = result.unwrap_or_else(|_| json!(null));
+        assert_eq!(parsed["access_token"], "abc123");
+        assert_eq!(parsed["token_type"], "bearer");
+    }
+
+    #[test]
+    fn test_parse_response_body_invalid_json() {
+        let result = parse_response_body(Some("application/json"), "not json at all");
+        assert!(result.is_err());
+    }
 }

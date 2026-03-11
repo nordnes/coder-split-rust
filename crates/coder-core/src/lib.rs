@@ -88,8 +88,8 @@ pub use identity::{
     OrganizationRecord, PasswordUserRecord, SlimRoleRecord, TokenConfigRecord,
     UpdateOAuth2ProviderAppInput, UpdateOrganizationInput, UpdateOrganizationStoreError,
     UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
-    UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
-    UserStatus, UserStatusChangeRecord,
+    UserDeletedRecord, UserLinkClaims, UserLinkRecord, UserListFilter, UserPreferenceRecord,
+    UserRecord, UserStatus, UserStatusChangeRecord,
 };
 pub use password::{
     PasswordError, hash_password, hash_session_token, new_session_token, normalize_real_name,
