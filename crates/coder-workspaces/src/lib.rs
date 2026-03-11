@@ -622,6 +622,16 @@ async fn evaluate_workspace<S: AutobuildStore>(
                 last_used_at = %ws.last_used_at,
                 "autobuild: marked workspace dormant"
             );
+            // If the workspace is running, it also needs to be stopped.
+            if action == AutobuildAction::Stop {
+                info!(
+                    workspace_id = %ws.id,
+                    workspace_name = %ws.name,
+                    "autobuild: stopping dormant workspace"
+                );
+                // In the full implementation this would trigger a stop build
+                // via the workspace builder.
+            }
         }
         BuildReason::Autodelete => {
             info!(
