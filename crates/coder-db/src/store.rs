@@ -79,6 +79,21 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
 const REGULAR_MAX_TOKEN_LIFETIME_SECS: u64 = 60 * 60 * 24 * 30;
 const OWNER_MAX_TOKEN_LIFETIME_SECS: u64 = 60 * 60 * 24 * 365;
 
+/// Records a database query metric with operation name, duration, and success/failure.
+///
+/// Emits two metrics:
+/// - `db_query_duration_ms` (histogram): query latency in milliseconds, labelled by
+///   `operation` and `success`.
+/// - `db_queries_total` (counter): total number of queries, labelled by `operation` and
+///   `success`.
+fn record_db_query(operation: &str, duration_ms: f64, success: bool) {
+    let success_str = if success { "true" } else { "false" };
+    metrics::histogram!("db_query_duration_ms", "operation" => operation.to_owned(), "success" => success_str)
+        .record(duration_ms);
+    metrics::counter!("db_queries_total", "operation" => operation.to_owned(), "success" => success_str)
+        .increment(1);
+}
+
 /// Database initialization failures.
 #[derive(Debug, Error)]
 pub enum DatabaseInitError {
@@ -673,6 +688,7 @@ struct StoredUserLinkRow {
     oauth_access_token: String,
     oauth_refresh_token: String,
     oauth_expiry: OffsetDateTime,
+    claims: Value,
 }
 
 #[derive(Debug, FromRow)]
@@ -1055,6 +1071,8 @@ impl AppStore for PostgresStore {
         &self,
         token_hash: &[u8],
     ) -> Result<Option<AuthenticatedUser>, StorageError> {
+        let query_start = std::time::Instant::now();
+        let result: Result<Option<AuthenticatedUser>, StorageError> = async {
         let row = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
@@ -1108,6 +1126,14 @@ impl AppStore for PostgresStore {
 
         auth_user.org_roles = org_roles;
         Ok(Some(auth_user))
+        }.await;
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query(
+            "find_user_by_session_token_hash",
+            query_duration,
+            result.is_ok(),
+        );
+        result
     }
 
     #[instrument(skip(self, token_hash), err(level = tracing::Level::WARN))]
@@ -1303,7 +1329,8 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn find_user_by_id(&self, user_id: Uuid) -> Result<Option<UserRecord>, StorageError> {
-        sqlx::query_as::<_, StoredUserRow>(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
                 u.email,
@@ -1330,9 +1357,11 @@ impl AppStore for PostgresStore {
         .bind(user_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(storage_error)?
-        .map(user_record_from_row)
-        .transpose()
+        .map_err(storage_error)
+        .and_then(|opt| opt.map(user_record_from_row).transpose());
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("find_user_by_id", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -1615,20 +1644,22 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredUserLinkRow>(
             "INSERT INTO user_links (
                 user_id, login_type, linked_id,
-                oauth_access_token, oauth_refresh_token, oauth_expiry
-             ) VALUES ($1, $2::login_type, $3, $4, $5, $6)
+                oauth_access_token, oauth_refresh_token, oauth_expiry, claims
+             ) VALUES ($1, $2::login_type, $3, $4, $5, $6, $7)
              ON CONFLICT (user_id, login_type) DO UPDATE SET
                 linked_id = EXCLUDED.linked_id,
                 oauth_access_token = EXCLUDED.oauth_access_token,
                 oauth_refresh_token = EXCLUDED.oauth_refresh_token,
-                oauth_expiry = EXCLUDED.oauth_expiry
+                oauth_expiry = EXCLUDED.oauth_expiry,
+                claims = EXCLUDED.claims
              RETURNING
                 user_id,
                 login_type::text AS login_type,
                 linked_id,
                 oauth_access_token,
                 oauth_refresh_token,
-                oauth_expiry",
+                oauth_expiry,
+                claims",
         )
         .bind(user_id)
         .bind(input.login_type.as_str())
@@ -1636,6 +1667,7 @@ impl AppStore for PostgresStore {
         .bind(&input.oauth_access_token)
         .bind(&input.oauth_refresh_token)
         .bind(input.oauth_expiry)
+        .bind(serde_json::to_value(&input.claims).unwrap_or_default())
         .fetch_one(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -1803,7 +1835,8 @@ impl AppStore for PostgresStore {
                 linked_id,
                 oauth_access_token,
                 oauth_refresh_token,
-                oauth_expiry
+                oauth_expiry,
+                claims
              FROM user_links
              WHERE user_id = $1",
         )
@@ -2498,7 +2531,8 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
     async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
-        sqlx::query(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query(
             "INSERT INTO audit_logs (
                 id,
                 request_id,
@@ -2543,9 +2577,12 @@ impl AppStore for PostgresStore {
         .bind(input.user_id)
         .execute(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map(|_| ())
+        .map_err(storage_error);
 
-        Ok(())
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("insert_audit_log", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self, logs), err(level = tracing::Level::WARN))]
@@ -5686,6 +5723,8 @@ impl AppStore for PostgresStore {
         &self,
         filter: WorkspaceListFilter,
     ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+        let query_start = std::time::Instant::now();
+        let result: Result<(Vec<WorkspaceRecord>, i64), StorageError> = async {
         let search = filter
             .name
             .as_deref()
@@ -5774,6 +5813,10 @@ impl AppStore for PostgresStore {
         let workspaces: Vec<WorkspaceRecord> =
             rows.into_iter().map(workspace_record_from_row).collect();
         Ok((workspaces, total))
+        }.await;
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("list_workspaces", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -5782,7 +5825,8 @@ impl AppStore for PostgresStore {
         workspace_id: Uuid,
         viewer_id: Option<Uuid>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        sqlx::query_as::<_, StoredWorkspaceRow>(
+        let query_start = std::time::Instant::now();
+        let result = sqlx::query_as::<_, StoredWorkspaceRow>(
             "SELECT w.id, w.created_at, w.updated_at, w.deleted, w.owner_id, w.organization_id,
                     w.template_id, w.name, w.autostart_schedule, w.ttl, w.last_used_at,
                     w.dormant_at, w.deleting_at, w.automatic_updates,
@@ -5797,7 +5841,10 @@ impl AppStore for PostgresStore {
         .fetch_optional(&self.pool)
         .await
         .map_err(storage_error)
-        .map(|opt| opt.map(workspace_record_from_row))
+        .map(|opt| opt.map(workspace_record_from_row));
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        record_db_query("find_workspace_by_id", query_duration, result.is_ok());
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -10015,6 +10062,7 @@ fn user_link_record_from_row(row: StoredUserLinkRow) -> Result<UserLinkRecord, S
         .login_type
         .parse::<LoginType>()
         .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+    let claims = serde_json::from_value(row.claims).unwrap_or_default();
     Ok(UserLinkRecord {
         user_id: row.user_id,
         login_type,
@@ -10022,6 +10070,7 @@ fn user_link_record_from_row(row: StoredUserLinkRow) -> Result<UserLinkRecord, S
         oauth_access_token: row.oauth_access_token,
         oauth_refresh_token: row.oauth_refresh_token,
         oauth_expiry: row.oauth_expiry,
+        claims,
     })
 }
 
@@ -12881,7 +12930,7 @@ mod tests {
 
         // Filter by search
         let (users, total) = store
-            .list_users(coder_core::UserListFilter {
+            .list_users(UserListFilter {
                 search: tag.clone(),
                 status: None,
                 limit: 50,
@@ -12906,7 +12955,7 @@ mod tests {
 
         // Filter by status=suspended
         let (suspended, _) = store
-            .list_users(coder_core::UserListFilter {
+            .list_users(UserListFilter {
                 search: tag.clone(),
                 status: Some(UserStatus::Suspended),
                 limit: 50,
@@ -12924,7 +12973,7 @@ mod tests {
 
         // Pagination: limit 1, offset 0
         let (page, _) = store
-            .list_users(coder_core::UserListFilter {
+            .list_users(UserListFilter {
                 search: tag.clone(),
                 status: None,
                 limit: 1,
@@ -14135,6 +14184,829 @@ mod tests {
         assert!(
             !canceled,
             "cancel should return false for an already-completed job"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Constraint Violations
+    // =========================================================================
+
+    /// Verify that creating a user with a duplicate email/username returns
+    /// `CreateUserStoreError::AlreadyExists` instead of panicking.
+    #[tokio::test]
+    #[ignore]
+    async fn test_create_user_duplicate_returns_error() -> TestResult {
+        use coder_core::CreateUserStoreError;
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let suffix = uniq();
+
+        // First creation succeeds
+        let _user_id = create_test_user(&store, org_id, &suffix).await?;
+
+        // Second creation with the same username/email should fail gracefully
+        let input = CreateUserInput {
+            email: format!("test-{suffix}@example.com"),
+            username: format!("testuser-{suffix}"),
+            name: format!("Test User {suffix}"),
+            password_hash: Some("hashed".to_string()),
+            login_type: LoginType::Password,
+            status: UserStatus::Active,
+            organization_ids: vec![org_id],
+        };
+
+        let result = store.create_user(input).await;
+        assert!(result.is_err(), "duplicate user should return an error");
+        match result {
+            Err(CreateUserStoreError::AlreadyExists) => {} // expected
+            Err(other) => {
+                return Err(format!("expected AlreadyExists, got: {other:?}").into());
+            }
+            Ok(_) => return Err("expected error but got Ok".into()),
+        }
+
+        Ok(())
+    }
+
+    /// Inserting a workspace with an invalid template_id (non-existent FK)
+    /// should return a storage error, not panic.
+    #[tokio::test]
+    #[ignore]
+    async fn test_insert_workspace_invalid_template_fk() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let bogus_template_id = Uuid::new_v4(); // does not exist
+        let result = store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: user_id,
+                organization_id: org_id,
+                template_id: bogus_template_id,
+                name: format!("ws-fk-{}", uniq()),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await;
+
+        assert!(
+            result.is_err(),
+            "workspace with bogus template FK should fail"
+        );
+        Ok(())
+    }
+
+    /// Creating a group with a duplicate name in the same organization should
+    /// return an error rather than panicking.
+    #[tokio::test]
+    #[ignore]
+    async fn test_create_group_duplicate_name_returns_error() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+
+        let group_name = format!("dup-group-{}", uniq());
+        let input = CreateGroupInput {
+            name: group_name.clone(),
+            display_name: "Dup Group".to_string(),
+            organization_id: org_id,
+            avatar_url: String::new(),
+            quota_allowance: 0,
+        };
+
+        // First creation succeeds
+        let _g1 = store.create_group(&input).await?;
+
+        // Second creation with the same name should fail
+        let result = store.create_group(&input).await;
+        assert!(
+            result.is_err(),
+            "duplicate group name in same org should fail"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Complex Query – find_workspace_by_owner_and_name (JOIN + LOWER)
+    // =========================================================================
+
+    /// `find_workspace_by_owner_and_name` uses LOWER() for case-insensitive
+    /// matching and a LEFT JOIN on workspace_favorites. Verify both the happy
+    /// path and the case-insensitive lookup.
+    #[tokio::test]
+    #[ignore]
+    async fn test_find_workspace_by_owner_and_name_case_insensitive() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user_id,
+            &format!("tmpl-ci-{}", uniq()),
+        )
+        .await?;
+
+        let ws_name = format!("MyWorkspace-{}", uniq());
+        let ws_id = Uuid::new_v4();
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: ws_id,
+                owner_id: user_id,
+                organization_id: org_id,
+                template_id: tmpl,
+                name: ws_name.clone(),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Exact name match
+        let found = store
+            .find_workspace_by_owner_and_name(user_id, &ws_name, None)
+            .await?;
+        assert!(found.is_some(), "exact name should match");
+        assert_eq!(found.as_ref().map(|w| w.id), Some(ws_id));
+
+        // Case-insensitive match (all lower)
+        let lower = store
+            .find_workspace_by_owner_and_name(user_id, &ws_name.to_lowercase(), None)
+            .await?;
+        assert!(lower.is_some(), "lower-case name should still match");
+
+        // Non-existent name should return None
+        let missing = store
+            .find_workspace_by_owner_and_name(user_id, "no-such-ws", None)
+            .await?;
+        assert!(missing.is_none());
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Workspace list – empty result set
+    // =========================================================================
+
+    /// Listing workspaces with a filter that matches nothing should return an
+    /// empty vec with a total count of 0.
+    #[tokio::test]
+    #[ignore]
+    async fn test_workspace_list_empty_result() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let non_existent_owner = Uuid::new_v4();
+        let (list, total) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(non_existent_owner),
+                ..default_ws_filter()
+            })
+            .await?;
+        assert!(list.is_empty(), "no workspaces should match bogus owner");
+        assert_eq!(total, 0);
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Workspace list – pagination boundary
+    // =========================================================================
+
+    /// Test that offset beyond total rows returns an empty page while the total
+    /// count remains correct.
+    #[tokio::test]
+    #[ignore]
+    async fn test_workspace_list_pagination_beyond_end() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user_id,
+            &format!("tmpl-pag-{}", uniq()),
+        )
+        .await?;
+
+        // Create 3 workspaces
+        for i in 0..3 {
+            store
+                .insert_workspace(CreateWorkspaceInput {
+                    id: Uuid::new_v4(),
+                    owner_id: user_id,
+                    organization_id: org_id,
+                    template_id: tmpl,
+                    name: format!("ws-pag-{}-{}", i, uniq()),
+                    autostart_schedule: None,
+                    ttl_ns: None,
+                    automatic_updates: "never".to_string(),
+                })
+                .await?;
+        }
+
+        // Page with offset past the end
+        let (page, total) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                offset: 100,
+                limit: 10,
+                ..default_ws_filter()
+            })
+            .await?;
+        assert!(page.is_empty(), "offset past end should return empty page");
+        assert_eq!(total, 3, "total should still reflect all matching rows");
+
+        // Page with limit 1, offset 0 – should get exactly 1
+        let (first_page, total2) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                offset: 0,
+                limit: 1,
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(first_page.len(), 1, "limit=1 should return exactly 1 row");
+        assert_eq!(total2, 3);
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Workspace list – combined template_ids + owner filter
+    // =========================================================================
+
+    /// Verify that combining `owner_id` and `template_ids` filters narrows
+    /// results correctly (AND semantics).
+    #[tokio::test]
+    #[ignore]
+    async fn test_workspace_list_combined_owner_and_template_filter() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let owner_a = create_test_user(&store, org_id, &uniq()).await?;
+        let owner_b = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl_x =
+            create_test_template(&store, &pool, org_id, owner_a, &format!("tx-{}", uniq())).await?;
+        let tmpl_y =
+            create_test_template(&store, &pool, org_id, owner_a, &format!("ty-{}", uniq())).await?;
+
+        // owner_a has 2 workspaces: one on tmpl_x, one on tmpl_y
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: owner_a,
+                organization_id: org_id,
+                template_id: tmpl_x,
+                name: format!("ws-ax-{}", uniq()),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: owner_a,
+                organization_id: org_id,
+                template_id: tmpl_y,
+                name: format!("ws-ay-{}", uniq()),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // owner_b has 1 workspace on tmpl_x
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: Uuid::new_v4(),
+                owner_id: owner_b,
+                organization_id: org_id,
+                template_id: tmpl_x,
+                name: format!("ws-bx-{}", uniq()),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Filter: owner_a AND tmpl_x → should be exactly 1
+        let (rows, total) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(owner_a),
+                template_ids: vec![tmpl_x],
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(total, 1, "only 1 workspace belongs to owner_a on tmpl_x");
+        assert_eq!(rows.len(), 1);
+
+        // Filter: owner_a with no template filter → should be 2
+        let (rows2, total2) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(owner_a),
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(total2, 2);
+        assert_eq!(rows2.len(), 2);
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Soft-delete cascade – template soft-delete hides from find
+    // =========================================================================
+
+    /// After soft-deleting a template, `find_template_by_id` should return
+    /// `None` (the SQL filters `deleted = false`).
+    #[tokio::test]
+    #[ignore]
+    async fn test_soft_delete_template_hides_from_find() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl_id = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user_id,
+            &format!("tmpl-sdel-{}", uniq()),
+        )
+        .await?;
+
+        // Should be findable before deletion
+        let before = store.find_template_by_id(tmpl_id).await?;
+        assert!(before.is_some(), "template should exist before soft-delete");
+
+        // Soft-delete
+        let deleted = store.soft_delete_template(tmpl_id).await?;
+        assert!(deleted, "soft_delete_template should return true");
+
+        // Should NOT be findable after deletion
+        let after = store.find_template_by_id(tmpl_id).await?;
+        assert!(
+            after.is_none(),
+            "template should not be found after soft-delete"
+        );
+
+        // Deleting again should return false (already soft-deleted)
+        let second = store.soft_delete_template(tmpl_id).await?;
+        assert!(
+            !second,
+            "second soft_delete_template should return false (idempotent)"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Soft-delete cascade – workspace soft-delete excludes from list
+    // =========================================================================
+
+    /// After soft-deleting a workspace it should be excluded from list_workspaces
+    /// AND the total count should drop.
+    #[tokio::test]
+    #[ignore]
+    async fn test_soft_delete_workspace_excludes_from_list_and_count() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user_id,
+            &format!("tmpl-wsdel-{}", uniq()),
+        )
+        .await?;
+
+        let ws_id = Uuid::new_v4();
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: ws_id,
+                owner_id: user_id,
+                organization_id: org_id,
+                template_id: tmpl,
+                name: format!("ws-sdel-{}", uniq()),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Count before delete
+        let (_, before_total) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                ..default_ws_filter()
+            })
+            .await?;
+        assert!(before_total >= 1);
+
+        // Soft-delete the workspace
+        store.soft_delete_workspace(ws_id).await?;
+
+        // The workspace should no longer appear in list or find
+        let after_find = store.find_workspace_by_id(ws_id, None).await?;
+        assert!(
+            after_find.is_none(),
+            "soft-deleted workspace should not be found"
+        );
+
+        let (after_list, after_total) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_id: Some(user_id),
+                ..default_ws_filter()
+            })
+            .await?;
+        assert_eq!(
+            after_total,
+            before_total - 1,
+            "total should drop by 1 after soft-delete"
+        );
+        assert!(
+            !after_list.iter().any(|w| w.id == ws_id),
+            "deleted workspace should not appear in list"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Transaction method – acquire_pending_notification_messages
+    // =========================================================================
+
+    /// `acquire_pending_notification_messages` uses FOR UPDATE SKIP LOCKED in a
+    /// subquery. Verify that:
+    ///   - pending messages are leased and returned with status "leased"
+    ///   - messages that already exceeded max_attempt_count are skipped
+    #[tokio::test]
+    #[ignore]
+    async fn test_acquire_pending_notification_messages_basic() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Seed a notification template
+        let notif_tmpl_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO notification_templates (id, name, title_template, body_template, "group", actions, kind)
+               VALUES ($1, $2, 'Title', 'Body', NULL, '[]', 'system')
+               ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(notif_tmpl_id)
+        .bind(format!("test-acq-{}", uniq()))
+        .execute(&pool)
+        .await?;
+
+        // Insert 2 pending messages; one with attempt_count already at the max
+        let msg1 = Uuid::new_v4();
+        let msg2 = Uuid::new_v4();
+        for (id, attempts) in [(msg1, 0i32), (msg2, 99)] {
+            sqlx::query(
+                r#"INSERT INTO notification_messages
+                   (id, user_id, notification_template_id, method, status, payload,
+                    created_at, updated_at, attempt_count)
+                   VALUES ($1, $2, $3, 'smtp'::notification_method,
+                           'pending'::notification_message_status,
+                           '{}'::jsonb, NOW(), NOW(), $4)"#,
+            )
+            .bind(id)
+            .bind(user_id)
+            .bind(notif_tmpl_id)
+            .bind(attempts)
+            .execute(&pool)
+            .await?;
+        }
+
+        // Acquire with max_attempt_count = 5: only msg1 should be acquired
+        let acquired = store.acquire_pending_notification_messages(10, 5).await?;
+
+        let acquired_ids: Vec<Uuid> = acquired.iter().map(|m| m.id).collect();
+        assert!(
+            acquired_ids.contains(&msg1),
+            "pending message with 0 attempts should be acquired"
+        );
+        assert!(
+            !acquired_ids.contains(&msg2),
+            "message with 99 attempts should NOT be acquired (exceeds max)"
+        );
+
+        // The acquired message should have status Leased
+        for msg in &acquired {
+            if msg.id == msg1 {
+                assert_eq!(
+                    msg.status,
+                    coder_core::NotificationMessageStatus::Leased,
+                    "acquired message should be leased"
+                );
+            }
+        }
+
+        // Clean up
+        for id in [msg1, msg2] {
+            let _ = sqlx::query("DELETE FROM notification_messages WHERE id = $1")
+                .bind(id)
+                .execute(&pool)
+                .await;
+        }
+        let _ = sqlx::query("DELETE FROM notification_templates WHERE id = $1")
+            .bind(notif_tmpl_id)
+            .execute(&pool)
+            .await;
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: update_workspace_name – CTE-based UPDATE with JOIN
+    // =========================================================================
+
+    /// `update_workspace_name` uses a CTE (WITH updated AS ...) and a LEFT JOIN
+    /// on workspace_favorites. Verify it updates correctly and returns None for
+    /// a non-existent workspace.
+    #[tokio::test]
+    #[ignore]
+    async fn test_update_workspace_name_cte_path() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl = create_test_template(
+            &store,
+            &pool,
+            org_id,
+            user_id,
+            &format!("tmpl-ren-{}", uniq()),
+        )
+        .await?;
+
+        let ws_id = Uuid::new_v4();
+        let orig_name = format!("ws-orig-{}", uniq());
+        store
+            .insert_workspace(CreateWorkspaceInput {
+                id: ws_id,
+                owner_id: user_id,
+                organization_id: org_id,
+                template_id: tmpl,
+                name: orig_name.clone(),
+                autostart_schedule: None,
+                ttl_ns: None,
+                automatic_updates: "never".to_string(),
+            })
+            .await?;
+
+        // Rename the workspace
+        let new_name = format!("ws-renamed-{}", uniq());
+        let updated = store
+            .update_workspace_name(ws_id, &new_name, Some(user_id))
+            .await?;
+        assert!(updated.is_some(), "update should return the record");
+        assert_eq!(
+            updated.as_ref().map(|w| w.name.as_str()),
+            Some(new_name.as_str())
+        );
+
+        // Verify via find
+        let found = store.find_workspace_by_id(ws_id, None).await?;
+        assert_eq!(
+            found.as_ref().map(|w| w.name.as_str()),
+            Some(new_name.as_str())
+        );
+
+        // Update a non-existent workspace should return None (not error)
+        let missing = store
+            .update_workspace_name(Uuid::new_v4(), "nope", None)
+            .await?;
+        assert!(
+            missing.is_none(),
+            "updating non-existent workspace should return None"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: User status change tracking (insert + list)
+    // =========================================================================
+
+    /// `insert_user_status_change` and `list_user_status_changes` exercise the
+    /// user_status_changes table. Verify insertion and ordering (ASC by
+    /// changed_at).
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_status_changes_insert_and_list() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Insert two status changes
+        let sc1 = store
+            .insert_user_status_change(
+                user_id,
+                UserStatus::Active,
+                UserStatus::Suspended,
+                None,
+                "test suspension",
+            )
+            .await?;
+        assert_eq!(sc1.user_id, user_id);
+
+        let sc2 = store
+            .insert_user_status_change(
+                user_id,
+                UserStatus::Suspended,
+                UserStatus::Active,
+                None,
+                "reactivated",
+            )
+            .await?;
+
+        // List should return them ordered by changed_at ASC
+        let changes = store.list_user_status_changes(user_id).await?;
+        assert!(
+            changes.len() >= 2,
+            "should have at least the 2 changes we inserted"
+        );
+
+        // The second change should come after the first in the list
+        let pos1 = changes
+            .iter()
+            .position(|c| c.id == sc1.id)
+            .ok_or("sc1 not found in changes list")?;
+        let pos2 = changes
+            .iter()
+            .position(|c| c.id == sc2.id)
+            .ok_or("sc2 not found in changes list")?;
+        assert!(pos1 < pos2, "changes should be ordered by changed_at ASC");
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: Template version list – sort order verification
+    // =========================================================================
+
+    /// `list_template_versions` orders by `created_at DESC`. Verify that the
+    /// most recently created version appears first.
+    #[tokio::test]
+    #[ignore]
+    async fn test_template_version_list_sort_order() -> TestResult {
+        use coder_core::template::CreateTemplateVersionInput;
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let tmpl_name = format!("tmpl-sort-{}", uniq());
+        let tmpl_id = create_test_template(&store, &pool, org_id, user_id, &tmpl_name).await?;
+
+        // Add two more versions (the template helper already created v1)
+        for i in 2..=3 {
+            let v_id = Uuid::new_v4();
+            let job_id = create_provisioner_job(&pool, org_id, user_id).await?;
+            let now = OffsetDateTime::now_utc();
+            store
+                .insert_template_version(CreateTemplateVersionInput {
+                    id: v_id,
+                    template_id: Some(tmpl_id),
+                    organization_id: org_id,
+                    created_at: now,
+                    updated_at: now,
+                    name: format!("{tmpl_name}-v{i}"),
+                    message: format!("version {i}"),
+                    readme: String::new(),
+                    job_id,
+                    created_by: user_id,
+                    source_example_id: None,
+                })
+                .await?;
+        }
+
+        let versions = store
+            .list_template_versions(TemplateVersionListFilter {
+                template_id: tmpl_id,
+                include_archived: true,
+                offset: 0,
+                limit: 100,
+            })
+            .await?;
+
+        assert!(versions.len() >= 3, "should have at least 3 versions");
+
+        // Verify DESC ordering: first version in the list has the latest created_at
+        for window in versions.windows(2) {
+            assert!(
+                window[0].created_at >= window[1].created_at,
+                "versions should be ordered by created_at DESC"
+            );
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // NEW: User list – sort order verification (LOWER(username) ASC)
+    // =========================================================================
+
+    /// `list_users` orders by `LOWER(username) ASC`. Verify alphabetical
+    /// ordering among newly created users.
+    #[tokio::test]
+    #[ignore]
+    async fn test_user_list_sort_order_by_username() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+
+        // Create users with carefully chosen prefixes so we can verify ordering
+        let tag = uniq();
+        let mut names = vec![
+            format!("charlie-{tag}"),
+            format!("alpha-{tag}"),
+            format!("bravo-{tag}"),
+        ];
+        for name in &names {
+            create_test_user(&store, org_id, name).await?;
+        }
+
+        let (users, total) = store
+            .list_users(UserListFilter {
+                search: tag.clone(),
+                status: None,
+                offset: 0,
+                limit: 100,
+            })
+            .await?;
+
+        assert_eq!(total, 3, "should find the 3 test users");
+
+        // Extract usernames
+        let returned_usernames: Vec<String> = users.iter().map(|u| u.username.clone()).collect();
+
+        names.sort();
+        let expected: Vec<String> = names.iter().map(|n| format!("testuser-{n}")).collect();
+
+        assert_eq!(
+            returned_usernames, expected,
+            "users should be ordered by LOWER(username) ASC"
         );
 
         Ok(())

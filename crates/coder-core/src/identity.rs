@@ -533,6 +533,25 @@ pub enum CreateApiKeyStoreError {
 // User Identity Supplements
 // ---------------------------------------------------------------------------
 
+/// IDP claims associated with a user link.
+///
+/// Mirrors the Go `UserLinkClaims` type from
+/// `coderd/database/types.go`. The claims are captured at login time and
+/// used for IDP sync.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct UserLinkClaims {
+    /// Claims extracted from the OIDC ID token.
+    #[serde(default)]
+    pub id_token_claims: serde_json::Map<String, serde_json::Value>,
+    /// Claims fetched from the UserInfo endpoint.
+    #[serde(default)]
+    pub user_info_claims: serde_json::Map<String, serde_json::Value>,
+    /// Merged result of id_token_claims and user_info_claims (UserInfo
+    /// takes precedence). Computed at login time.
+    #[serde(default)]
+    pub merged_claims: serde_json::Map<String, serde_json::Value>,
+}
+
 /// An OAuth/OIDC identity provider link for a user.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UserLinkRecord {
@@ -548,6 +567,8 @@ pub struct UserLinkRecord {
     pub oauth_refresh_token: String,
     /// OAuth token expiry time.
     pub oauth_expiry: OffsetDateTime,
+    /// IDP claims captured at login time.
+    pub claims: UserLinkClaims,
 }
 
 /// Input for upserting a user link.
@@ -563,6 +584,8 @@ pub struct UpsertUserLinkInput {
     pub oauth_refresh_token: String,
     /// OAuth token expiry time.
     pub oauth_expiry: OffsetDateTime,
+    /// IDP claims captured at login time.
+    pub claims: UserLinkClaims,
 }
 
 /// Per-user key-value configuration entry.

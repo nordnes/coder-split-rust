@@ -4,5 +4,7 @@
 mod app;
 pub mod connection_guard;
 mod error;
+mod extractors;
+pub mod metrics;
 
 pub use app::{AppState, build_router};

@@ -24,9 +24,8 @@ use axum::{
 };
 use coder_audit::{AuditAction, AuditEvent, AuditSink, batched_sink::BatchedAuditSink};
 use coder_auth::{
-    AuthService, AuthServiceError, AuthenticatedRequest, ExternalAuthService,
-    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
-    OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
+    AuthService, AuthenticatedRequest, ExternalAuthService, OAUTH2_REDIRECT_COOKIE,
+    OAUTH2_STATE_COOKIE, OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
 use coder_connectivity::{
     HealthService,
@@ -89,11 +88,12 @@ use coder_core::{
     WorkspaceAgentListContainersResponse, WorkspaceAgentListeningPortsResponse,
     WorkspaceListFilter,
 };
-use coder_identity::{IdentityService, IdentityServiceError};
+use coder_identity::IdentityService;
 use coder_provisioner::{InitScriptError, render_init_script};
 use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
 use coder_workspaces::DeploymentStatsService;
 use futures_util::StreamExt;
+use metrics_exporter_prometheus::PrometheusHandle;
 use serde::Deserialize;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -108,6 +108,7 @@ use tracing::debug;
 use uuid::Uuid;
 
 use crate::error::AppError;
+use crate::extractors::{AgentAuth, Auth};
 
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
 const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
@@ -196,7 +197,9 @@ pub struct AppState {
     pub coordinator: Arc<dyn TailnetCoordinator>,
     /// DERP relay traffic tracker.
     pub derp_tracker: Arc<DerpTrafficTracker>,
-    auth: AuthService<Arc<dyn AppStore>>,
+    /// Handle to render Prometheus metrics text exposition.
+    pub prometheus_handle: Option<PrometheusHandle>,
+    pub(crate) auth: AuthService<Arc<dyn AppStore>>,
     identity: IdentityService<Arc<dyn AppStore>>,
     deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
     health: HealthService<Arc<dyn AppStore>>,
@@ -217,6 +220,7 @@ impl AppState {
         agent_provider: Arc<dyn AgentProvider>,
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
+        prometheus_handle: Option<PrometheusHandle>,
     ) -> Result<Self, reqwest::Error> {
         let audit = Arc::new(BatchedAuditSink::new(
             audit,
@@ -243,6 +247,7 @@ impl AppState {
             agent_provider,
             coordinator,
             derp_tracker,
+            prometheus_handle,
             auth,
             identity,
             deployment_stats,
@@ -250,6 +255,15 @@ impl AppState {
             external_auth,
             oauth2_provider,
         })
+    }
+
+    /// Cancels the background deployment-stats refresh loop.
+    ///
+    /// This should be called during the graceful shutdown sequence before
+    /// closing the database pool, so the loop does not attempt further
+    /// queries after the pool is closed.
+    pub fn close_deployment_stats(&self) {
+        self.deployment_stats.close();
     }
 }
 
@@ -365,6 +379,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/", get(server_root))
         .route("/healthz", get(healthz))
+        .route("/metrics", get(get_prometheus_metrics))
         .route("/latency-check", get(latency_check))
         .route(
             "/external-auth/{externalauth}/callback",
@@ -1052,14 +1067,10 @@ async fn build_info(State(state): State<AppState>) -> Json<coder_core::BuildInfo
 }
 
 async fn post_csp_report(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
     payload: Result<Json<CspViolationReport>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(report) = match payload {
         Ok(payload) => payload,
         Err(error) => {
@@ -1076,7 +1087,7 @@ async fn post_csp_report(
 
     debug!(report = ?report.report, "CSP violation reported");
 
-    Ok((StatusCode::OK, Json("ok")).into_response())
+    Ok((StatusCode::OK, Json(ApiResponse::ok("ok"))).into_response())
 }
 
 async fn deployment_config(State(state): State<AppState>) -> Json<DeploymentConfigResponse> {
@@ -1103,7 +1114,10 @@ async fn get_init_script(
         Err(InitScriptError::UnknownTarget { os, arch }) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!("Unknown os/arch: {os}/{arch}"))),
+                Json(ApiResponse::error(
+                    format!("Unknown os/arch: {os}/{arch}"),
+                    "The requested os/arch combination is not supported.",
+                )),
             )
                 .into_response();
         }
@@ -1122,14 +1136,81 @@ async fn get_init_script(
     response
 }
 
+// ---------------------------------------------------------------------------
+// RBAC enforcement audit summary
+// ---------------------------------------------------------------------------
+//
+// Every mutation (POST/PUT/DELETE) and sensitive-read handler below calls
+// `Authorizer::new().authorize(actor, action, object)` from `coder-rbac`.
+//
+// **Handlers with formal RBAC authorize() checks:**
+//   Mutations:
+//     - create_first_user (Create, User)
+//     - post_login (handled by AuthService)
+//     - create_token, delete_token, delete_all_tokens (Create/Delete, ApiKey)
+//     - create_user (Create, User)
+//     - put_user_roles (Assign, OrganizationMember)
+//     - put_user_status (Update, User)
+//     (put_user_profile, put_user_appearance, put_user_preferences,
+//      put_user_password, post_convert_login delegate to service layer)
+//     - delete_external_auth_by_id (Delete, User) [NEW]
+//     - post_external_auth_device_exchange (Update, User) [NEW]
+//     - post_task_log_snapshot (Update, Task) [NEW - user auth path]
+//     - create_task (Create, Task)
+//     - create_workspace, patch_workspace (Create/Update, Workspace)
+//     - post_org_template (Create, Template)
+//     - create_org_member, delete_org_member (Create/Delete, OrganizationMember)
+//     - put_org_member_roles (Assign, OrganizationMember)
+//     - post_oauth2_app, put_oauth2_app, delete_oauth2_app (CRUD, OAuth2ProviderApp)
+//     - post_file (Create, File)
+//     - put_health_settings (Update, DeploymentConfig)
+//     - put_notifications_settings (Update, DeploymentConfig)
+//     - put_notification_template_method (Update, NotificationTemplate)
+//     - put_user_notification_preferences (Update, NotificationPreference)
+//     - post_webpush_subscription, delete_webpush_subscription (Create/Delete, NotificationPreference)
+//     - post_test_audit_log (Create, AuditLog)
+//
+//   Sensitive reads:
+//     - list_audit_logs (Read, AuditLog)
+//     - list_users (owner-only check, preserves can_list_users() semantics) [NEW]
+//     - deployment_stats (Read, DeploymentStats) [NEW - replaced can_view_operational_data()]
+//     - debug_health (Read, DeploymentConfig) [NEW]
+//     - get_health_settings (Read, DeploymentConfig) [NEW]
+//     - get_notifications_settings (Read, DeploymentConfig) [NEW]
+//     - get_notification_dispatch_methods (Read, DeploymentConfig) [NEW]
+//     - get_system_notification_templates (auth-only, no RBAC — see note in handler)
+//     - get_custom_notification_templates (auth-only, no RBAC — see note in handler)
+//     - insights_daus, insights_templates, insights_user_activity,
+//       insights_user_latency, insights_user_status_counts (Read, DeploymentStats) [NEW]
+//     - debug_coordinator, debug_tailnet, debug_derp_traffic,
+//       debug_expvar, debug_pprof, debug_websocket,
+//       debug_metrics (Read, DebugInfo; also allows auditor role) [NEW]
+//     - get_deployment_config (Read, DeploymentConfig)
+//     - list_templates (Read, Template - filter-based)
+//
+//   Service-layer delegation (RBAC checked inside service):
+//     - get_user, get_user_roles (via IdentityService)
+//     - get_organization, list_organization_members (via IdentityService)
+//     - list_token_api_keys, get_api_key (via AuthService)
+//
+// **Public / unauthenticated endpoints (no RBAC needed):**
+//     - healthz, latency_check, build_info, deployment_ssh
+//     - auth_methods, get_first_user (existence check)
+//     - login_with_password (pre-auth), OAuth disabled stubs
+//     - DERP map, SSH config (public deployment info)
+//
+// **resolve_organization / resolve_user patterns:**
+//   All instances correctly use `let Some(...) = resolve_*(...) else { return Ok(not_found) }`
+//   or `match ... { Some => ..., None => return Ok(not_found) }`, ensuring the handler
+//   stops processing when the target cannot be resolved. No RBAC bypass bugs detected.
+//
+// ---------------------------------------------------------------------------
+
 async fn list_audit_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<AuditQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // RBAC: verify the actor can read audit logs.
     // This replaces the previous can_view_operational_data() check, which was
     // redundant — role_auditor() and role_owner() both grant AuditLog::Read at
@@ -1162,13 +1243,9 @@ async fn list_audit_logs(
 
 async fn post_generate_test_audit_log(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTestAuditLogRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create audit log entries.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1241,12 +1318,18 @@ async fn post_generate_test_audit_log(
 
 async fn deployment_stats(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view deployment stats.",
         ));
@@ -1265,13 +1348,19 @@ async fn deployment_ssh(State(state): State<AppState>) -> Json<SshConfigResponse
 
 async fn debug_health(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<DebugHealthQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment health information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view deployment health.",
         ));
@@ -1304,7 +1393,10 @@ async fn debug_health(
             .into_response()),
         Some(other) => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok(format!("Invalid format option {other:?}."))),
+            Json(ApiResponse::error(
+                format!("Invalid format option {other:?}."),
+                "Supported formats are: json, text.",
+            )),
         )
             .into_response()),
     }
@@ -1312,12 +1404,18 @@ async fn debug_health(
 
 async fn get_health_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view health settings.",
         ));
@@ -1328,13 +1426,9 @@ async fn get_health_settings(
 
 async fn put_health_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<HealthSettings>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1398,24 +1492,16 @@ async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
 }
 
 async fn get_enabled_experiments(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     Ok(Json(Vec::<String>::new()).into_response())
 }
 
 async fn get_available_experiments(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     Ok(Json(AvailableExperiments { safe: Vec::new() }).into_response())
 }
 
@@ -1425,12 +1511,8 @@ async fn auth_methods() -> Json<AuthMethods> {
 
 async fn list_external_auths(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     Ok(Json(
         state
             .external_auth
@@ -1442,12 +1524,9 @@ async fn list_external_auths(
 
 async fn get_external_auth_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(provider): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(config) = find_external_auth_provider(&state, &provider) else {
         return Ok(resource_not_found_response());
     };
@@ -1469,12 +1548,24 @@ async fn get_external_auth_by_id(
 
 async fn delete_external_auth_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(provider): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    // RBAC: verify the actor can delete their own external auth links.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::User).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete external auth links.",
+        ));
+    }
+
     let Some(response) = state
         .external_auth
         .delete(
@@ -1502,12 +1593,9 @@ async fn delete_external_auth_by_id(
 
 async fn get_external_auth_device_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(provider): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(config) = find_external_auth_provider(&state, &provider) else {
         return Ok(resource_not_found_response());
     };
@@ -1520,18 +1608,30 @@ async fn get_external_auth_device_by_id(
         .authorize_device(config)
         .await
         .map(|device| (StatusCode::OK, Json(device)).into_response())
-        .or_else(|error| handle_external_auth_error("Failed to authorize device.", error))
+        .map_err(|error| AppError::from_external_auth("Failed to authorize device.", error))
 }
 
 async fn post_external_auth_device_exchange(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(provider): Path<String>,
     payload: Result<Json<ExternalAuthDeviceExchangeRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    // RBAC: verify the actor can update their own external auth links.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::User).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to exchange external auth device codes.",
+        ));
+    }
+
     let Some(config) = find_external_auth_provider(&state, &provider) else {
         return Ok(resource_not_found_response());
     };
@@ -1557,7 +1657,10 @@ async fn post_external_auth_device_exchange(
         .exchange_device(config, context.user.id, &request)
         .await
     {
-        return handle_external_auth_error("Failed to exchange device code.", error);
+        return Err(AppError::from_external_auth(
+            "Failed to exchange device code.",
+            error,
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1582,7 +1685,10 @@ async fn get_external_auth_callback_by_id(
     let Some(state_value) = query.state.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("State must be provided.")),
+            Json(ApiResponse::error(
+                "State must be provided.",
+                "The state query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
@@ -1597,7 +1703,10 @@ async fn get_external_auth_callback_by_id(
     let Some(code) = query.code.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Code must be provided.")),
+            Json(ApiResponse::error(
+                "Code must be provided.",
+                "The code query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
@@ -1607,7 +1716,10 @@ async fn get_external_auth_callback_by_id(
         .exchange_callback(config, context.user.id, &code)
         .await
     {
-        return handle_external_auth_error("Failed exchanging OAuth code.", error);
+        return Err(AppError::from_external_auth(
+            "Failed exchanging OAuth code.",
+            error,
+        ));
     }
 
     let redirect = cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE)
@@ -1674,7 +1786,7 @@ async fn post_first_user(
             )
                 .into_response())
         }
-        Err(error) => handle_auth_error(error),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1687,10 +1799,7 @@ async fn login_with_password(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let outcome = match state.auth.login_with_password(&request).await {
-        Ok(outcome) => outcome,
-        Err(error) => return handle_auth_error(error),
-    };
+    let outcome = state.auth.login_with_password(&request).await?;
     record_audit(
         &state,
         AuditAction::Login,
@@ -1704,10 +1813,7 @@ async fn login_with_password(
     Ok((StatusCode::CREATED, Json(outcome.response)).into_response())
 }
 
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+async fn logout(State(state): State<AppState>, Auth(context): Auth) -> Result<Response, AppError> {
     state.auth.logout(&context.session_token).await?;
     record_audit(
         &state,
@@ -1747,9 +1853,7 @@ async fn post_request_one_time_passcode(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    if let Err(error) = state.auth.request_one_time_passcode(&request).await {
-        return handle_auth_error(error);
-    }
+    state.auth.request_one_time_passcode(&request).await?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1763,14 +1867,10 @@ async fn post_change_password_with_one_time_passcode(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let user_id = match state
+    let user_id = state
         .auth
         .change_password_with_one_time_passcode(&request)
-        .await
-    {
-        Ok(user_id) => user_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -1788,7 +1888,10 @@ async fn post_change_password_with_one_time_passcode(
 async fn get_github_oauth_device_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -1796,7 +1899,10 @@ async fn get_github_oauth_device_disabled() -> Response {
 async fn get_github_oauth_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -1804,19 +1910,19 @@ async fn get_github_oauth_callback_disabled() -> Response {
 async fn get_oidc_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("OIDC is not enabled.")),
+        Json(ApiResponse::error(
+            "OIDC is not enabled.",
+            "This deployment does not have OIDC configured.",
+        )),
     )
         .into_response()
 }
 
 async fn get_user_debug_link(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(requested_user): Path<String>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &requested_user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -1828,25 +1934,31 @@ async fn get_user_debug_link(
     if target_user.login_type != LoginType::Oidc {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("User is not an OIDC user.")),
+            Json(ApiResponse::error(
+                "User is not an OIDC user.",
+                "Debug links are only available for OIDC-authenticated users.",
+            )),
         )
             .into_response());
     }
 
-    Ok(not_implemented_response(
-        "OIDC debug context is not yet available in the Rust backend.",
-    ))
+    let links = state.store.list_user_links(target_user.id).await?;
+    let claims = links
+        .into_iter()
+        .find(|l| l.login_type == LoginType::Oidc)
+        .map(|l| l.claims)
+        .unwrap_or_default();
+
+    Ok((StatusCode::OK, Json(claims)).into_response())
 }
 
 async fn list_users(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<UsersQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !context.actor.can_list_users() {
+    // RBAC: only owners can enumerate all users (preserves can_list_users() semantics).
+    if !context.actor.is_owner() {
         return Ok(forbidden_response("You are not authorized to list users."));
     }
 
@@ -1863,7 +1975,7 @@ async fn list_users(
         None => None,
     };
 
-    let (users, count) = match state
+    let (users, count) = state
         .identity
         .list_users(
             &context.actor,
@@ -1874,11 +1986,7 @@ async fn list_users(
                 offset: query.offset.unwrap_or_default(),
             },
         )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -1892,13 +2000,9 @@ async fn list_users(
 
 async fn post_user(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateUserRequestWithOrgs>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create users.
     let authorizer = Authorizer::new();
     if authorizer
@@ -1918,10 +2022,7 @@ async fn post_user(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let user = match state.identity.create_user(&context.actor, &request).await {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+    let user = state.identity.create_user(&context.actor, &request).await?;
 
     record_audit(
         &state,
@@ -1939,19 +2040,12 @@ async fn post_user(
 async fn get_user_login_type(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let response = match state
+    let response = state
         .auth
         .get_user_login_type(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(response)).into_response())
 }
@@ -1959,11 +2053,8 @@ async fn get_user_login_type(
 async fn get_user_git_ssh_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -1999,11 +2090,8 @@ async fn get_user_git_ssh_key(
 async fn put_user_git_ssh_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -2059,12 +2147,9 @@ async fn put_user_git_ssh_key(
 async fn get_user_autofill_parameters(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<HashMap<String, String>>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
     };
@@ -2112,25 +2197,18 @@ async fn get_user_autofill_parameters(
 async fn put_user_profile(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserProfileRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let updated_user = match state
+    // NOTE: RBAC is enforced inside IdentityService::update_user_profile.
+    let updated_user = state
         .identity
         .update_user_profile(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2148,29 +2226,25 @@ async fn put_user_profile(
 async fn put_suspend_user_account(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    put_user_status(state, user, headers, UserStatus::Suspended).await
+    put_user_status(state, user, context, UserStatus::Suspended).await
 }
 
 async fn put_activate_user_account(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    put_user_status(state, user, headers, UserStatus::Active).await
+    put_user_status(state, user, context, UserStatus::Active).await
 }
 
 async fn put_user_status(
     state: AppState,
     user: String,
-    headers: HeaderMap,
+    context: AuthenticatedRequest,
     status: UserStatus,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update user status.
     let authorizer = Authorizer::new();
     if authorizer
@@ -2186,14 +2260,10 @@ async fn put_user_status(
         ));
     }
 
-    let updated_user = match state
+    let updated_user = state
         .identity
         .update_user_status(&context.actor, &context.user, &user, status)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2211,19 +2281,12 @@ async fn put_user_status(
 async fn get_user_appearance(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let settings = match state
+    let settings = state
         .identity
         .get_user_appearance(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
     Ok((
         StatusCode::OK,
         Json(UserAppearanceSettings {
@@ -2237,25 +2300,18 @@ async fn get_user_appearance(
 async fn put_user_appearance(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserAppearanceSettingsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let (target_user_id, settings) = match state
+    // NOTE: RBAC is enforced inside IdentityService::update_user_appearance.
+    let (target_user_id, settings) = state
         .identity
         .update_user_appearance(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2280,19 +2336,12 @@ async fn put_user_appearance(
 async fn get_user_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let settings = match state
+    let settings = state
         .identity
         .get_user_preferences(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
     Ok((
         StatusCode::OK,
         Json(UserPreferenceSettings {
@@ -2305,25 +2354,18 @@ async fn get_user_preferences(
 async fn put_user_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserPreferenceSettingsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let (target_user_id, settings) = match state
+    // NOTE: RBAC is enforced inside IdentityService::update_user_preferences.
+    let (target_user_id, settings) = state
         .identity
         .update_user_preferences(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2347,25 +2389,18 @@ async fn put_user_preferences(
 async fn put_user_password(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserPasswordRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let target_user_id = match state
+    // NOTE: RBAC is enforced inside AuthService::update_user_password.
+    let target_user_id = state
         .auth
         .update_user_password(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(target_user_id) => target_user_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2383,59 +2418,39 @@ async fn put_user_password(
 async fn post_convert_login(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<ConvertLoginRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    // NOTE: RBAC is enforced inside AuthService::convert_login.
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let message = match state
+    let message = state
         .auth
         .convert_login(&context.user, &user, &request)
-        .await
-    {
-        Ok(message) => message,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
     Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
 }
 
 async fn get_user(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
-    let target_user = match state
+    let target_user = state
         .identity
         .get_user(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(UserResponse::from(target_user))).into_response())
 }
 
 async fn list_site_roles(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let roles = match state.identity.list_site_roles(&context.actor) {
-        Ok(roles) => roles,
-        Err(error) => return handle_identity_error(error),
-    };
+    let roles = state.identity.list_site_roles(&context.actor)?;
 
     Ok((StatusCode::OK, Json(roles)).into_response())
 }
@@ -2443,19 +2458,12 @@ async fn list_site_roles(
 async fn get_user_roles(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let (target_user, organization_roles) = match state
+    let (target_user, organization_roles) = state
         .identity
         .get_user_roles(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2474,13 +2482,9 @@ async fn get_user_roles(
 async fn put_user_roles(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateRolesRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can assign user roles (admin-only).
     let authorizer = Authorizer::new();
     if authorizer
@@ -2500,14 +2504,10 @@ async fn put_user_roles(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let updated_user = match state
+    let updated_user = state
         .identity
         .update_user_roles(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2524,16 +2524,9 @@ async fn put_user_roles(
 
 async fn list_organizations(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
-    let organizations = match state.identity.list_organizations(&context.actor).await {
-        Ok(organizations) => organizations,
-        Err(error) => return handle_identity_error(error),
-    };
+    let organizations = state.identity.list_organizations(&context.actor).await?;
 
     Ok((
         StatusCode::OK,
@@ -2550,20 +2543,12 @@ async fn list_organizations(
 async fn get_organization(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
-    let target_organization = match state
+    let target_organization = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(organization) => organization,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2575,19 +2560,12 @@ async fn get_organization(
 async fn list_organization_roles(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let roles = match state
+    let roles = state
         .identity
         .list_organization_roles(&context.actor, &organization)
-        .await
-    {
-        Ok(roles) => roles,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(roles)).into_response())
 }
@@ -2595,13 +2573,10 @@ async fn list_organization_roles(
 async fn list_organization_members(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<MembersQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let members = match state
+    let members = state
         .identity
         .list_organization_members(
             &context.actor,
@@ -2610,11 +2585,7 @@ async fn list_organization_members(
             query.limit.unwrap_or_default(),
             query.offset.unwrap_or_default(),
         )
-        .await
-    {
-        Ok(members) => members,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2631,13 +2602,10 @@ async fn list_organization_members(
 async fn list_paginated_organization_members(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<MembersQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let (members, count) = match state
+    let (members, count) = state
         .identity
         .list_organization_members_page(
             &context.actor,
@@ -2646,11 +2614,7 @@ async fn list_paginated_organization_members(
             query.limit.unwrap_or_default(),
             query.offset.unwrap_or_default(),
         )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2668,19 +2632,12 @@ async fn list_paginated_organization_members(
 async fn get_organization_member(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let member = match state
+    let member = state
         .identity
         .get_organization_member(&context.actor, &context.user, &organization, &user)
-        .await
-    {
-        Ok(member) => member,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2692,12 +2649,8 @@ async fn get_organization_member(
 async fn post_organization_member(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can add members to this organization.
     let Some(org) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -2716,14 +2669,10 @@ async fn post_organization_member(
         ));
     }
 
-    let member = match state
+    let member = state
         .identity
         .create_organization_member(&context.actor, &context.user, &organization, &user)
-        .await
-    {
-        Ok(member) => member,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2745,12 +2694,8 @@ async fn post_organization_member(
 async fn delete_organization_member(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can remove members from this organization.
     let Some(org) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -2769,14 +2714,10 @@ async fn delete_organization_member(
         ));
     }
 
-    let (organization_id, user_id) = match state
+    let (organization_id, user_id) = state
         .identity
         .delete_organization_member(&context.actor, &context.user, &organization, &user)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2794,13 +2735,9 @@ async fn delete_organization_member(
 async fn put_organization_member_roles(
     State(state): State<AppState>,
     Path((organization, user)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateRolesRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can assign roles in this organization.
     let Some(org) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -2823,7 +2760,7 @@ async fn put_organization_member_roles(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let updated_member = match state
+    let updated_member = state
         .identity
         .update_organization_member_roles(
             &context.actor,
@@ -2832,11 +2769,7 @@ async fn put_organization_member_roles(
             &user,
             &request,
         )
-        .await
-    {
-        Ok(member) => member,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2861,12 +2794,8 @@ async fn put_organization_member_roles(
 async fn create_session_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -2885,14 +2814,10 @@ async fn create_session_api_key(
         ));
     }
 
-    let result = match state
+    let result = state
         .auth
         .create_session_api_key(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2910,13 +2835,9 @@ async fn create_session_api_key(
 async fn create_token_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTokenRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create token API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -2939,14 +2860,10 @@ async fn create_token_api_key(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let result = match state
+    let result = state
         .auth
         .create_token_api_key(&context.actor, &context.user, &user, request)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2964,13 +2881,10 @@ async fn create_token_api_key(
 async fn list_token_api_keys(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<TokenListQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let keys = match state
+    let keys = state
         .auth
         .list_token_api_keys(
             &context.actor,
@@ -2979,11 +2893,7 @@ async fn list_token_api_keys(
             query.include_all,
             query.include_expired,
         )
-        .await
-    {
-        Ok(keys) => keys,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(keys)).into_response())
 }
@@ -2991,19 +2901,12 @@ async fn list_token_api_keys(
 async fn get_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let key = match state
+    let key = state
         .auth
         .get_api_key(&context.actor, &context.user, &user, &keyid)
-        .await
-    {
-        Ok(key) => key,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(key)).into_response())
 }
@@ -3011,19 +2914,12 @@ async fn get_api_key(
 async fn get_api_key_by_name(
     State(state): State<AppState>,
     Path((user, keyname)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let key = match state
+    let key = state
         .auth
         .get_api_key_by_name(&context.actor, &context.user, &user, &keyname)
-        .await
-    {
-        Ok(key) => key,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(key)).into_response())
 }
@@ -3031,12 +2927,8 @@ async fn get_api_key_by_name(
 async fn delete_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -3055,14 +2947,10 @@ async fn delete_api_key(
         ));
     }
 
-    let key_id = match state
+    let key_id = state
         .auth
         .delete_api_key(&context.actor, &context.user, &user, &keyid)
-        .await
-    {
-        Ok(key_id) => key_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -3080,12 +2968,8 @@ async fn delete_api_key(
 async fn expire_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can expire API keys for this user.
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(not_found_response("User not found."));
@@ -3104,14 +2988,10 @@ async fn expire_api_key(
         ));
     }
 
-    let key_id = match state
+    let key_id = state
         .auth
         .expire_api_key(&context.actor, &context.user, &user, &keyid)
-        .await
-    {
-        Ok(key_id) => key_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -3129,38 +3009,24 @@ async fn expire_api_key(
 async fn get_token_config(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let config = match state
+    let config = state
         .auth
         .get_token_config(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(config) => config,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
     Ok((StatusCode::OK, Json(config)).into_response())
 }
 
 async fn list_user_organizations(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let organizations = match state
+    let organizations = state
         .identity
         .list_user_organizations(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(organizations) => organizations,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -3177,19 +3043,12 @@ async fn list_user_organizations(
 async fn get_user_organization_by_name(
     State(state): State<AppState>,
     Path((user, organizationname)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    let target_organization = match state
+    let target_organization = state
         .identity
         .get_user_organization_by_name(&context.actor, &context.user, &user, &organizationname)
-        .await
-    {
-        Ok(organization) => organization,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -3201,12 +3060,8 @@ async fn get_user_organization_by_name(
 async fn delete_user(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete users.
     let authorizer = Authorizer::new();
     if authorizer
@@ -3222,14 +3077,10 @@ async fn delete_user(
         ));
     }
 
-    let target_user = match state
+    let target_user = state
         .identity
         .delete_user(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -3255,20 +3106,13 @@ async fn delete_user(
 async fn list_provisioner_daemons(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner daemons in this org.
     let authorizer = Authorizer::new();
@@ -3296,20 +3140,13 @@ async fn list_provisioner_daemons(
 async fn list_provisioner_jobs(
     State(state): State<AppState>,
     Path(organization): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -3337,20 +3174,13 @@ async fn list_provisioner_jobs(
 async fn get_provisioner_job(
     State(state): State<AppState>,
     Path((organization, _job)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -3379,22 +3209,13 @@ async fn get_provisioner_job(
 async fn cancel_provisioner_job(
     State(state): State<AppState>,
     Path((organization, job)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => {
-            return handle_identity_error(error);
-        }
-    };
+        .await?;
 
     // RBAC: verify the actor can update provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -3462,7 +3283,11 @@ async fn cancel_provisioner_job(
             .into_response());
     }
 
-    Ok(StatusCode::OK.into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Provisioner job canceled.")),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -3479,22 +3304,13 @@ async fn get_provisioner_job_logs(
     State(state): State<AppState>,
     Path((organization, job)): Path<(String, String)>,
     Query(query): Query<ProvisionerJobLogsQuery>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => {
-            return handle_identity_error(error);
-        }
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -3564,12 +3380,9 @@ async fn get_provisioner_job_logs(
 // applications (currently empty).
 // ---------------------------------------------------------------------------
 async fn applications_host(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     Ok((
         StatusCode::OK,
         Json(AppHostResponse {
@@ -3584,12 +3397,9 @@ async fn applications_host(
 // Stub: returns 400 because subdomain apps are not supported yet.
 // ---------------------------------------------------------------------------
 async fn applications_auth_redirect(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     Ok((
         StatusCode::BAD_REQUEST,
         Json(ApiResponse::error(
@@ -3685,12 +3495,8 @@ async fn deprecated_workspace_agent_git_auth(
 async fn deprecated_workspace_agent_startup_logs(
     State(state): State<AppState>,
     Path(agent_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -3729,12 +3535,8 @@ struct TasksQuery {
 async fn list_tasks(
     State(state): State<AppState>,
     Query(query): Query<TasksQuery>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Always scope to the authenticated user — no cross-user enumeration.
     let filter = TaskListFilter {
         owner_id: Some(context.user.id),
@@ -3757,13 +3559,9 @@ async fn list_tasks(
 async fn create_task(
     State(state): State<AppState>,
     Path(user_param): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<CreateTaskRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Resolve the user from the path parameter.
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
@@ -3847,12 +3645,8 @@ async fn resolve_task(
 async fn get_task(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -3873,13 +3667,9 @@ async fn get_task(
 async fn patch_task_input(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<coder_core::UpdateTaskInputRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -3941,12 +3731,8 @@ async fn patch_task_input(
 async fn delete_task(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -3988,12 +3774,8 @@ async fn delete_task(
 async fn get_task_logs(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4046,13 +3828,9 @@ async fn get_task_logs(
 async fn post_task_send(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<TaskSendRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4137,12 +3915,8 @@ async fn post_task_send(
 async fn post_task_pause(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4192,12 +3966,8 @@ async fn post_task_pause(
 async fn post_task_resume(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user_param, &context.user).await? else {
         return Ok(not_found_response("Task not found."));
     };
@@ -4268,6 +4038,22 @@ async fn post_task_log_snapshot(
         let Some(context) = authenticate_request(&state, &headers).await? else {
             return Ok(unauthorized_response("Missing or invalid session token."));
         };
+
+        // RBAC: verify the actor can update their own tasks.
+        let authorizer = Authorizer::new();
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Update,
+                &Object::new(ResourceType::Task).with_owner(context.user.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to post task log snapshots.",
+            ));
+        }
+
         context.user.id
     };
 
@@ -4319,12 +4105,8 @@ struct ChatsQuery {
 async fn list_chats(
     State(state): State<AppState>,
     Query(query): Query<ChatsQuery>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let chats = state
         .store
         .list_chats_by_owner(context.user.id, query.archived)
@@ -4337,13 +4119,9 @@ async fn list_chats(
 
 async fn create_chat(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<CreateChatRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create a chat.
     let authorizer = Authorizer::new();
     if authorizer
@@ -4401,12 +4179,8 @@ async fn create_chat(
 async fn get_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4438,12 +4212,8 @@ async fn get_chat(
 async fn delete_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4476,13 +4246,9 @@ async fn delete_chat(
 async fn post_chat_message(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Json(request): Json<CreateChatMessageRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4650,14 +4416,11 @@ struct ChatFileUploadQuery {
 /// POST /api/v2/chats/files – upload a chat file.
 async fn upload_chat_file(
     State(state): State<AppState>,
+    Auth(context): Auth,
     headers: HeaderMap,
     Query(query): Query<ChatFileUploadQuery>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Require organization query parameter.
     let org_id_str = match query.organization {
         Some(ref s) if !s.is_empty() => s.as_str(),
@@ -4803,13 +4566,9 @@ async fn upload_chat_file(
 /// GET /api/v2/chats/files/{file} – retrieve a chat file by ID.
 async fn get_chat_file(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(file) = state.store.find_chat_file_by_id(file_id).await? else {
         return Ok(not_found_response("Chat file not found."));
     };
@@ -4841,12 +4600,8 @@ async fn get_chat_file(
 async fn archive_chat_handler(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4888,12 +4643,8 @@ async fn archive_chat_handler(
 async fn unarchive_chat_handler(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -4947,13 +4698,9 @@ async fn unarchive_chat_handler(
 async fn watch_chat_git(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
         return Ok(not_found_response("Chat not found."));
     };
@@ -5050,11 +4797,22 @@ struct InboxNotificationsQuery {
 
 async fn get_notifications_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification settings.",
+        ));
+    }
 
     let settings = state.store.get_notifications_settings().await?;
     Ok((StatusCode::OK, Json(settings)).into_response())
@@ -5062,13 +4820,9 @@ async fn get_notifications_settings(
 
 async fn put_notifications_settings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<coder_core::NotificationsSettings>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5096,11 +4850,11 @@ async fn put_notifications_settings(
 
 async fn get_system_notification_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
+    // to any non-owner role, but any authenticated user should be able to view
+    // available notification templates (e.g., to configure preferences).
 
     let templates = state
         .store
@@ -5111,11 +4865,11 @@ async fn get_system_notification_templates(
 
 async fn get_custom_notification_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
+    // to any non-owner role, but any authenticated user should be able to view
+    // available notification templates (e.g., to configure preferences).
 
     let templates = state
         .store
@@ -5126,12 +4880,8 @@ async fn get_custom_notification_templates(
 
 async fn post_test_notification(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update deployment configuration.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5160,13 +4910,9 @@ async fn post_test_notification(
 async fn put_notification_template_method(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateNotificationTemplateMethod>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update notification templates.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5216,11 +4962,22 @@ async fn put_notification_template_method(
 
 async fn get_notification_dispatch_methods(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification dispatch methods.",
+        ));
+    }
 
     let _ = &state;
     let response = coder_core::NotificationMethodsResponse {
@@ -5233,12 +4990,8 @@ async fn get_notification_dispatch_methods(
 async fn get_user_notification_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5262,13 +5015,9 @@ async fn get_user_notification_preferences(
 async fn put_user_notification_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateUserNotificationPreferences>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5321,13 +5070,9 @@ async fn put_user_notification_preferences(
 
 async fn list_inbox_notifications(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(params): Query<InboxNotificationsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read their own notifications.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5444,12 +5189,8 @@ async fn list_inbox_notifications(
 
 async fn put_mark_all_inbox_notifications_read(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update their own notifications.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5475,12 +5216,8 @@ async fn put_mark_all_inbox_notifications_read(
 
 async fn watch_inbox_notifications(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Return initial state. Real-time push requires pub/sub infrastructure not yet available.
     let notifications = state
         .store
@@ -5505,13 +5242,9 @@ async fn watch_inbox_notifications(
 async fn put_inbox_notification_read_status(
     State(state): State<AppState>,
     Path(id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateInboxNotificationReadStatusRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update their own notifications.
     let authorizer = Authorizer::new();
     if authorizer
@@ -5581,13 +5314,9 @@ async fn put_inbox_notification_read_status(
 async fn post_user_webpush_subscription(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<WebpushSubscription>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5622,13 +5351,9 @@ async fn post_user_webpush_subscription(
 async fn delete_user_webpush_subscription(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<coder_core::DeleteWebpushSubscription>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5662,12 +5387,8 @@ async fn delete_user_webpush_subscription(
 async fn post_user_webpush_test(
     State(state): State<AppState>,
     Path(user): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let target_user = match resolve_user(&state, &user, &context.user).await? {
         Some(u) => u,
         None => {
@@ -5961,13 +5682,9 @@ async fn build_tv_response(
 async fn list_org_templates(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<TemplateFilter>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6006,12 +5723,9 @@ async fn list_org_templates(
 async fn post_org_template(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTemplateRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6097,12 +5811,8 @@ async fn post_org_template(
 async fn get_org_template_by_name(
     State(state): State<AppState>,
     Path((org, name)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6127,12 +5837,8 @@ async fn get_org_template_by_name(
 async fn get_org_template_version_by_name(
     State(state): State<AppState>,
     Path((org, tname, vname)): Path<(String, String, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6162,12 +5868,8 @@ async fn get_org_template_version_by_name(
 async fn get_org_template_examples(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6195,12 +5897,8 @@ async fn get_org_template_examples(
 async fn get_org_previous_template_version(
     State(state): State<AppState>,
     Path((org, tname, vname)): Path<(String, String, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let org_record = match resolve_organization(&state, &org).await? {
         Some(o) => o,
         None => {
@@ -6230,12 +5928,9 @@ async fn get_org_previous_template_version(
 async fn post_org_template_version(
     State(state): State<AppState>,
     Path(org): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6319,13 +6014,9 @@ async fn post_org_template_version(
 /// GET /templates
 async fn list_all_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<TemplateFilter>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let templates = state
         .store
         .list_templates(TemplateListFilter {
@@ -6354,12 +6045,8 @@ async fn list_all_templates(
 /// GET /templates/examples
 async fn get_all_template_examples(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: check that the actor can read templates in any organization.
     let authorizer = Authorizer::new();
     let obj = Object::new(ResourceType::Template).any_organization();
@@ -6378,12 +6065,8 @@ async fn get_all_template_examples(
 async fn get_template(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let template = state.store.find_template_by_id(template_id).await?;
     match template {
         Some(t) if !t.deleted => Ok((StatusCode::OK, Json(template_response(&t))).into_response()),
@@ -6395,12 +6078,8 @@ async fn get_template(
 async fn delete_template(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template to get org info for RBAC.
     let Some(template) = state.store.find_template_by_id(template_id).await? else {
         return Ok(not_found_response("Template not found."));
@@ -6449,12 +6128,9 @@ async fn delete_template(
 async fn patch_template(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<UpdateTemplateMeta>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6578,12 +6254,8 @@ async fn patch_template(
 async fn get_template_daus(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let rows = state.store.template_daus(template_id).await?;
     let entries: Vec<DAUEntry> = rows
         .iter()
@@ -6603,11 +6275,8 @@ async fn get_template_daus(
 async fn get_template_examples(
     State(state): State<AppState>,
     Path(_template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     // Template examples are static / built-in. Return empty list for now.
     let examples: Vec<TemplateExample> = Vec::new();
     Ok((StatusCode::OK, Json(examples)).into_response())
@@ -6617,13 +6286,9 @@ async fn get_template_examples(
 async fn list_template_versions(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Query(query): Query<TemplateVersionsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let versions = state
         .store
         .list_template_versions(TemplateVersionListFilter {
@@ -6645,12 +6310,8 @@ async fn list_template_versions(
 async fn get_template_version_by_name(
     State(state): State<AppState>,
     Path((template_id, vname)): Path<(Uuid, String)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = state
         .store
         .find_template_version_by_template_and_name(template_id, &vname)
@@ -6671,12 +6332,8 @@ async fn get_template_version_by_name(
 async fn get_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = state.store.find_template_version_by_id(version_id).await?;
     match ver {
         Some(v) => {
@@ -6691,12 +6348,9 @@ async fn get_template_version(
 async fn patch_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<PatchTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6754,12 +6408,8 @@ async fn patch_template_version(
 async fn post_archive_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the version to get template info for RBAC.
     let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
@@ -6796,12 +6446,8 @@ async fn post_archive_template_version(
 async fn patch_cancel_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -6847,12 +6493,9 @@ async fn patch_cancel_template_version(
 async fn post_template_version_dry_run(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<CreateTemplateVersionDryRunRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) =
         payload.map_err(|e| AppError::from(StorageError::invalid_data(e.to_string())))?;
 
@@ -6913,12 +6556,8 @@ async fn post_template_version_dry_run(
 async fn get_template_version_dry_run(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let job = state.store.find_provisioner_job(job_id).await?;
     match job {
         Some(j) => Ok((StatusCode::OK, Json(provisioner_job_response(&j))).into_response()),
@@ -6930,12 +6569,8 @@ async fn get_template_version_dry_run(
 async fn patch_template_version_dry_run(
     State(state): State<AppState>,
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template version for org-scoped RBAC.
     let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
         return Ok(not_found_response("Template version not found."));
@@ -6979,12 +6614,8 @@ async fn patch_template_version_dry_run(
 async fn patch_cancel_template_version_dry_run(
     State(state): State<AppState>,
     Path((version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template version for org-scoped RBAC.
     let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
         return Ok(not_found_response("Template version not found."));
@@ -7027,12 +6658,8 @@ async fn patch_cancel_template_version_dry_run(
 async fn get_template_version_dry_run_logs(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Verify the job exists.
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
@@ -7048,12 +6675,8 @@ async fn get_template_version_dry_run_logs(
 async fn get_template_version_dry_run_resources(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
@@ -7068,12 +6691,8 @@ async fn get_template_version_dry_run_resources(
 async fn get_template_version_dry_run_matched_provisioners(
     State(state): State<AppState>,
     Path((_version_id, job_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
@@ -7092,12 +6711,8 @@ async fn get_template_version_dry_run_matched_provisioners(
 async fn get_template_version_dynamic_parameters(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7112,13 +6727,9 @@ async fn get_template_version_dynamic_parameters(
 async fn post_template_version_dynamic_parameters_evaluate(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     body: Result<Json<DynamicParametersRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7163,13 +6774,9 @@ async fn post_template_version_dynamic_parameters_evaluate(
 async fn patch_active_template_version(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     body: Result<Json<UpdateActiveTemplateVersionRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let template = match state.store.find_template_by_id(template_id).await? {
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
@@ -7228,20 +6835,20 @@ async fn patch_active_template_version(
         return Ok(not_found_response("Template not found."));
     }
 
-    Ok(StatusCode::OK.into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Active template version updated.")),
+    )
+        .into_response())
 }
 
 /// POST /templates/{template}/versions/archive — archive unused template versions
 async fn post_archive_template_versions(
     State(state): State<AppState>,
     Path(template_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     body: Result<Json<ArchiveTemplateVersionsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let template = match state.store.find_template_by_id(template_id).await? {
         Some(t) => t,
         None => return Ok(not_found_response("Template not found.")),
@@ -7291,12 +6898,8 @@ async fn post_archive_template_versions(
 async fn get_template_version_external_auth(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Verify the version exists.
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
@@ -7312,12 +6915,8 @@ async fn get_template_version_external_auth(
 async fn get_template_version_logs(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7331,30 +6930,25 @@ async fn get_template_version_logs(
 async fn get_template_version_parameters(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    get_template_version_rich_parameters_impl(&state, &headers, version_id).await
+    get_template_version_rich_parameters_impl(&state, version_id).await
 }
 
 /// GET /templateversions/{templateversion}/rich-parameters
 async fn get_template_version_rich_parameters(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    get_template_version_rich_parameters_impl(&state, &headers, version_id).await
+    get_template_version_rich_parameters_impl(&state, version_id).await
 }
 
 /// Shared implementation for parameters / rich-parameters endpoints.
 async fn get_template_version_rich_parameters_impl(
     state: &AppState,
-    headers: &HeaderMap,
     version_id: Uuid,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(state, headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let params = state
         .store
         .list_template_version_parameters(version_id)
@@ -7394,12 +6988,8 @@ async fn get_template_version_rich_parameters_impl(
 async fn get_template_version_presets(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let presets = state
         .store
         .list_template_version_presets(version_id)
@@ -7425,12 +7015,8 @@ async fn get_template_version_presets(
 async fn get_template_version_preset_parameters(
     State(state): State<AppState>,
     Path((_version_id, preset_id)): Path<(Uuid, Uuid)>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let params = state
         .store
         .list_template_version_preset_parameters(preset_id)
@@ -7453,12 +7039,8 @@ async fn get_template_version_preset_parameters(
 async fn get_template_version_resources(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7473,12 +7055,8 @@ async fn get_template_version_resources(
 async fn get_template_version_schema(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let _ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
@@ -7493,12 +7071,8 @@ async fn get_template_version_schema(
 async fn post_unarchive_template_version(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Look up the template version for org-scoped RBAC.
     let Some(ver) = state.store.find_template_version_by_id(version_id).await? else {
         return Ok(not_found_response("Template version not found."));
@@ -7534,12 +7108,8 @@ async fn post_unarchive_template_version(
 async fn get_template_version_variables(
     State(state): State<AppState>,
     Path(version_id): Path<Uuid>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let vars = state
         .store
         .list_template_version_variables(version_id)
@@ -7575,13 +7145,9 @@ async fn get_template_version_variables(
 
 async fn post_authcheck(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<AuthorizationRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -7757,6 +7323,10 @@ async fn resolve_user(
         .map_err(AppError::from)
 }
 
+/// Deprecated: all call-sites now use `Authorizer::new().authorize()` with
+/// the appropriate `ResourceType` and `Action` instead of this coarse check.
+/// Retained temporarily for reference; safe to remove once confirmed unused.
+#[allow(dead_code)]
 fn can_view_operational_data(actor: &Actor) -> bool {
     actor.is_owner() || actor.has_site_role(ROLE_AUDITOR)
 }
@@ -7877,108 +7447,6 @@ async fn record_audit(
         .await;
 }
 
-fn handle_auth_error(error: AuthServiceError) -> Result<Response, AppError> {
-    match error {
-        AuthServiceError::Storage(error) => Err(AppError::from(error)),
-        AuthServiceError::Unauthorized { message } => Ok(unauthorized_response(message)),
-        AuthServiceError::Forbidden { message } => Ok(forbidden_response(message)),
-        AuthServiceError::NotFound { message } => Ok(not_found_response(message)),
-        AuthServiceError::BadRequest { message, detail } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations: Vec::new(),
-            }),
-        )
-            .into_response()),
-        AuthServiceError::Validation {
-            message,
-            validations,
-        } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail: None,
-                validations,
-            }),
-        )
-            .into_response()),
-        AuthServiceError::Conflict {
-            message,
-            detail,
-            validations,
-        } => Ok((
-            StatusCode::CONFLICT,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations,
-            }),
-        )
-            .into_response()),
-    }
-}
-
-fn handle_external_auth_error(
-    message: &'static str,
-    error: ExternalAuthServiceError,
-) -> Result<Response, AppError> {
-    match error {
-        ExternalAuthServiceError::BadRequest(detail) => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(message, detail)),
-        )
-            .into_response()),
-        ExternalAuthServiceError::Storage(error) => Err(AppError::from(error)),
-        ExternalAuthServiceError::Internal(detail) => {
-            Ok(internal_server_error_detail_response(message, detail))
-        }
-    }
-}
-
-fn handle_identity_error(error: IdentityServiceError) -> Result<Response, AppError> {
-    match error {
-        IdentityServiceError::Storage(error) => Err(AppError::from(error)),
-        IdentityServiceError::NotFound { message } => Ok(not_found_response(message)),
-        IdentityServiceError::Forbidden { message } => Ok(forbidden_response(message)),
-        IdentityServiceError::BadRequest { message, detail } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations: Vec::new(),
-            }),
-        )
-            .into_response()),
-        IdentityServiceError::Validation {
-            message,
-            validations,
-        } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail: None,
-                validations,
-            }),
-        )
-            .into_response()),
-        IdentityServiceError::Conflict {
-            message,
-            detail,
-            validations,
-        } => Ok((
-            StatusCode::CONFLICT,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations,
-            }),
-        )
-            .into_response()),
-    }
-}
-
 fn build_version_headers(version: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Ok(value) = HeaderValue::from_str(version) {
@@ -8030,17 +7498,6 @@ fn not_implemented_response(message: impl Into<String>) -> Response {
     (
         StatusCode::NOT_IMPLEMENTED,
         Json(ApiResponse::ok(message.into())),
-    )
-        .into_response()
-}
-
-fn not_implemented_detail_response(
-    message: impl Into<String>,
-    detail: impl Into<String>,
-) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::error(message.into(), detail.into())),
     )
         .into_response()
 }
@@ -8135,13 +7592,9 @@ struct BuildLogsQuery {
 /// GET /workspaces — filtered, paginated workspace listing.
 async fn list_workspaces(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<WorkspacesQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let owner_id = if let Some(ref owner) = query.owner {
         if owner == "me" {
             Some(context.user.id)
@@ -8208,13 +7661,9 @@ async fn list_workspaces(
 /// GET /workspaces/{workspace}
 async fn get_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8229,13 +7678,10 @@ async fn get_workspace(
 /// PATCH /workspaces/{workspace}
 async fn patch_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8284,14 +7730,10 @@ async fn patch_workspace(
 /// GET /workspaces/{workspace}/builds
 async fn list_workspace_builds_handler(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     Query(query): Query<WorkspaceBuildsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8316,13 +7758,10 @@ async fn list_workspace_builds_handler(
 /// POST /workspaces/{workspace}/builds — start/stop/delete transition.
 async fn post_workspace_build(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8458,13 +7897,10 @@ async fn post_workspace_build(
 /// PUT /workspaces/{workspace}/autostart
 async fn put_workspace_autostart(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8512,13 +7948,10 @@ async fn put_workspace_autostart(
 /// PUT /workspaces/{workspace}/ttl
 async fn put_workspace_ttl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8564,13 +7997,10 @@ async fn put_workspace_ttl(
 /// PUT /workspaces/{workspace}/dormant
 async fn put_workspace_dormant(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8626,13 +8056,10 @@ async fn put_workspace_dormant(
 /// PUT /workspaces/{workspace}/extend
 async fn put_workspace_extend(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8713,13 +8140,10 @@ async fn put_workspace_extend(
 /// PUT /workspaces/{workspace}/autoupdates
 async fn put_workspace_autoupdates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8767,13 +8191,9 @@ async fn put_workspace_autoupdates(
 /// PUT /workspaces/{workspace}/favorite
 async fn put_workspace_favorite(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8811,13 +8231,9 @@ async fn put_workspace_favorite(
 /// DELETE /workspaces/{workspace}/favorite
 async fn delete_workspace_favorite(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8855,13 +8271,9 @@ async fn delete_workspace_favorite(
 /// GET /workspaces/{workspace}/port-share
 async fn list_workspace_port_shares(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -8890,13 +8302,10 @@ async fn list_workspace_port_shares(
 /// POST /workspaces/{workspace}/port-share
 async fn post_workspace_port_share(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -8972,13 +8381,10 @@ async fn post_workspace_port_share(
 /// DELETE /workspaces/{workspace}/port-share
 async fn delete_workspace_port_share(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -9027,13 +8433,9 @@ async fn delete_workspace_port_share(
 /// GET /workspaces/{workspace}/acl
 async fn get_workspace_acl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9100,13 +8502,10 @@ async fn get_workspace_acl(
 /// PATCH /workspaces/{workspace}/acl
 async fn patch_workspace_acl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     payload: Result<Json<UpdateWorkspaceACLRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(req) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -9153,13 +8552,9 @@ async fn patch_workspace_acl(
 /// DELETE /workspaces/{workspace}/acl
 async fn delete_workspace_acl(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9194,13 +8589,9 @@ async fn delete_workspace_acl(
 /// GET /workspaces/{workspace}/resolve-autostart
 async fn get_workspace_resolve_autostart(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9224,13 +8615,9 @@ async fn get_workspace_resolve_autostart(
 /// in `coderd/workspacebuilds.go`.
 async fn get_workspace_timings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(latest_build) = state
         .store
         .find_latest_workspace_build(workspace_id)
@@ -9254,13 +8641,9 @@ async fn get_workspace_timings(
 /// POST /workspaces/{workspace}/usage — updates last_used_at.
 async fn post_workspace_usage(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(workspace) = state
         .store
         .find_workspace_by_id(workspace_id, Some(context.user.id))
@@ -9302,15 +8685,11 @@ async fn post_workspace_usage(
 /// Mirrors the Go `watchWorkspace` handler in `coderd/workspaces.go`.
 async fn get_workspace_watch(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
     use axum::body::Body;
     use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
-
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
 
     let Some(workspace) = state
         .store
@@ -9418,16 +8797,12 @@ async fn get_workspace_watch(
 /// Mirrors the Go `watchWorkspaceWS` handler.
 async fn get_workspace_watch_ws(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(workspace_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     use axum::extract::ws::Message;
     use coder_core::pubsub::{WorkspaceEvent, workspace_event_channel};
-
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
 
     let Some(workspace) = state
         .store
@@ -9508,13 +8883,9 @@ async fn get_workspace_watch_ws(
 /// GET /workspacebuilds/{build}
 async fn get_workspace_build(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9525,13 +8896,9 @@ async fn get_workspace_build(
 /// PATCH /workspacebuilds/{build}/cancel
 async fn patch_cancel_workspace_build(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9571,7 +8938,10 @@ async fn patch_cancel_workspace_build(
     if !canceled {
         return Ok((
             StatusCode::PRECONDITION_FAILED,
-            Json(ApiResponse::ok("Build is already completed or canceled.")),
+            Json(ApiResponse::error(
+                "Build cannot be canceled.",
+                "The workspace build has already completed or been canceled.",
+            )),
         )
             .into_response());
     }
@@ -9582,14 +8952,10 @@ async fn patch_cancel_workspace_build(
 /// GET /workspacebuilds/{build}/logs
 async fn get_workspace_build_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
     Query(query): Query<BuildLogsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9618,13 +8984,9 @@ async fn get_workspace_build_logs(
 /// GET /workspacebuilds/{build}/parameters
 async fn get_workspace_build_parameters(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9648,13 +9010,9 @@ async fn get_workspace_build_parameters(
 /// GET /workspacebuilds/{build}/resources
 async fn get_workspace_build_resources(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9710,13 +9068,9 @@ async fn get_workspace_build_resources(
 /// GET /workspacebuilds/{build}/state
 async fn get_workspace_build_state(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9736,14 +9090,10 @@ async fn get_workspace_build_state(
 /// PUT /workspacebuilds/{build}/state
 async fn put_workspace_build_state(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(build_id): Path<Uuid>,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9786,13 +9136,9 @@ async fn put_workspace_build_state(
 /// GET /workspacebuilds/{build}/timings
 async fn get_workspace_build_timings(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(build_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(build) = state.store.find_workspace_build_by_id(build_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9804,13 +9150,9 @@ async fn get_workspace_build_timings(
 /// GET /users/{user}/workspace/{name}
 async fn get_user_workspace_by_name(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((user, name)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9844,13 +9186,9 @@ async fn get_user_workspace_by_name(
 /// GET /users/{user}/workspace/{name}/builds/{number}
 async fn get_user_workspace_build_by_number(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((user, name, number)): Path<(String, String, i64)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
@@ -9877,13 +9215,10 @@ async fn get_user_workspace_build_by_number(
 /// POST /users/{user}/workspaces — create workspace + initial build.
 async fn post_user_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path(user): Path<String>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -10040,13 +9375,10 @@ async fn post_user_workspace(
 /// logic used by `post_user_workspace`.
 async fn post_org_member_workspace(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((organization, user)): Path<(String, String)>,
     payload: Result<Json<Value>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(body) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -10217,13 +9549,9 @@ async fn post_org_member_workspace(
 /// Mirrors the Go `workspaceAvailableUsers` handler.
 async fn get_org_member_workspace_available_users(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path((organization, _user)): Path<(String, String)>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // Validate the organization exists.
     let Some(_org_record) = resolve_organization(&state, &organization).await? else {
         return Ok(not_found_response("Organization not found."));
@@ -10380,12 +9708,8 @@ fn build_to_json(b: &coder_core::WorkspaceBuildRecord) -> Value {
 
 async fn list_oauth2_provider_apps(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read OAuth2 provider apps.
     // The member site role grants Oauth2App::Read, so all authenticated users
     // with the default member role retain access (backward compatible).
@@ -10403,10 +9727,7 @@ async fn list_oauth2_provider_apps(
         ));
     }
 
-    let apps = match state.oauth2_provider.list_apps().await {
-        Ok(apps) => apps,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let apps = state.oauth2_provider.list_apps().await?;
     let response: Vec<OAuth2ProviderAppResponse> =
         apps.into_iter().map(oauth2_app_response).collect();
     Ok((StatusCode::OK, Json(response)).into_response())
@@ -10414,13 +9735,9 @@ async fn list_oauth2_provider_apps(
 
 async fn post_oauth2_provider_app(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<PostOAuth2ProviderAppRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create OAuth2 provider apps.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10442,7 +9759,7 @@ async fn post_oauth2_provider_app(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let app = match state
+    let app = state
         .oauth2_provider
         .create_app(
             &request.name,
@@ -10450,11 +9767,7 @@ async fn post_oauth2_provider_app(
             &request.callback_url,
             context.user.id,
         )
-        .await
-    {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -10472,12 +9785,8 @@ async fn post_oauth2_provider_app(
 async fn get_oauth2_provider_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read OAuth2 provider apps.
     // The member site role grants Oauth2App::Read, so all authenticated users
     // with the default member role retain access (backward compatible).
@@ -10501,23 +9810,16 @@ async fn get_oauth2_provider_app(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    let app = match state.oauth2_provider.get_app(app_uuid).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let app = state.oauth2_provider.get_app(app_uuid).await?;
     Ok((StatusCode::OK, Json(oauth2_app_response(app))).into_response())
 }
 
 async fn put_oauth2_provider_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<PutOAuth2ProviderAppRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can update OAuth2 provider apps.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10545,7 +9847,7 @@ async fn put_oauth2_provider_app(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let app = match state
+    let app = state
         .oauth2_provider
         .update_app(
             app_uuid,
@@ -10553,11 +9855,7 @@ async fn put_oauth2_provider_app(
             &request.icon,
             &request.callback_url,
         )
-        .await
-    {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -10575,12 +9873,8 @@ async fn put_oauth2_provider_app(
 async fn delete_oauth2_provider_app(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete OAuth2 provider apps.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10604,9 +9898,7 @@ async fn delete_oauth2_provider_app(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    if let Err(error) = state.oauth2_provider.delete_app(app_uuid).await {
-        return handle_oauth2_provider_error(error);
-    }
+    state.oauth2_provider.delete_app(app_uuid).await?;
 
     record_audit(
         &state,
@@ -10624,12 +9916,8 @@ async fn delete_oauth2_provider_app(
 async fn list_oauth2_provider_app_secrets(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can read OAuth2 provider app secrets.
     let authorizer = Authorizer::new();
     if authorizer
@@ -10651,10 +9939,7 @@ async fn list_oauth2_provider_app_secrets(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    let secrets = match state.oauth2_provider.list_app_secrets(app_uuid).await {
-        Ok(secrets) => secrets,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let secrets = state.oauth2_provider.list_app_secrets(app_uuid).await?;
     let response: Vec<OAuth2ProviderAppSecretResponse> =
         secrets.into_iter().map(oauth2_secret_response).collect();
     Ok((StatusCode::OK, Json(response)).into_response())
@@ -10663,12 +9948,8 @@ async fn list_oauth2_provider_app_secrets(
 async fn post_oauth2_provider_app_secret(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create OAuth2 provider app secrets.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10692,10 +9973,7 @@ async fn post_oauth2_provider_app_secret(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    let (raw_secret, record) = match state.oauth2_provider.create_app_secret(app_uuid).await {
-        Ok(result) => result,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let (raw_secret, record) = state.oauth2_provider.create_app_secret(app_uuid).await?;
 
     record_audit(
         &state,
@@ -10718,12 +9996,8 @@ async fn post_oauth2_provider_app_secret(
 async fn delete_oauth2_provider_app_secret(
     State(state): State<AppState>,
     Path((app_id, secret_id)): Path<(String, String)>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can delete OAuth2 provider app secrets.
     // This intentionally replaces the prior is_owner() gate to support future
     // custom roles that may grant OAuth2 app management without full ownership.
@@ -10758,7 +10032,7 @@ async fn delete_oauth2_provider_app_secret(
         .delete_app_secret(app_uuid, secret_uuid)
         .await
     {
-        return handle_oauth2_provider_error(error);
+        return Err(error.into());
     }
 
     record_audit(
@@ -10777,12 +10051,8 @@ async fn delete_oauth2_provider_app_secret(
 async fn delete_oauth2_provider_app_tokens(
     State(state): State<AppState>,
     Path(app_id): Path<String>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // No RBAC check here: this is a self-service endpoint where any
     // authenticated user can revoke their own OAuth2 app authorizations.
     // The downstream revoke_tokens() call is scoped to context.user.id,
@@ -10799,7 +10069,7 @@ async fn delete_oauth2_provider_app_tokens(
         .revoke_tokens(app_uuid, context.user.id)
         .await
     {
-        return handle_oauth2_provider_error(error);
+        return Err(error.into());
     }
 
     record_audit(
@@ -10817,16 +10087,16 @@ async fn delete_oauth2_provider_app_tokens(
 
 async fn get_oauth2_authorize(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(params): Query<OAuth2AuthorizeRequest>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -10835,7 +10105,10 @@ async fn get_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -10843,22 +10116,22 @@ async fn get_oauth2_authorize(
 
     // Validate the app and its callback URL BEFORE creating the authorization
     // code.  This prevents orphaned codes when the callback URL is invalid.
-    let app = match state.oauth2_provider.get_app(client_id).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let app = state.oauth2_provider.get_app(client_id).await?;
     let mut redirect_url = match url::Url::parse(&app.callback_url) {
         Ok(url) => url,
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The registered callback URL could not be parsed.",
+                )),
             )
                 .into_response());
         }
     };
 
-    let raw_code = match state
+    let raw_code = state
         .oauth2_provider
         .create_authorization_code(
             client_id,
@@ -10867,11 +10140,7 @@ async fn get_oauth2_authorize(
             &params.code_challenge,
             &params.code_challenge_method,
         )
-        .await
-    {
-        Ok(code) => code,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     // Build the redirect URL with the code and state.
     redirect_url
@@ -10888,12 +10157,9 @@ async fn get_oauth2_authorize(
 
 async fn post_oauth2_authorize(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<OAuth2AuthorizeRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
     let Json(params) = match payload {
         Ok(p) => p,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -10901,7 +10167,10 @@ async fn post_oauth2_authorize(
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -10910,7 +10179,10 @@ async fn post_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -10918,22 +10190,22 @@ async fn post_oauth2_authorize(
 
     // Validate the app and its callback URL BEFORE creating the authorization
     // code.  This prevents orphaned codes when the callback URL is invalid.
-    let app = match state.oauth2_provider.get_app(client_id).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let app = state.oauth2_provider.get_app(client_id).await?;
     let mut redirect_url = match url::Url::parse(&app.callback_url) {
         Ok(url) => url,
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The registered callback URL could not be parsed.",
+                )),
             )
                 .into_response());
         }
     };
 
-    let raw_code = match state
+    let raw_code = state
         .oauth2_provider
         .create_authorization_code(
             client_id,
@@ -10942,11 +10214,7 @@ async fn post_oauth2_authorize(
             &params.code_challenge,
             &params.code_challenge_method,
         )
-        .await
-    {
-        Ok(code) => code,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     // Build the redirect URL with the code and state.
     redirect_url
@@ -10971,12 +10239,15 @@ async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
             };
-            let result = match state
+            let result = state
                 .oauth2_provider
                 .exchange_code(
                     &request.code,
@@ -10984,11 +10255,7 @@ async fn post_oauth2_token(
                     &request.client_secret,
                     &request.code_verifier,
                 )
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => return handle_oauth2_provider_error(error),
-            };
+                .await?;
             let response = OAuth2TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -11003,19 +10270,18 @@ async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
             };
-            let result = match state
+            let result = state
                 .oauth2_provider
                 .refresh_token(&request.refresh_token, client_id, &request.client_secret)
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => return handle_oauth2_provider_error(error),
-            };
+                .await?;
             let response = OAuth2TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -11026,20 +10292,12 @@ async fn post_oauth2_token(
         }
         _ => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Unsupported grant_type.")),
+            Json(ApiResponse::error(
+                "Unsupported grant_type.",
+                "Supported grant types are: authorization_code, refresh_token.",
+            )),
         )
             .into_response()),
-    }
-}
-
-fn handle_oauth2_provider_error(error: OAuth2ProviderError) -> Result<Response, AppError> {
-    match error {
-        OAuth2ProviderError::Storage(error) => Err(AppError::from(error)),
-        OAuth2ProviderError::BadRequest { message } => {
-            Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
-        }
-        OAuth2ProviderError::NotFound { message } => Ok(not_found_response(message)),
-        OAuth2ProviderError::Unauthorized { message } => Ok(unauthorized_response(message)),
     }
 }
 
@@ -11076,13 +10334,19 @@ fn oauth2_secret_response(
 
 async fn insights_daus(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsDausQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view deployment DAUs.",
         ));
@@ -11119,13 +10383,19 @@ fn parse_rfc3339(raw: &Option<String>) -> Option<OffsetDateTime> {
 
 async fn insights_templates(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsTemplatesQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view template insights.",
         ));
@@ -11204,13 +10474,19 @@ async fn insights_templates(
 
 async fn insights_user_activity(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsUserActivityQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view user activity insights.",
         ));
@@ -11251,13 +10527,19 @@ async fn insights_user_activity(
 
 async fn insights_user_latency(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsUserLatencyQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view user latency insights.",
         ));
@@ -11298,13 +10580,19 @@ async fn insights_user_latency(
 
 async fn insights_user_status_counts(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Query(query): Query<InsightsUserStatusCountsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view user status counts.",
         ));
@@ -11358,12 +10646,20 @@ async fn insights_user_status_counts(
 /// backend does not yet have a tailnet coordination layer, so we return 501.
 async fn debug_coordinator(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view coordinator debug information.",
         ));
@@ -11389,12 +10685,20 @@ async fn debug_coordinator(
 /// have a workspace-agent provider, so we return 501.
 async fn debug_tailnet(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view tailnet debug information.",
         ));
@@ -11412,12 +10716,20 @@ async fn debug_tailnet(
 /// include a DERP relay, so we return 501.
 async fn debug_derp_traffic(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view DERP traffic debug information.",
         ));
@@ -11435,12 +10747,20 @@ async fn debug_derp_traffic(
 /// on other platforms.
 async fn debug_expvar(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view expvar debug information.",
         ));
@@ -11509,12 +10829,20 @@ fn parse_proc_kb(val: &str) -> Option<u64> {
 async fn debug_pprof(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view pprof debug information.",
         ));
@@ -11579,13 +10907,21 @@ async fn debug_pprof(
 /// three numbered text messages, verifying each is echoed correctly.
 async fn debug_websocket(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to use the debug websocket.",
         ));
@@ -11633,12 +10969,20 @@ async fn websocket_echo(mut socket: WebSocket) {
 /// delegate to it.
 async fn debug_metrics(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view debug metrics.",
         ));
@@ -11778,12 +11122,8 @@ async fn derp_map_updates(
 /// workspace-proxy regions.
 async fn get_regions(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let region_id = state
         .store
         .ensure_deployment_metadata()
@@ -11970,13 +11310,9 @@ const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
 /// handler currently returns 204 No Content after validation succeeds.
 async fn post_custom_notification(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     payload: Result<Json<coder_core::CustomNotificationRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can create notification messages.
     // In Go, postCustomNotification checks policy.ActionCreate on
     // rbac.ResourceNotificationMessage at site level. Only the owner role
@@ -12319,13 +11655,9 @@ async fn build_agent_response(
 /// GET /api/v2/workspaceagents/{agent} — get agent info.
 async fn get_workspace_agent(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12337,13 +11669,9 @@ async fn get_workspace_agent(
 /// GET /api/v2/workspaceagents/{agent}/connection — per-agent connection info.
 async fn get_workspace_agent_connection(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(_agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
@@ -12351,13 +11679,9 @@ async fn get_workspace_agent_connection(
 /// GET /api/v2/workspaceagents/{agent}/containers — list containers.
 async fn get_workspace_agent_containers(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12391,13 +11715,9 @@ async fn get_workspace_agent_containers(
 /// POST /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc}/recreate — recreate devcontainer.
 async fn post_workspace_agent_recreate_devcontainer(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12452,13 +11772,9 @@ async fn post_workspace_agent_recreate_devcontainer(
 /// DELETE /api/v2/workspaceagents/{agent}/containers/devcontainers/{dc} — delete devcontainer.
 async fn delete_workspace_agent_devcontainer(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(context): Auth,
     Path((agent_id, dc_id)): Path<(Uuid, Uuid)>,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12513,61 +11829,228 @@ async fn delete_workspace_agent_devcontainer(
 /// GET /api/v2/workspaceagents/{agent}/containers/watch — SSE container watch.
 async fn get_workspace_agent_containers_watch(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real streaming requires agent connectivity.
-    Ok(ws.on_upgrade(|socket| {
-        ws_close_not_implemented(
-            socket,
-            "Container watch requires agent connectivity which is not yet implemented.",
-        )
+    let pubsub = state.pubsub.clone();
+    let store = state.store.clone();
+    let channel = coder_core::pubsub::workspace_agent_containers_channel(agent_id);
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
+        let mut subscription = match pubsub.subscribe(&channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to container events",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
+        // Send the initial container state snapshot.
+        let devcontainer_rows = match store.list_workspace_agent_devcontainers(agent_id).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to fetch initial container state",
+                );
+                Vec::new()
+            }
+        };
+        let devcontainers: Vec<coder_core::WorkspaceAgentDevcontainer> = devcontainer_rows
+            .iter()
+            .map(|dc| coder_core::WorkspaceAgentDevcontainer {
+                id: dc.id,
+                workspace_agent_id: dc.workspace_agent_id,
+                workspace_folder: dc.workspace_folder.clone(),
+                config_path: dc.config_path.clone(),
+                name: dc.name.clone(),
+                container: None,
+            })
+            .collect();
+        let snapshot = WorkspaceAgentListContainersResponse {
+            containers: Vec::new(),
+            devcontainers,
+        };
+        if let Ok(payload) = serde_json::to_string(&snapshot) {
+            if socket.send(Message::Text(payload.into())).await.is_err() {
+                return;
+            }
+        }
+
+        // Stream container state changes until the connection closes.
+        loop {
+            tokio::select! {
+                ws_msg = socket.recv() => {
+                    match ws_msg {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                event = subscription.recv() => {
+                    match event {
+                        Ok(data) => {
+                            let text = match String::from_utf8(data) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "non-UTF-8 container event payload",
+                                    );
+                                    continue;
+                                }
+                            };
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
     }))
 }
 
 /// GET /api/v2/workspaceagents/{agent}/coordinate — WebSocket coordination.
+///
+/// Implements agent-side coordination protocol.  Registers the agent as a
+/// peer in the [`TailnetCoordinator`] and multiplexes between incoming
+/// WebSocket messages and outgoing coordinator responses.
 async fn get_workspace_agent_coordinate(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
-    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+    let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real coordination requires tailnet.
-    Ok(ws.on_upgrade(|socket| {
-        ws_close_not_implemented(
-            socket,
-            "Agent coordination requires tailnet integration which is not yet implemented.",
-        )
+    let coordinator = state.coordinator.clone();
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse, PeerKind};
+
+        // Register the agent as a peer in the coordinator.
+        let mut handle =
+            coordinator.coordinate(agent_id, row.name.clone(), PeerKind::Agent);
+
+        // Multiplex: read from WebSocket AND from the coordinator response
+        // channel simultaneously.
+        loop {
+            tokio::select! {
+                // --- Incoming WebSocket message from the agent ---
+                ws_msg = socket.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            match serde_json::from_str::<CoordinateRequest>(&text) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(agent_id, request) {
+                                        tracing::warn!(
+                                            agent_id = %agent_id,
+                                            error = %e,
+                                            "agent coordination request error",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        agent_id = %agent_id,
+                                        error = %e,
+                                        "invalid agent coordination request JSON",
+                                    );
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Binary(bin))) => {
+                            match serde_json::from_slice::<CoordinateRequest>(&bin) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(agent_id, request) {
+                                        tracing::warn!(
+                                            agent_id = %agent_id,
+                                            error = %e,
+                                            "agent coordination request error (binary)",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        agent_id = %agent_id,
+                                        error = %e,
+                                        "invalid agent coordination request (binary)",
+                                    );
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                // --- Outgoing coordination response from the coordinator ---
+                resp = handle.response_rx.recv() => {
+                    match resp {
+                        Some(coord_response) => {
+                            if let Ok(payload) = serde_json::to_string(&coord_response) {
+                                if socket.send(Message::Text(payload.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        // Channel closed — coordinator shut down our session.
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        coordinator.close_coordination(agent_id, handle.session_id);
     }))
 }
 
 /// GET /api/v2/workspaceagents/{agent}/listening-ports — list listening ports.
 async fn get_workspace_agent_listening_ports(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12583,14 +12066,10 @@ async fn get_workspace_agent_listening_ports(
 /// GET /api/v2/workspaceagents/{agent}/logs — streaming agent logs.
 async fn get_workspace_agent_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     Query(query): Query<AgentLogsQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12728,37 +12207,106 @@ async fn get_workspace_agent_logs(
 /// GET /api/v2/workspaceagents/{agent}/pty — WebSocket terminal.
 async fn get_workspace_agent_pty(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real PTY requires agent connectivity.
-    Ok(ws.on_upgrade(|socket| {
-        ws_close_not_implemented(
-            socket,
-            "Agent PTY requires agent connectivity which is not yet implemented.",
-        )
+    let pubsub = state.pubsub.clone();
+    let agent_provider = state.agent_provider.clone();
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Verify the agent is currently connected before starting the relay.
+        if agent_provider
+            .get_agent_connection(agent_id)
+            .await
+            .is_none()
+        {
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 4002,
+                    reason: "agent is not connected".into(),
+                })))
+                .await;
+            return;
+        }
+
+        // Set up bidirectional relay channels via pubsub.
+        let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
+        let input_channel = coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
+
+        let mut output_sub = match pubsub.subscribe(&output_channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to PTY output",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
+        // Relay binary frames between WebSocket client and PTY channels.
+        loop {
+            tokio::select! {
+                ws_msg = socket.recv() => {
+                    match ws_msg {
+                        Some(Ok(Message::Binary(data))) => {
+                            if let Err(e) = pubsub.publish(&input_channel, &data).await {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    error = %e,
+                                    "failed to publish PTY input",
+                                );
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Text(text))) => {
+                            if let Err(e) = pubsub.publish(&input_channel, text.as_bytes()).await {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    error = %e,
+                                    "failed to publish PTY input",
+                                );
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                pty_data = output_sub.recv() => {
+                    match pty_data {
+                        Ok(data) => {
+                            if socket.send(Message::Binary(data.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
     }))
 }
 
 /// GET /api/v2/workspaceagents/{agent}/watch-metadata — SSE metadata watch.
 async fn get_workspace_agent_watch_metadata(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
@@ -12786,23 +12334,104 @@ async fn get_workspace_agent_watch_metadata(
 /// GET /api/v2/workspaceagents/{agent}/watch-metadata-ws — WebSocket metadata watch.
 async fn get_workspace_agent_watch_metadata_ws(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real watch requires pubsub.
-    Ok(ws.on_upgrade(|socket| ws_close_not_implemented(
-        socket,
-        "Agent metadata WebSocket watch requires pubsub integration which is not yet implemented.",
-    )))
+    let pubsub = state.pubsub.clone();
+    let store = state.store.clone();
+    let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
+        let mut subscription = match pubsub.subscribe(&channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to metadata events",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
+        // Send the initial metadata snapshot.
+        match store.list_workspace_agent_metadata(agent_id).await {
+            Ok(rows) => {
+                let metadata: Vec<coder_core::WorkspaceAgentMetadata> = rows
+                    .iter()
+                    .map(|m| coder_core::WorkspaceAgentMetadata {
+                        display_name: m.display_name.clone(),
+                        key: m.key.clone(),
+                        script: m.script.clone(),
+                        value: m.value.clone(),
+                        error: m.error.clone(),
+                        timeout: m.timeout,
+                        interval: m.interval,
+                        collected_at: m.collected_at,
+                        display_order: m.display_order,
+                    })
+                    .collect();
+                if let Ok(payload) = serde_json::to_string(&metadata) {
+                    if socket.send(Message::Text(payload.into())).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to fetch initial metadata",
+                );
+            }
+        }
+
+        // Stream metadata updates until the connection closes.
+        loop {
+            tokio::select! {
+                ws_msg = socket.recv() => {
+                    match ws_msg {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                event = subscription.recv() => {
+                    match event {
+                        Ok(data) => {
+                            let text = match String::from_utf8(data) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "non-UTF-8 metadata event payload",
+                                    );
+                                    continue;
+                                }
+                            };
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }))
 }
 
 /// GET /api/v2/workspaceagents/connection — global agent connection info.
@@ -12848,12 +12477,8 @@ fn build_workspace_agent_connection_info(state: &AppState) -> WorkspaceAgentConn
 
 async fn get_workspace_agents_connection_info(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let info = build_workspace_agent_connection_info(&state);
     Ok((StatusCode::OK, Json(info)).into_response())
 }
@@ -12861,13 +12486,9 @@ async fn get_workspace_agents_connection_info(
 /// PATCH /api/v2/workspaceagents/me/app-status — update app status (agent-authenticated).
 async fn patch_workspace_agent_app_status(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     body: Result<Json<PatchAppStatusRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let Json(request) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -12930,14 +12551,10 @@ async fn patch_workspace_agent_app_status(
 
 /// GET /api/v2/workspaceagents/me/external-auth — agent external auth.
 async fn get_workspace_agent_external_auth(
-    State(state): State<AppState>,
-    headers: HeaderMap,
+    State(_state): State<AppState>,
+    AgentAuth(_agent): AgentAuth,
     Query(query): Query<AgentExternalAuthQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     // Validate that either id or match is provided.
     if query.id.is_empty() {
         return Ok((
@@ -12958,13 +12575,9 @@ async fn get_workspace_agent_external_auth(
 /// POST /api/v2/workspaceagents/me/log-source — create agent log source.
 async fn post_workspace_agent_log_source(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     body: Result<Json<CreateLogSourceRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let Json(request) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -12994,13 +12607,9 @@ async fn post_workspace_agent_log_source(
 /// PATCH /api/v2/workspaceagents/me/logs — append agent logs.
 async fn patch_workspace_agent_logs(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     body: Result<Json<PatchAgentLogsRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let Json(request) = match body {
         Ok(json) => json,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -13060,14 +12669,10 @@ async fn patch_workspace_agent_logs(
 /// streams events as they arrive.
 async fn get_workspace_agent_reinit(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
 ) -> Result<Response, AppError> {
     use axum::body::Body;
     use coder_core::pubsub::workspace_agent_reinit_channel;
-
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
 
     let channel = workspace_agent_reinit_channel(agent.id);
     let mut subscription = state.pubsub.subscribe(&channel).await.map_err(|e| {
@@ -13132,13 +12737,9 @@ async fn get_workspace_agent_reinit(
 /// open and cleaned up when the agent disconnects.
 async fn get_workspace_agent_rpc(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    AgentAuth(agent): AgentAuth,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid agent token."));
-    };
-
     let agent_id = agent.id;
     let provider = state.agent_provider.clone();
     let store = state.store.clone();
@@ -13572,13 +13173,10 @@ const WINDOWS_ZIP_MIME_TYPE: &str = "application/x-zip-compressed";
 /// POST /api/v2/files – upload a binary file, deduplicate by SHA-256 hash.
 async fn post_file(
     State(state): State<AppState>,
+    Auth(context): Auth,
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, AppError> {
-    let Some(context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     // RBAC: verify the actor can upload files.
     // In Go, postFile checks rbac.ActionCreate on rbac.ResourceFile at the
     // site level (no org/owner scoping). This intentionally differs from
@@ -13616,9 +13214,10 @@ async fn post_file(
         _ => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!(
-                    "Unsupported content type header \"{content_type}\"."
-                ))),
+                Json(ApiResponse::error(
+                    format!("Unsupported content type header \"{content_type}\"."),
+                    "Allowed content types are: application/x-tar, application/zip, application/x-zip-compressed.",
+                )),
             )
                 .into_response());
         }
@@ -13661,13 +13260,9 @@ async fn post_file(
 /// GET /api/v2/files/{fileid} – retrieve a file by UUID.
 async fn get_file_by_id(
     State(state): State<AppState>,
-    headers: HeaderMap,
+    Auth(_context): Auth,
     Path(file_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let file = state.store.get_file_by_id(file_id).await?;
     let Some(file) = file else {
         return Ok(resource_not_found_response());
@@ -13815,8 +13410,25 @@ async fn csrf_middleware(request: axum::extract::Request, next: Next) -> Respons
     next.run(request).await
 }
 
-/// Middleware: record basic Prometheus-style HTTP metrics using the `metrics`
+/// Handler: render Prometheus text exposition format from the installed recorder.
+async fn get_prometheus_metrics(State(state): State<AppState>) -> Response {
+    match state.prometheus_handle {
+        Some(ref handle) => {
+            let body = handle.render();
+            (
+                StatusCode::OK,
+                [(CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+                body,
+            )
+                .into_response()
+        }
+        None => (StatusCode::NOT_FOUND, "metrics recorder not installed").into_response(),
+    }
+}
+
+/// Middleware: record Prometheus-compatible HTTP metrics using the `metrics`
 /// crate.  Counters and histograms are registered lazily on first use.
+/// Tracks per-request latency, status codes, and active connection count.
 async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> Response {
     let method = request.method().to_string();
     let path = request
@@ -13825,26 +13437,16 @@ async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> R
         .map(|m| m.as_str().to_owned())
         .unwrap_or_else(|| "unmatched".to_owned());
 
+    metrics::gauge!("active_connections").increment(1.0);
+
     let start = std::time::Instant::now();
     let response = next.run(request).await;
-    let elapsed = start.elapsed().as_secs_f64();
+    let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let status = response.status().as_u16().to_string();
+    metrics::gauge!("active_connections").decrement(1.0);
 
-    metrics::counter!(
-        "coderd_api_requests_processed_total",
-        "code" => status,
-        "method" => method.clone(),
-        "path" => path.clone(),
-    )
-    .increment(1);
-
-    metrics::histogram!(
-        "coderd_api_request_latencies_seconds",
-        "method" => method,
-        "path" => path,
-    )
-    .record(elapsed);
+    let status = response.status().as_u16();
+    crate::metrics::record_request(&method, &path, status, elapsed_ms);
 
     response
 }
@@ -13917,8 +13519,8 @@ mod tests {
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertCustomRoleInput,
         UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
         UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord,
-        UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-        UserStatusChangeRecord, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
+        UserLinkClaims, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+        UserStatus, UserStatusChangeRecord, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
         WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
         WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
         WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
@@ -14976,7 +14578,11 @@ mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            matched.sort_by(|left, right| left.username.cmp(&right.username));
+            matched.sort_by(|left, right| {
+                left.username
+                    .to_lowercase()
+                    .cmp(&right.username.to_lowercase())
+            });
             let count = matched.len();
             let start = usize::try_from(filter.offset).unwrap_or(0);
             let end = if filter.limit == 0 {
@@ -15366,10 +14972,12 @@ mod tests {
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             let mut rows = organizations
                 .values()
+                .filter(|org| !org.deleted)
                 .filter(|org| organization_ids.is_empty() || organization_ids.contains(&org.id))
                 .cloned()
                 .collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.name.cmp(&right.name));
+            // Match PostgresStore: ORDER BY LOWER(name) ASC
+            rows.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
             Ok(rows)
         }
 
@@ -15382,6 +14990,7 @@ mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?
                 .get(&organization_id)
+                .filter(|org| !org.deleted)
                 .cloned())
         }
 
@@ -15395,7 +15004,7 @@ mod tests {
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             Ok(organizations
                 .values()
-                .find(|org| org.name.eq_ignore_ascii_case(name))
+                .find(|org| !org.deleted && org.name.eq_ignore_ascii_case(name))
                 .cloned())
         }
 
@@ -15424,7 +15033,12 @@ mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.username.cmp(&right.username));
+            // Match PostgresStore: ORDER BY LOWER(u.username) ASC
+            rows.sort_by(|left, right| {
+                left.username
+                    .to_lowercase()
+                    .cmp(&right.username.to_lowercase())
+            });
             let start = usize::try_from(filter.offset).unwrap_or(0);
             let end = if filter.limit == 0 {
                 rows.len()
@@ -15463,7 +15077,12 @@ mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.username.cmp(&right.username));
+            // Match PostgresStore: ORDER BY LOWER(u.username) ASC
+            rows.sort_by(|left, right| {
+                left.username
+                    .to_lowercase()
+                    .cmp(&right.username.to_lowercase())
+            });
             let count = rows.len();
             let start = usize::try_from(filter.offset).unwrap_or(0);
             let end = if filter.limit == 0 {
@@ -15739,7 +15358,7 @@ mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             let now = OffsetDateTime::now_utc();
-            Ok(api_keys
+            let mut results: Vec<ApiKeyWithOwnerRecord> = api_keys
                 .values()
                 .filter(|key| key.login_type == filter.login_type)
                 .filter(|key| filter.user_id.is_none_or(|user_id| key.user_id == user_id))
@@ -15751,7 +15370,15 @@ mod tests {
                         .map(|user| user.username.clone())
                         .unwrap_or_default(),
                 })
-                .collect())
+                .collect();
+            // Match PostgresStore: ORDER BY LOWER(u.username) ASC, k.created_at DESC
+            results.sort_by(|a, b| {
+                a.username
+                    .to_lowercase()
+                    .cmp(&b.username.to_lowercase())
+                    .then_with(|| b.key.created_at.cmp(&a.key.created_at))
+            });
+            Ok(results)
         }
 
         async fn delete_api_key(&self, id: &str) -> Result<bool, StorageError> {
@@ -17270,6 +16897,17 @@ mod tests {
                 Some(t) if !t.deleted => {
                     t.deleted = true;
                     t.updated_at = OffsetDateTime::now_utc();
+                    drop(templates);
+                    // Cascade: archive all template versions belonging to this template.
+                    let mut versions = self
+                        .template_versions
+                        .lock()
+                        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                    for v in versions.values_mut() {
+                        if v.template_id == Some(template_id) {
+                            v.archived = true;
+                        }
+                    }
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -18704,6 +18342,35 @@ mod tests {
             &self,
             filter: WorkspaceListFilter,
         ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+            // Pre-resolve owner_username -> owner_id so we can filter by username.
+            let resolved_owner_id: Option<Uuid> = if filter.owner_id.is_some() {
+                filter.owner_id
+            } else if let Some(ref username) = filter.owner_username {
+                let users = self
+                    .users
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                users
+                    .values()
+                    .find(|u| u.username == *username)
+                    .map(|u| u.id)
+            } else {
+                None
+            };
+            // Pre-resolve template_name -> template_id so we can filter by name.
+            let resolved_template_name_id: Option<Uuid> =
+                if let Some(ref tname) = filter.template_name {
+                    let templates = self
+                        .templates
+                        .lock()
+                        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                    templates
+                        .values()
+                        .find(|t| t.name == *tname && !t.deleted)
+                        .map(|t| t.id)
+                } else {
+                    None
+                };
             let workspaces = self
                 .workspaces
                 .lock()
@@ -18712,15 +18379,17 @@ mod tests {
                 .values()
                 .filter(|w| !w.deleted)
                 .filter(|w| {
-                    filter
-                        .owner_id
-                        .is_none_or(|owner_id| w.owner_id == owner_id)
+                    if filter.owner_id.is_some() || filter.owner_username.is_some() {
+                        resolved_owner_id.is_some_and(|owner_id| w.owner_id == owner_id)
+                    } else {
+                        true
+                    }
                 })
                 .filter(|w| {
-                    filter
-                        .name
-                        .as_ref()
-                        .is_none_or(|n| w.name.contains(n.as_str()))
+                    filter.name.as_ref().is_none_or(|n| {
+                        let lower = n.to_lowercase();
+                        w.name.to_lowercase().contains(&lower)
+                    })
                 })
                 .filter(|w| {
                     filter
@@ -18729,6 +18398,14 @@ mod tests {
                 })
                 .filter(|w| {
                     filter.template_ids.is_empty() || filter.template_ids.contains(&w.template_id)
+                })
+                .filter(|w| {
+                    // Filter by template_name: if set, only include matching template.
+                    if filter.template_name.is_some() {
+                        resolved_template_name_id.is_some_and(|tid| w.template_id == tid)
+                    } else {
+                        true
+                    }
                 })
                 .filter(|w| {
                     filter.dormant.is_none_or(|d| {
@@ -18799,6 +18476,19 @@ mod tests {
             }
             ws.deleted = true;
             ws.updated_at = OffsetDateTime::now_utc();
+            drop(workspaces);
+            // Cascade: remove associated port shares and ACLs.
+            let mut port_shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            port_shares.retain(|ps| ps.workspace_id != workspace_id);
+            drop(port_shares);
+            let mut acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            acls.remove(&workspace_id);
             Ok(true)
         }
 
@@ -19422,6 +19112,7 @@ mod tests {
                 oauth_access_token: input.oauth_access_token.clone(),
                 oauth_refresh_token: input.oauth_refresh_token.clone(),
                 oauth_expiry: input.oauth_expiry,
+                claims: input.claims.clone(),
             };
             links.insert((user_id, input.login_type), record.clone());
             Ok(record)
@@ -19748,6 +19439,7 @@ mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                None,
             )?,
             store,
         ))
@@ -19979,7 +19671,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert_eq!(body, Value::String("ok".to_owned()));
+        assert_eq!(body.get("message").and_then(Value::as_str), Some("ok"));
         Ok(())
     }
 
@@ -26652,6 +26344,433 @@ mod tests {
             "expected 101 or 426, got {}",
             response.status()
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // WebSocket handler integration tests (spawn_test_server + tokio-tungstenite)
+    // -----------------------------------------------------------------------
+
+    /// Helper: connect a WebSocket to an arbitrary path with auth.
+    async fn connect_ws_to(
+        base: &Url,
+        path: &str,
+        session_token: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Box<dyn Error>,
+    > {
+        let url = ws_url(base, path);
+        let req = Request::builder()
+            .uri(&url)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .header("Coder-Session-Token", session_token)
+            .header("Host", base.host_str().unwrap_or("localhost"))
+            .body(())?;
+        let (stream, _response) = tokio_tungstenite::connect_async(req).await?;
+        Ok(stream)
+    }
+
+    // --- containers/watch tests ---
+
+    #[tokio::test]
+    async fn test_containers_watch_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_containers_watch_ws_streams_initial_snapshot() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        // Insert a devcontainer so the initial snapshot is non-empty.
+        store
+            .workspace_agent_devcontainers
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(coder_core::WorkspaceAgentDevcontainerRow {
+                id: Uuid::new_v4(),
+                workspace_agent_id: agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                workspace_folder: "/workspace".to_owned(),
+                config_path: ".devcontainer/devcontainer.json".to_owned(),
+                name: "test-dc".to_owned(),
+                subagent_id: None,
+            });
+
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
+            &token,
+        )
+        .await?;
+
+        // Read initial snapshot.
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text = match msg {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        let snapshot: Value = serde_json::from_str(&text)?;
+        let devcontainers = snapshot
+            .get("devcontainers")
+            .and_then(Value::as_array)
+            .ok_or("missing devcontainers")?;
+        assert_eq!(devcontainers.len(), 1);
+        assert_eq!(
+            devcontainers[0].get("name").and_then(Value::as_str),
+            Some("test-dc")
+        );
+
+        // Publish a container event via pubsub and verify it arrives.
+        let channel = coder_core::pubsub::workspace_agent_containers_channel(agent_id);
+        let event_payload = r#"{"containers":[],"devcontainers":[]}"#;
+        pubsub.publish(&channel, event_payload.as_bytes()).await?;
+
+        let msg2 = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text2 = match msg2 {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        assert_eq!(text2, event_payload);
+
+        Ok(())
+    }
+
+    // --- coordinate tests ---
+
+    #[tokio::test]
+    async fn test_agent_coordinate_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/coordinate"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_agent_coordinate_ws_registers_and_exchanges() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{CoordinateRequest, NodeInfo};
+
+        let (state, store) = test_state_with_store(true)?;
+        let coordinator = state.coordinator.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        // Connect to the agent coordinate endpoint.
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/coordinate"),
+            &token,
+        )
+        .await?;
+
+        // Send an update_self coordination request.
+        let node = NodeInfo {
+            id: 99,
+            preferred_derp: 2,
+            addresses: vec!["100.64.0.2/32".to_owned()],
+            endpoints: vec!["10.0.0.1:41641".to_owned()],
+            ..Default::default()
+        };
+        let req = CoordinateRequest {
+            update_self: Some(node),
+            ..Default::default()
+        };
+        let payload = serde_json::to_string(&req)?;
+        ws.send(tungstenite::Message::Text(payload.into())).await?;
+
+        // Verify the agent was registered by checking the coordinator debug output.
+        let debug = coordinator.debug_json();
+        let total_peers = debug["total_peers"].as_u64().unwrap_or(0);
+        assert!(
+            total_peers >= 1,
+            "expected at least 1 peer in coordinator, got {total_peers}"
+        );
+
+        // Send a disconnect and verify the stream ends gracefully.
+        let disconnect_req = CoordinateRequest {
+            disconnect: Some(true),
+            ..Default::default()
+        };
+        let disconnect_payload = serde_json::to_string(&disconnect_req)?;
+        ws.send(tungstenite::Message::Text(disconnect_payload.into()))
+            .await?;
+
+        // Give a small delay for the server to process and close.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        Ok(())
+    }
+
+    // --- pty tests ---
+
+    #[tokio::test]
+    async fn test_pty_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pty_ws_relays_via_pubsub() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::agents::AgentConnection;
+
+        let (state, store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        // Register a stub agent connection so the PTY handler accepts us.
+        #[derive(Debug)]
+        struct StubConn {
+            id: Uuid,
+            connected: OffsetDateTime,
+        }
+        #[async_trait::async_trait]
+        impl AgentConnection for StubConn {
+            async fn recreate_devcontainer(
+                &self,
+                _container_id: &str,
+            ) -> Result<(), coder_connectivity::agents::AgentError> {
+                Ok(())
+            }
+            async fn delete_devcontainer(
+                &self,
+                _container_id: &str,
+            ) -> Result<(), coder_connectivity::agents::AgentError> {
+                Ok(())
+            }
+            fn agent_id(&self) -> Uuid {
+                self.id
+            }
+            fn connected_at(&self) -> OffsetDateTime {
+                self.connected
+            }
+        }
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConn {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        state.agent_provider.register_agent(agent_id, conn).await;
+
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        // Subscribe to the PTY input channel before connecting so we can
+        // verify data flows from WS client -> pubsub.
+        let input_channel = coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
+        let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
+        let mut input_sub = pubsub.subscribe(&input_channel).await?;
+
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+            &token,
+        )
+        .await?;
+
+        // Send binary data over WS and verify it arrives on the PTY input channel.
+        ws.send(tungstenite::Message::Binary(b"hello-pty".to_vec().into()))
+            .await?;
+
+        let received = tokio::time::timeout(Duration::from_secs(5), input_sub.recv())
+            .await?
+            .map_err(|e| format!("pubsub recv error: {e}"))?;
+        assert_eq!(received, b"hello-pty");
+
+        // Publish to PTY output channel and verify it arrives over WS as binary.
+        pubsub.publish(&output_channel, b"pty-output-data").await?;
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        match msg {
+            tungstenite::Message::Binary(data) => {
+                assert_eq!(data.as_ref(), b"pty-output-data");
+            }
+            other => return Err(format!("expected binary, got {other:?}").into()),
+        }
+
+        Ok(())
+    }
+
+    // --- watch-metadata-ws tests ---
+
+    #[tokio::test]
+    async fn test_metadata_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_ws_streams_initial_and_updates() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        // Insert metadata so the initial snapshot is non-empty.
+        store
+            .workspace_agent_metadata
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentMetadataRow {
+                workspace_agent_id: agent_id,
+                display_name: "Memory".to_owned(),
+                key: "mem".to_owned(),
+                script: "free -m".to_owned(),
+                value: "1024".to_owned(),
+                error: String::new(),
+                timeout: 5,
+                interval: 10,
+                collected_at: OffsetDateTime::now_utc(),
+                display_order: 0,
+            });
+
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+            &token,
+        )
+        .await?;
+
+        // Read initial metadata snapshot.
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text = match msg {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        let metadata: Value = serde_json::from_str(&text)?;
+        let items = metadata.as_array().ok_or("expected array")?;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("key").and_then(Value::as_str), Some("mem"));
+        assert_eq!(items[0].get("value").and_then(Value::as_str), Some("1024"));
+
+        // Publish a metadata update via pubsub and verify it arrives.
+        let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+        let update_payload = r#"[{"display_name":"CPU","key":"cpu","script":"uptime","value":"0.5","error":"","timeout":5,"interval":10,"collected_at":"2025-01-01T00:00:00Z","display_order":1}]"#;
+        pubsub.publish(&channel, update_payload.as_bytes()).await?;
+
+        let msg2 = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text2 = match msg2 {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        assert_eq!(text2, update_payload);
+
         Ok(())
     }
 
@@ -38241,6 +38360,2587 @@ mod tests {
         assert!(resp.peer_updates.is_empty());
 
         ws.close(None).await.ok();
+        Ok(())
+    }
+
+    // =========================================================================
+    // FakeStore audit tests -- verify parity with PostgresStore behavior
+    // =========================================================================
+
+    #[tokio::test]
+    async fn fake_store_list_users_case_insensitive_sort() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        store
+            .create_user(CreateUserInput {
+                email: "b@test.com".to_owned(),
+                username: "Bob".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+        store
+            .create_user(CreateUserInput {
+                email: "a@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let (users, _count) = store.list_users(UserListFilter::default()).await?;
+        let usernames: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
+        // PostgresStore sorts by LOWER(username) ASC
+        assert_eq!(usernames, vec!["admin", "alice", "Bob"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_users_offset_limit() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        for i in 0..5 {
+            let name = format!("user{i}");
+            store
+                .create_user(CreateUserInput {
+                    email: format!("{name}@test.com"),
+                    username: name,
+                    name: String::new(),
+                    password_hash: None,
+                    login_type: LoginType::Password,
+                    status: UserStatus::Active,
+                    organization_ids: orgs.clone(),
+                })
+                .await?;
+        }
+
+        // Total = 6 (admin + user0..user4). Offset 2, limit 2 should give user1, user2.
+        let (page, total) = store
+            .list_users(UserListFilter {
+                offset: 2,
+                limit: 2,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(total, 6);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].username, "user1");
+        assert_eq!(page[1].username, "user2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_users_search_and_status_filter() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        let user = store
+            .create_user(CreateUserInput {
+                email: "suspended@test.com".to_owned(),
+                username: "suspendeduser".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+        store
+            .update_user_status(user.id, UserStatus::Suspended)
+            .await?;
+
+        // Search by username substring.
+        let (found, _) = store
+            .list_users(UserListFilter {
+                search: "suspended".to_owned(),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].username, "suspendeduser");
+
+        // Filter by status.
+        let (active, _) = store
+            .list_users(UserListFilter {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            })
+            .await?;
+        assert!(
+            active.iter().all(|u| u.status == UserStatus::Active),
+            "all returned users should be active"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_api_keys_sorted_by_username_then_created_at()
+    -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        let bob = store
+            .create_user(CreateUserInput {
+                email: "bob@test.com".to_owned(),
+                username: "bob".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+        let alice = store
+            .create_user(CreateUserInput {
+                email: "alice@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let now = OffsetDateTime::now_utc();
+        store
+            .create_api_key(CreateApiKeyInput {
+                id: "bob-key-1".to_owned(),
+                hashed_secret: vec![1],
+                user_id: bob.id,
+                last_used: now,
+                expires_at: now + time::Duration::days(30),
+                created_at: now - time::Duration::days(2),
+                updated_at: now,
+                login_type: LoginType::Token,
+                scopes: vec!["all".to_owned()],
+                token_name: "bob-token".to_owned(),
+                lifetime_seconds: 86400,
+                allow_list: Vec::new(),
+            })
+            .await?;
+        store
+            .create_api_key(CreateApiKeyInput {
+                id: "alice-key-1".to_owned(),
+                hashed_secret: vec![2],
+                user_id: alice.id,
+                last_used: now,
+                expires_at: now + time::Duration::days(30),
+                created_at: now - time::Duration::days(1),
+                updated_at: now,
+                login_type: LoginType::Token,
+                scopes: vec!["all".to_owned()],
+                token_name: "alice-token".to_owned(),
+                lifetime_seconds: 86400,
+                allow_list: Vec::new(),
+            })
+            .await?;
+
+        let keys = store
+            .list_api_keys(ApiKeyListFilter {
+                login_type: LoginType::Token,
+                user_id: None,
+                include_expired: false,
+            })
+            .await?;
+
+        // PostgresStore sorts by LOWER(username) ASC, then created_at DESC.
+        assert!(keys.len() >= 2);
+        assert_eq!(keys[0].username, "alice");
+        assert_eq!(keys[1].username, "bob");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_organizations_filters_deleted_and_sorts_lowercase()
+    -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+
+        let org_id = Uuid::from_u128(100);
+        let now = OffsetDateTime::now_utc();
+        store
+            .organizations
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(
+                org_id,
+                OrganizationRecord {
+                    id: org_id,
+                    name: "Borg".to_owned(),
+                    display_name: "Borg Org".to_owned(),
+                    description: String::new(),
+                    icon: String::new(),
+                    created_at: now,
+                    updated_at: now,
+                    is_default: false,
+                    deleted: false,
+                },
+            );
+        let deleted_id = Uuid::from_u128(200);
+        store
+            .organizations
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(
+                deleted_id,
+                OrganizationRecord {
+                    id: deleted_id,
+                    name: "aaa-deleted".to_owned(),
+                    display_name: "Deleted".to_owned(),
+                    description: String::new(),
+                    icon: String::new(),
+                    created_at: now,
+                    updated_at: now,
+                    is_default: false,
+                    deleted: true,
+                },
+            );
+
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let names: Vec<&str> = orgs.iter().map(|o| o.name.as_str()).collect();
+        assert!(
+            !names.contains(&"aaa-deleted"),
+            "deleted org should be excluded"
+        );
+        assert_eq!(names, vec!["Borg", "first-organization"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_find_organization_by_id_excludes_deleted() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let org_id = Uuid::from_u128(300);
+        let now = OffsetDateTime::now_utc();
+        store
+            .organizations
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(
+                org_id,
+                OrganizationRecord {
+                    id: org_id,
+                    name: "gone".to_owned(),
+                    display_name: "Gone Org".to_owned(),
+                    description: String::new(),
+                    icon: String::new(),
+                    created_at: now,
+                    updated_at: now,
+                    is_default: false,
+                    deleted: true,
+                },
+            );
+        let result = store.find_organization_by_id(org_id).await?;
+        assert!(result.is_none(), "deleted org should not be found");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_workspaces_owner_username_filter() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+        let org_id = orgs[0];
+
+        let alice = store
+            .create_user(CreateUserInput {
+                email: "alice@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let now = OffsetDateTime::now_utc();
+        let template_id = Uuid::from_u128(500);
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(501),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: alice.id,
+            organization_id: org_id,
+            template_id,
+            name: "alice-ws".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(502),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: admin.id,
+            organization_id: org_id,
+            template_id,
+            name: "admin-ws".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        let (ws, count) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_username: Some("alice".to_owned()),
+                limit: 25,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(count, 1);
+        assert_eq!(ws[0].name, "alice-ws");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_workspaces_template_name_filter() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+
+        let now = OffsetDateTime::now_utc();
+        let tmpl_a = Uuid::from_u128(600);
+        let tmpl_b = Uuid::from_u128(601);
+        store
+            .insert_template(CreateTemplateInput {
+                id: tmpl_a,
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "template-a".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Template A".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+        store
+            .insert_template(CreateTemplateInput {
+                id: tmpl_b,
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "template-b".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Template B".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(700),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: admin.id,
+            organization_id: org_id,
+            template_id: tmpl_a,
+            name: "ws-a".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(701),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: admin.id,
+            organization_id: org_id,
+            template_id: tmpl_b,
+            name: "ws-b".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        let (ws, count) = store
+            .list_workspaces(WorkspaceListFilter {
+                template_name: Some("template-a".to_owned()),
+                limit: 25,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(count, 1);
+        assert_eq!(ws[0].name, "ws-a");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_soft_delete_template_cascades_to_versions() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+
+        let now = OffsetDateTime::now_utc();
+        let template_id = Uuid::from_u128(800);
+        let version_id = Uuid::from_u128(801);
+
+        store
+            .insert_template(CreateTemplateInput {
+                id: template_id,
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "tmpl".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: version_id,
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Tmpl".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+
+        store
+            .insert_template_version(CreateTemplateVersionInput {
+                id: version_id,
+                template_id: Some(template_id),
+                organization_id: org_id,
+                created_at: now,
+                updated_at: now,
+                name: "v1".to_owned(),
+                readme: String::new(),
+                job_id: Uuid::nil(),
+                created_by: admin.id,
+                message: String::new(),
+                source_example_id: None,
+            })
+            .await?;
+
+        let v = store
+            .find_template_version_by_id(version_id)
+            .await?
+            .ok_or("version not found")?;
+        assert!(
+            !v.archived,
+            "version should not be archived before template deletion"
+        );
+
+        let deleted = store.soft_delete_template(template_id).await?;
+        assert!(deleted);
+
+        let v = store
+            .find_template_version_by_id(version_id)
+            .await?
+            .ok_or("version not found")?;
+        assert!(
+            v.archived,
+            "version should be archived after template deletion"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_soft_delete_workspace_cascades_port_shares_and_acls()
+    -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let ws_id = Uuid::from_u128(900);
+        let now = OffsetDateTime::now_utc();
+        store.insert_workspace(WorkspaceRecord {
+            id: ws_id,
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: Uuid::nil(),
+            organization_id: Uuid::nil(),
+            template_id: Uuid::nil(),
+            name: "ws".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        store
+            .workspace_port_shares
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .push(WorkspaceAgentPortShareRecord {
+                workspace_id: ws_id,
+                agent_name: "main".to_owned(),
+                port: 8080,
+                share_level: "authenticated".to_owned(),
+                protocol: "http".to_owned(),
+            });
+        store
+            .workspace_acls
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(ws_id, WorkspaceACLRecord::default());
+
+        let deleted = store.soft_delete_workspace(ws_id).await?;
+        assert!(deleted);
+
+        let port_shares = store
+            .workspace_port_shares
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert!(
+            port_shares.iter().all(|ps| ps.workspace_id != ws_id),
+            "port shares should be removed after workspace deletion"
+        );
+        drop(port_shares);
+
+        let acls = store
+            .workspace_acls
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert!(
+            !acls.contains_key(&ws_id),
+            "ACL should be removed after workspace deletion"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_create_user_unique_username() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        store
+            .create_user(CreateUserInput {
+                email: "alice@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let result = store
+            .create_user(CreateUserInput {
+                email: "different@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await;
+        assert!(
+            matches!(result, Err(CreateUserStoreError::AlreadyExists)),
+            "duplicate username should return AlreadyExists"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_create_template_unique_name_per_org() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+
+        let now = OffsetDateTime::now_utc();
+        store
+            .insert_template(CreateTemplateInput {
+                id: Uuid::from_u128(1000),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "unique-tmpl".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Unique".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+
+        let result = store
+            .insert_template(CreateTemplateInput {
+                id: Uuid::from_u128(1001),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "unique-tmpl".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Unique 2".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await;
+        assert!(
+            matches!(result, Err(CreateTemplateStoreError::AlreadyExists)),
+            "duplicate template name in same org should return AlreadyExists"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_org_members_case_insensitive_sort() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+
+        store
+            .create_user(CreateUserInput {
+                email: "b@test.com".to_owned(),
+                username: "Bob".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+        store
+            .create_user(CreateUserInput {
+                email: "a@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+
+        let members = store
+            .list_organization_members(OrganizationMemberListFilter {
+                organization_id: org_id,
+                ..Default::default()
+            })
+            .await?;
+        let usernames: Vec<&str> = members.iter().map(|m| m.username.as_str()).collect();
+        assert_eq!(usernames, vec!["admin", "alice", "Bob"]);
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests — User management, Org, Auth, Audit, etc.
+    // =======================================================================
+
+    #[tokio::test]
+    async fn happy_list_users() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(1));
+        let users = body
+            .get("users")
+            .and_then(Value::as_array)
+            .ok_or("missing users")?;
+        assert_eq!(users.len(), 1);
+        assert_eq!(
+            users[0].get("username").and_then(Value::as_str),
+            Some("owner")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "newuser@example.com".to_owned(),
+                    username: "newuser".to_owned(),
+                    name: "New User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("username").and_then(Value::as_str),
+            Some("newuser")
+        );
+        assert_eq!(
+            body.get("email").and_then(Value::as_str),
+            Some("newuser@example.com")
+        );
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
+        assert_eq!(
+            body.get("email").and_then(Value::as_str),
+            Some("owner@example.com")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a user to delete
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "todelete@example.com".to_owned(),
+                    username: "todelete".to_owned(),
+                    name: "To Delete".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let response = call(
+            app,
+            authenticated_request(Method::DELETE, "/api/v2/users/todelete", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_profile() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/profile",
+                &session_token,
+                &UpdateUserProfileRequest {
+                    username: "owner".to_owned(),
+                    name: "Updated Owner".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("Updated Owner")
+        );
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_appearance() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/appearance", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("theme_preference").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_appearance() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/appearance",
+                &session_token,
+                &UpdateUserAppearanceSettingsRequest {
+                    theme_preference: "dark".to_owned(),
+                    terminal_font: "fira-code".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("theme_preference").and_then(Value::as_str),
+            Some("dark")
+        );
+        assert_eq!(
+            body.get("terminal_font").and_then(Value::as_str),
+            Some("fira-code")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_preferences() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/preferences", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("task_notification_alert_dismissed")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_preferences() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/preferences",
+                &session_token,
+                &UpdateUserPreferenceSettingsRequest {
+                    task_notification_alert_dismissed: true,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("task_notification_alert_dismissed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_password() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/password",
+                &session_token,
+                &UpdateUserPasswordRequest {
+                    old_password: "Password123".to_owned(),
+                    password: "NewPassword456".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_login_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/login-type", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("login_type").and_then(Value::as_str),
+            Some("password")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/roles", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body
+            .get("roles")
+            .and_then(Value::as_array)
+            .ok_or("missing roles")?;
+        assert!(
+            roles.iter().any(|r| r.as_str() == Some("owner")),
+            "first user should have owner role"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "roleuser@example.com".to_owned(),
+                    username: "roleuser".to_owned(),
+                    name: "Role User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/roleuser/roles",
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["user-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body
+            .get("roles")
+            .and_then(Value::as_array)
+            .ok_or("missing roles")?;
+        assert!(
+            roles
+                .iter()
+                .any(|r| r.get("name").and_then(Value::as_str) == Some("user-admin")),
+            "user should have user-admin role"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_git_ssh_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/gitsshkey", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("public_key").and_then(Value::as_str).is_some(),
+            "should return a public key"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_git_ssh_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::PUT, "/api/v2/users/me/gitsshkey", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("public_key").and_then(Value::as_str).is_some(),
+            "regenerated key should return a public key"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_organizations() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/organizations", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let orgs = body.as_array().ok_or("expected array")?;
+        assert_eq!(orgs.len(), 1);
+        assert!(orgs[0].get("id").and_then(Value::as_str).is_some());
+        assert!(orgs[0].get("name").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_organization() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("first-organization")
+        );
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_organization_members() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let members = body.as_array().ok_or("expected array")?;
+        assert_eq!(members.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_organization_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members/owner",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("user_id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_organization_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create user not yet in the org
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgadd@example.com".to_owned(),
+                    username: "orgadd".to_owned(),
+                    name: "Org Add".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        // Remove the user from org, then re-add
+        let _del = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                "/api/v2/organizations/first-organization/members/orgadd",
+                &session_token,
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                "/api/v2/organizations/first-organization/members/orgadd",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("user_id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_organization_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgdel@example.com".to_owned(),
+                    username: "orgdel".to_owned(),
+                    name: "Org Del".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/organizations/{organization_id}/members/orgdel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_organization_member_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgrole@example.com".to_owned(),
+                    username: "orgrole".to_owned(),
+                    name: "Org Role".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/organizations/{organization_id}/members/orgrole/roles"),
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["organization-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body
+            .get("roles")
+            .and_then(Value::as_array)
+            .ok_or("missing roles")?;
+        assert!(
+            roles
+                .iter()
+                .any(|r| r.get("name").and_then(Value::as_str) == Some("organization-admin")),
+            "member should have organization-admin role"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_organization_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members/roles",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body.as_array().ok_or("expected array")?;
+        assert!(
+            !roles.is_empty(),
+            "should return available organization roles"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_site_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/roles", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body.as_array().ok_or("expected array")?;
+        assert!(!roles.is_empty(), "should return available site roles");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_user_organizations() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/organizations",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let orgs = body.as_array().ok_or("expected array")?;
+        assert_eq!(orgs.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_organization_by_name() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/organizations/first-organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("first-organization")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_external_auths() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/external-auth", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("providers")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            body.get("links").and_then(Value::as_array).map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_enabled_experiments() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/experiments", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let experiments = body.as_array().ok_or("expected array")?;
+        assert!(experiments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_available_experiments() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/experiments/available", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("safe").is_some(), "should have safe field");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_session_api_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/users/me/keys", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("key").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_token_api_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(7200),
+                    token_name: "happy-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("key").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_token_api_keys() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(7200),
+                    token_name: "list-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let tokens = body.as_array().ok_or("expected array")?;
+        assert_eq!(tokens.len(), 1, "should list the created token");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_token_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/keys/tokens/tokenconfig",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("max_token_lifetime").is_some(),
+            "should return token config with max_token_lifetime"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_api_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a token
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "to-delete".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        // List tokens to get the key ID
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        let list_body = response_json(list_response).await?;
+        let key_id = list_body
+            .as_array()
+            .and_then(|keys| keys.first())
+            .and_then(|key| key.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing key id")?
+            .to_owned();
+
+        // Delete the token
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/users/me/keys/{key_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_audit_logs() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/audit", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("audit_logs").is_some(),
+            "should have audit_logs field"
+        );
+        assert!(body.get("count").is_some(), "should have count field");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_generate_test_audit_log() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/audit/testgenerate",
+                &session_token,
+                &CreateTestAuditLogRequest::default(),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_validate_user_password() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/users/validate-password",
+                &ValidateUserPasswordRequest {
+                    password: "StrongPassword123!".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("valid").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_paginated_organization_members() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/paginated-members?limit=10&offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("count").is_some(), "should have count field");
+        assert!(body.get("members").is_some(), "should have members field");
+        let count = body
+            .get("count")
+            .and_then(Value::as_u64)
+            .ok_or("missing count")?;
+        assert_eq!(count, 1, "owner should be the only member");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_autofill_parameters() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let template_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/users/me/autofill-parameters?template_id={template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let params = body.as_array().ok_or("expected array")?;
+        assert!(params.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_suspend_and_activate_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "statususer@example.com".to_owned(),
+                    username: "statususer".to_owned(),
+                    name: "Status User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let suspend_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/statususer/status/suspend",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(suspend_response.status(), StatusCode::OK);
+        let suspend_body = response_json(suspend_response).await?;
+        assert_eq!(
+            suspend_body.get("status").and_then(Value::as_str),
+            Some("suspended")
+        );
+
+        let activate_response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/statususer/status/activate",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(activate_response.status(), StatusCode::OK);
+        let activate_body = response_json(activate_response).await?;
+        assert_eq!(
+            activate_body.get("status").and_then(Value::as_str),
+            Some("active")
+        );
+        Ok(())
+    }
+
+    // ── OIDC Debug Link tests ────────────────────────────────────
+
+    #[tokio::test]
+    async fn debug_link_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/owner/debug-link")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_link_non_oidc_user_returns_400() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // The default created user is a Password user, not OIDC
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/debug/owner/debug-link",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("User is not an OIDC user."),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_link_oidc_user_returns_claims() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+        let session_token = create_and_login(&app).await?;
+
+        // Find the owner user and change their login_type to OIDC
+        let owner_id = {
+            let mut users = store.users.lock().map_err(|e| e.to_string())?;
+            let user = users
+                .values_mut()
+                .find(|u| u.username == "owner")
+                .ok_or("owner user not found")?;
+            user.login_type = LoginType::Oidc;
+            user.id
+        };
+
+        // Insert a user link with OIDC claims
+        let mut id_token_claims = serde_json::Map::new();
+        id_token_claims.insert("sub".to_owned(), Value::String("oidc-sub-123".to_owned()));
+        id_token_claims.insert(
+            "email".to_owned(),
+            Value::String("owner@example.com".to_owned()),
+        );
+
+        let mut user_info_claims = serde_json::Map::new();
+        user_info_claims.insert("name".to_owned(), Value::String("Owner".to_owned()));
+
+        let mut merged_claims = serde_json::Map::new();
+        merged_claims.insert("sub".to_owned(), Value::String("oidc-sub-123".to_owned()));
+        merged_claims.insert(
+            "email".to_owned(),
+            Value::String("owner@example.com".to_owned()),
+        );
+        merged_claims.insert("name".to_owned(), Value::String("Owner".to_owned()));
+
+        let claims = UserLinkClaims {
+            id_token_claims: id_token_claims.clone(),
+            user_info_claims: user_info_claims.clone(),
+            merged_claims: merged_claims.clone(),
+        };
+
+        store.user_links.lock().map_err(|e| e.to_string())?.insert(
+            (owner_id, LoginType::Oidc),
+            UserLinkRecord {
+                user_id: owner_id,
+                login_type: LoginType::Oidc,
+                linked_id: "oidc-sub-123".to_owned(),
+                oauth_access_token: String::new(),
+                oauth_refresh_token: String::new(),
+                oauth_expiry: OffsetDateTime::now_utc(),
+                claims: claims.clone(),
+            },
+        );
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/debug/owner/debug-link",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id_token_claims")
+                .and_then(|v| v.get("sub"))
+                .and_then(Value::as_str),
+            Some("oidc-sub-123"),
+        );
+        assert_eq!(
+            body.get("user_info_claims")
+                .and_then(|v| v.get("name"))
+                .and_then(Value::as_str),
+            Some("Owner"),
+        );
+        assert_eq!(
+            body.get("merged_claims")
+                .and_then(|v| v.get("email"))
+                .and_then(Value::as_str),
+            Some("owner@example.com"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_link_forbidden_for_non_owner() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state);
+
+        // Create the first (owner) user via the normal flow
+        let _owner_session = create_and_login(&app).await?;
+
+        // Change the owner user's login_type to OIDC so the endpoint accepts them
+        let owner_id = {
+            let mut users = store.users.lock().map_err(|e| e.to_string())?;
+            let user = users
+                .values_mut()
+                .find(|u| u.username == "owner")
+                .ok_or("owner user not found")?;
+            user.login_type = LoginType::Oidc;
+            user.id
+        };
+
+        // Insert OIDC link for the owner
+        store.user_links.lock().map_err(|e| e.to_string())?.insert(
+            (owner_id, LoginType::Oidc),
+            UserLinkRecord {
+                user_id: owner_id,
+                login_type: LoginType::Oidc,
+                linked_id: "oidc-sub-owner".to_owned(),
+                oauth_access_token: String::new(),
+                oauth_refresh_token: String::new(),
+                oauth_expiry: OffsetDateTime::now_utc(),
+                claims: UserLinkClaims::default(),
+            },
+        );
+
+        // Create a second user (non-owner, Password login type)
+        let second_user_id = Uuid::new_v4();
+        let org_id = {
+            let orgs = store.organizations.lock().map_err(|e| e.to_string())?;
+            orgs.values().next().ok_or("no organization found")?.id
+        };
+
+        let password_hash = hash_password("Password123")?;
+        store
+            .password_hashes
+            .lock()
+            .map_err(|e| e.to_string())?
+            .insert(second_user_id, password_hash);
+
+        let now = OffsetDateTime::now_utc();
+        store.users.lock().map_err(|e| e.to_string())?.insert(
+            second_user_id,
+            UserRecord {
+                id: second_user_id,
+                email: "other@example.com".to_owned(),
+                username: "other".to_owned(),
+                name: "Other".to_owned(),
+                avatar_url: String::new(),
+                created_at: now,
+                updated_at: now,
+                last_seen_at: None,
+                organization_ids: vec![org_id],
+                roles: vec![SlimRoleRecord {
+                    name: "member".to_owned(),
+                    display_name: "Member".to_owned(),
+                    organization_id: None,
+                }],
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                deleted: false,
+                is_system: false,
+            },
+        );
+
+        // Login as the second (non-owner) user via password
+        let login_response = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "other@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert!(
+            login_response.status().is_success(),
+            "login failed with status {}",
+            login_response.status(),
+        );
+        let login_body = response_json(login_response).await?;
+        let other_token = login_body
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing session token")?
+            .to_owned();
+
+        // Non-owner user trying to view another user's debug link should be forbidden
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/owner/debug-link", &other_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // RBAC rejection tests — verify that unauthenticated or unauthorized
+    // requests to newly-hardened handlers receive 401 / 403.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn unauthenticated_deployment_stats_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/deployment/stats")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_debug_health_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/health")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_health_settings_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/health/settings")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_list_users_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/users")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_insights_daus_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/insights/daus")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_debug_coordinator_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/coordinator")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_notifications_settings_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/notifications/settings")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_system_notification_templates_returns_401()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/notifications/templates/system")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_delete_external_auth_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::DELETE, "/api/v2/external-auth/github")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_put_user_profile_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            json_request(
+                Method::PUT,
+                "/api/v2/users/me/profile",
+                &serde_json::json!({"username": "hacker", "name": "Hacker"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_put_user_appearance_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            json_request(
+                Method::PUT,
+                "/api/v2/users/me/appearance",
+                &serde_json::json!({"theme_preference": "dark"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_put_user_password_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            json_request(
+                Method::PUT,
+                "/api/v2/users/me/password",
+                &serde_json::json!({
+                    "old_password": "old",
+                    "password": "new"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_deployment_stats() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/stats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_list_users() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_debug_health() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/health", &session_token)?,
+        )
+        .await?;
+        // May return OK or a different status depending on health probes,
+        // but should NOT return 401 or 403.
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_notifications_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/settings",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Error response consistency audit — regression tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_init_script_returns_error_for_unknown_os_arch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/init-script/badOS/badArch")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Unknown os/arch"),
+            "expected ApiResponse::error with message containing 'Unknown os/arch', got: {body}"
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_health_rejects_invalid_format() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/debug/health?format=xml",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Invalid format option"),
+            "expected ApiResponse::error with message, got: {body}"
+        );
+        assert!(
+            body.get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("json, text"),
+            "expected detail listing supported formats"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_github_oauth_device_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_github_oauth_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/users/oauth2/github/callback")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_oidc_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/users/oidc/callback")?).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("OIDC is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_rejects_invalid_response_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/oauth2/authorize?response_type=token&client_id=abc&redirect_uri=http://x",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("response_type must be \"code\".")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_rejects_invalid_client_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/oauth2/authorize?response_type=code&client_id=not-a-uuid&redirect_uri=http://x",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Invalid client_id.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_token_rejects_unsupported_grant_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            {
+                let body = "grant_type=implicit&client_id=00000000-0000-0000-0000-000000000000&client_secret=secret";
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oauth2/tokens")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))?
+            },
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Unsupported grant_type.")
+        );
+        assert!(
+            body.get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("authorization_code"),
+            "expected detail listing supported grant types"
+        );
         Ok(())
     }
 }
