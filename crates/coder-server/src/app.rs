@@ -18756,7 +18756,13 @@ mod tests {
             let mut rows: Vec<WorkspaceRecord> = workspaces
                 .values()
                 .filter(|w| !w.deleted)
-                .filter(|w| resolved_owner_id.is_none_or(|owner_id| w.owner_id == owner_id))
+                .filter(|w| {
+                    if filter.owner_id.is_some() || filter.owner_username.is_some() {
+                        resolved_owner_id.is_some_and(|owner_id| w.owner_id == owner_id)
+                    } else {
+                        true
+                    }
+                })
                 .filter(|w| {
                     filter.name.as_ref().is_none_or(|n| {
                         let lower = n.to_lowercase();
