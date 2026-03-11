@@ -4,6 +4,7 @@
 mod app;
 mod error;
 mod extractors;
+pub mod metrics;
 pub mod rate_limit;
 
 pub use app::{AppState, build_router};
