@@ -26,6 +26,8 @@ pub struct ServerConfig {
     pub shutdown_grace_period_secs: u64,
     /// Log format used by the binary.
     pub log_format: LogFormat,
+    /// Rate-limiting configuration for the HTTP layer.
+    pub rate_limit: RateLimitConfig,
 }
 
 impl ServerConfig {
@@ -131,6 +133,33 @@ impl ServerConfig {
                 description: "Structured log output format.",
             },
         ]
+    }
+}
+
+/// Rate-limiting configuration for the HTTP layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    /// Whether rate limiting is active.
+    pub enabled: bool,
+    /// Maximum login attempts per minute per IP address.
+    pub login_per_minute: u32,
+    /// Maximum API requests per minute for authenticated users.
+    pub api_per_minute: u32,
+    /// Maximum API requests per minute for unauthenticated IPs.
+    pub unauthenticated_per_minute: u32,
+    /// Maximum audit endpoint requests per minute per user.
+    pub audit_per_minute: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            login_per_minute: 5,
+            api_per_minute: 600,
+            unauthenticated_per_minute: 60,
+            audit_per_minute: 30,
+        }
     }
 }
 

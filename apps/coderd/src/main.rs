@@ -16,7 +16,7 @@ use coder_core::pubsub::PubSub;
 use coder_core::{
     AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
     ExternalAuthLinkProvider, LogFormat, PersistAuditLogInput, ServerConfig, SshConfig,
-    StorageError,
+    StorageError, config::RateLimitConfig,
 };
 use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
 use coder_server::{AppState, build_router};
@@ -105,6 +105,26 @@ struct ServerArgs {
     /// Output format for logs.
     #[arg(long, env = "CODER_LOG_FORMAT", value_enum, default_value_t = LogFormatArg::Pretty)]
     log_format: LogFormatArg,
+
+    /// Enable HTTP rate limiting.
+    #[arg(long, env = "CODER_RATE_LIMIT_ENABLED", default_value_t = true)]
+    rate_limit_enabled: bool,
+
+    /// Maximum general API requests per minute for authenticated users.
+    #[arg(long, env = "CODER_RATE_LIMIT_API_PER_MINUTE", default_value_t = 600)]
+    rate_limit_api_per_minute: u32,
+
+    /// Maximum login attempts per minute per IP address.
+    #[arg(long, env = "CODER_RATE_LIMIT_LOGIN_PER_MINUTE", default_value_t = 5)]
+    rate_limit_login_per_minute: u32,
+
+    /// Maximum API requests per minute for unauthenticated IPs.
+    #[arg(
+        long,
+        env = "CODER_RATE_LIMIT_UNAUTHENTICATED_PER_MINUTE",
+        default_value_t = 60
+    )]
+    rate_limit_unauthenticated_per_minute: u32,
 }
 
 #[derive(Debug, Error)]
@@ -240,7 +260,8 @@ async fn run() -> Result<(), MainError> {
             source,
         })?;
 
-    let application = build_router(state.clone());
+    let rate_limit_state = coder_server::RateLimitState::new(&config.rate_limit).map(Arc::new);
+    let application = build_router(state.clone(), rate_limit_state);
     info!(
         listen_addr = %config.listen_addr,
         access_url = %config.access_url,
@@ -324,6 +345,13 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         log_format: match args.log_format {
             LogFormatArg::Pretty => LogFormat::Pretty,
             LogFormatArg::Json => LogFormat::Json,
+        },
+        rate_limit: RateLimitConfig {
+            enabled: args.rate_limit_enabled,
+            login_per_minute: args.rate_limit_login_per_minute,
+            api_per_minute: args.rate_limit_api_per_minute,
+            unauthenticated_per_minute: args.rate_limit_unauthenticated_per_minute,
+            audit_per_minute: 30,
         },
     })
 }
