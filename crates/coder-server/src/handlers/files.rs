@@ -1,6 +1,7 @@
 //! File upload/download handlers.
 
 use super::*;
+use sha2::Digest;
 
 pub(crate) const TAR_MIME_TYPE: &str = "application/x-tar";
 pub(crate) const ZIP_MIME_TYPE: &str = "application/zip";

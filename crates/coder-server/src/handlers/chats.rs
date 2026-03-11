@@ -24,8 +24,12 @@ pub(crate) async fn list_chats(
 pub(crate) async fn create_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(request): Json<CreateChatRequest>,
+    payload: Result<Json<CreateChatRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
@@ -163,8 +167,12 @@ pub(crate) async fn post_chat_message(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
     headers: HeaderMap,
-    Json(request): Json<CreateChatMessageRequest>,
+    payload: Result<Json<CreateChatMessageRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };

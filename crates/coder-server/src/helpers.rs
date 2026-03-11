@@ -9,14 +9,13 @@ use axum::{
     http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header::LOCATION},
     response::{IntoResponse, Response},
 };
-use coder_audit::{AuditAction, AuditEvent, AuditSink};
+use coder_audit::{AuditAction, AuditEvent};
 use coder_auth::{
     AuthServiceError, AuthenticatedRequest, ExternalAuthServiceError, cookie_from_headers,
 };
 use coder_connectivity::generate_git_ssh_key;
 use coder_core::{
-    ApiResponse, AuthenticatedUser, HealthSettings, HealthcheckReport, ServerConfig, UserRecord,
-    ValidationError,
+    ApiResponse, AuthenticatedUser, HealthSettings, HealthcheckReport, UserRecord, ValidationError,
 };
 use coder_identity::IdentityServiceError;
 use coder_rbac::{Actor, ROLE_AUDITOR, ResourceKind};
