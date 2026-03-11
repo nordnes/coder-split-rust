@@ -255,8 +255,6 @@ pub fn build_router(
                 // -------------------------------------------------------
                 .route("/audit", get(list_audit_logs))
                 .route("/audit/testgenerate", post(post_generate_test_audit_log))
-                .route("/auth/scopes", get(list_api_key_scopes))
-                .route("/deployment/config", get(deployment_config))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
                 .route("/debug/health", get(debug_health))
@@ -766,6 +764,8 @@ pub fn build_router(
                     get(get_github_oauth_callback_disabled),
                 )
                 .route("/users/oidc/callback", get(get_oidc_callback_disabled))
+                .route("/auth/scopes", get(list_api_key_scopes))
+                .route("/deployment/config", get(deployment_config))
                 // -------------------------------------------------------
                 // Agent routes — use agent-token authentication handled
                 // inside the handler itself.
