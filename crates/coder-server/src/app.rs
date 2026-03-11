@@ -22,7 +22,7 @@ use axum::{
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
-use coder_audit::{AuditAction, AuditEvent, AuditSink};
+use coder_audit::{AuditAction, AuditEvent, AuditSink, batched_sink::BatchedAuditSink};
 use coder_auth::{
     AuthService, AuthServiceError, AuthenticatedRequest, ExternalAuthService,
     ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
@@ -218,7 +218,15 @@ impl AppState {
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
     ) -> Result<Self, reqwest::Error> {
-        let auth = AuthService::new(store.clone());
+        let audit = Arc::new(BatchedAuditSink::new(
+            audit,
+            std::time::Duration::from_millis(config.audit_batch_flush_interval_ms),
+            config.audit_batch_max_size,
+        )) as Arc<dyn AuditSink>;
+        let auth = AuthService::with_cache_ttl(
+            store.clone(),
+            std::time::Duration::from_secs(config.session_cache_ttl_secs),
+        );
         let identity = IdentityService::new(store.clone());
         let deployment_stats = DeploymentStatsService::new(store.clone());
         let health = HealthService::new(store.clone())?;
@@ -983,6 +991,18 @@ pub fn build_router(state: AppState) -> Router {
         .layer(middleware::from_fn(csp_middleware))
         .layer(middleware::from_fn(hsts_middleware))
         .layer(middleware::from_fn(real_ip_middleware))
+        .layer(middleware::from_fn({
+            let guard_state = crate::connection_guard::ConnectionGuardState::new(
+                state.config.max_concurrent_requests,
+            );
+            move |request, next: Next| {
+                crate::connection_guard::connection_guard_middleware(
+                    request,
+                    next,
+                    guard_state.clone(),
+                )
+            }
+        }))
         .layer(
             TraceLayer::new_for_http()
                 .make_span_with(DefaultMakeSpan::new())
@@ -19694,6 +19714,11 @@ mod tests {
             derp_regions: Vec::new(),
             shutdown_grace_period_secs: 10,
             log_format: LogFormat::Pretty,
+            session_cache_ttl_secs: 30,
+            audit_batch_flush_interval_ms: 500,
+            audit_batch_max_size: 50,
+            max_concurrent_requests: 1024,
+            max_concurrent_db_queries: 40,
         })
     }
 

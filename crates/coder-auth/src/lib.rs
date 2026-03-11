@@ -1,6 +1,8 @@
 //! Authentication, sessions, and external-auth lifecycle helpers.
 #![forbid(unsafe_code)]
 
+pub mod session_cache;
+
 use std::{sync::Arc, time::Duration};
 
 use async_trait::async_trait;
@@ -218,19 +220,33 @@ pub fn supported_auth_methods() -> AuthMethods {
 #[derive(Clone)]
 pub struct AuthService<S> {
     store: S,
+    session_cache: Arc<session_cache::SessionCache>,
 }
 
 impl<S> AuthService<S>
 where
     S: AuthStore + Clone + Send + Sync + 'static,
 {
-    /// Creates the service for the supplied auth-capable store.
+    /// Creates the service for the supplied auth-capable store with a
+    /// configurable session cache TTL.
+    #[must_use]
+    pub fn with_cache_ttl(store: S, cache_ttl: Duration) -> Self {
+        Self {
+            store,
+            session_cache: Arc::new(session_cache::SessionCache::new(cache_ttl)),
+        }
+    }
+
+    /// Creates the service with the default 30-second session cache TTL.
     #[must_use]
     pub fn new(store: S) -> Self {
-        Self { store }
+        Self::with_cache_ttl(store, Duration::from_secs(30))
     }
 
     /// Authenticates the incoming request using the session header or cookie.
+    ///
+    /// Checks the in-memory session cache first (read lock), falling back to
+    /// the database on a miss and populating the cache (write lock).
     pub async fn authenticate(
         &self,
         headers: &HeaderMap,
@@ -243,6 +259,17 @@ where
         };
 
         let session_token_hash = hash_session_token(&session_token);
+
+        // Fast path: check the in-memory cache.
+        if let Some(user) = self.session_cache.get(&session_token_hash).await {
+            return Ok(Some(AuthenticatedRequest {
+                session_token,
+                actor: actor_from_user(&user),
+                user,
+            }));
+        }
+
+        // Slow path: fall back to the database.
         let Some(user) = self
             .store
             .find_user_by_session_token_hash(&session_token_hash)
@@ -250,6 +277,11 @@ where
         else {
             return Ok(None);
         };
+
+        // Populate cache for subsequent requests.
+        self.session_cache
+            .insert(session_token_hash, user.clone())
+            .await;
 
         Ok(Some(AuthenticatedRequest {
             session_token,
@@ -347,10 +379,12 @@ where
         })
     }
 
-    /// Revokes the current session token.
+    /// Revokes the current session token and evicts it from the cache.
     pub async fn logout(&self, session_token: &str) -> Result<(), StorageError> {
         let token_hash = hash_session_token(session_token);
         self.store.delete_auth_session(&token_hash).await?;
+        // Immediately evict from cache so concurrent requests see the logout.
+        self.session_cache.evict(&token_hash).await;
         Ok(())
     }
 
@@ -465,6 +499,9 @@ where
             return Err(AuthServiceError::not_found("User not found."));
         }
 
+        // Evict all cached sessions for this user after password reset.
+        self.session_cache.evict_user(user.user.id).await;
+
         Ok(user.user.id)
     }
 
@@ -563,6 +600,9 @@ where
         {
             return Err(AuthServiceError::not_found("User not found."));
         }
+
+        // Evict all cached sessions for this user after password change.
+        self.session_cache.evict_user(target_user.id).await;
 
         Ok(target_user.id)
     }

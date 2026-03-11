@@ -1,6 +1,8 @@
 //! Audit boundary for the Rust `coderd` rewrite.
 #![forbid(unsafe_code)]
 
+pub mod batched_sink;
+
 use async_trait::async_trait;
 use coder_rbac::ResourceKind;
 use tracing::info;

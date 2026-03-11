@@ -285,6 +285,11 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             LogFormatArg::Pretty => LogFormat::Pretty,
             LogFormatArg::Json => LogFormat::Json,
         },
+        session_cache_ttl_secs: 30,
+        audit_batch_flush_interval_ms: 500,
+        audit_batch_max_size: 50,
+        max_concurrent_requests: 1024,
+        max_concurrent_db_queries: args.db_max_connections as usize * 2,
     })
 }
 

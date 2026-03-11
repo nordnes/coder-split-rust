@@ -2548,6 +2548,179 @@ impl AppStore for PostgresStore {
         Ok(())
     }
 
+    #[instrument(skip(self, logs), err(level = tracing::Level::WARN))]
+    async fn batch_insert_audit_logs(
+        &self,
+        logs: Vec<PersistAuditLogInput>,
+    ) -> Result<(), StorageError> {
+        if logs.is_empty() {
+            return Ok(());
+        }
+
+        // Build a multi-row INSERT statement dynamically.
+        let mut query = String::from(
+            "INSERT INTO audit_logs (
+                id, request_id, time, ip, user_agent, resource_type, resource_id,
+                resource_target, resource_icon, action, diff_json, status_code,
+                additional_fields_json, description, resource_link, is_deleted,
+                organization_id, user_id
+            ) VALUES ",
+        );
+
+        let mut param_idx = 1u32;
+        for (i, _) in logs.iter().enumerate() {
+            if i > 0 {
+                query.push_str(", ");
+            }
+            query.push('(');
+            for j in 0..18u32 {
+                if j > 0 {
+                    query.push_str(", ");
+                }
+                query.push('$');
+                query.push_str(&(param_idx + j).to_string());
+            }
+            query.push(')');
+            param_idx += 18;
+        }
+
+        let mut sqlx_query = sqlx::query(&query);
+        for input in &logs {
+            sqlx_query = sqlx_query
+                .bind(input.id)
+                .bind(input.request_id)
+                .bind(input.time)
+                .bind(&input.ip)
+                .bind(&input.user_agent)
+                .bind(&input.resource_type)
+                .bind(input.resource_id)
+                .bind(&input.resource_target)
+                .bind(&input.resource_icon)
+                .bind(&input.action)
+                .bind(input.diff.to_string())
+                .bind(input.status_code)
+                .bind(input.additional_fields.to_string())
+                .bind(&input.description)
+                .bind(&input.resource_link)
+                .bind(input.is_deleted)
+                .bind(input.organization_id)
+                .bind(input.user_id);
+        }
+
+        sqlx_query
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let rows: Vec<StoredUserRow> = sqlx::query_as(
+            "SELECT
+                u.id,
+                u.email,
+                u.username,
+                u.name,
+                u.avatar_url,
+                u.created_at,
+                u.updated_at,
+                u.last_seen_at,
+                u.login_type::text AS login_type,
+                u.status::text AS status,
+                u.deleted,
+                u.is_system,
+                COALESCE(
+                    array_agg(DISTINCT om.organization_id) FILTER (WHERE om.organization_id IS NOT NULL),
+                    ARRAY[]::uuid[]
+                ) AS organization_ids,
+                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles
+             FROM users u
+             LEFT JOIN organization_members om ON om.user_id = u.id
+             WHERE u.id = ANY($1) AND u.deleted = false
+             GROUP BY u.id",
+        )
+        .bind(ids)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        rows.into_iter().map(user_record_from_row).collect()
+    }
+
+    #[instrument(skip(self, params), err(level = tracing::Level::WARN))]
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        if params.is_empty() {
+            return Ok(());
+        }
+
+        let mut query = String::from(
+            "INSERT INTO workspace_build_parameters (
+                workspace_build_id, name, value
+            ) VALUES ",
+        );
+
+        let mut param_idx = 1u32;
+        for (i, _) in params.iter().enumerate() {
+            if i > 0 {
+                query.push_str(", ");
+            }
+            query.push('(');
+            for j in 0..3u32 {
+                if j > 0 {
+                    query.push_str(", ");
+                }
+                query.push('$');
+                query.push_str(&(param_idx + j).to_string());
+            }
+            query.push(')');
+            param_idx += 3;
+        }
+
+        let mut sqlx_query = sqlx::query(&query);
+        for param in &params {
+            sqlx_query = sqlx_query
+                .bind(param.workspace_build_id)
+                .bind(&param.name)
+                .bind(&param.value);
+        }
+
+        sqlx_query
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+
+        let result = sqlx::query("UPDATE workspaces SET last_used_at = $1 WHERE id = ANY($2)")
+            .bind(last_used_at)
+            .bind(ids)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected())
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         let encoded: Option<String> = sqlx::query_scalar(

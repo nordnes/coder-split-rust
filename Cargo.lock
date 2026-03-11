@@ -347,6 +347,7 @@ dependencies = [
  "coder-core",
  "coder-rbac",
  "http",
+ "metrics",
  "rand 0.8.5",
  "reqwest",
  "serde",

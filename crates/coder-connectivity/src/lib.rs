@@ -885,6 +885,11 @@ mod tests {
             derp_regions: Vec::new(),
             shutdown_grace_period_secs: 5,
             log_format: coder_core::LogFormat::Pretty,
+            session_cache_ttl_secs: 30,
+            audit_batch_flush_interval_ms: 500,
+            audit_batch_max_size: 50,
+            max_concurrent_requests: 1024,
+            max_concurrent_db_queries: 40,
         }
     }
 

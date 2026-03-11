@@ -1704,6 +1704,59 @@ pub trait OperationalStore: Send + Sync {
         ))
     }
 
+    /// Persists a batch of audit log entries in a single multi-row INSERT.
+    async fn batch_insert_audit_logs(
+        &self,
+        logs: Vec<PersistAuditLogInput>,
+    ) -> Result<(), StorageError> {
+        let _ = logs;
+        Err(StorageError::unavailable(
+            "batch audit log inserts are not implemented",
+        ))
+    }
+
+    /// Lists workspaces joined with their latest builds in a single query.
+    async fn batch_list_workspaces_with_builds(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<Vec<(WorkspaceRecord, Option<WorkspaceBuildRecord>)>, StorageError> {
+        let _ = filter;
+        Err(StorageError::unavailable(
+            "batch workspace listing is not implemented",
+        ))
+    }
+
+    /// Inserts multiple workspace build parameters in a single multi-row INSERT.
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        let _ = params;
+        Err(StorageError::unavailable(
+            "batch workspace build parameter inserts are not implemented",
+        ))
+    }
+
+    /// Updates `last_used_at` for multiple workspaces in a single UPDATE statement.
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        let _ = (ids, last_used_at);
+        Err(StorageError::unavailable(
+            "batch workspace last_used_at updates are not implemented",
+        ))
+    }
+
+    /// Looks up multiple users by their IDs in a single query.
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
+        let _ = ids;
+        Err(StorageError::unavailable(
+            "batch user lookups are not implemented",
+        ))
+    }
+
     /// Returns deployment health settings.
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         Err(StorageError::unavailable(
@@ -2587,6 +2640,59 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = input;
         Err(StorageError::unavailable(
             "audit log inserts are not implemented",
+        ))
+    }
+
+    /// Persists a batch of audit log entries in a single multi-row INSERT.
+    async fn batch_insert_audit_logs(
+        &self,
+        logs: Vec<PersistAuditLogInput>,
+    ) -> Result<(), StorageError> {
+        let _ = logs;
+        Err(StorageError::unavailable(
+            "batch audit log inserts are not implemented",
+        ))
+    }
+
+    /// Lists workspaces joined with their latest builds in a single query.
+    async fn batch_list_workspaces_with_builds(
+        &self,
+        filter: WorkspaceListFilter,
+    ) -> Result<Vec<(WorkspaceRecord, Option<WorkspaceBuildRecord>)>, StorageError> {
+        let _ = filter;
+        Err(StorageError::unavailable(
+            "batch workspace listing is not implemented",
+        ))
+    }
+
+    /// Inserts multiple workspace build parameters in a single multi-row INSERT.
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        let _ = params;
+        Err(StorageError::unavailable(
+            "batch workspace build parameter inserts are not implemented",
+        ))
+    }
+
+    /// Updates `last_used_at` for multiple workspaces in a single UPDATE statement.
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        let _ = (ids, last_used_at);
+        Err(StorageError::unavailable(
+            "batch workspace last_used_at updates are not implemented",
+        ))
+    }
+
+    /// Looks up multiple users by their IDs in a single query.
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
+        let _ = ids;
+        Err(StorageError::unavailable(
+            "batch user lookups are not implemented",
         ))
     }
 

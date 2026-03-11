@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+pub mod connection_guard;
 mod error;
 
 pub use app::{AppState, build_router};
