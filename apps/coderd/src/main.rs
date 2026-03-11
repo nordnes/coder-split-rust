@@ -161,7 +161,12 @@ struct ServerArgs {
     cors_allowed_origins: Vec<String>,
 
     /// Whether cross-origin requests may include credentials.
-    #[arg(long, env = "CODER_CORS_ALLOW_CREDENTIALS", default_value_t = true)]
+    ///
+    /// Note: Credentials are only allowed when one or more explicit origins are
+    /// configured via `--cors-allowed-origins` / `CODER_CORS_ALLOWED_ORIGINS`.
+    /// In wildcard mode (no explicit origins), `Access-Control-Allow-Credentials`
+    /// is not sent, even if this flag is true.
+    #[arg(long, env = "CODER_CORS_ALLOW_CREDENTIALS", default_value_t = false)]
     cors_allow_credentials: bool,
 }
 
@@ -449,6 +454,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             allowed_origins: args
                 .cors_allowed_origins
                 .into_iter()
+                .map(|s| s.trim().to_owned())
                 .filter(|s| !s.is_empty())
                 .collect(),
             allow_credentials: args.cors_allow_credentials,

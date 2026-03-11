@@ -28846,4 +28846,167 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn cors_non_matching_origin_not_reflected() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://good.example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://evil.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "non-matching origin must NOT receive access-control-allow-origin"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_multiple_origins_reflects_correct_one() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec![
+                "https://alpha.example.com".to_owned(),
+                "https://beta.example.com".to_owned(),
+            ],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://beta.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://beta.example.com"),
+            "second configured origin should be reflected"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_includes_max_age() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: false,
+            max_age_secs: 7200,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .header("access-control-request-method", "GET")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-max-age")
+                .and_then(|v| v.to_str().ok()),
+            Some("7200"),
+            "preflight must include max-age from config"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_expose_headers_set_on_response() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: false,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        let exposed = response
+            .headers()
+            .get("access-control-expose-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+
+        assert!(
+            exposed.contains("content-range"),
+            "expose-headers should include content-range, got: {exposed}"
+        );
+        assert!(
+            exposed.contains("x-content-type-options"),
+            "expose-headers should include x-content-type-options, got: {exposed}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_all_invalid_origins_blocks_requests() -> Result<(), Box<dyn Error>> {
+        // Configure origins that are not valid HTTP header values (contain
+        // non-visible-ASCII).  build_cors_layer must NOT fall back to wildcard.
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec![
+                "https://bad\x01origin.example.com".to_owned(),
+                "https://also\x7Fbad.example.com".to_owned(),
+            ],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://any-origin.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        // Must NOT produce wildcard – the operator intended to restrict.
+        assert_ne!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+            "all-invalid origins must not fall back to wildcard"
+        );
+        // In fact, no origin header should be returned at all.
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .is_none(),
+            "all-invalid origins should block all cross-origin requests"
+        );
+        Ok(())
+    }
 }

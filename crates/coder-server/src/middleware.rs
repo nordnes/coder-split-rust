@@ -15,17 +15,44 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, Expos
 ///
 /// When `allowed_origins` is empty the layer allows every origin (wildcard).
 /// Otherwise only the listed origins are permitted.
+///
+/// If `allowed_origins` is non-empty but **all** entries fail
+/// [`HeaderValue::from_str`] validation, the layer falls back to an empty
+/// allow-list that blocks every cross-origin request rather than silently
+/// opening up to all origins.  A warning is logged for each rejected origin.
 pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
     // Filter origins up-front so that invalid values (non-visible-ASCII, etc.)
     // are dropped before we decide between wildcard and explicit-list mode.
     let valid_origins: Vec<HeaderValue> = config
         .allowed_origins
         .iter()
-        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .filter_map(|o| match HeaderValue::from_str(o) {
+            Ok(v) => Some(v),
+            Err(err) => {
+                tracing::warn!(
+                    origin = %o,
+                    error = %err,
+                    "ignoring invalid CORS origin (not a valid HTTP header value)"
+                );
+                None
+            }
+        })
         .collect();
 
-    let allow_origin = if valid_origins.is_empty() {
+    // Decide between wildcard, explicit-list, or restrictive fallback.
+    let explicitly_configured = !config.allowed_origins.is_empty();
+    let allow_origin = if !explicitly_configured {
+        // Operator did not restrict origins → wildcard.
         AllowOrigin::any()
+    } else if valid_origins.is_empty() {
+        // Operator intended to restrict origins but every entry was invalid.
+        // Falling back to wildcard would silently weaken security, so we use
+        // an empty list that blocks all cross-origin requests.
+        tracing::warn!(
+            "all configured CORS origins were invalid; \
+             cross-origin requests will be blocked"
+        );
+        AllowOrigin::list(Vec::<HeaderValue>::new())
     } else {
         AllowOrigin::list(valid_origins.clone())
     };
@@ -36,6 +63,7 @@ pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
         Method::PUT,
         Method::PATCH,
         Method::DELETE,
+        Method::HEAD,
         Method::OPTIONS,
     ]);
 
