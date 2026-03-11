@@ -456,12 +456,12 @@ where
         match self.client.send(web_push_msg).await {
             Ok(()) => Ok(()),
             Err(err) => {
-                // Check if the subscription is gone (HTTP 410).
-                let err_str = err.to_string();
-                if err_str.contains("410") || err_str.to_lowercase().contains("gone") {
+                // Use structured error matching for stale subscription
+                // detection instead of fragile string parsing.
+                if is_subscription_gone(&err) {
                     Err(WebpushSendOutcome::Gone)
                 } else {
-                    Err(WebpushSendOutcome::Failed(err_str))
+                    Err(WebpushSendOutcome::Failed(err.to_string()))
                 }
             }
         }
@@ -474,6 +474,18 @@ enum WebpushSendOutcome {
     Gone,
     /// A transport or protocol error occurred.
     Failed(String),
+}
+
+/// Checks whether a web push error indicates the subscription is gone (HTTP 410).
+///
+/// Uses structured matching on [`web_push::WebPushError`] variants rather than
+/// fragile string matching. The `EndpointNotValid` and `EndpointNotFound`
+/// variants correspond to HTTP 410 Gone responses from push services.
+fn is_subscription_gone(err: &web_push::WebPushError) -> bool {
+    matches!(
+        err,
+        web_push::WebPushError::EndpointNotValid(_) | web_push::WebPushError::EndpointNotFound(_)
+    )
 }
 
 /// Generates a new VAPID key pair, stores it, and deletes all existing
@@ -507,19 +519,82 @@ where
     Ok((public_key_b64, private_pem))
 }
 
-/// Generates a PEM-encoded EC P-256 private key using the openssl command.
+/// Generates a PEM-encoded EC P-256 private key using pure Rust cryptography.
+///
+/// The key is output in SEC1 PEM format (`BEGIN EC PRIVATE KEY`) which is
+/// accepted by the `web-push` crate's `VapidSignatureBuilder::from_pem_no_sub`.
 fn generate_ec_p256_pem() -> Result<String, String> {
-    let output = std::process::Command::new("openssl")
-        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout"])
-        .output()
-        .map_err(|e| format!("failed to run openssl: {e}"))?;
+    use base64::engine::general_purpose::STANDARD as B64STD;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
 
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        return Err(format!("openssl failed: {stderr}"));
+    // Generate a random EC P-256 private key.
+    let secret_key = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let scalar_bytes = secret_key.to_bytes();
+    let public_key = secret_key.public_key();
+    let pub_point = public_key.to_encoded_point(false);
+    let pub_bytes = pub_point.as_bytes();
+
+    // Build SEC1 ECPrivateKey DER encoding (RFC 5915):
+    //   ECPrivateKey ::= SEQUENCE {
+    //     version        INTEGER { ecPrivkeyVer1(1) },
+    //     privateKey     OCTET STRING (32 bytes for P-256),
+    //     parameters [0] ECParameters {{ namedCurve (prime256v1) }} OPTIONAL,
+    //     publicKey  [1] BIT STRING OPTIONAL
+    //   }
+    let oid_prime256v1: &[u8] = &[0x06, 0x08, 0x2a, 0x86, 0x48, 0xce, 0x3d, 0x03, 0x01, 0x07];
+
+    // Inner content of the SEQUENCE
+    let mut inner = Vec::with_capacity(128);
+    // version = 1
+    inner.extend_from_slice(&[0x02, 0x01, 0x01]);
+    // privateKey OCTET STRING
+    inner.push(0x04);
+    inner.push(scalar_bytes.len() as u8);
+    inner.extend_from_slice(&scalar_bytes);
+    // parameters [0] EXPLICIT
+    inner.push(0xa0);
+    inner.push(oid_prime256v1.len() as u8);
+    inner.extend_from_slice(oid_prime256v1);
+    // publicKey [1] EXPLICIT BIT STRING
+    let bitstring_len = 1 + pub_bytes.len(); // 1 byte for unused-bits prefix
+    inner.push(0xa1);
+    der_push_length(&mut inner, 2 + bitstring_len);
+    inner.push(0x03);
+    der_push_length(&mut inner, bitstring_len);
+    inner.push(0x00); // unused bits = 0
+    inner.extend_from_slice(pub_bytes);
+
+    // Wrap in SEQUENCE
+    let mut der = Vec::with_capacity(4 + inner.len());
+    der.push(0x30);
+    der_push_length(&mut der, inner.len());
+    der.extend_from_slice(&inner);
+
+    // Encode as PEM
+    let b64 = B64STD.encode(&der);
+    let mut pem = String::from("-----BEGIN EC PRIVATE KEY-----\n");
+    for chunk in b64.as_bytes().chunks(64) {
+        pem.push_str(
+            std::str::from_utf8(chunk).map_err(|e| format!("base64 encoding error: {e}"))?,
+        );
+        pem.push('\n');
     }
+    pem.push_str("-----END EC PRIVATE KEY-----\n");
+    Ok(pem)
+}
 
-    String::from_utf8(output.stdout).map_err(|e| format!("invalid UTF-8 from openssl: {e}"))
+/// Appends a DER length encoding to the buffer.
+fn der_push_length(buf: &mut Vec<u8>, len: usize) {
+    if len < 0x80 {
+        buf.push(len as u8);
+    } else if len < 0x100 {
+        buf.push(0x81);
+        buf.push(len as u8);
+    } else {
+        buf.push(0x82);
+        buf.push((len >> 8) as u8);
+        buf.push(len as u8);
+    }
 }
 
 /// A no-op web push dispatcher that always returns an error.
@@ -1322,7 +1397,7 @@ mod tests {
     #[test]
     fn generate_ec_p256_pem_produces_valid_key() {
         let pem = generate_ec_p256_pem();
-        assert!(pem.is_ok(), "openssl should produce a PEM key");
+        assert!(pem.is_ok(), "should produce a PEM key");
         let pem_str = pem.unwrap_or_else(|e| panic!("unexpected error: {e}"));
         assert!(
             pem_str.contains("BEGIN EC PRIVATE KEY"),
