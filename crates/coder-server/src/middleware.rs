@@ -6,7 +6,9 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use std::collections::HashMap;
 use std::net::IpAddr;
+use tracing_opentelemetry::OpenTelemetrySpanExt;
 
 /// Stored in request extensions so downstream handlers can read the real
 /// client IP even when the server is behind a reverse proxy.
@@ -138,6 +140,105 @@ pub(crate) async fn csrf_middleware(request: axum::extract::Request, next: Next)
     }
 
     next.run(request).await
+}
+
+/// Middleware: propagate W3C TraceContext from incoming request headers into
+/// the current `tracing` span and echo `traceparent` / `tracestate` back on
+/// the response so downstream services can continue the trace.
+pub(crate) async fn otel_trace_context_middleware(
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    // Extract incoming propagation headers into a HashMap so the OTel
+    // propagator can read them via the TextMapExtractor trait.
+    let mut carrier: HashMap<String, String> = HashMap::new();
+    for (name, value) in request.headers() {
+        if let Ok(v) = value.to_str() {
+            carrier.insert(name.as_str().to_owned(), v.to_owned());
+        }
+    }
+
+    let parent_cx =
+        opentelemetry::global::get_text_map_propagator(|propagator| propagator.extract(&carrier));
+
+    // Attach the extracted context to the current tracing span so that the
+    // OTel layer records it as the parent.
+    if let Err(e) = tracing::Span::current().set_parent(parent_cx) {
+        tracing::warn!(error = %e, "failed to set trace parent context");
+    }
+
+    let mut response = next.run(request).await;
+
+    // Inject the current span context into the response headers so callers
+    // (and browser devtools) can see the trace.
+    let cx = tracing::Span::current().context();
+    let mut inject_map: HashMap<String, String> = HashMap::new();
+    opentelemetry::global::get_text_map_propagator(|propagator| {
+        propagator.inject_context(&cx, &mut inject_map);
+    });
+    for (key, value) in &inject_map {
+        if let (Ok(name), Ok(val)) = (
+            HeaderName::try_from(key.as_str()),
+            HeaderValue::from_str(value),
+        ) {
+            response.headers_mut().insert(name, val);
+        }
+    }
+
+    response
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{Router, body::Body, middleware, routing::get};
+    use http::{Request, StatusCode};
+    use tower::ServiceExt;
+
+    /// Tiny handler that returns 200 OK for every request.
+    async fn ok_handler() -> StatusCode {
+        StatusCode::OK
+    }
+
+    #[tokio::test]
+    async fn otel_middleware_returns_200_without_trace_headers() {
+        let app = Router::new()
+            .route("/ping", get(ok_handler))
+            .layer(middleware::from_fn(otel_trace_context_middleware));
+
+        let request = Request::builder()
+            .uri("/ping")
+            .body(Body::empty())
+            .unwrap_or_else(|_| unreachable!());
+
+        let response = app
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn otel_middleware_passes_through_request_with_traceparent() {
+        let app = Router::new()
+            .route("/ping", get(ok_handler))
+            .layer(middleware::from_fn(otel_trace_context_middleware));
+
+        let request = Request::builder()
+            .uri("/ping")
+            .header(
+                "traceparent",
+                "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+            )
+            .body(Body::empty())
+            .unwrap_or_else(|_| unreachable!());
+
+        let response = app
+            .oneshot(request)
+            .await
+            .unwrap_or_else(|_| unreachable!());
+        assert_eq!(response.status(), StatusCode::OK);
+    }
 }
 
 /// Middleware: record Prometheus-compatible HTTP metrics using the `metrics`

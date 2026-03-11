@@ -38,6 +38,8 @@ pub struct ServerConfig {
     pub max_concurrent_db_queries: usize,
     /// Rate-limiting configuration for the HTTP layer.
     pub rate_limit: RateLimitConfig,
+    /// OpenTelemetry distributed tracing configuration.
+    pub otel: OtelConfig,
 }
 
 impl ServerConfig {
@@ -176,6 +178,35 @@ impl ServerConfig {
     }
 }
 
+/// OpenTelemetry distributed tracing configuration.
+#[derive(Clone, Debug, PartialEq)]
+pub struct OtelConfig {
+    // NOTE: `Eq` is implemented manually below because `f64` does not derive
+    // `Eq`.  The `sample_ratio` field is bounded to [0.0, 1.0] so NaN is never
+    // expected, making the `Eq` contract safe to uphold.
+    /// Whether OpenTelemetry tracing is enabled.
+    pub enabled: bool,
+    /// OTLP collector endpoint (gRPC).
+    pub endpoint: String,
+    /// Logical service name reported in traces.
+    pub service_name: String,
+    /// Sampling ratio (0.0 – 1.0).  1.0 samples every request.
+    pub sample_ratio: f64,
+}
+
+impl Eq for OtelConfig {}
+
+impl Default for OtelConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            endpoint: "http://localhost:4317".to_owned(),
+            service_name: "coderd".to_owned(),
+            sample_ratio: 1.0,
+        }
+    }
+}
+
 /// Rate-limiting configuration for the HTTP layer.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RateLimitConfig {
@@ -286,4 +317,84 @@ pub struct PublicDatabaseConfig {
     pub min_connections: u32,
     /// Seconds to wait when acquiring a connection.
     pub acquire_timeout_secs: u64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn otel_config_default_is_disabled() {
+        let config = OtelConfig::default();
+        assert!(!config.enabled);
+        assert_eq!(config.endpoint, "http://localhost:4317");
+        assert_eq!(config.service_name, "coderd");
+        assert!((config.sample_ratio - 1.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn otel_config_clone_preserves_fields() {
+        let config = OtelConfig {
+            enabled: true,
+            endpoint: "http://collector:4317".to_owned(),
+            service_name: "my-service".to_owned(),
+            sample_ratio: 0.5,
+        };
+        let cloned = config.clone();
+        assert_eq!(config, cloned);
+    }
+
+    #[test]
+    fn otel_config_equality() {
+        let a = OtelConfig::default();
+        let b = OtelConfig::default();
+        assert_eq!(a, b);
+
+        let c = OtelConfig {
+            enabled: true,
+            ..OtelConfig::default()
+        };
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn otel_config_debug_format() {
+        let config = OtelConfig::default();
+        let debug = format!("{config:?}");
+        assert!(debug.contains("OtelConfig"));
+        assert!(debug.contains("enabled: false"));
+    }
+
+    #[test]
+    fn server_config_includes_otel() {
+        let config = ServerConfig {
+            listen_addr: std::net::SocketAddr::from(([127, 0, 0, 1], 3000)),
+            access_url: Url::parse("http://127.0.0.1:3000").unwrap_or_else(|_| unreachable!()),
+            database: DatabaseConfig {
+                postgres_url: "postgres://unused".to_owned(),
+                max_connections: 20,
+                min_connections: 1,
+                acquire_timeout_secs: 10,
+            },
+            telemetry_enabled: false,
+            ssh: SshConfig {
+                hostname_prefix: String::new(),
+                hostname_suffix: String::new(),
+                ssh_config_options: Vec::new(),
+            },
+            external_auth_providers: Vec::new(),
+            derp_regions: Vec::new(),
+            shutdown_grace_period_secs: 10,
+            log_format: LogFormat::Pretty,
+            session_cache_ttl_secs: 30,
+            audit_batch_flush_interval_ms: 500,
+            audit_batch_max_size: 50,
+            max_concurrent_requests: 1024,
+            max_concurrent_db_queries: 40,
+            rate_limit: RateLimitConfig::default(),
+            otel: OtelConfig::default(),
+        };
+        assert!(!config.otel.enabled);
+        assert_eq!(config.otel.endpoint, "http://localhost:4317");
+    }
 }

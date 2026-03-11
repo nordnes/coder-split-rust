@@ -61,7 +61,8 @@ use crate::handlers::users::*;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
-    csp_middleware, csrf_middleware, hsts_middleware, prometheus_middleware, real_ip_middleware,
+    csp_middleware, csrf_middleware, hsts_middleware, otel_trace_context_middleware,
+    prometheus_middleware, real_ip_middleware,
 };
 
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
@@ -860,6 +861,7 @@ pub fn build_router(
         .route("/oauth2/tokens", post(post_oauth2_token))
         // route_layer runs *after* routing so MatchedPath is populated.
         .route_layer(middleware::from_fn(prometheus_middleware))
+        .layer(middleware::from_fn(otel_trace_context_middleware))
         .layer(middleware::from_fn_with_state(rate_limit_state, crate::rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(csp_middleware))
@@ -7137,6 +7139,7 @@ mod tests {
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
+            otel: coder_core::config::OtelConfig::default(),
         })
     }
 

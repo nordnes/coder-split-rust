@@ -15,17 +15,22 @@ use coder_connectivity::tailnet::{
 use coder_core::pubsub::PubSub;
 use coder_core::{
     AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
-    ExternalAuthLinkProvider, LogFormat, PersistAuditLogInput, ServerConfig, SshConfig,
+    ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError, config::RateLimitConfig,
 };
 use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
 use coder_server::{AppState, build_router};
 use metrics_exporter_prometheus::PrometheusBuilder;
+use opentelemetry::trace::TracerProvider;
+use opentelemetry_otlp::WithExportConfig;
+use opentelemetry_sdk::trace::SdkTracerProvider;
 use shutdown::ShutdownCoordinator;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tracing::{error, info, warn};
 use tracing_subscriber::EnvFilter;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use url::Url;
 use uuid::Uuid;
 
@@ -129,6 +134,22 @@ struct ServerArgs {
     /// Maximum number of concurrent database queries.
     #[arg(long, env = "CODER_MAX_CONCURRENT_DB_QUERIES", default_value_t = 0)]
     max_concurrent_db_queries: usize,
+
+    /// Enable OpenTelemetry distributed tracing.
+    #[arg(long, env = "CODER_OTEL_ENABLED", default_value_t = false)]
+    otel_enabled: bool,
+
+    /// OTLP gRPC endpoint for trace export.
+    #[arg(
+        long,
+        env = "CODER_OTEL_ENDPOINT",
+        default_value = "http://localhost:4317"
+    )]
+    otel_endpoint: String,
+
+    /// Trace sampling ratio (0.0 – 1.0).
+    #[arg(long, env = "CODER_OTEL_SAMPLE_RATIO", default_value_t = 1.0)]
+    otel_sample_ratio: f64,
 
     /// Enable HTTP rate limiting.
     #[arg(long, env = "CODER_RATE_LIMIT_ENABLED", default_value_t = true)]
@@ -281,7 +302,13 @@ async fn run() -> Result<(), MainError> {
     let cli = Cli::parse();
     let Command::Server(args) = cli.command;
 
-    init_tracing(args.log_format);
+    let otel_config = OtelConfig {
+        enabled: args.otel_enabled,
+        endpoint: args.otel_endpoint.clone(),
+        service_name: "coderd".to_owned(),
+        sample_ratio: args.otel_sample_ratio,
+    };
+    let tracer_provider = init_tracing(args.log_format, &otel_config);
     init_panic_hook();
 
     let config = build_config(args)?;
@@ -370,6 +397,16 @@ async fn run() -> Result<(), MainError> {
 
     // 4. Close the database connection pool last so preceding tasks can still
     //    issue final queries during their own shutdown.
+    // 5. Flush and shut down the OpenTelemetry tracer provider so buffered
+    //    spans are exported before the process exits.
+    coordinator.register("opentelemetry", async move {
+        if let Some(provider) = tracer_provider {
+            if let Err(e) = provider.shutdown() {
+                warn!(error = %e, "opentelemetry tracer shutdown failed");
+            }
+        }
+    });
+
     coordinator.register("database", async move {
         store_pool.close().await;
     });
@@ -431,6 +468,12 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             unauthenticated_per_minute: args.rate_limit_unauthenticated_per_minute,
             audit_per_minute: 30,
         },
+        otel: OtelConfig {
+            enabled: args.otel_enabled,
+            endpoint: args.otel_endpoint,
+            service_name: "coderd".to_owned(),
+            sample_ratio: args.otel_sample_ratio,
+        },
     })
 }
 
@@ -444,25 +487,97 @@ fn init_panic_hook() {
     }));
 }
 
-fn init_tracing(log_format: LogFormatArg) {
+/// Initialises the global tracing subscriber.
+///
+/// When OpenTelemetry is enabled via `otel_config`, a [`SdkTracerProvider`] is
+/// constructed with an OTLP gRPC exporter and wired into the subscriber as an
+/// additional layer.  The returned provider **must** be shut down during the
+/// graceful-shutdown sequence so that buffered spans are flushed.
+fn init_tracing(log_format: LogFormatArg, otel_config: &OtelConfig) -> Option<SdkTracerProvider> {
     let env_filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info"));
 
+    // Build the optional tracer provider.
+    let tracer_provider = if otel_config.enabled {
+        match build_otel_provider(otel_config) {
+            Ok(provider) => Some(provider),
+            Err(e) => {
+                eprintln!("WARNING: failed to initialise OpenTelemetry: {e}");
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // The OTel layer must be constructed inside each match arm because the
+    // `OpenTelemetryLayer<S, T>` type parameter `S` depends on the concrete
+    // fmt layer variant (compact vs json).
     match log_format {
         LogFormatArg::Pretty => {
-            tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
+            let fmt_layer = tracing_subscriber::fmt::layer()
                 .with_target(false)
-                .compact()
+                .compact();
+            let otel_layer = tracer_provider
+                .as_ref()
+                .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("coderd")));
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt_layer)
+                .with(otel_layer)
                 .init();
         }
         LogFormatArg::Json => {
-            tracing_subscriber::fmt()
-                .with_env_filter(env_filter)
-                .with_target(false)
-                .json()
+            let fmt_layer = tracing_subscriber::fmt::layer().with_target(false).json();
+            let otel_layer = tracer_provider
+                .as_ref()
+                .map(|p| tracing_opentelemetry::layer().with_tracer(p.tracer("coderd")));
+            tracing_subscriber::registry()
+                .with(env_filter)
+                .with(fmt_layer)
+                .with(otel_layer)
                 .init();
         }
     }
+
+    tracer_provider
+}
+
+/// Builds an [`SdkTracerProvider`] configured with an OTLP gRPC exporter.
+fn build_otel_provider(
+    config: &OtelConfig,
+) -> Result<SdkTracerProvider, Box<dyn std::error::Error + Send + Sync>> {
+    use opentelemetry_sdk::trace::Sampler;
+
+    // Set the global text-map propagator so that incoming W3C TraceContext
+    // headers (traceparent / tracestate) are understood by the SDK.
+    opentelemetry::global::set_text_map_propagator(
+        opentelemetry_sdk::propagation::TraceContextPropagator::new(),
+    );
+
+    let exporter = opentelemetry_otlp::SpanExporter::builder()
+        .with_tonic()
+        .with_endpoint(&config.endpoint)
+        .build()?;
+
+    let sampler = if (config.sample_ratio - 1.0_f64).abs() < f64::EPSILON {
+        Sampler::AlwaysOn
+    } else if config.sample_ratio <= 0.0 {
+        Sampler::AlwaysOff
+    } else {
+        Sampler::TraceIdRatioBased(config.sample_ratio)
+    };
+
+    let provider = SdkTracerProvider::builder()
+        .with_batch_exporter(exporter)
+        .with_sampler(sampler)
+        .with_resource(
+            opentelemetry_sdk::Resource::builder()
+                .with_service_name(config.service_name.clone())
+                .build(),
+        )
+        .build();
+
+    Ok(provider)
 }
 
 async fn shutdown_signal() {
