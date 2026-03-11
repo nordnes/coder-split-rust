@@ -195,6 +195,7 @@ async fn run() -> Result<(), MainError> {
     let Command::Server(args) = cli.command;
 
     init_tracing(args.log_format);
+    init_panic_hook();
 
     let config = build_config(args)?;
 
@@ -325,6 +326,16 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             LogFormatArg::Json => LogFormat::Json,
         },
     })
+}
+
+fn init_panic_hook() {
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let location = panic_info
+            .location()
+            .map(|loc| format!("{}:{}", loc.file(), loc.line()));
+        tracing::error!(panic = true, %panic_info, ?location, %backtrace, "Server Panic");
+    }));
 }
 
 fn init_tracing(log_format: LogFormatArg) {
