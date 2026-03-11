@@ -80,7 +80,8 @@ pub use api::{
 pub use build_info::BuildMetadata;
 pub use config::{
     CorsConfig, DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, OtelConfig,
-    PublicDatabaseConfig, PublicDeploymentConfig, ServerConfig, SshConfig,
+    PublicDatabaseConfig, PublicDeploymentConfig, PublicProvisionerConfig, PublicTelemetryConfig,
+    PublicTlsConfig, ServerConfig, SshConfig,
 };
 pub use identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyScope, ApiKeyWithOwnerRecord, AuthenticatedUser,
