@@ -269,7 +269,10 @@ impl<S: LicenseStore> LicenseService<S> {
 
             let show_warning_days: i64 = if ents.trial { 7 } else { 30 };
 
-            if days_to_expire > 0 && days_to_expire < show_warning_days {
+            if days_to_expire <= 0 {
+                ents.warnings
+                    .push("Your license has expired. You are in a grace period.".to_owned());
+            } else if days_to_expire < show_warning_days {
                 let day_word = if days_to_expire == 1 { "day" } else { "days" };
                 ents.warnings.push(format!(
                     "Your license expires in {} {}.",
