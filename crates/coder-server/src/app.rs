@@ -52,10 +52,12 @@ use crate::handlers::external_auth::*;
 use crate::handlers::files::*;
 use crate::handlers::health::*;
 use crate::handlers::insights::*;
+use crate::handlers::mcp::*;
 use crate::handlers::notifications::*;
 use crate::handlers::oauth2::*;
 use crate::handlers::organizations::*;
 use crate::handlers::tasks::*;
+use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
 use crate::handlers::users::*;
 use crate::handlers::workspaces::*;
@@ -244,6 +246,7 @@ pub fn build_router(
         .route("/healthz", get(healthz))
         .route("/latency-check", get(latency_check))
         .route("/metrics", get(get_prometheus_metrics))
+        .route("/mcp/http", post(mcp_http_handler))
         .route(
             "/external-auth/{externalauth}/callback",
             get(get_external_auth_callback_by_id),
@@ -260,6 +263,7 @@ pub fn build_router(
                 // -------------------------------------------------------
                 .route("/audit", get(list_audit_logs))
                 .route("/audit/testgenerate", post(post_generate_test_audit_log))
+                .route("/telemetry", get(get_telemetry_status))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
                 .route("/debug/health", get(debug_health))
