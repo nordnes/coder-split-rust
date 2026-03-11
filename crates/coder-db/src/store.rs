@@ -74,7 +74,7 @@ use time::OffsetDateTime;
 use tracing::instrument;
 use uuid::Uuid;
 
-static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
+use crate::migrations;
 
 const REGULAR_MAX_TOKEN_LIFETIME_SECS: u64 = 60 * 60 * 24 * 30;
 const OWNER_MAX_TOKEN_LIFETIME_SECS: u64 = 60 * 60 * 24 * 365;
@@ -105,11 +105,11 @@ pub enum DatabaseInitError {
         source: sqlx::Error,
     },
     /// Migration execution failed.
-    #[error("run database migrations: {source}")]
+    #[error(transparent)]
     Migrate {
         /// Wrapped migration error.
-        #[source]
-        source: sqlx::migrate::MigrateError,
+        #[from]
+        source: migrations::MigrationError,
     },
 }
 
@@ -805,10 +805,8 @@ impl PostgresStore {
 
     /// Applies the Rust rewrite migrations.
     pub async fn migrate(&self) -> Result<(), DatabaseInitError> {
-        MIGRATOR
-            .run(&self.pool)
-            .await
-            .map_err(|source| DatabaseInitError::Migrate { source })
+        migrations::run_migrations(&self.pool).await?;
+        Ok(())
     }
 }
 
