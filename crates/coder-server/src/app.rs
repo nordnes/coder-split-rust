@@ -12510,6 +12510,26 @@ async fn get_workspace_agent_containers_watch(
     let channel = coder_core::pubsub::workspace_agent_containers_channel(agent_id);
 
     Ok(ws.on_upgrade(move |mut socket| async move {
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
+        let mut subscription = match pubsub.subscribe(&channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to container events",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
         // Send the initial container state snapshot.
         let devcontainer_rows = match store.list_workspace_agent_devcontainers(agent_id).await {
             Ok(rows) => rows,
@@ -12542,25 +12562,6 @@ async fn get_workspace_agent_containers_watch(
                 return;
             }
         }
-
-        // Subscribe to container events for this agent.
-        let mut subscription = match pubsub.subscribe(&channel).await {
-            Ok(sub) => sub,
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    error = %e,
-                    "failed to subscribe to container events",
-                );
-                let _ = socket
-                    .send(Message::Close(Some(CloseFrame {
-                        code: 1011,
-                        reason: format!("pubsub subscribe failed: {e}").into(),
-                    })))
-                    .await;
-                return;
-            }
-        };
 
         // Stream container state changes until the connection closes.
         loop {
@@ -13038,6 +13039,26 @@ async fn get_workspace_agent_watch_metadata_ws(
     let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
 
     Ok(ws.on_upgrade(move |mut socket| async move {
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
+        let mut subscription = match pubsub.subscribe(&channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to metadata events",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
         // Send the initial metadata snapshot.
         match store.list_workspace_agent_metadata(agent_id).await {
             Ok(rows) => {
@@ -13069,25 +13090,6 @@ async fn get_workspace_agent_watch_metadata_ws(
                 );
             }
         }
-
-        // Subscribe to metadata updates for this agent.
-        let mut subscription = match pubsub.subscribe(&channel).await {
-            Ok(sub) => sub,
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    error = %e,
-                    "failed to subscribe to metadata events",
-                );
-                let _ = socket
-                    .send(Message::Close(Some(CloseFrame {
-                        code: 1011,
-                        reason: format!("pubsub subscribe failed: {e}").into(),
-                    })))
-                    .await;
-                return;
-            }
-        };
 
         // Stream metadata updates until the connection closes.
         loop {
