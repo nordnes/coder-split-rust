@@ -3325,6 +3325,54 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("chats are not implemented"))
     }
 
+    /// Updates the status of a chat (e.g. to "waiting" on interrupt).
+    async fn update_chat_status(
+        &self,
+        id: Uuid,
+        status: ChatStatus,
+    ) -> Result<ChatRecord, StorageError> {
+        let _ = (id, status);
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Fetches the diff status for a chat.
+    ///
+    /// Returns an API response type directly because this data is a
+    /// pass-through from an external diff/PR service — there is no
+    /// intermediate storage record. The handler returns the response
+    /// as-is (or a default when `None`).
+    async fn get_chat_diff_status(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<Option<crate::api::ChatDiffStatusResponse>, StorageError> {
+        let _ = chat_id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Fetches the diff contents for a chat.
+    ///
+    /// Returns an API response type directly because the diff text is
+    /// fetched from an external service (e.g. a git provider) and has
+    /// no corresponding storage record type.
+    async fn get_chat_diff_contents(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<crate::api::ChatDiffContentsResponse, StorageError> {
+        let _ = chat_id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Lists enabled chat model providers.
+    ///
+    /// Returns API response types directly because model provider
+    /// configuration is aggregated from deployment settings and
+    /// external LLM services — there is no single storage record.
+    async fn get_enabled_chat_providers(
+        &self,
+    ) -> Result<Vec<crate::api::ChatModelProvider>, StorageError> {
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
     /// Updates the content of an existing chat message.
     async fn update_chat_message_content(
         &self,
@@ -3459,7 +3507,6 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
             "chat model configs are not implemented",
         ))
     }
-
     // -----------------------------------------------------------------------
     // Chat Files
     // -----------------------------------------------------------------------
