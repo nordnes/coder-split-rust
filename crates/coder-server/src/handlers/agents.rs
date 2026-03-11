@@ -1363,7 +1363,15 @@ pub(crate) async fn get_workspace_agent_external_auth(
             .filter(|_| authenticated)
             .map(|l| l.access_token.clone())
             .unwrap_or_default(),
-        url: provider_config.token_url.clone(),
+        // When not authenticated, provide the user-facing redirect URL through
+        // the Coder server so the agent can tell the user where to authenticate
+        // (matching Go's pattern: `{access_url}/external-auth/{provider_id}`).
+        // When already authenticated the URL is left empty.
+        url: if authenticated {
+            String::new()
+        } else {
+            format!("{}external-auth/{}", state.config.access_url, query.id)
+        },
         auth_type: provider_config.provider_type.clone(),
         authenticated,
         username: None,
