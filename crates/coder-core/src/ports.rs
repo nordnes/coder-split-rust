@@ -3092,6 +3092,41 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Err(StorageError::unavailable("chats are not implemented"))
     }
 
+    /// Updates the status of a chat (e.g. to "waiting" on interrupt).
+    async fn update_chat_status(
+        &self,
+        id: Uuid,
+        status: ChatStatus,
+    ) -> Result<ChatRecord, StorageError> {
+        let _ = (id, status);
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Fetches the diff status for a chat.
+    async fn get_chat_diff_status(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<Option<crate::api::ChatDiffStatusResponse>, StorageError> {
+        let _ = chat_id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Fetches the diff contents for a chat.
+    async fn get_chat_diff_contents(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<crate::api::ChatDiffContentsResponse, StorageError> {
+        let _ = chat_id;
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
+    /// Lists enabled chat model providers.
+    async fn get_enabled_chat_providers(
+        &self,
+    ) -> Result<Vec<crate::api::ChatModelProvider>, StorageError> {
+        Err(StorageError::unavailable("chats are not implemented"))
+    }
+
     // -----------------------------------------------------------------------
     // Chat Files
     // -----------------------------------------------------------------------

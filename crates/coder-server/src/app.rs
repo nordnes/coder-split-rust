@@ -447,8 +447,14 @@ pub fn build_router(
                 )
                 // Chats
                 .route("/chats", get(list_chats).post(create_chat))
+                .route("/chats/watch", get(watch_chats))
+                .route("/chats/models", get(list_chat_models))
                 .route("/chats/{chat}", get(get_chat).delete(delete_chat))
                 .route("/chats/{chat}/messages", post(post_chat_message))
+                .route("/chats/{chat}/stream", get(stream_chat))
+                .route("/chats/{chat}/interrupt", post(interrupt_chat))
+                .route("/chats/{chat}/diff-status", get(get_chat_diff_status))
+                .route("/chats/{chat}/diff", get(get_chat_diff_contents))
                 .route(
                     "/chats/files",
                     post(upload_chat_file).layer(DefaultBodyLimit::max(MAX_CHAT_FILE_SIZE)),
@@ -1040,6 +1046,11 @@ pub(crate) const MAX_CHAT_FILE_NAME: usize = 255;
 #[derive(Deserialize)]
 pub(crate) struct ChatFileUploadQuery {
     pub(crate) organization: Option<String>,
+}
+
+#[derive(Deserialize)]
+pub(crate) struct StreamChatQuery {
+    pub(crate) after_id: Option<i64>,
 }
 
 // ---------------------------------------------------------------------------
@@ -4155,6 +4166,69 @@ mod tests {
                 chat.updated_at = OffsetDateTime::now_utc();
             }
             Ok(())
+        }
+
+        async fn update_chat_status(
+            &self,
+            id: Uuid,
+            status: ChatStatus,
+        ) -> Result<ChatRecord, StorageError> {
+            let mut chats = self
+                .chats
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let chat = chats
+                .get_mut(&id)
+                .ok_or_else(|| StorageError::unavailable("chat not found"))?;
+            chat.status = status;
+            chat.updated_at = OffsetDateTime::now_utc();
+            Ok(chat.clone())
+        }
+
+        async fn get_chat_diff_status(
+            &self,
+            chat_id: Uuid,
+        ) -> Result<Option<coder_core::api::ChatDiffStatusResponse>, StorageError> {
+            // Return a default empty diff status for the given chat.
+            let chats = self
+                .chats
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if chats.contains_key(&chat_id) {
+                Ok(Some(coder_core::api::ChatDiffStatusResponse {
+                    chat_id,
+                    url: None,
+                    pull_request_state: None,
+                    changes_requested: false,
+                    additions: 0,
+                    deletions: 0,
+                    changed_files: 0,
+                    refreshed_at: None,
+                    stale_at: None,
+                }))
+            } else {
+                Ok(None)
+            }
+        }
+
+        async fn get_chat_diff_contents(
+            &self,
+            chat_id: Uuid,
+        ) -> Result<coder_core::api::ChatDiffContentsResponse, StorageError> {
+            Ok(coder_core::api::ChatDiffContentsResponse {
+                chat_id,
+                provider: None,
+                remote_origin: None,
+                branch: None,
+                pull_request_url: None,
+                diff: String::new(),
+            })
+        }
+
+        async fn get_enabled_chat_providers(
+            &self,
+        ) -> Result<Vec<coder_core::api::ChatModelProvider>, StorageError> {
+            Ok(Vec::new())
         }
 
         // -----------------------------------------------------------------
@@ -19276,6 +19350,427 @@ mod tests {
             ws_resp.status(),
             StatusCode::NOT_IMPLEMENTED,
             "watch_chat_git with WS headers should no longer return 501",
+        );
+        Ok(())
+    }
+
+    // =====================================================================
+    // Chat SSE & real-time route tests
+    // =====================================================================
+
+    /// Helper: create a chat and return its UUID.
+    async fn create_chat_get_id(
+        app: &Router,
+        session_token: &str,
+        text: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                session_token,
+                &json!({
+                    "content": [{"type": "text", "text": text}]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_json(resp).await?;
+        let id = body
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?
+            .to_owned();
+        Ok(id)
+    }
+
+    // -- watch_chats (SSE) ------------------------------------------------
+
+    #[tokio::test]
+    async fn test_watch_chats_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let resp = call(app, request(Method::GET, "/api/v2/chats/watch")?).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_watch_chats_returns_sse() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats/watch", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("text/event-stream"),
+            "expected text/event-stream content-type, got {ct}",
+        );
+        Ok(())
+    }
+
+    // -- list_chat_models -------------------------------------------------
+
+    #[tokio::test]
+    async fn test_list_chat_models_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let resp = call(app, request(Method::GET, "/api/v2/chats/models")?).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_list_chat_models_returns_providers() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats/models", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        // FakeStore returns empty providers list.
+        let providers = body
+            .get("providers")
+            .and_then(Value::as_array)
+            .ok_or("missing providers")?;
+        assert_eq!(providers.len(), 0);
+        Ok(())
+    }
+
+    // -- stream_chat (SSE) ------------------------------------------------
+
+    #[tokio::test]
+    async fn test_stream_chat_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let chat_id = Uuid::new_v4();
+        let resp = call(
+            app,
+            request(Method::GET, &format!("/api/v2/chats/{chat_id}/stream"))?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stream_chat_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{fake_id}/stream"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stream_chat_returns_sse() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let chat_id = create_chat_get_id(&app, &session_token, "stream test").await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}/stream"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("text/event-stream"),
+            "expected text/event-stream content-type, got {ct}",
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_stream_chat_other_user_gets_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token_a = create_and_login(&app).await?;
+        let chat_id = create_chat_get_id(&app, &token_a, "owner's chat").await?;
+
+        // Get org ID for creating second user.
+        let orgs_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/organizations", &token_a)?,
+        )
+        .await?;
+        let orgs = response_json(orgs_resp).await?;
+        let org_id_str = orgs
+            .as_array()
+            .and_then(|a| a.first())
+            .and_then(|o| o.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing org id")?;
+        let org_id = Uuid::parse_str(org_id_str)?;
+
+        // Create user B using authenticated request (same pattern as existing tests).
+        let create_user_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &token_a,
+                &CreateUserRequestWithOrgs {
+                    email: "other@example.com".to_owned(),
+                    username: "otheruser".to_owned(),
+                    name: "Other User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![org_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(
+            create_user_resp.status(),
+            StatusCode::CREATED,
+            "failed to create second user",
+        );
+
+        let login_resp = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "other@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(login_resp.status(), StatusCode::CREATED);
+        let login_body = response_json(login_resp).await?;
+        let token_b = login_body
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing session_token")?;
+
+        // User B tries to stream user A's chat.
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}/stream"),
+                token_b,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    // -- interrupt_chat ---------------------------------------------------
+
+    #[tokio::test]
+    async fn test_interrupt_chat_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let chat_id = Uuid::new_v4();
+        let resp = call(
+            app,
+            request(Method::POST, &format!("/api/v2/chats/{chat_id}/interrupt"))?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_chat_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let resp = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{fake_id}/interrupt"),
+                &session_token,
+                &json!({}),
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_chat_updates_status() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let chat_id = create_chat_get_id(&app, &session_token, "interrupt me").await?;
+
+        let resp = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/interrupt"),
+                &session_token,
+                &json!({}),
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert_eq!(body.get("status").and_then(Value::as_str), Some("waiting"),);
+        Ok(())
+    }
+
+    // -- get_chat_diff_status ---------------------------------------------
+
+    #[tokio::test]
+    async fn test_diff_status_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let chat_id = Uuid::new_v4();
+        let resp = call(
+            app,
+            request(Method::GET, &format!("/api/v2/chats/{chat_id}/diff-status"))?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_status_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{fake_id}/diff-status"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_status_returns_structure() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let chat_id = create_chat_get_id(&app, &session_token, "diff status test").await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}/diff-status"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert_eq!(body.get("chat_id").and_then(Value::as_str), Some(&*chat_id));
+        assert_eq!(
+            body.get("changes_requested").and_then(Value::as_bool),
+            Some(false),
+        );
+        assert_eq!(body.get("additions").and_then(Value::as_i64), Some(0),);
+        assert_eq!(body.get("deletions").and_then(Value::as_i64), Some(0),);
+        assert_eq!(body.get("changed_files").and_then(Value::as_i64), Some(0),);
+        Ok(())
+    }
+
+    // -- get_chat_diff_contents -------------------------------------------
+
+    #[tokio::test]
+    async fn test_diff_contents_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let chat_id = Uuid::new_v4();
+        let resp = call(
+            app,
+            request(Method::GET, &format!("/api/v2/chats/{chat_id}/diff"))?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_contents_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{fake_id}/diff"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_diff_contents_returns_structure() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let chat_id = create_chat_get_id(&app, &session_token, "diff test").await?;
+
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}/diff"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert_eq!(body.get("chat_id").and_then(Value::as_str), Some(&*chat_id));
+        // FakeStore returns empty diff; empty strings are omitted by skip_serializing_if.
+        // The field should either be absent (None) or an empty string.
+        let diff_val = body.get("diff").and_then(Value::as_str);
+        assert!(
+            diff_val.is_none() || diff_val == Some(""),
+            "expected absent or empty diff, got {diff_val:?}",
         );
         Ok(())
     }

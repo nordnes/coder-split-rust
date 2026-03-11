@@ -614,6 +614,290 @@ pub(crate) async fn unarchive_chat_handler(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// GET /api/v2/chats/watch – SSE stream for chat list updates.
+///
+/// Subscribes to the pub/sub channel for the authenticated user's chat events
+/// and streams them as server-sent events. Sends an initial ping to signal
+/// the connection is ready.
+pub(crate) async fn watch_chats(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use std::convert::Infallible;
+
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let channel = coder_core::api::chat_event_channel(context.user.id);
+    let subscription = state
+        .pubsub
+        .subscribe(&channel)
+        .await
+        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+    let stream = async_stream::stream! {
+        // Send initial ping to signal the connection is ready.
+        let ping = coder_core::api::ServerSentEvent::<()> {
+            event_type: coder_core::api::ServerSentEventType::Ping,
+            data: None,
+        };
+        if let Ok(json) = serde_json::to_string(&ping) {
+            yield Ok::<_, Infallible>(Event::default().data(json));
+        }
+
+        // Stream chat events from pub/sub.
+        let mut sub = subscription;
+        while let Ok(message) = sub.recv().await {
+            // Parse the message as a ChatEvent.
+            if let Ok(chat_event) = serde_json::from_slice::<coder_core::api::ChatEvent>(&message) {
+                let sse = coder_core::api::ServerSentEvent {
+                    event_type: coder_core::api::ServerSentEventType::Data,
+                    data: Some(chat_event),
+                };
+                if let Ok(json) = serde_json::to_string(&sse) {
+                    yield Ok::<_, Infallible>(Event::default().data(json));
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// GET /api/v2/chats/models – List available AI chat models.
+///
+/// Returns the list of configured AI model providers and their models.
+/// The Go reference queries the database for enabled providers and models,
+/// then merges with deployment-level API keys. This implementation returns
+/// the providers from the store.
+pub(crate) async fn list_chat_models(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let providers = state.store.get_enabled_chat_providers().await?;
+
+    Ok(Json(coder_core::api::ChatModelsResponse { providers }).into_response())
+}
+
+/// GET /api/v2/chats/{chat}/stream – SSE stream for chat messages.
+///
+/// Streams real-time chat messages as server-sent events. Sends message parts,
+/// status updates, and errors. The Go reference subscribes to a chat daemon
+/// for live events and sends an initial snapshot. This implementation
+/// subscribes to the chat's pub/sub channel and streams events.
+pub(crate) async fn stream_chat(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    Query(query): Query<StreamChatQuery>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use std::convert::Infallible;
+
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok(not_found_response("Chat not found."));
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok(not_found_response("Chat not found."));
+    }
+
+    // Load initial message snapshot (optionally filtered by after_id).
+    let after_id = query.after_id.unwrap_or(0);
+    let messages = state.store.list_chat_messages(chat_id, after_id).await?;
+    let queued = state.store.list_chat_queued_messages(chat_id).await?;
+
+    // Convert to ChatStreamEvent snapshot.
+    let mut snapshot: Vec<coder_core::api::ChatStreamEvent> = Vec::new();
+    for msg in messages {
+        let msg_resp = chat_message_response_from_record(msg)?;
+        snapshot.push(coder_core::api::ChatStreamEvent {
+            event_type: coder_core::api::ChatStreamEventType::Message,
+            chat_id,
+            message: Some(msg_resp),
+            message_part: None,
+            status: None,
+            error: None,
+            retry: None,
+            queued_messages: Vec::new(),
+        });
+    }
+
+    // Add status event.
+    snapshot.push(coder_core::api::ChatStreamEvent {
+        event_type: coder_core::api::ChatStreamEventType::Status,
+        chat_id,
+        message: None,
+        message_part: None,
+        status: Some(coder_core::api::ChatStreamStatus {
+            status: chat.status.clone(),
+        }),
+        error: None,
+        retry: None,
+        queued_messages: Vec::new(),
+    });
+
+    // Add queued messages if any.
+    if !queued.is_empty() {
+        let queued_responses: Vec<ChatQueuedMessageResponse> = queued
+            .into_iter()
+            .map(chat_queued_message_response_from_record)
+            .collect::<Result<_, _>>()?;
+        snapshot.push(coder_core::api::ChatStreamEvent {
+            event_type: coder_core::api::ChatStreamEventType::QueueUpdate,
+            chat_id,
+            message: None,
+            message_part: None,
+            status: None,
+            error: None,
+            retry: None,
+            queued_messages: queued_responses,
+        });
+    }
+
+    // Subscribe to live events on the chat's pub/sub channel.
+    let channel = format!("chat:stream:{chat_id}");
+    let subscription = state.pubsub.subscribe(&channel).await.ok();
+
+    let stream = async_stream::stream! {
+        // Send snapshot in batches (up to 256 events per SSE message).
+        const BATCH_SIZE: usize = 256;
+        for chunk in snapshot.chunks(BATCH_SIZE) {
+            let sse = coder_core::api::ServerSentEvent {
+                event_type: coder_core::api::ServerSentEventType::Data,
+                data: Some(chunk),
+            };
+            if let Ok(json) = serde_json::to_string(&sse) {
+                yield Ok::<_, Infallible>(Event::default().data(json));
+            }
+        }
+
+        // Stream live events if we have a subscription.
+        if let Some(mut sub) = subscription {
+            while let Ok(message) = sub.recv().await {
+                if let Ok(events) = serde_json::from_slice::<Vec<coder_core::api::ChatStreamEvent>>(&message) {
+                    let sse = coder_core::api::ServerSentEvent {
+                        event_type: coder_core::api::ServerSentEventType::Data,
+                        data: Some(events),
+                    };
+                    if let Ok(json) = serde_json::to_string(&sse) {
+                        yield Ok::<_, Infallible>(Event::default().data(json));
+                    }
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response())
+}
+
+/// POST /api/v2/chats/{chat}/interrupt – Interrupt active chat.
+///
+/// Cancels an ongoing AI response generation by updating the chat status
+/// to "waiting". Returns the updated chat.
+pub(crate) async fn interrupt_chat(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok(not_found_response("Chat not found."));
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok(not_found_response("Chat not found."));
+    }
+
+    // Update the chat status to "waiting" (interrupt).
+    let updated = state
+        .store
+        .update_chat_status(chat_id, coder_core::api::ChatStatus::Waiting)
+        .await?;
+
+    Ok(Json(chat_response_from_record(updated)).into_response())
+}
+
+/// GET /api/v2/chats/{chat}/diff-status – Get chat diff status.
+///
+/// Returns the cached diff status for a chat's code changes. This includes
+/// pull request state, additions/deletions, and refresh timestamps.
+pub(crate) async fn get_chat_diff_status(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok(not_found_response("Chat not found."));
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok(not_found_response("Chat not found."));
+    }
+
+    // Fetch the diff status from the store; return a default if none exists.
+    let status = state.store.get_chat_diff_status(chat_id).await?;
+    let response = status.unwrap_or(coder_core::api::ChatDiffStatusResponse {
+        chat_id,
+        url: None,
+        pull_request_state: None,
+        changes_requested: false,
+        additions: 0,
+        deletions: 0,
+        changed_files: 0,
+        refreshed_at: None,
+        stale_at: None,
+    });
+
+    Ok(Json(response).into_response())
+}
+
+/// GET /api/v2/chats/{chat}/diff – Get chat diff contents.
+///
+/// Returns the resolved diff text for a chat. Includes provider information,
+/// remote origin, branch, and the actual diff content.
+pub(crate) async fn get_chat_diff_contents(
+    State(state): State<AppState>,
+    Path(chat_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(chat) = state.store.find_chat_by_id(chat_id).await? else {
+        return Ok(not_found_response("Chat not found."));
+    };
+
+    if chat.owner_id != context.user.id {
+        return Ok(not_found_response("Chat not found."));
+    }
+
+    let diff = state.store.get_chat_diff_contents(chat_id).await?;
+    Ok(Json(diff).into_response())
+}
+
 /// GET /api/v2/chats/{chat}/git/watch – WebSocket for watching git changes.
 ///
 /// Validates that the chat exists and belongs to the authenticated user,

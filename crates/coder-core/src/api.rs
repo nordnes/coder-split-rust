@@ -2481,7 +2481,7 @@ pub struct ChatMessageUsage {
 }
 
 /// ChatMessage represents a single message in a chat.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessageResponse {
     pub id: i64,
     pub chat_id: Uuid,
@@ -2497,7 +2497,7 @@ pub struct ChatMessageResponse {
 }
 
 /// Chat represents a chat session.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatResponse {
     pub id: Uuid,
     pub owner_id: Uuid,
@@ -2520,7 +2520,7 @@ pub struct ChatResponse {
 }
 
 /// ChatQueuedMessage represents a queued message waiting to be processed.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatQueuedMessageResponse {
     pub id: i64,
     pub chat_id: Uuid,
@@ -2600,6 +2600,211 @@ pub struct CreateChatMessageApiResponse {
 #[derive(Clone, Debug, Serialize)]
 pub struct UploadChatFileResponse {
     pub id: Uuid,
+}
+
+// ---------------------------------------------------------------------------
+// Chat Models & Diff types
+// ---------------------------------------------------------------------------
+
+/// ChatModel represents a model in the chat model catalog.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatModel {
+    pub id: String,
+    pub provider: String,
+    pub model: String,
+    pub display_name: String,
+}
+
+/// ChatModelProviderUnavailableReason explains why a provider cannot be used.
+#[derive(Clone, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatModelProviderUnavailableReason {
+    MissingApiKey,
+    FetchFailed,
+}
+
+/// ChatModelProvider represents provider availability and model results.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatModelProvider {
+    pub provider: String,
+    pub available: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub unavailable_reason: Option<ChatModelProviderUnavailableReason>,
+    pub models: Vec<ChatModel>,
+}
+
+/// ChatModelsResponse is the catalog returned from chat model discovery.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatModelsResponse {
+    pub providers: Vec<ChatModelProvider>,
+}
+
+/// ChatDiffStatusResponse represents cached diff status for a chat.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatDiffStatusResponse {
+    pub chat_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_request_state: Option<String>,
+    pub changes_requested: bool,
+    pub additions: i32,
+    pub deletions: i32,
+    pub changed_files: i32,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_rfc3339"
+    )]
+    pub refreshed_at: Option<OffsetDateTime>,
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_rfc3339"
+    )]
+    pub stale_at: Option<OffsetDateTime>,
+}
+
+/// ChatDiffContentsResponse represents the resolved diff text for a chat.
+#[derive(Clone, Debug, Serialize)]
+pub struct ChatDiffContentsResponse {
+    pub chat_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pull_request_url: Option<String>,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub diff: String,
+}
+
+// ---------------------------------------------------------------------------
+// Chat Stream types
+// ---------------------------------------------------------------------------
+
+/// ChatStreamEventType represents the kind of chat stream update.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatStreamEventType {
+    MessagePart,
+    Message,
+    Status,
+    Error,
+    QueueUpdate,
+    Retry,
+}
+
+/// ChatStreamMessagePart is a streamed message part update.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatStreamMessagePart {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+    pub part: ChatMessagePart,
+}
+
+/// ChatStreamStatus represents an updated chat status.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatStreamStatus {
+    pub status: ChatStatus,
+}
+
+/// ChatStreamError represents an error event in the stream.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatStreamError {
+    pub message: String,
+}
+
+/// ChatStreamRetry represents an auto-retry status event in the stream.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatStreamRetry {
+    pub attempt: i32,
+    pub delay_ms: i64,
+    pub error: String,
+    #[serde(with = "time::serde::rfc3339")]
+    pub retrying_at: OffsetDateTime,
+}
+
+/// ChatStreamEvent represents a real-time update for chat streaming.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatStreamEvent {
+    #[serde(rename = "type")]
+    pub event_type: ChatStreamEventType,
+    pub chat_id: Uuid,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<ChatMessageResponse>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message_part: Option<ChatStreamMessagePart>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<ChatStreamStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<ChatStreamError>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<ChatStreamRetry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub queued_messages: Vec<ChatQueuedMessageResponse>,
+}
+
+// ---------------------------------------------------------------------------
+// Chat PubSub event types
+// ---------------------------------------------------------------------------
+
+/// ChatEventKind represents the kind of chat event broadcast over pub/sub.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatEventKind {
+    StatusChange,
+    TitleChange,
+    Created,
+    Deleted,
+    DiffStatusChange,
+}
+
+/// ChatEvent is a pub/sub event payload for chat updates.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ChatEvent {
+    pub kind: ChatEventKind,
+    pub chat: ChatResponse,
+}
+
+/// ServerSentEventType represents SSE event types.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ServerSentEventType {
+    Ping,
+    Data,
+    Error,
+}
+
+/// ServerSentEvent is a generic server-sent event envelope.
+#[derive(Clone, Debug, Serialize)]
+pub struct ServerSentEvent<T: Serialize> {
+    #[serde(rename = "type")]
+    pub event_type: ServerSentEventType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub data: Option<T>,
+}
+
+/// Returns the pub/sub channel name for chat events owned by the given user.
+///
+/// Mirrors the Go `pubsub.ChatEventChannel(ownerID)` function.
+#[must_use]
+pub fn chat_event_channel(owner_id: Uuid) -> String {
+    format!("chat:owner:{owner_id}")
+}
+
+/// Helper to serialize an optional OffsetDateTime in RFC 3339.
+fn serialize_optional_rfc3339<S>(
+    value: &Option<OffsetDateTime>,
+    serializer: S,
+) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    match value {
+        Some(dt) => time::serde::rfc3339::serialize(dt, serializer),
+        None => serializer.serialize_none(),
+    }
 }
 
 // ---------------------------------------------------------------------------
