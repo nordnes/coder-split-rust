@@ -1144,8 +1144,8 @@ async fn get_init_script(
 //     - get_health_settings (Read, DeploymentConfig) [NEW]
 //     - get_notifications_settings (Read, DeploymentConfig) [NEW]
 //     - get_notification_dispatch_methods (Read, DeploymentConfig) [NEW]
-//     - get_system_notification_templates (Read, NotificationTemplate) [NEW]
-//     - get_custom_notification_templates (Read, NotificationTemplate) [NEW]
+//     - get_system_notification_templates (auth-only, no RBAC — see note in handler)
+//     - get_custom_notification_templates (auth-only, no RBAC — see note in handler)
 //     - insights_daus, insights_templates, insights_user_activity,
 //       insights_user_latency, insights_user_status_counts (Read, DeploymentStats) [NEW]
 //     - debug_coordinator, debug_tailnet, debug_derp_traffic,
@@ -5249,20 +5249,9 @@ async fn get_system_notification_templates(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: verify the actor can read notification templates.
-    let authorizer = Authorizer::new();
-    if authorizer
-        .authorize(
-            &context.actor,
-            Action::Read,
-            &Object::new(ResourceType::NotificationTemplate),
-        )
-        .is_err()
-    {
-        return Ok(forbidden_response(
-            "You are not authorized to view notification templates.",
-        ));
-    }
+    // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
+    // to any non-owner role, but any authenticated user should be able to view
+    // available notification templates (e.g., to configure preferences).
 
     let templates = state
         .store
@@ -5279,20 +5268,9 @@ async fn get_custom_notification_templates(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: verify the actor can read notification templates.
-    let authorizer = Authorizer::new();
-    if authorizer
-        .authorize(
-            &context.actor,
-            Action::Read,
-            &Object::new(ResourceType::NotificationTemplate),
-        )
-        .is_err()
-    {
-        return Ok(forbidden_response(
-            "You are not authorized to view notification templates.",
-        ));
-    }
+    // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
+    // to any non-owner role, but any authenticated user should be able to view
+    // available notification templates (e.g., to configure preferences).
 
     let templates = state
         .store
