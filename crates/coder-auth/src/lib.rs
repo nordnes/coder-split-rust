@@ -1,4 +1,19 @@
 //! Authentication, sessions, and external-auth lifecycle helpers.
+//!
+//! `coder-auth` owns every operation related to proving identity:
+//!
+//! * **Password login** — PBKDF2-SHA256 verification, session creation
+//! * **Session management** — in-memory [`session_cache::SessionCache`] with
+//!   database fallback, logout / eviction
+//! * **API keys** — session-scoped and token-scoped key lifecycle
+//! * **One-time passcodes** — password-reset flow
+//! * **External auth** — OAuth2 / OIDC callback exchange, device-code flow,
+//!   token refresh, revocation via [`ExternalAuthService`]
+//! * **OAuth login** — GitHub and generic OIDC login/signup flows in the
+//!   [`oauth_login`] sub-module
+//!
+//! The crate is generic over any store that implements [`coder_core::AuthStore`],
+//! making it easy to test with the in-memory `FakeStore`.
 #![forbid(unsafe_code)]
 
 pub mod oauth_login;

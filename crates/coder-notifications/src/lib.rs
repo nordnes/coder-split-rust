@@ -2,6 +2,17 @@
 //!
 //! Provides a background dispatch loop that polls pending notification messages
 //! and delivers them via SMTP email, HTTP webhook, or in-app inbox.
+//!
+//! # Key types
+//!
+//! * [`NotificationDispatchService`] — background service that polls
+//!   `acquire_pending_notification_messages` every 10 seconds and routes each
+//!   message to the appropriate transport
+//! * [`NotificationConfig`] — SMTP and webhook configuration
+//! * [`NotificationDispatchError`] — transport-level delivery failures
+//!
+//! Email dispatch is currently stubbed (requires `lettre` wiring); webhook
+//! and inbox delivery are fully implemented.
 #![forbid(unsafe_code)]
 
 use std::sync::{Arc, Weak};

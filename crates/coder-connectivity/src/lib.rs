@@ -1,4 +1,16 @@
 //! Connectivity, agent, health, and SSH helpers.
+//!
+//! `coder-connectivity` groups operational services that probe the health
+//! of subsystems and manage infrastructure-level resources:
+//!
+//! * [`HealthService`] — cached deployment health checks (database, access URL,
+//!   WebSocket, DERP, workspace proxies, provisioner daemons) with a 15-second
+//!   TTL
+//! * [`TelemetryService`] — periodic anonymous deployment telemetry snapshots
+//! * [`UpdateCheckService`] — polls GitHub releases for available updates
+//! * [`generate_git_ssh_key`] — Ed25519 keypair generation for Git-over-SSH
+//! * [`agents`] — in-memory agent connection provider
+//! * [`tailnet`] — DERP map construction and in-memory coordinator
 #![forbid(unsafe_code)]
 
 pub mod agents;

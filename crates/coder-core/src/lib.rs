@@ -1,5 +1,36 @@
 //! Shared domain types, API models, and storage contracts for the Rust
 //! backend rewrite.
+//!
+//! `coder-core` is the foundation crate of the Rust Coder backend.  It defines
+//! every type that crosses crate boundaries but contains **no** business logic
+//! or I/O of its own.  Higher-level crates (`coder-auth`, `coder-identity`,
+//! `coder-db`, `coder-server`, …) depend on `coder-core` for their shared
+//! vocabulary.
+//!
+//! # Modules
+//!
+//! | Module | Purpose |
+//! |--------|---------|
+//! | [`api`] | HTTP request / response models serialised to JSON |
+//! | [`build_info`] | Compile-time metadata (version, git commit) |
+//! | [`config`] | Runtime configuration structs (`ServerConfig`, `DatabaseConfig`, …) |
+//! | [`enums`] | PostgreSQL `CREATE TYPE … AS ENUM` mirrors with `sqlx::Type` derives |
+//! | [`identity`] | Domain records for users, organisations, API keys, and OAuth2 apps |
+//! | [`password`] | PBKDF2-SHA256 password hashing and session-token helpers |
+//! | [`ports`] | Storage trait hierarchy (`AppStore` and its sub-traits) |
+//! | [`provisioner`] | Provisioner job, daemon, and key domain records |
+//! | [`pubsub`] | Lightweight pub/sub trait for real-time event fan-out |
+//! | [`retry`] | Configurable retry loop with exponential back-off |
+//! | [`template`] | Template and template-version domain records |
+//!
+//! # Design Principles
+//!
+//! * **No unsafe code** — enforced by `#![forbid(unsafe_code)]`.
+//! * **No business logic** — pure data definitions and trait contracts.
+//! * **Serde-first** — API types derive `Serialize` / `Deserialize` for
+//!   zero-copy JSON round-tripping.
+//! * **Go parity** — types mirror the original Go SDK (`codersdk/`) so that
+//!   HTTP responses are byte-for-byte compatible.
 #![forbid(unsafe_code)]
 
 pub mod api;

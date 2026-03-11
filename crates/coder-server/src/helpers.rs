@@ -1,4 +1,14 @@
 //! Shared helper functions used across handler modules.
+//!
+//! This module provides:
+//!
+//! * **Authentication helpers** — [`authenticate_request`], [`authenticate_agent_request`]
+//! * **User resolution** — [`resolve_user`] (by `"me"`, UUID, or username)
+//! * **Error mappers** — [`handle_auth_error`], [`handle_external_auth_error`],
+//!   [`handle_identity_error`] convert domain errors into HTTP responses
+//! * **Response builders** — convenience functions for common HTTP status codes
+//!   (`unauthorized_response`, `forbidden_response`, `not_found_response`, …)
+//! * **Audit recording** — [`record_audit`] dispatches events to the audit sink
 
 use crate::app::{AppState, BUILD_VERSION_HEADER};
 use crate::error::AppError;
@@ -22,6 +32,10 @@ use coder_rbac::{Actor, ROLE_AUDITOR, ResourceKind};
 use std::str::FromStr;
 use uuid::Uuid;
 
+/// Authenticates an HTTP request using the session token in the headers.
+///
+/// Returns `Ok(Some(…))` for a valid session, `Ok(None)` when no token is
+/// present, or an error on storage failures.
 pub(crate) async fn authenticate_request(
     state: &AppState,
     headers: &HeaderMap,
@@ -66,6 +80,10 @@ pub(crate) async fn authenticate_agent_request(
         .map_err(AppError::from)
 }
 
+/// Resolves a user identifier from a URL path segment.
+///
+/// Accepts the literal `"me"` (returns the authenticated user), a UUID, or a
+/// username.  Returns `Ok(None)` when no matching user is found.
 pub(crate) async fn resolve_user(
     state: &AppState,
     requested_user: &str,
@@ -94,10 +112,14 @@ pub(crate) async fn resolve_user(
         .map_err(AppError::from)
 }
 
+/// Returns `true` if the actor has permission to view operational data
+/// (owners and auditors).
 pub(crate) fn can_view_operational_data(actor: &Actor) -> bool {
     actor.is_owner() || actor.has_site_role(ROLE_AUDITOR)
 }
 
+/// Looks up an external auth provider by its identifier from the server
+/// configuration.
 pub(crate) fn find_external_auth_provider<'a>(
     state: &'a AppState,
     provider_id: &str,
@@ -109,6 +131,8 @@ pub(crate) fn find_external_auth_provider<'a>(
         .find(|provider| provider.id == provider_id)
 }
 
+/// Marks dismissed health-check sections in the report so the UI can hide
+/// them.
 pub(crate) fn apply_dismissed_health_settings(
     mut report: HealthcheckReport,
     settings: &HealthSettings,
@@ -127,6 +151,8 @@ pub(crate) fn apply_dismissed_health_settings(
     report
 }
 
+/// Extracts the path (and optional query) from a redirect URI, stripping
+/// the scheme and authority to prevent open-redirect attacks.
 pub(crate) fn sanitize_redirect_uri(input: &str) -> String {
     if let Ok(url) = url::Url::parse(input) {
         let path = url.path();
@@ -153,6 +179,8 @@ pub(crate) fn sanitize_redirect_uri(input: &str) -> String {
     "/".to_owned()
 }
 
+/// Builds a `303 See Other` redirect to `/login` with the given message
+/// and the original URI preserved as a `redirect` query parameter.
 pub(crate) fn redirect_to_login_response(uri: &http::Uri, message: &str) -> Response {
     let mut serializer = url::form_urlencoded::Serializer::new(String::new());
     serializer.append_pair("message", message);
@@ -167,6 +195,8 @@ pub(crate) fn redirect_to_login_response(uri: &http::Uri, message: &str) -> Resp
     response
 }
 
+/// Returns a `400 Bad Request` response indicating that the provider does
+/// not support the device-code flow.
 pub(crate) fn external_auth_device_flow_unsupported_response() -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -177,6 +207,9 @@ pub(crate) fn external_auth_device_flow_unsupported_response() -> Response {
         .into_response()
 }
 
+/// Generates a new SSH keypair for the user and upserts it in the store.
+///
+/// The key comment is set to the user's email or, if empty, their username.
 pub(crate) async fn store_new_git_ssh_key(
     state: &AppState,
     user: &UserRecord,
@@ -194,6 +227,7 @@ pub(crate) async fn store_new_git_ssh_key(
         .map_err(|error| error.to_string())
 }
 
+/// Records an audit event via the batched audit sink.
 pub(crate) async fn record_audit(
     state: &AppState,
     action: AuditAction,
@@ -214,6 +248,8 @@ pub(crate) async fn record_audit(
         .await;
 }
 
+/// Converts an [`AuthServiceError`] into an HTTP response, mapping each
+/// variant to the appropriate status code.
 pub(crate) fn handle_auth_error(error: AuthServiceError) -> Result<Response, AppError> {
     match error {
         AuthServiceError::Storage(error) => Err(AppError::from(error)),
@@ -257,6 +293,8 @@ pub(crate) fn handle_auth_error(error: AuthServiceError) -> Result<Response, App
     }
 }
 
+/// Converts an [`ExternalAuthServiceError`] into an HTTP response,
+/// wrapping the service-level detail with a caller-supplied message.
 pub(crate) fn handle_external_auth_error(
     message: &'static str,
     error: ExternalAuthServiceError,
@@ -274,6 +312,8 @@ pub(crate) fn handle_external_auth_error(
     }
 }
 
+/// Converts an [`IdentityServiceError`] into an HTTP response, mapping
+/// each variant to the appropriate status code.
 pub(crate) fn handle_identity_error(error: IdentityServiceError) -> Result<Response, AppError> {
     match error {
         IdentityServiceError::Storage(error) => Err(AppError::from(error)),
@@ -316,6 +356,7 @@ pub(crate) fn handle_identity_error(error: IdentityServiceError) -> Result<Respo
     }
 }
 
+/// Returns a [`HeaderMap`] containing the `X-Coder-Build-Version` header.
 pub(crate) fn build_version_headers(version: &str) -> HeaderMap {
     let mut headers = HeaderMap::new();
     if let Ok(value) = HeaderValue::from_str(version) {
@@ -324,6 +365,7 @@ pub(crate) fn build_version_headers(version: &str) -> HeaderMap {
     headers
 }
 
+/// Returns a `400 Bad Request` response for malformed JSON request bodies.
 pub(crate) fn invalid_json_response(error: JsonRejection) -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -335,10 +377,14 @@ pub(crate) fn invalid_json_response(error: JsonRejection) -> Response {
         .into_response()
 }
 
+/// Returns a `400 Bad Request` response listing field-level validation
+/// errors.
 pub(crate) fn validation_response(validations: Vec<ValidationError>) -> Response {
     validation_message_response("Request body has invalid fields.", validations)
 }
 
+/// Returns a `400 Bad Request` response with a custom message and
+/// field-level validation errors.
 pub(crate) fn validation_message_response(
     message: &str,
     validations: Vec<ValidationError>,
@@ -354,6 +400,7 @@ pub(crate) fn validation_message_response(
         .into_response()
 }
 
+/// Returns a `401 Unauthorized` JSON response.
 pub(crate) fn unauthorized_response(message: impl Into<String>) -> Response {
     (
         StatusCode::UNAUTHORIZED,
@@ -362,14 +409,18 @@ pub(crate) fn unauthorized_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
+/// Returns a `403 Forbidden` JSON response.
 pub(crate) fn forbidden_response(message: impl Into<String>) -> Response {
     (StatusCode::FORBIDDEN, Json(ApiResponse::ok(message.into()))).into_response()
 }
 
+/// Returns a `404 Not Found` JSON response.
 pub(crate) fn not_found_response(message: impl Into<String>) -> Response {
     (StatusCode::NOT_FOUND, Json(ApiResponse::ok(message.into()))).into_response()
 }
 
+/// Returns a `404 Not Found` JSON response with an additional detail
+/// string.
 pub(crate) fn not_found_detail_response(
     message: impl Into<String>,
     detail: impl Into<String>,
@@ -381,6 +432,7 @@ pub(crate) fn not_found_detail_response(
         .into_response()
 }
 
+/// Returns a `500 Internal Server Error` JSON response.
 pub(crate) fn internal_server_error_response(message: impl Into<String>) -> Response {
     (
         StatusCode::INTERNAL_SERVER_ERROR,
@@ -389,6 +441,8 @@ pub(crate) fn internal_server_error_response(message: impl Into<String>) -> Resp
         .into_response()
 }
 
+/// Returns a `500 Internal Server Error` JSON response with an additional
+/// detail string.
 pub(crate) fn internal_server_error_detail_response(
     message: impl Into<String>,
     detail: impl Into<String>,
@@ -400,6 +454,8 @@ pub(crate) fn internal_server_error_detail_response(
         .into_response()
 }
 
+/// Returns a generic `404 Not Found` response suitable for routes that
+/// must not reveal whether the resource exists.
 pub(crate) fn resource_not_found_response() -> Response {
     (
         StatusCode::NOT_FOUND,
