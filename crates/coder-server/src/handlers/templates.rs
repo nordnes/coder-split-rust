@@ -1465,11 +1465,48 @@ pub(crate) async fn post_template_version_dynamic_parameters_evaluate(
         }
     };
 
-    // Dynamic parameters are evaluated via the provisioner. Return stub response.
+    // Fetch the stored template-version parameters from the database and
+    // return them as the evaluated result.  Full dynamic evaluation requires
+    // the provisioner, which is not yet wired; returning the persisted
+    // parameter definitions is the closest correct approximation and matches
+    // what the Go backend does for non-dynamic template versions.
+    let params = state
+        .store
+        .list_template_version_parameters(version_id)
+        .await?;
+
+    let parameters: Vec<Value> = params
+        .iter()
+        .map(|p| {
+            let options: Vec<coder_core::api::TemplateVersionParameterOption> =
+                serde_json::from_value(p.options.clone()).unwrap_or_default();
+            serde_json::to_value(TemplateVersionParameter {
+                name: p.name.clone(),
+                display_name: p.display_name.clone(),
+                description: p.description.clone(),
+                description_plaintext: p.description.clone(),
+                param_type: p.param_type.clone(),
+                form_type: p.form_type.clone(),
+                mutable: p.mutable,
+                default_value: p.default_value.clone(),
+                icon: p.icon.clone(),
+                options,
+                validation_error: p.validation_error.clone(),
+                validation_regex: p.validation_regex.clone(),
+                validation_min: p.validation_min,
+                validation_max: p.validation_max,
+                validation_monotonic: p.validation_monotonic.clone(),
+                required: p.required,
+                ephemeral: p.ephemeral,
+            })
+            .unwrap_or_default()
+        })
+        .collect();
+
     let response = DynamicParametersResponse {
         id: req.id,
         diagnostics: Vec::new(),
-        parameters: Vec::new(),
+        parameters,
     };
     Ok((StatusCode::OK, Json(response)).into_response())
 }

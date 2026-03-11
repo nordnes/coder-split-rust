@@ -971,6 +971,7 @@ mod tests {
     fn test_build_metadata() -> BuildMetadata {
         BuildMetadata {
             version: "0.0.0-test".to_owned(),
+            git_commit: "test".to_owned(),
             external_url: String::new(),
             agent_api_version: String::new(),
             provisioner_api_version: String::new(),
