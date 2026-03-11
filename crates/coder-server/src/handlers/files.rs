@@ -106,10 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-const TAR_MIME_TYPE: &str = "application/x-tar";
-const ZIP_MIME_TYPE: &str = "application/zip";
-const WINDOWS_ZIP_MIME_TYPE: &str = "application/x-zip-compressed";
-
 /// POST /api/v2/files – upload a binary file, deduplicate by SHA-256 hash.
 pub(crate) async fn post_file(
     State(state): State<AppState>,
@@ -222,3 +218,7 @@ pub(crate) async fn get_file_by_id(
 
     Ok((StatusCode::OK, response_headers, file.data).into_response())
 }
+
+const TAR_MIME_TYPE: &str = "application/x-tar";
+const ZIP_MIME_TYPE: &str = "application/zip";
+const WINDOWS_ZIP_MIME_TYPE: &str = "application/x-zip-compressed";

@@ -106,12 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct ExternalAuthCallbackQuery {
-    code: Option<String>,
-    state: Option<String>,
-}
-
 pub(crate) async fn list_external_auths(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -310,4 +304,10 @@ pub(crate) async fn get_external_auth_callback_by_id(
         HeaderValue::from_str(&redirect).unwrap_or_else(|_| HeaderValue::from_static("/")),
     );
     Ok(response)
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ExternalAuthCallbackQuery {
+    code: Option<String>,
+    state: Option<String>,
 }

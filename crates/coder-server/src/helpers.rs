@@ -1,6 +1,6 @@
 //! Shared helper functions for HTTP handlers.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use axum::{
     Json,
@@ -33,6 +33,7 @@ use axum::extract::rejection::JsonRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket};
 use coder_core::HealthcheckReport;
 use coder_rbac::ResourceKind;
+use std::str::FromStr;
 
 pub(crate) async fn authenticate_request(
     state: &AppState,
@@ -386,17 +387,6 @@ pub(crate) fn not_implemented_response(message: impl Into<String>) -> Response {
         .into_response()
 }
 
-pub(crate) fn not_implemented_detail_response(
-    message: impl Into<String>,
-    detail: impl Into<String>,
-) -> Response {
-    (
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::error(message.into(), detail.into())),
-    )
-        .into_response()
-}
-
 /// Accept a WebSocket upgrade then immediately close with a "not implemented" reason.
 /// Used for endpoints that require tailnet/pubsub integration not yet available.
 pub(crate) async fn ws_close_not_implemented(mut socket: WebSocket, reason: &str) {
@@ -538,3 +528,5 @@ pub(crate) const VALID_HEALTH_SECTIONS: &[&str] = &[
     "WorkspaceProxy",
     "ProvisionerDaemons",
 ];
+
+pub(crate) const MAX_CHAT_FILE_SIZE: usize = 10 << 20;

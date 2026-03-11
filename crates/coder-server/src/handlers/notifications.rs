@@ -106,11 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-/// Maximum length for custom notification title.
-const MAX_CUSTOM_NOTIFICATION_TITLE_LEN: usize = 120;
-/// Maximum length for custom notification message.
-const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
-
 pub(crate) async fn get_notifications_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -864,10 +859,6 @@ pub(crate) async fn post_custom_notification(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-// ---------------------------------------------------------------------------
-// Notifications domain handlers
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 pub(crate) struct InboxNotificationsQuery {
     #[serde(default)]
@@ -877,3 +868,8 @@ pub(crate) struct InboxNotificationsQuery {
     #[serde(default)]
     read_status: Option<String>,
 }
+
+/// Maximum length for custom notification title.
+const MAX_CUSTOM_NOTIFICATION_TITLE_LEN: usize = 120;
+/// Maximum length for custom notification message.
+const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;

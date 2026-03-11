@@ -106,14 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct MembersQuery {
-    #[serde(default)]
-    q: String,
-    limit: Option<u32>,
-    offset: Option<u32>,
-}
-
 pub(crate) async fn list_organizations(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -453,3 +445,11 @@ pub(crate) async fn put_organization_member_roles(
 // ---------------------------------------------------------------------------
 // Template & Template Version Handlers (33 routes)
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct MembersQuery {
+    #[serde(default)]
+    q: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
+}

@@ -106,17 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-/// Query parameters for listing template versions.
-#[derive(Clone, Debug, Default, Deserialize)]
-pub(crate) struct TemplateVersionsQuery {
-    #[serde(default)]
-    include_archived: Option<bool>,
-    #[serde(default)]
-    limit: Option<u32>,
-    #[serde(default)]
-    offset: Option<u32>,
-}
-
 /// Converts a `TemplateRecord` into a `TemplateResponse`.
 pub(crate) fn template_response(rec: &TemplateRecord) -> TemplateResponse {
     use coder_core::api::{TemplateAutostartRequirement, TemplateAutostopRequirement};
@@ -1975,4 +1964,15 @@ pub(crate) async fn get_template_version_variables(
         .collect();
 
     Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// Query parameters for listing template versions.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub(crate) struct TemplateVersionsQuery {
+    #[serde(default)]
+    include_archived: Option<bool>,
+    #[serde(default)]
+    limit: Option<u32>,
+    #[serde(default)]
+    offset: Option<u32>,
 }

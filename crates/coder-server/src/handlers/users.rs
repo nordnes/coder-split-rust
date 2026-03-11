@@ -106,15 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct UsersQuery {
-    #[serde(default)]
-    q: String,
-    status: Option<String>,
-    limit: Option<u32>,
-    offset: Option<u32>,
-}
-
 pub(crate) async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -876,4 +867,13 @@ pub(crate) async fn delete_user(
         Json(ApiResponse::ok("User has been deleted!")),
     )
         .into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct UsersQuery {
+    #[serde(default)]
+    q: String,
+    status: Option<String>,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }

@@ -106,48 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct InsightsDausQuery {
-    #[serde(default)]
-    tz_offset: Option<i32>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct InsightsTemplatesQuery {
-    start_time: Option<String>,
-    end_time: Option<String>,
-    #[serde(default)]
-    interval: Option<String>,
-    #[serde(default)]
-    template_ids: Option<String>,
-    #[serde(default)]
-    sections: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct InsightsUserActivityQuery {
-    start_time: Option<String>,
-    end_time: Option<String>,
-    #[serde(default)]
-    template_ids: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct InsightsUserLatencyQuery {
-    start_time: Option<String>,
-    end_time: Option<String>,
-    #[serde(default)]
-    template_ids: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct InsightsUserStatusCountsQuery {
-    #[serde(default)]
-    timezone: Option<String>,
-    #[serde(default)]
-    tz_offset: Option<i32>,
-}
-
 // ---------------------------------------------------------------------------
 // Insights / Analytics handlers
 // ---------------------------------------------------------------------------
@@ -422,4 +380,46 @@ pub(crate) async fn insights_user_status_counts(
         .get_user_status_counts(&timezone, start_time, end_time)
         .await?;
     Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InsightsUserStatusCountsQuery {
+    #[serde(default)]
+    timezone: Option<String>,
+    #[serde(default)]
+    tz_offset: Option<i32>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InsightsUserLatencyQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InsightsUserActivityQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InsightsTemplatesQuery {
+    start_time: Option<String>,
+    end_time: Option<String>,
+    #[serde(default)]
+    interval: Option<String>,
+    #[serde(default)]
+    template_ids: Option<String>,
+    #[serde(default)]
+    sections: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct InsightsDausQuery {
+    #[serde(default)]
+    tz_offset: Option<i32>,
 }

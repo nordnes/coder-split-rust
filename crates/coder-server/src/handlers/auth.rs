@@ -106,14 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct TokenListQuery {
-    #[serde(default)]
-    include_all: bool,
-    #[serde(default)]
-    include_expired: bool,
-}
-
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     Json(ExternalApiKeyScopes {
         external: PUBLIC_API_KEY_SCOPES
@@ -340,9 +332,14 @@ pub(crate) async fn get_user_debug_link(
             .into_response());
     }
 
-    Ok(not_implemented_response(
-        "OIDC debug context is not yet available in the Rust backend.",
-    ))
+    let links = state.store.list_user_links(target_user.id).await?;
+    let claims = links
+        .into_iter()
+        .find(|l| l.login_type == LoginType::Oidc)
+        .map(|l| l.claims)
+        .unwrap_or_default();
+
+    Ok((StatusCode::OK, Json(claims)).into_response())
 }
 
 pub(crate) async fn post_convert_login(
@@ -770,4 +767,12 @@ pub(crate) async fn post_authcheck(
     }
 
     Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct TokenListQuery {
+    #[serde(default)]
+    include_all: bool,
+    #[serde(default)]
+    include_expired: bool,
 }

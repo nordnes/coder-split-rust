@@ -106,13 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct DebugHealthQuery {
-    format: Option<String>,
-    #[serde(default)]
-    force: bool,
-}
-
 pub(crate) async fn healthz(State(state): State<AppState>) -> Result<impl IntoResponse, AppError> {
     state.store.ping().await?;
     Ok((StatusCode::OK, "OK"))
@@ -241,4 +234,11 @@ pub(crate) async fn put_health_settings(
     .await;
 
     Ok((StatusCode::OK, Json(settings)).into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct DebugHealthQuery {
+    format: Option<String>,
+    #[serde(default)]
+    force: bool,
 }

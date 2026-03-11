@@ -106,12 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct CspViolationReport {
-    #[serde(rename = "csp-report")]
-    report: HashMap<String, Value>,
-}
-
 pub(crate) async fn server_root() -> impl IntoResponse {
     (StatusCode::OK, SLIM_BUILD_MESSAGE)
 }
@@ -1216,11 +1210,22 @@ pub(crate) async fn tailnet_rpc_conn(
 }
 
 // ---------------------------------------------------------------------------
-// GET /organizations/{org}/provisionerjobs/{job}/logs — provisioner job logs.
+// Custom Notifications
 // ---------------------------------------------------------------------------
+
+/// Maximum length for custom notification title.
+const MAX_CUSTOM_NOTIFICATION_TITLE_LEN: usize = 120;
+/// Maximum length for custom notification message.
+const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct ProvisionerJobLogsQuery {
     after: Option<i64>,
     follow: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct CspViolationReport {
+    #[serde(rename = "csp-report")]
+    report: HashMap<String, Value>,
 }

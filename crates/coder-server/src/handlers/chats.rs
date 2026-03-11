@@ -819,10 +819,6 @@ pub(crate) async fn watch_chat_git(
     }))
 }
 
-// ---------------------------------------------------------------------------
-// Chats handlers
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 pub(crate) struct ChatsQuery {
     #[serde(default)]

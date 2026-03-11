@@ -687,10 +687,6 @@ pub(crate) fn task_response_from_record(record: TaskRecord) -> TaskResponse {
     }
 }
 
-// ---------------------------------------------------------------------------
-// AI Tasks handlers
-// ---------------------------------------------------------------------------
-
 #[derive(Deserialize)]
 pub(crate) struct TasksQuery {
     #[serde(default)]

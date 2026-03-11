@@ -106,14 +106,6 @@ use crate::app::AppState;
 use crate::error::AppError;
 use crate::helpers::*;
 
-#[derive(Debug, Default, Deserialize)]
-pub(crate) struct AuditQuery {
-    #[serde(default)]
-    q: String,
-    limit: Option<u32>,
-    offset: Option<u32>,
-}
-
 pub(crate) async fn list_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -229,4 +221,12 @@ pub(crate) async fn post_generate_test_audit_log(
         .await?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct AuditQuery {
+    #[serde(default)]
+    q: String,
+    limit: Option<u32>,
+    offset: Option<u32>,
 }
