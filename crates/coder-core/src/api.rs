@@ -78,6 +78,9 @@ pub struct BuildInfoResponse {
     pub upgrade_message: String,
     /// Stable deployment identifier.
     pub deployment_id: String,
+    /// Web Push public key (VAPID), omitted when not configured.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub webpush_public_key: String,
 }
 
 /// Update-check information surfaced through `/api/v2/updatecheck`.
@@ -99,7 +102,9 @@ pub struct SshConfigResponse {
     /// Hostname suffix used for workspace SSH hostnames.
     pub hostname_suffix: String,
     /// Extra SSH config directives the client should write.
-    pub ssh_config_options: Vec<(String, String)>,
+    ///
+    /// Serialized as a JSON object to match Go's `map[string]string`.
+    pub ssh_config_options: HashMap<String, String>,
 }
 
 /// Deployment configuration surfaced through `/api/v2/deployment/config`.
