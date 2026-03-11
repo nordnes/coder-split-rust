@@ -14,11 +14,11 @@ use coder_connectivity::tailnet::{
 };
 use coder_core::pubsub::PubSub;
 use coder_core::{
-    AppStore, BuildMetadata, DatabaseConfig, DeploymentStore, DerpRegionConfig,
+    AppStore, BuildMetadata, CorsConfig, DatabaseConfig, DeploymentStore, DerpRegionConfig,
     ExternalAuthLinkProvider, LogFormat, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError, config::RateLimitConfig,
 };
-use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
+use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_server::{AppState, build_router};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use shutdown::ShutdownCoordinator;
@@ -149,6 +149,29 @@ struct ServerArgs {
         default_value_t = 60
     )]
     rate_limit_unauthenticated_per_minute: u32,
+
+    /// Run database migrations and exit without starting the server.
+    #[arg(long, env = "CODER_MIGRATE_ONLY", default_value_t = false)]
+    migrate_only: bool,
+
+    /// Comma-separated list of allowed CORS origins.  When empty every origin
+    /// is permitted (wildcard).
+    #[arg(
+        long,
+        env = "CODER_CORS_ALLOWED_ORIGINS",
+        default_value = "",
+        value_delimiter = ','
+    )]
+    cors_allowed_origins: Vec<String>,
+
+    /// Whether cross-origin requests may include credentials.
+    ///
+    /// Note: Credentials are only allowed when one or more explicit origins are
+    /// configured via `--cors-allowed-origins` / `CODER_CORS_ALLOWED_ORIGINS`.
+    /// In wildcard mode (no explicit origins), `Access-Control-Allow-Credentials`
+    /// is not sent, even if this flag is true.
+    #[arg(long, env = "CODER_CORS_ALLOW_CREDENTIALS", default_value_t = false)]
+    cors_allow_credentials: bool,
 }
 
 #[derive(Debug, Error)]
@@ -157,6 +180,8 @@ enum MainError {
     Config(String),
     #[error(transparent)]
     DatabaseInit(#[from] DatabaseInitError),
+    #[error(transparent)]
+    Migration(#[from] MigrationError),
     #[error(transparent)]
     Storage(#[from] StorageError),
     #[error("listen on {listen_addr}: {source}")]
@@ -284,10 +309,29 @@ async fn run() -> Result<(), MainError> {
     init_tracing(args.log_format);
     init_panic_hook();
 
+    let migrate_only = args.migrate_only;
     let config = build_config(args)?;
 
     let store = PostgresStore::connect(&config.database).await?;
-    store.migrate().await?;
+    let pool = store.pool();
+    let report = run_migrations(&pool).await?;
+
+    if report.applied_count > 0 {
+        info!(
+            applied = report.applied_count,
+            total = report.total_count,
+            "applied new database migrations"
+        );
+    } else {
+        info!(total = report.total_count, "database schema is up to date");
+    }
+
+    if migrate_only {
+        info!("--migrate-only requested, exiting after migrations");
+        pool.close().await;
+        return Ok(());
+    }
+
     let deployment_metadata = store.ensure_deployment_metadata().await?;
     let store_pool = store.pool();
     let store: Arc<dyn AppStore> = Arc::new(store);
@@ -431,6 +475,16 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             unauthenticated_per_minute: args.rate_limit_unauthenticated_per_minute,
             audit_per_minute: 30,
         },
+        cors: CorsConfig {
+            allowed_origins: args
+                .cors_allowed_origins
+                .into_iter()
+                .map(|s| s.trim().to_owned())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            allow_credentials: args.cors_allow_credentials,
+            max_age_secs: 3600,
+        },
     })
 }
 
@@ -525,5 +579,52 @@ fn resource_kind_name(resource: coder_rbac::ResourceKind) -> &'static str {
         coder_rbac::ResourceKind::WorkspaceApp => "workspace_app",
         coder_rbac::ResourceKind::PrebuildsSettings => "prebuilds_settings",
         coder_rbac::ResourceKind::Task => "task",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use clap::Parser;
+
+    use super::*;
+
+    #[test]
+    fn cli_parse_server_defaults() {
+        let cli = Cli::parse_from([
+            "coderd",
+            "server",
+            "--postgres-url",
+            "postgres://localhost/test",
+        ]);
+        let Command::Server(args) = cli.command;
+        assert!(!args.migrate_only);
+        assert_eq!(args.listen_addr.to_string(), "127.0.0.1:3000");
+    }
+
+    #[test]
+    fn cli_parse_migrate_only_flag() {
+        let cli = Cli::parse_from([
+            "coderd",
+            "server",
+            "--postgres-url",
+            "postgres://localhost/test",
+            "--migrate-only",
+        ]);
+        let Command::Server(args) = cli.command;
+        assert!(args.migrate_only);
+    }
+
+    #[test]
+    fn cli_parse_without_migrate_only() {
+        // When --migrate-only is not passed, it defaults to false.
+        let cli = Cli::parse_from([
+            "coderd",
+            "server",
+            "--postgres-url",
+            "postgres://localhost/test",
+        ]);
+        let Command::Server(args) = cli.command;
+        assert!(!args.migrate_only);
+        assert_eq!(args.db_max_connections, 20);
     }
 }
