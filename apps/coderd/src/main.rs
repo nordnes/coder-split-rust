@@ -418,6 +418,16 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         ));
     }
 
+    if args.otel_sample_ratio.is_nan()
+        || args.otel_sample_ratio.is_infinite()
+        || args.otel_sample_ratio < 0.0
+        || args.otel_sample_ratio > 1.0
+    {
+        return Err(MainError::Config(
+            "otel-sample-ratio must be between 0.0 and 1.0 (inclusive)".to_owned(),
+        ));
+    }
+
     Ok(ServerConfig {
         listen_addr: args.listen_addr,
         access_url: args.access_url,
