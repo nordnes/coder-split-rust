@@ -536,6 +536,7 @@ dependencies = [
  "metrics",
  "metrics-exporter-prometheus",
  "opentelemetry",
+ "opentelemetry_sdk",
  "reqwest",
  "serde",
  "serde_json",
@@ -549,6 +550,7 @@ dependencies = [
  "tower-http",
  "tracing",
  "tracing-opentelemetry",
+ "tracing-subscriber",
  "url",
  "uuid",
 ]
