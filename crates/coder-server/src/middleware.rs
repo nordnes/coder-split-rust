@@ -16,15 +16,18 @@ use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, Expos
 /// When `allowed_origins` is empty the layer allows every origin (wildcard).
 /// Otherwise only the listed origins are permitted.
 pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
-    let allow_origin = if config.allowed_origins.is_empty() {
+    // Filter origins up-front so that invalid values (non-visible-ASCII, etc.)
+    // are dropped before we decide between wildcard and explicit-list mode.
+    let valid_origins: Vec<HeaderValue> = config
+        .allowed_origins
+        .iter()
+        .filter_map(|o| HeaderValue::from_str(o).ok())
+        .collect();
+
+    let allow_origin = if valid_origins.is_empty() {
         AllowOrigin::any()
     } else {
-        let origins: Vec<HeaderValue> = config
-            .allowed_origins
-            .iter()
-            .filter_map(|o| HeaderValue::from_str(o).ok())
-            .collect();
-        AllowOrigin::list(origins)
+        AllowOrigin::list(valid_origins.clone())
     };
 
     let allow_methods = AllowMethods::list([
@@ -56,7 +59,7 @@ pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
         .expose_headers(expose_headers)
         .max_age(std::time::Duration::from_secs(config.max_age_secs));
 
-    if config.allow_credentials && !config.allowed_origins.is_empty() {
+    if config.allow_credentials && !valid_origins.is_empty() {
         layer = layer.allow_credentials(true);
     }
 
