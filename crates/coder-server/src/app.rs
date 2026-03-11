@@ -1138,7 +1138,7 @@ async fn get_init_script(
 //
 //   Sensitive reads:
 //     - list_audit_logs (Read, AuditLog)
-//     - list_users (Read, User) [NEW - replaced can_list_users()]
+//     - list_users (owner-only check, preserves can_list_users() semantics) [NEW]
 //     - deployment_stats (Read, DeploymentStats) [NEW - replaced can_view_operational_data()]
 //     - debug_health (Read, DeploymentConfig) [NEW]
 //     - get_health_settings (Read, DeploymentConfig) [NEW]
@@ -1150,7 +1150,7 @@ async fn get_init_script(
 //       insights_user_latency, insights_user_status_counts (Read, DeploymentStats) [NEW]
 //     - debug_coordinator, debug_tailnet, debug_derp_traffic,
 //       debug_expvar, debug_pprof, debug_websocket,
-//       debug_metrics (Read, DebugInfo) [NEW]
+//       debug_metrics (Read, DebugInfo; also allows auditor role) [NEW]
 //     - get_deployment_config (Read, DeploymentConfig)
 //     - list_templates (Read, Template - filter-based)
 //
@@ -1960,16 +1960,8 @@ async fn list_users(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    // RBAC: verify the actor can read user resources.
-    let authorizer = Authorizer::new();
-    if authorizer
-        .authorize(
-            &context.actor,
-            Action::Read,
-            &Object::new(ResourceType::User),
-        )
-        .is_err()
-    {
+    // RBAC: only owners can enumerate all users (preserves can_list_users() semantics).
+    if !context.actor.is_owner() {
         return Ok(forbidden_response("You are not authorized to list users."));
     }
 
@@ -11607,6 +11599,7 @@ async fn debug_coordinator(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -11615,6 +11608,7 @@ async fn debug_coordinator(
             &Object::new(ResourceType::DebugInfo),
         )
         .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
     {
         return Ok(forbidden_response(
             "You are not authorized to view coordinator debug information.",
@@ -11647,6 +11641,7 @@ async fn debug_tailnet(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -11655,6 +11650,7 @@ async fn debug_tailnet(
             &Object::new(ResourceType::DebugInfo),
         )
         .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
     {
         return Ok(forbidden_response(
             "You are not authorized to view tailnet debug information.",
@@ -11679,6 +11675,7 @@ async fn debug_derp_traffic(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -11687,6 +11684,7 @@ async fn debug_derp_traffic(
             &Object::new(ResourceType::DebugInfo),
         )
         .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
     {
         return Ok(forbidden_response(
             "You are not authorized to view DERP traffic debug information.",
@@ -11711,6 +11709,7 @@ async fn debug_expvar(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -11719,6 +11718,7 @@ async fn debug_expvar(
             &Object::new(ResourceType::DebugInfo),
         )
         .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
     {
         return Ok(forbidden_response(
             "You are not authorized to view expvar debug information.",
@@ -11794,6 +11794,7 @@ async fn debug_pprof(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -11802,6 +11803,7 @@ async fn debug_pprof(
             &Object::new(ResourceType::DebugInfo),
         )
         .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
     {
         return Ok(forbidden_response(
             "You are not authorized to view pprof debug information.",
@@ -11874,6 +11876,7 @@ async fn debug_websocket(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -11882,6 +11885,7 @@ async fn debug_websocket(
             &Object::new(ResourceType::DebugInfo),
         )
         .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
     {
         return Ok(forbidden_response(
             "You are not authorized to use the debug websocket.",
@@ -11936,6 +11940,7 @@ async fn debug_metrics(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
@@ -11944,6 +11949,7 @@ async fn debug_metrics(
             &Object::new(ResourceType::DebugInfo),
         )
         .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
     {
         return Ok(forbidden_response(
             "You are not authorized to view debug metrics.",
