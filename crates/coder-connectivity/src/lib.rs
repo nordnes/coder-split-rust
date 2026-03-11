@@ -967,6 +967,7 @@ mod tests {
             rate_limit: coder_core::config::RateLimitConfig::default(),
             github_oauth: None,
             oidc: None,
+            otel: coder_core::config::OtelConfig::default(),
             cors: coder_core::config::CorsConfig::default(),
         }
     }
