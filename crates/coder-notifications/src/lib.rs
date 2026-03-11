@@ -80,7 +80,15 @@ where
     S: IdentityStore + Clone + Send + Sync + 'static,
 {
     /// Creates the dispatch service and starts the background poll loop.
-    pub fn new(store: S, config: NotificationConfig) -> Result<Arc<Self>, reqwest::Error> {
+    ///
+    /// Returns both the shared service handle and a [`tokio::task::JoinHandle`]
+    /// for the background task.  During shutdown, drop the `Arc` first (so the
+    /// internal `Weak::upgrade` fails on the next loop tick), then `await` the
+    /// handle to ensure the task has finished before closing the database pool.
+    pub fn new(
+        store: S,
+        config: NotificationConfig,
+    ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), reqwest::Error> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(config.webhook_timeout_secs))
             .build()?;
@@ -90,8 +98,8 @@ where
             config,
             http_client,
         });
-        Self::spawn_dispatch_loop(&service);
-        Ok(service)
+        let handle = Self::spawn_dispatch_loop(&service);
+        Ok((service, handle))
     }
 
     /// Returns the current configuration.
@@ -232,11 +240,11 @@ where
         Ok(())
     }
 
-    fn spawn_dispatch_loop(service: &Arc<Self>) {
+    fn spawn_dispatch_loop(service: &Arc<Self>) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(service);
         tokio::spawn(async move {
             run_dispatch_loop(weak).await;
-        });
+        })
     }
 }
 
@@ -1038,7 +1046,7 @@ mod tests {
             smtp_from: "noreply@example.com".to_owned(),
             webhook_timeout_secs: 15,
         };
-        let service = NotificationDispatchService::new(store, config.clone())
+        let (service, _handle) = NotificationDispatchService::new(store, config.clone())
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         assert_eq!(service.config().smtp_host, "mail.example.com");
         assert_eq!(service.config().smtp_port, 465);
@@ -1052,7 +1060,7 @@ mod tests {
     async fn dispatch_once_with_no_pending_messages() {
         let store = MockStore::new();
         let config = NotificationConfig::default();
-        let service = NotificationDispatchService::new(store, config)
+        let (service, _handle) = NotificationDispatchService::new(store, config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         let count = service
             .dispatch_once()
@@ -1067,7 +1075,7 @@ mod tests {
     async fn dispatch_once_propagates_storage_error() {
         let store = MockStore::new().with_error("database is down");
         let config = NotificationConfig::default();
-        let service = NotificationDispatchService::new(store, config)
+        let (service, _handle) = NotificationDispatchService::new(store, config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         let result = service.dispatch_once().await;
         assert!(result.is_err());
@@ -1086,7 +1094,7 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let service = NotificationDispatchService::new(store.clone(), config)
+        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
@@ -1114,7 +1122,7 @@ mod tests {
         let store = MockStore::new().with_pending(vec![msg]);
         // Default config has empty smtp_host → email dispatch fails.
         let config = NotificationConfig::default();
-        let service = NotificationDispatchService::new(store.clone(), config)
+        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
@@ -1151,7 +1159,7 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let service = NotificationDispatchService::new(store.clone(), config)
+        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
@@ -1179,7 +1187,7 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let service = NotificationDispatchService::new(store.clone(), config)
+        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
@@ -1215,7 +1223,7 @@ mod tests {
         let id2 = msg2.id;
         let store = MockStore::new().with_pending(vec![msg1, msg2]);
         let config = NotificationConfig::default();
-        let service = NotificationDispatchService::new(store.clone(), config)
+        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
@@ -1253,7 +1261,7 @@ mod tests {
             smtp_from: "sender@custom.com".to_owned(),
             webhook_timeout_secs: 5,
         };
-        let service = NotificationDispatchService::new(store, config)
+        let (service, _handle) = NotificationDispatchService::new(store, config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         assert_eq!(service.config().smtp_host, "custom.smtp.example.com");
         assert_eq!(service.config().smtp_port, 2525);
@@ -1318,7 +1326,7 @@ mod tests {
             webhook_timeout_secs: 1,
             ..NotificationConfig::default()
         };
-        let service = NotificationDispatchService::new(store.clone(), config)
+        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
             .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
