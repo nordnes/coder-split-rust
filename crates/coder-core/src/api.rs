@@ -2234,7 +2234,7 @@ pub struct WebpushMessage {
 pub struct VapidKeyPair {
     /// Base64url-encoded public key.
     pub public_key: String,
-    /// Base64url-encoded private key.
+    /// PEM-encoded EC private key (SEC1 format).
     pub private_key: String,
 }
 

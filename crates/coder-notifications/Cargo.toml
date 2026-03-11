@@ -13,7 +13,7 @@ workspace = true
 [dependencies]
 base64.workspace = true
 coder-core = { path = "../coder-core" }
-p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"] }
+p256.workspace = true
 reqwest.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

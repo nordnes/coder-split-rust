@@ -4601,6 +4601,9 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Stores or updates the VAPID key pair for web push.
+    ///
+    /// `public_key` is base64url-encoded and `private_key` is PEM-encoded
+    /// (SEC1 EC private key format).
     async fn upsert_webpush_vapid_keys(
         &self,
         public_key: &str,
