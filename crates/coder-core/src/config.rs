@@ -446,7 +446,7 @@ mod tests {
             ssh: SshConfig {
                 hostname_prefix: String::new(),
                 hostname_suffix: String::new(),
-                ssh_config_options: Vec::new(),
+                ssh_config_options: HashMap::new(),
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
