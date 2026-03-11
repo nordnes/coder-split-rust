@@ -959,6 +959,7 @@ mod tests {
             derp_regions: Vec::new(),
             shutdown_grace_period_secs: 5,
             log_format: coder_core::LogFormat::Pretty,
+            rate_limit: coder_core::config::RateLimitConfig::default(),
         }
     }
 

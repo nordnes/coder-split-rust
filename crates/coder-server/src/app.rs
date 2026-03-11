@@ -20512,6 +20512,7 @@ mod tests {
             derp_regions: Vec::new(),
             shutdown_grace_period_secs: 10,
             log_format: LogFormat::Pretty,
+            rate_limit: coder_core::config::RateLimitConfig::default(),
         })
     }
 
