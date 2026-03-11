@@ -1,5 +1,8 @@
 #![forbid(unsafe_code)]
 
+mod shutdown;
+
+use std::time::Duration;
 use std::{net::SocketAddr, process::ExitCode, sync::Arc};
 
 use async_trait::async_trait;
@@ -17,6 +20,7 @@ use coder_core::{
 };
 use coder_db::{DatabaseInitError, PostgresPubSub, PostgresStore};
 use coder_server::{AppState, build_router};
+use shutdown::ShutdownCoordinator;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tracing::{error, info, warn};
@@ -190,17 +194,18 @@ async fn run() -> Result<(), MainError> {
     let Command::Server(args) = cli.command;
 
     init_tracing(args.log_format);
+    init_panic_hook();
 
     let config = build_config(args)?;
 
     let store = PostgresStore::connect(&config.database).await?;
     store.migrate().await?;
     let deployment_metadata = store.ensure_deployment_metadata().await?;
-    let pool = store.pool();
+    let store_pool = store.pool();
     let store: Arc<dyn AppStore> = Arc::new(store);
 
     let pubsub: Arc<dyn PubSub> = Arc::new(
-        PostgresPubSub::new(pool)
+        PostgresPubSub::new(store_pool.clone())
             .await
             .map_err(|error| MainError::Config(format!("create pubsub: {error}")))?,
     );
@@ -229,7 +234,7 @@ async fn run() -> Result<(), MainError> {
             source,
         })?;
 
-    let application = build_router(state);
+    let application = build_router(state.clone());
     info!(
         listen_addr = %config.listen_addr,
         access_url = %config.access_url,
@@ -241,11 +246,40 @@ async fn run() -> Result<(), MainError> {
         .await
         .map_err(MainError::Serve);
 
-    // Shut down the pub/sub background listener task and release its dedicated
-    // PgListener database connection.
-    if let Err(close_err) = pubsub.close().await {
-        warn!(error = %close_err, "failed to close pubsub during shutdown");
-    }
+    // --- Graceful shutdown sequence ---
+    let grace_period = Duration::from_secs(config.shutdown_grace_period_secs);
+    info!(
+        grace_period_secs = config.shutdown_grace_period_secs,
+        "graceful shutdown initiated"
+    );
+
+    let mut coordinator = ShutdownCoordinator::new();
+
+    // 1. Flush audit sink.  The PersistingAuditSink is synchronous-per-event
+    //    so there is no buffered state to drain, but the slot is kept here so
+    //    a future batched implementation gets wired in automatically.
+    coordinator.register("audit", async {});
+
+    // 2. Close pub/sub background listener and release its PgListener connection.
+    coordinator.register("pubsub", async move {
+        if let Err(e) = pubsub.close().await {
+            warn!(error = %e, "pubsub close failed");
+        }
+    });
+
+    // 3. Cancel the deployment-stats background refresh loop.
+    coordinator.register("deployment_stats", async move {
+        state.close_deployment_stats();
+    });
+
+    // 4. Close the database connection pool last so preceding tasks can still
+    //    issue final queries during their own shutdown.
+    coordinator.register("database", async move {
+        store_pool.close().await;
+    });
+
+    coordinator.run(grace_period).await;
+    info!("shutdown complete");
 
     serve_result
 }
@@ -286,6 +320,16 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             LogFormatArg::Json => LogFormat::Json,
         },
     })
+}
+
+fn init_panic_hook() {
+    std::panic::set_hook(Box::new(move |panic_info| {
+        let backtrace = std::backtrace::Backtrace::force_capture();
+        let location = panic_info
+            .location()
+            .map(|loc| format!("{}:{}", loc.file(), loc.line()));
+        tracing::error!(panic = true, %panic_info, ?location, %backtrace, "Server Panic");
+    }));
 }
 
 fn init_tracing(log_format: LogFormatArg) {

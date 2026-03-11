@@ -24,9 +24,8 @@ use axum::{
 };
 use coder_audit::{AuditAction, AuditEvent, AuditSink};
 use coder_auth::{
-    AuthService, AuthServiceError, AuthenticatedRequest, ExternalAuthService,
-    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
-    OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
+    AuthService, AuthenticatedRequest, ExternalAuthService, OAUTH2_REDIRECT_COOKIE,
+    OAUTH2_STATE_COOKIE, OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
 use coder_connectivity::{
     HealthService,
@@ -89,7 +88,7 @@ use coder_core::{
     WorkspaceAgentListContainersResponse, WorkspaceAgentListeningPortsResponse,
     WorkspaceListFilter,
 };
-use coder_identity::{IdentityService, IdentityServiceError};
+use coder_identity::IdentityService;
 use coder_provisioner::{InitScriptError, render_init_script};
 use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
 use coder_workspaces::DeploymentStatsService;
@@ -243,6 +242,15 @@ impl AppState {
             external_auth,
             oauth2_provider,
         })
+    }
+
+    /// Cancels the background deployment-stats refresh loop.
+    ///
+    /// This should be called during the graceful shutdown sequence before
+    /// closing the database pool, so the loop does not attempt further
+    /// queries after the pool is closed.
+    pub fn close_deployment_stats(&self) {
+        self.deployment_stats.close();
     }
 }
 
@@ -1053,7 +1061,7 @@ async fn post_csp_report(
 
     debug!(report = ?report.report, "CSP violation reported");
 
-    Ok((StatusCode::OK, Json("ok")).into_response())
+    Ok((StatusCode::OK, Json(ApiResponse::ok("ok"))).into_response())
 }
 
 async fn deployment_config(State(state): State<AppState>) -> Json<DeploymentConfigResponse> {
@@ -1080,7 +1088,10 @@ async fn get_init_script(
         Err(InitScriptError::UnknownTarget { os, arch }) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!("Unknown os/arch: {os}/{arch}"))),
+                Json(ApiResponse::error(
+                    format!("Unknown os/arch: {os}/{arch}"),
+                    "The requested os/arch combination is not supported.",
+                )),
             )
                 .into_response();
         }
@@ -1356,7 +1367,10 @@ async fn debug_health(
             .into_response()),
         Some(other) => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok(format!("Invalid format option {other:?}."))),
+            Json(ApiResponse::error(
+                format!("Invalid format option {other:?}."),
+                "Supported formats are: json, text.",
+            )),
         )
             .into_response()),
     }
@@ -1568,7 +1582,7 @@ async fn get_external_auth_device_by_id(
         .authorize_device(config)
         .await
         .map(|device| (StatusCode::OK, Json(device)).into_response())
-        .or_else(|error| handle_external_auth_error("Failed to authorize device.", error))
+        .map_err(|error| AppError::from_external_auth("Failed to authorize device.", error))
 }
 
 async fn post_external_auth_device_exchange(
@@ -1617,7 +1631,10 @@ async fn post_external_auth_device_exchange(
         .exchange_device(config, context.user.id, &request)
         .await
     {
-        return handle_external_auth_error("Failed to exchange device code.", error);
+        return Err(AppError::from_external_auth(
+            "Failed to exchange device code.",
+            error,
+        ));
     }
 
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1642,7 +1659,10 @@ async fn get_external_auth_callback_by_id(
     let Some(state_value) = query.state.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("State must be provided.")),
+            Json(ApiResponse::error(
+                "State must be provided.",
+                "The state query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
@@ -1657,7 +1677,10 @@ async fn get_external_auth_callback_by_id(
     let Some(code) = query.code.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Code must be provided.")),
+            Json(ApiResponse::error(
+                "Code must be provided.",
+                "The code query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
@@ -1667,7 +1690,10 @@ async fn get_external_auth_callback_by_id(
         .exchange_callback(config, context.user.id, &code)
         .await
     {
-        return handle_external_auth_error("Failed exchanging OAuth code.", error);
+        return Err(AppError::from_external_auth(
+            "Failed exchanging OAuth code.",
+            error,
+        ));
     }
 
     let redirect = cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE)
@@ -1734,7 +1760,7 @@ async fn post_first_user(
             )
                 .into_response())
         }
-        Err(error) => handle_auth_error(error),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -1747,10 +1773,7 @@ async fn login_with_password(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let outcome = match state.auth.login_with_password(&request).await {
-        Ok(outcome) => outcome,
-        Err(error) => return handle_auth_error(error),
-    };
+    let outcome = state.auth.login_with_password(&request).await?;
     record_audit(
         &state,
         AuditAction::Login,
@@ -1804,9 +1827,7 @@ async fn post_request_one_time_passcode(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    if let Err(error) = state.auth.request_one_time_passcode(&request).await {
-        return handle_auth_error(error);
-    }
+    state.auth.request_one_time_passcode(&request).await?;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1820,14 +1841,10 @@ async fn post_change_password_with_one_time_passcode(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let user_id = match state
+    let user_id = state
         .auth
         .change_password_with_one_time_passcode(&request)
-        .await
-    {
-        Ok(user_id) => user_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -1845,7 +1862,10 @@ async fn post_change_password_with_one_time_passcode(
 async fn get_github_oauth_device_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -1853,7 +1873,10 @@ async fn get_github_oauth_device_disabled() -> Response {
 async fn get_github_oauth_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -1861,7 +1884,10 @@ async fn get_github_oauth_callback_disabled() -> Response {
 async fn get_oidc_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("OIDC is not enabled.")),
+        Json(ApiResponse::error(
+            "OIDC is not enabled.",
+            "This deployment does not have OIDC configured.",
+        )),
     )
         .into_response()
 }
@@ -1882,7 +1908,10 @@ async fn get_user_debug_link(
     if target_user.login_type != LoginType::Oidc {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("User is not an OIDC user.")),
+            Json(ApiResponse::error(
+                "User is not an OIDC user.",
+                "Debug links are only available for OIDC-authenticated users.",
+            )),
         )
             .into_response());
     }
@@ -1920,7 +1949,7 @@ async fn list_users(
         None => None,
     };
 
-    let (users, count) = match state
+    let (users, count) = state
         .identity
         .list_users(
             &context.actor,
@@ -1931,11 +1960,7 @@ async fn list_users(
                 offset: query.offset.unwrap_or_default(),
             },
         )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -1971,10 +1996,7 @@ async fn post_user(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let user = match state.identity.create_user(&context.actor, &request).await {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+    let user = state.identity.create_user(&context.actor, &request).await?;
 
     record_audit(
         &state,
@@ -1994,14 +2016,10 @@ async fn get_user_login_type(
     Path(user): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let response = match state
+    let response = state
         .auth
         .get_user_login_type(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(response) => response,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(response)).into_response())
 }
@@ -2161,14 +2179,10 @@ async fn put_user_profile(
         Err(error) => return Ok(invalid_json_response(error)),
     };
     // NOTE: RBAC is enforced inside IdentityService::update_user_profile.
-    let updated_user = match state
+    let updated_user = state
         .identity
         .update_user_profile(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2220,14 +2234,10 @@ async fn put_user_status(
         ));
     }
 
-    let updated_user = match state
+    let updated_user = state
         .identity
         .update_user_status(&context.actor, &context.user, &user, status)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2247,14 +2257,10 @@ async fn get_user_appearance(
     Path(user): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let settings = match state
+    let settings = state
         .identity
         .get_user_appearance(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
     Ok((
         StatusCode::OK,
         Json(UserAppearanceSettings {
@@ -2276,14 +2282,10 @@ async fn put_user_appearance(
         Err(error) => return Ok(invalid_json_response(error)),
     };
     // NOTE: RBAC is enforced inside IdentityService::update_user_appearance.
-    let (target_user_id, settings) = match state
+    let (target_user_id, settings) = state
         .identity
         .update_user_appearance(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2310,14 +2312,10 @@ async fn get_user_preferences(
     Path(user): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let settings = match state
+    let settings = state
         .identity
         .get_user_preferences(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
     Ok((
         StatusCode::OK,
         Json(UserPreferenceSettings {
@@ -2338,14 +2336,10 @@ async fn put_user_preferences(
         Err(error) => return Ok(invalid_json_response(error)),
     };
     // NOTE: RBAC is enforced inside IdentityService::update_user_preferences.
-    let (target_user_id, settings) = match state
+    let (target_user_id, settings) = state
         .identity
         .update_user_preferences(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(settings) => settings,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2377,14 +2371,10 @@ async fn put_user_password(
         Err(error) => return Ok(invalid_json_response(error)),
     };
     // NOTE: RBAC is enforced inside AuthService::update_user_password.
-    let target_user_id = match state
+    let target_user_id = state
         .auth
         .update_user_password(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(target_user_id) => target_user_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2410,14 +2400,10 @@ async fn post_convert_login(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let message = match state
+    let message = state
         .auth
         .convert_login(&context.user, &user, &request)
-        .await
-    {
-        Ok(message) => message,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
     Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
 }
 
@@ -2426,14 +2412,10 @@ async fn get_user(
     Path(user): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let target_user = match state
+    let target_user = state
         .identity
         .get_user(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(UserResponse::from(target_user))).into_response())
 }
@@ -2442,10 +2424,7 @@ async fn list_site_roles(
     State(state): State<AppState>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let roles = match state.identity.list_site_roles(&context.actor) {
-        Ok(roles) => roles,
-        Err(error) => return handle_identity_error(error),
-    };
+    let roles = state.identity.list_site_roles(&context.actor)?;
 
     Ok((StatusCode::OK, Json(roles)).into_response())
 }
@@ -2455,14 +2434,10 @@ async fn get_user_roles(
     Path(user): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let (target_user, organization_roles) = match state
+    let (target_user, organization_roles) = state
         .identity
         .get_user_roles(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2503,14 +2478,10 @@ async fn put_user_roles(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let updated_user = match state
+    let updated_user = state
         .identity
         .update_user_roles(&context.actor, &context.user, &user, &request)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2529,10 +2500,7 @@ async fn list_organizations(
     State(state): State<AppState>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let organizations = match state.identity.list_organizations(&context.actor).await {
-        Ok(organizations) => organizations,
-        Err(error) => return handle_identity_error(error),
-    };
+    let organizations = state.identity.list_organizations(&context.actor).await?;
 
     Ok((
         StatusCode::OK,
@@ -2551,14 +2519,10 @@ async fn get_organization(
     Path(organization): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let target_organization = match state
+    let target_organization = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(organization) => organization,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2572,14 +2536,10 @@ async fn list_organization_roles(
     Path(organization): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let roles = match state
+    let roles = state
         .identity
         .list_organization_roles(&context.actor, &organization)
-        .await
-    {
-        Ok(roles) => roles,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(roles)).into_response())
 }
@@ -2590,7 +2550,7 @@ async fn list_organization_members(
     Auth(context): Auth,
     Query(query): Query<MembersQuery>,
 ) -> Result<Response, AppError> {
-    let members = match state
+    let members = state
         .identity
         .list_organization_members(
             &context.actor,
@@ -2599,11 +2559,7 @@ async fn list_organization_members(
             query.limit.unwrap_or_default(),
             query.offset.unwrap_or_default(),
         )
-        .await
-    {
-        Ok(members) => members,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2623,7 +2579,7 @@ async fn list_paginated_organization_members(
     Auth(context): Auth,
     Query(query): Query<MembersQuery>,
 ) -> Result<Response, AppError> {
-    let (members, count) = match state
+    let (members, count) = state
         .identity
         .list_organization_members_page(
             &context.actor,
@@ -2632,11 +2588,7 @@ async fn list_paginated_organization_members(
             query.limit.unwrap_or_default(),
             query.offset.unwrap_or_default(),
         )
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2656,14 +2608,10 @@ async fn get_organization_member(
     Path((organization, user)): Path<(String, String)>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let member = match state
+    let member = state
         .identity
         .get_organization_member(&context.actor, &context.user, &organization, &user)
-        .await
-    {
-        Ok(member) => member,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -2695,14 +2643,10 @@ async fn post_organization_member(
         ));
     }
 
-    let member = match state
+    let member = state
         .identity
         .create_organization_member(&context.actor, &context.user, &organization, &user)
-        .await
-    {
-        Ok(member) => member,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2744,14 +2688,10 @@ async fn delete_organization_member(
         ));
     }
 
-    let (organization_id, user_id) = match state
+    let (organization_id, user_id) = state
         .identity
         .delete_organization_member(&context.actor, &context.user, &organization, &user)
-        .await
-    {
-        Ok(ids) => ids,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2794,7 +2734,7 @@ async fn put_organization_member_roles(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let updated_member = match state
+    let updated_member = state
         .identity
         .update_organization_member_roles(
             &context.actor,
@@ -2803,11 +2743,7 @@ async fn put_organization_member_roles(
             &user,
             &request,
         )
-        .await
-    {
-        Ok(member) => member,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2852,14 +2788,10 @@ async fn create_session_api_key(
         ));
     }
 
-    let result = match state
+    let result = state
         .auth
         .create_session_api_key(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2902,14 +2834,10 @@ async fn create_token_api_key(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let result = match state
+    let result = state
         .auth
         .create_token_api_key(&context.actor, &context.user, &user, request)
-        .await
-    {
-        Ok(result) => result,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -2930,7 +2858,7 @@ async fn list_token_api_keys(
     Auth(context): Auth,
     Query(query): Query<TokenListQuery>,
 ) -> Result<Response, AppError> {
-    let keys = match state
+    let keys = state
         .auth
         .list_token_api_keys(
             &context.actor,
@@ -2939,11 +2867,7 @@ async fn list_token_api_keys(
             query.include_all,
             query.include_expired,
         )
-        .await
-    {
-        Ok(keys) => keys,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(keys)).into_response())
 }
@@ -2953,14 +2877,10 @@ async fn get_api_key(
     Path((user, keyid)): Path<(String, String)>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let key = match state
+    let key = state
         .auth
         .get_api_key(&context.actor, &context.user, &user, &keyid)
-        .await
-    {
-        Ok(key) => key,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(key)).into_response())
 }
@@ -2970,14 +2890,10 @@ async fn get_api_key_by_name(
     Path((user, keyname)): Path<(String, String)>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let key = match state
+    let key = state
         .auth
         .get_api_key_by_name(&context.actor, &context.user, &user, &keyname)
-        .await
-    {
-        Ok(key) => key,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     Ok((StatusCode::OK, Json(key)).into_response())
 }
@@ -3005,14 +2921,10 @@ async fn delete_api_key(
         ));
     }
 
-    let key_id = match state
+    let key_id = state
         .auth
         .delete_api_key(&context.actor, &context.user, &user, &keyid)
-        .await
-    {
-        Ok(key_id) => key_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -3050,14 +2962,10 @@ async fn expire_api_key(
         ));
     }
 
-    let key_id = match state
+    let key_id = state
         .auth
         .expire_api_key(&context.actor, &context.user, &user, &keyid)
-        .await
-    {
-        Ok(key_id) => key_id,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -3077,14 +2985,10 @@ async fn get_token_config(
     Path(user): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let config = match state
+    let config = state
         .auth
         .get_token_config(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(config) => config,
-        Err(error) => return handle_auth_error(error),
-    };
+        .await?;
     Ok((StatusCode::OK, Json(config)).into_response())
 }
 
@@ -3093,14 +2997,10 @@ async fn list_user_organizations(
     Path(user): Path<String>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let organizations = match state
+    let organizations = state
         .identity
         .list_user_organizations(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(organizations) => organizations,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -3119,14 +3019,10 @@ async fn get_user_organization_by_name(
     Path((user, organizationname)): Path<(String, String)>,
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
-    let target_organization = match state
+    let target_organization = state
         .identity
         .get_user_organization_by_name(&context.actor, &context.user, &user, &organizationname)
-        .await
-    {
-        Ok(organization) => organization,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     Ok((
         StatusCode::OK,
@@ -3155,14 +3051,10 @@ async fn delete_user(
         ));
     }
 
-    let target_user = match state
+    let target_user = state
         .identity
         .delete_user(&context.actor, &context.user, &user)
-        .await
-    {
-        Ok(user) => user,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -3191,14 +3083,10 @@ async fn list_provisioner_daemons(
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner daemons in this org.
     let authorizer = Authorizer::new();
@@ -3229,14 +3117,10 @@ async fn list_provisioner_jobs(
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -3267,14 +3151,10 @@ async fn get_provisioner_job(
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => return handle_identity_error(error),
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -3306,16 +3186,10 @@ async fn cancel_provisioner_job(
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => {
-            return handle_identity_error(error);
-        }
-    };
+        .await?;
 
     // RBAC: verify the actor can update provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -3383,7 +3257,11 @@ async fn cancel_provisioner_job(
             .into_response());
     }
 
-    Ok(StatusCode::OK.into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Provisioner job canceled.")),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -3403,16 +3281,10 @@ async fn get_provisioner_job_logs(
     Auth(context): Auth,
 ) -> Result<Response, AppError> {
     // Validate the organization exists and the caller has access.
-    let org = match state
+    let org = state
         .identity
         .get_organization(&context.actor, &organization)
-        .await
-    {
-        Ok(o) => o,
-        Err(error) => {
-            return handle_identity_error(error);
-        }
-    };
+        .await?;
 
     // RBAC: verify the actor can read provisioner jobs in this org.
     let authorizer = Authorizer::new();
@@ -6937,7 +6809,11 @@ async fn patch_active_template_version(
         return Ok(not_found_response("Template not found."));
     }
 
-    Ok(StatusCode::OK.into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Active template version updated.")),
+    )
+        .into_response())
 }
 
 /// POST /templates/{template}/versions/archive — archive unused template versions
@@ -7543,108 +7419,6 @@ async fn record_audit(
             summary: summary.into(),
         })
         .await;
-}
-
-fn handle_auth_error(error: AuthServiceError) -> Result<Response, AppError> {
-    match error {
-        AuthServiceError::Storage(error) => Err(AppError::from(error)),
-        AuthServiceError::Unauthorized { message } => Ok(unauthorized_response(message)),
-        AuthServiceError::Forbidden { message } => Ok(forbidden_response(message)),
-        AuthServiceError::NotFound { message } => Ok(not_found_response(message)),
-        AuthServiceError::BadRequest { message, detail } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations: Vec::new(),
-            }),
-        )
-            .into_response()),
-        AuthServiceError::Validation {
-            message,
-            validations,
-        } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail: None,
-                validations,
-            }),
-        )
-            .into_response()),
-        AuthServiceError::Conflict {
-            message,
-            detail,
-            validations,
-        } => Ok((
-            StatusCode::CONFLICT,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations,
-            }),
-        )
-            .into_response()),
-    }
-}
-
-fn handle_external_auth_error(
-    message: &'static str,
-    error: ExternalAuthServiceError,
-) -> Result<Response, AppError> {
-    match error {
-        ExternalAuthServiceError::BadRequest(detail) => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(message, detail)),
-        )
-            .into_response()),
-        ExternalAuthServiceError::Storage(error) => Err(AppError::from(error)),
-        ExternalAuthServiceError::Internal(detail) => {
-            Ok(internal_server_error_detail_response(message, detail))
-        }
-    }
-}
-
-fn handle_identity_error(error: IdentityServiceError) -> Result<Response, AppError> {
-    match error {
-        IdentityServiceError::Storage(error) => Err(AppError::from(error)),
-        IdentityServiceError::NotFound { message } => Ok(not_found_response(message)),
-        IdentityServiceError::Forbidden { message } => Ok(forbidden_response(message)),
-        IdentityServiceError::BadRequest { message, detail } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations: Vec::new(),
-            }),
-        )
-            .into_response()),
-        IdentityServiceError::Validation {
-            message,
-            validations,
-        } => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse {
-                message,
-                detail: None,
-                validations,
-            }),
-        )
-            .into_response()),
-        IdentityServiceError::Conflict {
-            message,
-            detail,
-            validations,
-        } => Ok((
-            StatusCode::CONFLICT,
-            Json(ApiResponse {
-                message,
-                detail,
-                validations,
-            }),
-        )
-            .into_response()),
-    }
 }
 
 fn build_version_headers(version: &str) -> HeaderMap {
@@ -9138,7 +8912,10 @@ async fn patch_cancel_workspace_build(
     if !canceled {
         return Ok((
             StatusCode::PRECONDITION_FAILED,
-            Json(ApiResponse::ok("Build is already completed or canceled.")),
+            Json(ApiResponse::error(
+                "Build cannot be canceled.",
+                "The workspace build has already completed or been canceled.",
+            )),
         )
             .into_response());
     }
@@ -9924,10 +9701,7 @@ async fn list_oauth2_provider_apps(
         ));
     }
 
-    let apps = match state.oauth2_provider.list_apps().await {
-        Ok(apps) => apps,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let apps = state.oauth2_provider.list_apps().await?;
     let response: Vec<OAuth2ProviderAppResponse> =
         apps.into_iter().map(oauth2_app_response).collect();
     Ok((StatusCode::OK, Json(response)).into_response())
@@ -9959,7 +9733,7 @@ async fn post_oauth2_provider_app(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let app = match state
+    let app = state
         .oauth2_provider
         .create_app(
             &request.name,
@@ -9967,11 +9741,7 @@ async fn post_oauth2_provider_app(
             &request.callback_url,
             context.user.id,
         )
-        .await
-    {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -10014,10 +9784,7 @@ async fn get_oauth2_provider_app(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    let app = match state.oauth2_provider.get_app(app_uuid).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let app = state.oauth2_provider.get_app(app_uuid).await?;
     Ok((StatusCode::OK, Json(oauth2_app_response(app))).into_response())
 }
 
@@ -10054,7 +9821,7 @@ async fn put_oauth2_provider_app(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
-    let app = match state
+    let app = state
         .oauth2_provider
         .update_app(
             app_uuid,
@@ -10062,11 +9829,7 @@ async fn put_oauth2_provider_app(
             &request.icon,
             &request.callback_url,
         )
-        .await
-    {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     record_audit(
         &state,
@@ -10109,9 +9872,7 @@ async fn delete_oauth2_provider_app(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    if let Err(error) = state.oauth2_provider.delete_app(app_uuid).await {
-        return handle_oauth2_provider_error(error);
-    }
+    state.oauth2_provider.delete_app(app_uuid).await?;
 
     record_audit(
         &state,
@@ -10152,10 +9913,7 @@ async fn list_oauth2_provider_app_secrets(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    let secrets = match state.oauth2_provider.list_app_secrets(app_uuid).await {
-        Ok(secrets) => secrets,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let secrets = state.oauth2_provider.list_app_secrets(app_uuid).await?;
     let response: Vec<OAuth2ProviderAppSecretResponse> =
         secrets.into_iter().map(oauth2_secret_response).collect();
     Ok((StatusCode::OK, Json(response)).into_response())
@@ -10189,10 +9947,7 @@ async fn post_oauth2_provider_app_secret(
             return Ok(not_found_response("OAuth2 provider app not found."));
         }
     };
-    let (raw_secret, record) = match state.oauth2_provider.create_app_secret(app_uuid).await {
-        Ok(result) => result,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let (raw_secret, record) = state.oauth2_provider.create_app_secret(app_uuid).await?;
 
     record_audit(
         &state,
@@ -10251,7 +10006,7 @@ async fn delete_oauth2_provider_app_secret(
         .delete_app_secret(app_uuid, secret_uuid)
         .await
     {
-        return handle_oauth2_provider_error(error);
+        return Err(error.into());
     }
 
     record_audit(
@@ -10288,7 +10043,7 @@ async fn delete_oauth2_provider_app_tokens(
         .revoke_tokens(app_uuid, context.user.id)
         .await
     {
-        return handle_oauth2_provider_error(error);
+        return Err(error.into());
     }
 
     record_audit(
@@ -10312,7 +10067,10 @@ async fn get_oauth2_authorize(
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -10321,7 +10079,10 @@ async fn get_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -10329,22 +10090,22 @@ async fn get_oauth2_authorize(
 
     // Validate the app and its callback URL BEFORE creating the authorization
     // code.  This prevents orphaned codes when the callback URL is invalid.
-    let app = match state.oauth2_provider.get_app(client_id).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let app = state.oauth2_provider.get_app(client_id).await?;
     let mut redirect_url = match url::Url::parse(&app.callback_url) {
         Ok(url) => url,
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The registered callback URL could not be parsed.",
+                )),
             )
                 .into_response());
         }
     };
 
-    let raw_code = match state
+    let raw_code = state
         .oauth2_provider
         .create_authorization_code(
             client_id,
@@ -10353,11 +10114,7 @@ async fn get_oauth2_authorize(
             &params.code_challenge,
             &params.code_challenge_method,
         )
-        .await
-    {
-        Ok(code) => code,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     // Build the redirect URL with the code and state.
     redirect_url
@@ -10384,7 +10141,10 @@ async fn post_oauth2_authorize(
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -10393,7 +10153,10 @@ async fn post_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -10401,22 +10164,22 @@ async fn post_oauth2_authorize(
 
     // Validate the app and its callback URL BEFORE creating the authorization
     // code.  This prevents orphaned codes when the callback URL is invalid.
-    let app = match state.oauth2_provider.get_app(client_id).await {
-        Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+    let app = state.oauth2_provider.get_app(client_id).await?;
     let mut redirect_url = match url::Url::parse(&app.callback_url) {
         Ok(url) => url,
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The registered callback URL could not be parsed.",
+                )),
             )
                 .into_response());
         }
     };
 
-    let raw_code = match state
+    let raw_code = state
         .oauth2_provider
         .create_authorization_code(
             client_id,
@@ -10425,11 +10188,7 @@ async fn post_oauth2_authorize(
             &params.code_challenge,
             &params.code_challenge_method,
         )
-        .await
-    {
-        Ok(code) => code,
-        Err(error) => return handle_oauth2_provider_error(error),
-    };
+        .await?;
 
     // Build the redirect URL with the code and state.
     redirect_url
@@ -10454,12 +10213,15 @@ async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
             };
-            let result = match state
+            let result = state
                 .oauth2_provider
                 .exchange_code(
                     &request.code,
@@ -10467,11 +10229,7 @@ async fn post_oauth2_token(
                     &request.client_secret,
                     &request.code_verifier,
                 )
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => return handle_oauth2_provider_error(error),
-            };
+                .await?;
             let response = OAuth2TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -10486,19 +10244,18 @@ async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
             };
-            let result = match state
+            let result = state
                 .oauth2_provider
                 .refresh_token(&request.refresh_token, client_id, &request.client_secret)
-                .await
-            {
-                Ok(result) => result,
-                Err(error) => return handle_oauth2_provider_error(error),
-            };
+                .await?;
             let response = OAuth2TokenResponse {
                 access_token: result.access_token,
                 token_type: result.token_type,
@@ -10509,20 +10266,12 @@ async fn post_oauth2_token(
         }
         _ => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Unsupported grant_type.")),
+            Json(ApiResponse::error(
+                "Unsupported grant_type.",
+                "Supported grant types are: authorization_code, refresh_token.",
+            )),
         )
             .into_response()),
-    }
-}
-
-fn handle_oauth2_provider_error(error: OAuth2ProviderError) -> Result<Response, AppError> {
-    match error {
-        OAuth2ProviderError::Storage(error) => Err(AppError::from(error)),
-        OAuth2ProviderError::BadRequest { message } => {
-            Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
-        }
-        OAuth2ProviderError::NotFound { message } => Ok(not_found_response(message)),
-        OAuth2ProviderError::Unauthorized { message } => Ok(unauthorized_response(message)),
     }
 }
 
@@ -13439,9 +13188,10 @@ async fn post_file(
         _ => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!(
-                    "Unsupported content type header \"{content_type}\"."
-                ))),
+                Json(ApiResponse::error(
+                    format!("Unsupported content type header \"{content_type}\"."),
+                    "Allowed content types are: application/x-tar, application/zip, application/x-zip-compressed.",
+                )),
             )
                 .into_response());
         }
@@ -14795,7 +14545,11 @@ mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            matched.sort_by(|left, right| left.username.cmp(&right.username));
+            matched.sort_by(|left, right| {
+                left.username
+                    .to_lowercase()
+                    .cmp(&right.username.to_lowercase())
+            });
             let count = matched.len();
             let start = usize::try_from(filter.offset).unwrap_or(0);
             let end = if filter.limit == 0 {
@@ -15185,10 +14939,12 @@ mod tests {
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             let mut rows = organizations
                 .values()
+                .filter(|org| !org.deleted)
                 .filter(|org| organization_ids.is_empty() || organization_ids.contains(&org.id))
                 .cloned()
                 .collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.name.cmp(&right.name));
+            // Match PostgresStore: ORDER BY LOWER(name) ASC
+            rows.sort_by(|left, right| left.name.to_lowercase().cmp(&right.name.to_lowercase()));
             Ok(rows)
         }
 
@@ -15201,6 +14957,7 @@ mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?
                 .get(&organization_id)
+                .filter(|org| !org.deleted)
                 .cloned())
         }
 
@@ -15214,7 +14971,7 @@ mod tests {
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             Ok(organizations
                 .values()
-                .find(|org| org.name.eq_ignore_ascii_case(name))
+                .find(|org| !org.deleted && org.name.eq_ignore_ascii_case(name))
                 .cloned())
         }
 
@@ -15243,7 +15000,12 @@ mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.username.cmp(&right.username));
+            // Match PostgresStore: ORDER BY LOWER(u.username) ASC
+            rows.sort_by(|left, right| {
+                left.username
+                    .to_lowercase()
+                    .cmp(&right.username.to_lowercase())
+            });
             let start = usize::try_from(filter.offset).unwrap_or(0);
             let end = if filter.limit == 0 {
                 rows.len()
@@ -15282,7 +15044,12 @@ mod tests {
                 })
                 .cloned()
                 .collect::<Vec<_>>();
-            rows.sort_by(|left, right| left.username.cmp(&right.username));
+            // Match PostgresStore: ORDER BY LOWER(u.username) ASC
+            rows.sort_by(|left, right| {
+                left.username
+                    .to_lowercase()
+                    .cmp(&right.username.to_lowercase())
+            });
             let count = rows.len();
             let start = usize::try_from(filter.offset).unwrap_or(0);
             let end = if filter.limit == 0 {
@@ -15558,7 +15325,7 @@ mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             let now = OffsetDateTime::now_utc();
-            Ok(api_keys
+            let mut results: Vec<ApiKeyWithOwnerRecord> = api_keys
                 .values()
                 .filter(|key| key.login_type == filter.login_type)
                 .filter(|key| filter.user_id.is_none_or(|user_id| key.user_id == user_id))
@@ -15570,7 +15337,15 @@ mod tests {
                         .map(|user| user.username.clone())
                         .unwrap_or_default(),
                 })
-                .collect())
+                .collect();
+            // Match PostgresStore: ORDER BY LOWER(u.username) ASC, k.created_at DESC
+            results.sort_by(|a, b| {
+                a.username
+                    .to_lowercase()
+                    .cmp(&b.username.to_lowercase())
+                    .then_with(|| b.key.created_at.cmp(&a.key.created_at))
+            });
+            Ok(results)
         }
 
         async fn delete_api_key(&self, id: &str) -> Result<bool, StorageError> {
@@ -17089,6 +16864,17 @@ mod tests {
                 Some(t) if !t.deleted => {
                     t.deleted = true;
                     t.updated_at = OffsetDateTime::now_utc();
+                    drop(templates);
+                    // Cascade: archive all template versions belonging to this template.
+                    let mut versions = self
+                        .template_versions
+                        .lock()
+                        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                    for v in versions.values_mut() {
+                        if v.template_id == Some(template_id) {
+                            v.archived = true;
+                        }
+                    }
                     Ok(true)
                 }
                 _ => Ok(false),
@@ -18523,6 +18309,35 @@ mod tests {
             &self,
             filter: WorkspaceListFilter,
         ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
+            // Pre-resolve owner_username -> owner_id so we can filter by username.
+            let resolved_owner_id: Option<Uuid> = if filter.owner_id.is_some() {
+                filter.owner_id
+            } else if let Some(ref username) = filter.owner_username {
+                let users = self
+                    .users
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                users
+                    .values()
+                    .find(|u| u.username == *username)
+                    .map(|u| u.id)
+            } else {
+                None
+            };
+            // Pre-resolve template_name -> template_id so we can filter by name.
+            let resolved_template_name_id: Option<Uuid> =
+                if let Some(ref tname) = filter.template_name {
+                    let templates = self
+                        .templates
+                        .lock()
+                        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                    templates
+                        .values()
+                        .find(|t| t.name == *tname && !t.deleted)
+                        .map(|t| t.id)
+                } else {
+                    None
+                };
             let workspaces = self
                 .workspaces
                 .lock()
@@ -18531,15 +18346,17 @@ mod tests {
                 .values()
                 .filter(|w| !w.deleted)
                 .filter(|w| {
-                    filter
-                        .owner_id
-                        .is_none_or(|owner_id| w.owner_id == owner_id)
+                    if filter.owner_id.is_some() || filter.owner_username.is_some() {
+                        resolved_owner_id.is_some_and(|owner_id| w.owner_id == owner_id)
+                    } else {
+                        true
+                    }
                 })
                 .filter(|w| {
-                    filter
-                        .name
-                        .as_ref()
-                        .is_none_or(|n| w.name.contains(n.as_str()))
+                    filter.name.as_ref().is_none_or(|n| {
+                        let lower = n.to_lowercase();
+                        w.name.to_lowercase().contains(&lower)
+                    })
                 })
                 .filter(|w| {
                     filter
@@ -18548,6 +18365,14 @@ mod tests {
                 })
                 .filter(|w| {
                     filter.template_ids.is_empty() || filter.template_ids.contains(&w.template_id)
+                })
+                .filter(|w| {
+                    // Filter by template_name: if set, only include matching template.
+                    if filter.template_name.is_some() {
+                        resolved_template_name_id.is_some_and(|tid| w.template_id == tid)
+                    } else {
+                        true
+                    }
                 })
                 .filter(|w| {
                     filter.dormant.is_none_or(|d| {
@@ -18618,6 +18443,19 @@ mod tests {
             }
             ws.deleted = true;
             ws.updated_at = OffsetDateTime::now_utc();
+            drop(workspaces);
+            // Cascade: remove associated port shares and ACLs.
+            let mut port_shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            port_shares.retain(|ps| ps.workspace_id != workspace_id);
+            drop(port_shares);
+            let mut acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            acls.remove(&workspace_id);
             Ok(true)
         }
 
@@ -19794,7 +19632,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert_eq!(body, Value::String("ok".to_owned()));
+        assert_eq!(body.get("message").and_then(Value::as_str), Some("ok"));
         Ok(())
     }
 
@@ -38486,6 +38324,1960 @@ mod tests {
         Ok(())
     }
 
+    // =========================================================================
+    // FakeStore audit tests -- verify parity with PostgresStore behavior
+    // =========================================================================
+
+    #[tokio::test]
+    async fn fake_store_list_users_case_insensitive_sort() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        store
+            .create_user(CreateUserInput {
+                email: "b@test.com".to_owned(),
+                username: "Bob".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+        store
+            .create_user(CreateUserInput {
+                email: "a@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let (users, _count) = store.list_users(UserListFilter::default()).await?;
+        let usernames: Vec<&str> = users.iter().map(|u| u.username.as_str()).collect();
+        // PostgresStore sorts by LOWER(username) ASC
+        assert_eq!(usernames, vec!["admin", "alice", "Bob"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_users_offset_limit() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        for i in 0..5 {
+            let name = format!("user{i}");
+            store
+                .create_user(CreateUserInput {
+                    email: format!("{name}@test.com"),
+                    username: name,
+                    name: String::new(),
+                    password_hash: None,
+                    login_type: LoginType::Password,
+                    status: UserStatus::Active,
+                    organization_ids: orgs.clone(),
+                })
+                .await?;
+        }
+
+        // Total = 6 (admin + user0..user4). Offset 2, limit 2 should give user1, user2.
+        let (page, total) = store
+            .list_users(UserListFilter {
+                offset: 2,
+                limit: 2,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(total, 6);
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].username, "user1");
+        assert_eq!(page[1].username, "user2");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_users_search_and_status_filter() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        let user = store
+            .create_user(CreateUserInput {
+                email: "suspended@test.com".to_owned(),
+                username: "suspendeduser".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+        store
+            .update_user_status(user.id, UserStatus::Suspended)
+            .await?;
+
+        // Search by username substring.
+        let (found, _) = store
+            .list_users(UserListFilter {
+                search: "suspended".to_owned(),
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].username, "suspendeduser");
+
+        // Filter by status.
+        let (active, _) = store
+            .list_users(UserListFilter {
+                status: Some(UserStatus::Active),
+                ..Default::default()
+            })
+            .await?;
+        assert!(
+            active.iter().all(|u| u.status == UserStatus::Active),
+            "all returned users should be active"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_api_keys_sorted_by_username_then_created_at()
+    -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        let bob = store
+            .create_user(CreateUserInput {
+                email: "bob@test.com".to_owned(),
+                username: "bob".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+        let alice = store
+            .create_user(CreateUserInput {
+                email: "alice@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let now = OffsetDateTime::now_utc();
+        store
+            .create_api_key(CreateApiKeyInput {
+                id: "bob-key-1".to_owned(),
+                hashed_secret: vec![1],
+                user_id: bob.id,
+                last_used: now,
+                expires_at: now + time::Duration::days(30),
+                created_at: now - time::Duration::days(2),
+                updated_at: now,
+                login_type: LoginType::Token,
+                scopes: vec!["all".to_owned()],
+                token_name: "bob-token".to_owned(),
+                lifetime_seconds: 86400,
+                allow_list: Vec::new(),
+            })
+            .await?;
+        store
+            .create_api_key(CreateApiKeyInput {
+                id: "alice-key-1".to_owned(),
+                hashed_secret: vec![2],
+                user_id: alice.id,
+                last_used: now,
+                expires_at: now + time::Duration::days(30),
+                created_at: now - time::Duration::days(1),
+                updated_at: now,
+                login_type: LoginType::Token,
+                scopes: vec!["all".to_owned()],
+                token_name: "alice-token".to_owned(),
+                lifetime_seconds: 86400,
+                allow_list: Vec::new(),
+            })
+            .await?;
+
+        let keys = store
+            .list_api_keys(ApiKeyListFilter {
+                login_type: LoginType::Token,
+                user_id: None,
+                include_expired: false,
+            })
+            .await?;
+
+        // PostgresStore sorts by LOWER(username) ASC, then created_at DESC.
+        assert!(keys.len() >= 2);
+        assert_eq!(keys[0].username, "alice");
+        assert_eq!(keys[1].username, "bob");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_organizations_filters_deleted_and_sorts_lowercase()
+    -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+
+        let org_id = Uuid::from_u128(100);
+        let now = OffsetDateTime::now_utc();
+        store
+            .organizations
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(
+                org_id,
+                OrganizationRecord {
+                    id: org_id,
+                    name: "Borg".to_owned(),
+                    display_name: "Borg Org".to_owned(),
+                    description: String::new(),
+                    icon: String::new(),
+                    created_at: now,
+                    updated_at: now,
+                    is_default: false,
+                    deleted: false,
+                },
+            );
+        let deleted_id = Uuid::from_u128(200);
+        store
+            .organizations
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(
+                deleted_id,
+                OrganizationRecord {
+                    id: deleted_id,
+                    name: "aaa-deleted".to_owned(),
+                    display_name: "Deleted".to_owned(),
+                    description: String::new(),
+                    icon: String::new(),
+                    created_at: now,
+                    updated_at: now,
+                    is_default: false,
+                    deleted: true,
+                },
+            );
+
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let names: Vec<&str> = orgs.iter().map(|o| o.name.as_str()).collect();
+        assert!(
+            !names.contains(&"aaa-deleted"),
+            "deleted org should be excluded"
+        );
+        assert_eq!(names, vec!["Borg", "first-organization"]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_find_organization_by_id_excludes_deleted() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let org_id = Uuid::from_u128(300);
+        let now = OffsetDateTime::now_utc();
+        store
+            .organizations
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(
+                org_id,
+                OrganizationRecord {
+                    id: org_id,
+                    name: "gone".to_owned(),
+                    display_name: "Gone Org".to_owned(),
+                    description: String::new(),
+                    icon: String::new(),
+                    created_at: now,
+                    updated_at: now,
+                    is_default: false,
+                    deleted: true,
+                },
+            );
+        let result = store.find_organization_by_id(org_id).await?;
+        assert!(result.is_none(), "deleted org should not be found");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_workspaces_owner_username_filter() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+        let org_id = orgs[0];
+
+        let alice = store
+            .create_user(CreateUserInput {
+                email: "alice@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let now = OffsetDateTime::now_utc();
+        let template_id = Uuid::from_u128(500);
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(501),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: alice.id,
+            organization_id: org_id,
+            template_id,
+            name: "alice-ws".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(502),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: admin.id,
+            organization_id: org_id,
+            template_id,
+            name: "admin-ws".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        let (ws, count) = store
+            .list_workspaces(WorkspaceListFilter {
+                owner_username: Some("alice".to_owned()),
+                limit: 25,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(count, 1);
+        assert_eq!(ws[0].name, "alice-ws");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_workspaces_template_name_filter() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+
+        let now = OffsetDateTime::now_utc();
+        let tmpl_a = Uuid::from_u128(600);
+        let tmpl_b = Uuid::from_u128(601);
+        store
+            .insert_template(CreateTemplateInput {
+                id: tmpl_a,
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "template-a".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Template A".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+        store
+            .insert_template(CreateTemplateInput {
+                id: tmpl_b,
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "template-b".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Template B".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(700),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: admin.id,
+            organization_id: org_id,
+            template_id: tmpl_a,
+            name: "ws-a".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+        store.insert_workspace(WorkspaceRecord {
+            id: Uuid::from_u128(701),
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: admin.id,
+            organization_id: org_id,
+            template_id: tmpl_b,
+            name: "ws-b".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        let (ws, count) = store
+            .list_workspaces(WorkspaceListFilter {
+                template_name: Some("template-a".to_owned()),
+                limit: 25,
+                ..Default::default()
+            })
+            .await?;
+        assert_eq!(count, 1);
+        assert_eq!(ws[0].name, "ws-a");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_soft_delete_template_cascades_to_versions() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+
+        let now = OffsetDateTime::now_utc();
+        let template_id = Uuid::from_u128(800);
+        let version_id = Uuid::from_u128(801);
+
+        store
+            .insert_template(CreateTemplateInput {
+                id: template_id,
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "tmpl".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: version_id,
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Tmpl".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+
+        store
+            .insert_template_version(CreateTemplateVersionInput {
+                id: version_id,
+                template_id: Some(template_id),
+                organization_id: org_id,
+                created_at: now,
+                updated_at: now,
+                name: "v1".to_owned(),
+                readme: String::new(),
+                job_id: Uuid::nil(),
+                created_by: admin.id,
+                message: String::new(),
+                source_example_id: None,
+            })
+            .await?;
+
+        let v = store
+            .find_template_version_by_id(version_id)
+            .await?
+            .ok_or("version not found")?;
+        assert!(
+            !v.archived,
+            "version should not be archived before template deletion"
+        );
+
+        let deleted = store.soft_delete_template(template_id).await?;
+        assert!(deleted);
+
+        let v = store
+            .find_template_version_by_id(version_id)
+            .await?
+            .ok_or("version not found")?;
+        assert!(
+            v.archived,
+            "version should be archived after template deletion"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_soft_delete_workspace_cascades_port_shares_and_acls()
+    -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let ws_id = Uuid::from_u128(900);
+        let now = OffsetDateTime::now_utc();
+        store.insert_workspace(WorkspaceRecord {
+            id: ws_id,
+            created_at: now,
+            updated_at: now,
+            deleted: false,
+            owner_id: Uuid::nil(),
+            organization_id: Uuid::nil(),
+            template_id: Uuid::nil(),
+            name: "ws".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        store
+            .workspace_port_shares
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .push(WorkspaceAgentPortShareRecord {
+                workspace_id: ws_id,
+                agent_name: "main".to_owned(),
+                port: 8080,
+                share_level: "authenticated".to_owned(),
+                protocol: "http".to_owned(),
+            });
+        store
+            .workspace_acls
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(ws_id, WorkspaceACLRecord::default());
+
+        let deleted = store.soft_delete_workspace(ws_id).await?;
+        assert!(deleted);
+
+        let port_shares = store
+            .workspace_port_shares
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert!(
+            port_shares.iter().all(|ps| ps.workspace_id != ws_id),
+            "port shares should be removed after workspace deletion"
+        );
+        drop(port_shares);
+
+        let acls = store
+            .workspace_acls
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert!(
+            !acls.contains_key(&ws_id),
+            "ACL should be removed after workspace deletion"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_create_user_unique_username() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs: Vec<Uuid> = store
+            .list_organizations(Vec::new())
+            .await?
+            .into_iter()
+            .map(|o| o.id)
+            .collect();
+
+        store
+            .create_user(CreateUserInput {
+                email: "alice@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await?;
+
+        let result = store
+            .create_user(CreateUserInput {
+                email: "different@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: orgs.clone(),
+            })
+            .await;
+        assert!(
+            matches!(result, Err(CreateUserStoreError::AlreadyExists)),
+            "duplicate username should return AlreadyExists"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_create_template_unique_name_per_org() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+        let admin = store
+            .find_user_by_username("admin")
+            .await?
+            .ok_or("admin not found")?;
+
+        let now = OffsetDateTime::now_utc();
+        store
+            .insert_template(CreateTemplateInput {
+                id: Uuid::from_u128(1000),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "unique-tmpl".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Unique".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await?;
+
+        let result = store
+            .insert_template(CreateTemplateInput {
+                id: Uuid::from_u128(1001),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                name: "unique-tmpl".to_owned(),
+                provisioner: "echo".to_owned(),
+                active_version_id: Uuid::nil(),
+                description: String::new(),
+                default_ttl: 0,
+                created_by: admin.id,
+                icon: String::new(),
+                display_name: "Unique 2".to_owned(),
+                allow_user_cancel_workspace_jobs: false,
+                allow_user_autostart: false,
+                allow_user_autostop: false,
+                failure_ttl: 0,
+                time_til_dormant: 0,
+                time_til_dormant_autodelete: 0,
+                require_active_version: false,
+                activity_bump: 0,
+                max_port_share_level: "owner".to_owned(),
+            })
+            .await;
+        assert!(
+            matches!(result, Err(CreateTemplateStoreError::AlreadyExists)),
+            "duplicate template name in same org should return AlreadyExists"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_list_org_members_case_insensitive_sort() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .create_first_user(CreateFirstUserInput {
+                email: "admin@test.com".to_owned(),
+                username: "admin".to_owned(),
+                name: "Admin".to_owned(),
+                password_hash: "hash".to_owned(),
+            })
+            .await?;
+        let orgs = store.list_organizations(Vec::new()).await?;
+        let org_id = orgs[0].id;
+
+        store
+            .create_user(CreateUserInput {
+                email: "b@test.com".to_owned(),
+                username: "Bob".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+        store
+            .create_user(CreateUserInput {
+                email: "a@test.com".to_owned(),
+                username: "alice".to_owned(),
+                name: String::new(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![org_id],
+            })
+            .await?;
+
+        let members = store
+            .list_organization_members(OrganizationMemberListFilter {
+                organization_id: org_id,
+                ..Default::default()
+            })
+            .await?;
+        let usernames: Vec<&str> = members.iter().map(|m| m.username.as_str()).collect();
+        assert_eq!(usernames, vec!["admin", "alice", "Bob"]);
+        Ok(())
+    }
+
+    // =======================================================================
+    // Happy-path integration tests — User management, Org, Auth, Audit, etc.
+    // =======================================================================
+
+    #[tokio::test]
+    async fn happy_list_users() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("count").and_then(Value::as_u64), Some(1));
+        let users = body
+            .get("users")
+            .and_then(Value::as_array)
+            .ok_or("missing users")?;
+        assert_eq!(users.len(), 1);
+        assert_eq!(
+            users[0].get("username").and_then(Value::as_str),
+            Some("owner")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "newuser@example.com".to_owned(),
+                    username: "newuser".to_owned(),
+                    name: "New User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("username").and_then(Value::as_str),
+            Some("newuser")
+        );
+        assert_eq!(
+            body.get("email").and_then(Value::as_str),
+            Some("newuser@example.com")
+        );
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
+        assert_eq!(
+            body.get("email").and_then(Value::as_str),
+            Some("owner@example.com")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a user to delete
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "todelete@example.com".to_owned(),
+                    username: "todelete".to_owned(),
+                    name: "To Delete".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        let response = call(
+            app,
+            authenticated_request(Method::DELETE, "/api/v2/users/todelete", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_profile() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/profile",
+                &session_token,
+                &UpdateUserProfileRequest {
+                    username: "owner".to_owned(),
+                    name: "Updated Owner".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("Updated Owner")
+        );
+        assert_eq!(body.get("username").and_then(Value::as_str), Some("owner"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_appearance() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/appearance", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("theme_preference").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_appearance() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/appearance",
+                &session_token,
+                &UpdateUserAppearanceSettingsRequest {
+                    theme_preference: "dark".to_owned(),
+                    terminal_font: "fira-code".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("theme_preference").and_then(Value::as_str),
+            Some("dark")
+        );
+        assert_eq!(
+            body.get("terminal_font").and_then(Value::as_str),
+            Some("fira-code")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_preferences() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/preferences", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("task_notification_alert_dismissed")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_preferences() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/preferences",
+                &session_token,
+                &UpdateUserPreferenceSettingsRequest {
+                    task_notification_alert_dismissed: true,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("task_notification_alert_dismissed")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_password() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/password",
+                &session_token,
+                &UpdateUserPasswordRequest {
+                    old_password: "Password123".to_owned(),
+                    password: "NewPassword456".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_login_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/login-type", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("login_type").and_then(Value::as_str),
+            Some("password")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/roles", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body
+            .get("roles")
+            .and_then(Value::as_array)
+            .ok_or("missing roles")?;
+        assert!(
+            roles.iter().any(|r| r.as_str() == Some("owner")),
+            "first user should have owner role"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "roleuser@example.com".to_owned(),
+                    username: "roleuser".to_owned(),
+                    name: "Role User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/roleuser/roles",
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["user-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body
+            .get("roles")
+            .and_then(Value::as_array)
+            .ok_or("missing roles")?;
+        assert!(
+            roles
+                .iter()
+                .any(|r| r.get("name").and_then(Value::as_str) == Some("user-admin")),
+            "user should have user-admin role"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_git_ssh_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/gitsshkey", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("public_key").and_then(Value::as_str).is_some(),
+            "should return a public key"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_user_git_ssh_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::PUT, "/api/v2/users/me/gitsshkey", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("public_key").and_then(Value::as_str).is_some(),
+            "regenerated key should return a public key"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_organizations() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/organizations", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let orgs = body.as_array().ok_or("expected array")?;
+        assert_eq!(orgs.len(), 1);
+        assert!(orgs[0].get("id").and_then(Value::as_str).is_some());
+        assert!(orgs[0].get("name").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_organization() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("first-organization")
+        );
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_organization_members() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let members = body.as_array().ok_or("expected array")?;
+        assert_eq!(members.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_organization_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members/owner",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("user_id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_organization_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create user not yet in the org
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgadd@example.com".to_owned(),
+                    username: "orgadd".to_owned(),
+                    name: "Org Add".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        // Remove the user from org, then re-add
+        let _del = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                "/api/v2/organizations/first-organization/members/orgadd",
+                &session_token,
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                "/api/v2/organizations/first-organization/members/orgadd",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("user_id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_organization_member() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgdel@example.com".to_owned(),
+                    username: "orgdel".to_owned(),
+                    name: "Org Del".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/organizations/{organization_id}/members/orgdel"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_organization_member_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "orgrole@example.com".to_owned(),
+                    username: "orgrole".to_owned(),
+                    name: "Org Role".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/organizations/{organization_id}/members/orgrole/roles"),
+                &session_token,
+                &UpdateRolesRequest {
+                    roles: vec!["organization-admin".to_owned()],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body
+            .get("roles")
+            .and_then(Value::as_array)
+            .ok_or("missing roles")?;
+        assert!(
+            roles
+                .iter()
+                .any(|r| r.get("name").and_then(Value::as_str) == Some("organization-admin")),
+            "member should have organization-admin role"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_organization_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/members/roles",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body.as_array().ok_or("expected array")?;
+        assert!(
+            !roles.is_empty(),
+            "should return available organization roles"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_site_roles() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/roles", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let roles = body.as_array().ok_or("expected array")?;
+        assert!(!roles.is_empty(), "should return available site roles");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_user_organizations() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/organizations",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let orgs = body.as_array().ok_or("expected array")?;
+        assert_eq!(orgs.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_organization_by_name() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/organizations/first-organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("name").and_then(Value::as_str),
+            Some("first-organization")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_external_auths() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/external-auth", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("providers")
+                .and_then(Value::as_array)
+                .map(Vec::len),
+            Some(0)
+        );
+        assert_eq!(
+            body.get("links").and_then(Value::as_array).map(Vec::len),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_enabled_experiments() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/experiments", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let experiments = body.as_array().ok_or("expected array")?;
+        assert!(experiments.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_available_experiments() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/experiments/available", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("safe").is_some(), "should have safe field");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_session_api_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/users/me/keys", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("key").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_create_token_api_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(7200),
+                    token_name: "happy-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("key").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_token_api_keys() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(7200),
+                    token_name: "list-token".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let tokens = body.as_array().ok_or("expected array")?;
+        assert_eq!(tokens.len(), 1, "should list the created token");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_token_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/users/me/keys/tokens/tokenconfig",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("max_token_lifetime").is_some(),
+            "should return token config with max_token_lifetime"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_delete_api_key() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a token
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/keys/tokens",
+                &session_token,
+                &CreateTokenRequest {
+                    lifetime: Duration::from_secs(3600),
+                    token_name: "to-delete".to_owned(),
+                    ..CreateTokenRequest::default()
+                },
+            )?,
+        )
+        .await?;
+
+        // List tokens to get the key ID
+        let list_response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/keys/tokens", &session_token)?,
+        )
+        .await?;
+        let list_body = response_json(list_response).await?;
+        let key_id = list_body
+            .as_array()
+            .and_then(|keys| keys.first())
+            .and_then(|key| key.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing key id")?
+            .to_owned();
+
+        // Delete the token
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/users/me/keys/{key_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_audit_logs() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/audit", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("audit_logs").is_some(),
+            "should have audit_logs field"
+        );
+        assert!(body.get("count").is_some(), "should have count field");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_generate_test_audit_log() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/audit/testgenerate",
+                &session_token,
+                &CreateTestAuditLogRequest::default(),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_post_validate_user_password() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/users/validate-password",
+                &ValidateUserPasswordRequest {
+                    password: "StrongPassword123!".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("valid").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_list_paginated_organization_members() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/organizations/first-organization/paginated-members?limit=10&offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("count").is_some(), "should have count field");
+        assert!(body.get("members").is_some(), "should have members field");
+        let count = body
+            .get("count")
+            .and_then(Value::as_u64)
+            .ok_or("missing count")?;
+        assert_eq!(count, 1, "owner should be the only member");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_get_user_autofill_parameters() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+
+        let template_id = Uuid::new_v4();
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/users/me/autofill-parameters?template_id={template_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let params = body.as_array().ok_or("expected array")?;
+        assert!(params.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn happy_put_suspend_and_activate_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "statususer@example.com".to_owned(),
+                    username: "statususer".to_owned(),
+                    name: "Status User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let suspend_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/statususer/status/suspend",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(suspend_response.status(), StatusCode::OK);
+        let suspend_body = response_json(suspend_response).await?;
+        assert_eq!(
+            suspend_body.get("status").and_then(Value::as_str),
+            Some("suspended")
+        );
+
+        let activate_response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/statususer/status/activate",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(activate_response.status(), StatusCode::OK);
+        let activate_body = response_json(activate_response).await?;
+        assert_eq!(
+            activate_body.get("status").and_then(Value::as_str),
+            Some("active")
+        );
+        Ok(())
+    }
+
     // ── OIDC Debug Link tests ────────────────────────────────────
 
     #[tokio::test]
@@ -38908,6 +40700,208 @@ mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Error response consistency audit — regression tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_init_script_returns_error_for_unknown_os_arch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/init-script/badOS/badArch")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Unknown os/arch"),
+            "expected ApiResponse::error with message containing 'Unknown os/arch', got: {body}"
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_health_rejects_invalid_format() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/debug/health?format=xml",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Invalid format option"),
+            "expected ApiResponse::error with message, got: {body}"
+        );
+        assert!(
+            body.get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("json, text"),
+            "expected detail listing supported formats"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_github_oauth_device_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_github_oauth_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/users/oauth2/github/callback")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_oidc_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/users/oidc/callback")?).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("OIDC is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_rejects_invalid_response_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/oauth2/authorize?response_type=token&client_id=abc&redirect_uri=http://x",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("response_type must be \"code\".")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_rejects_invalid_client_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/oauth2/authorize?response_type=code&client_id=not-a-uuid&redirect_uri=http://x",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Invalid client_id.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_token_rejects_unsupported_grant_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            {
+                let body = "grant_type=implicit&client_id=00000000-0000-0000-0000-000000000000&client_secret=secret";
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oauth2/tokens")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))?
+            },
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Unsupported grant_type.")
+        );
+        assert!(
+            body.get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("authorization_code"),
+            "expected detail listing supported grant types"
+        );
         Ok(())
     }
 }
