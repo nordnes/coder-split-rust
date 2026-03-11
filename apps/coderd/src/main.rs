@@ -295,7 +295,7 @@ fn init_panic_hook() {
         let location = panic_info
             .location()
             .map(|loc| format!("{}:{}", loc.file(), loc.line()));
-        tracing::error!(panic = true, ?location, %backtrace, "Server Panic");
+        tracing::error!(panic = true, %panic_info, ?location, %backtrace, "Server Panic");
     }));
 }
 
