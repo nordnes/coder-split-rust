@@ -162,7 +162,10 @@ impl<S: LicenseStore> LicenseService<S> {
         }
 
         // Determine the entitlement level for features from this license.
-        let entitlement = if claims.in_grace_period(now) {
+        let entitlement = if claims.is_expired(now) {
+            // Fully expired (past grace period) — do not apply.
+            return;
+        } else if claims.in_grace_period(now) {
             Entitlement::GracePeriod
         } else {
             Entitlement::Entitled
