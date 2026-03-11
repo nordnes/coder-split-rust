@@ -152,6 +152,25 @@ pub struct OidcClaims {
 
 const HTTP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
 
+/// Derives the GitHub OAuth base URL from the configured `api_url`.
+///
+/// For `https://api.github.com` (the default), OAuth endpoints are on
+/// `https://github.com`.  For GitHub Enterprise the API URL is typically
+/// `https://<host>/api/v3`, and the OAuth endpoints live on `https://<host>`.
+fn github_oauth_url(config: &GithubOAuthConfig, path: &str) -> String {
+    let api = config.api_url.as_str().trim_end_matches('/');
+    // Standard GitHub API → use github.com for OAuth
+    if api == "https://api.github.com" {
+        return format!("https://github.com{path}");
+    }
+    // GHE: strip the /api/v3 suffix (if present) to get the base host
+    let base = api
+        .strip_suffix("/api/v3")
+        .or_else(|| api.strip_suffix("/api/v3/"))
+        .unwrap_or(api);
+    format!("{base}{path}")
+}
+
 /// Exchanges an authorization code for a GitHub access token.
 #[tracing::instrument(skip(config, code))]
 pub async fn github_exchange_code(
@@ -160,7 +179,7 @@ pub async fn github_exchange_code(
     code: &str,
 ) -> Result<GithubTokenResponse, OAuthLoginError> {
     let response = client
-        .post("https://github.com/login/oauth/access_token")
+        .post(github_oauth_url(config, "/login/oauth/access_token"))
         .header("Accept", "application/json")
         .form(&[
             ("client_id", config.client_id.as_str()),
@@ -280,7 +299,7 @@ pub async fn github_request_device_code(
     config: &GithubOAuthConfig,
 ) -> Result<GithubDeviceResponse, OAuthLoginError> {
     let response = client
-        .post("https://github.com/login/device/code")
+        .post(github_oauth_url(config, "/login/device/code"))
         .header("Accept", "application/json")
         .form(&[
             ("client_id", config.client_id.as_str()),
@@ -445,41 +464,52 @@ pub fn validate_oidc_claims(
     claims: &OidcClaims,
     config: &OidcConfig,
 ) -> Result<(), OAuthLoginError> {
-    // Check issuer
-    if let Some(iss) = claims.extra.get("iss").and_then(|v| v.as_str()) {
-        let expected = config.issuer_url.as_str().trim_end_matches('/');
-        let actual = iss.trim_end_matches('/');
-        if actual != expected {
-            return Err(OAuthLoginError::InvalidIdToken(format!(
-                "issuer mismatch: expected {expected}, got {actual}"
-            )));
-        }
+    // Check issuer (required per OIDC Core spec)
+    let iss = claims
+        .extra
+        .get("iss")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            OAuthLoginError::InvalidIdToken("missing required 'iss' claim".to_owned())
+        })?;
+    let expected = config.issuer_url.as_str().trim_end_matches('/');
+    let actual = iss.trim_end_matches('/');
+    if actual != expected {
+        return Err(OAuthLoginError::InvalidIdToken(format!(
+            "issuer mismatch: expected {expected}, got {actual}"
+        )));
     }
 
-    // Check audience
-    if let Some(aud) = claims.extra.get("aud") {
-        let matches = match aud {
-            serde_json::Value::String(s) => s == &config.client_id,
-            serde_json::Value::Array(arr) => arr
-                .iter()
-                .any(|v| v.as_str().map(|s| s == config.client_id).unwrap_or(false)),
-            _ => false,
-        };
-        if !matches {
-            return Err(OAuthLoginError::InvalidIdToken(
-                "audience does not match client_id".to_owned(),
-            ));
-        }
+    // Check audience (required per OIDC Core spec)
+    let aud = claims.extra.get("aud").ok_or_else(|| {
+        OAuthLoginError::InvalidIdToken("missing required 'aud' claim".to_owned())
+    })?;
+    let aud_matches = match aud {
+        serde_json::Value::String(s) => s == &config.client_id,
+        serde_json::Value::Array(arr) => arr
+            .iter()
+            .any(|v| v.as_str().is_some_and(|s| s == config.client_id)),
+        _ => false,
+    };
+    if !aud_matches {
+        return Err(OAuthLoginError::InvalidIdToken(
+            "audience does not match client_id".to_owned(),
+        ));
     }
 
-    // Check expiry
-    if let Some(exp) = claims.extra.get("exp").and_then(|v| v.as_i64()) {
-        let now = OffsetDateTime::now_utc().unix_timestamp();
-        if exp < now {
-            return Err(OAuthLoginError::InvalidIdToken(
-                "ID token has expired".to_owned(),
-            ));
-        }
+    // Check expiry (required per OIDC Core spec)
+    let exp = claims
+        .extra
+        .get("exp")
+        .and_then(|v| v.as_i64())
+        .ok_or_else(|| {
+            OAuthLoginError::InvalidIdToken("missing required 'exp' claim".to_owned())
+        })?;
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    if exp < now {
+        return Err(OAuthLoginError::InvalidIdToken(
+            "ID token has expired".to_owned(),
+        ));
     }
 
     Ok(())
@@ -526,7 +556,7 @@ pub fn oidc_derive_username(claims: &OidcClaims, config: &OidcConfig) -> String 
             return sanitize_username(prefix);
         }
     }
-    format!("user-{}", &claims.sub[..8.min(claims.sub.len())])
+    format!("user-{}", claims.sub.chars().take(8).collect::<String>())
 }
 
 /// Sanitizes a string to be a valid username (alphanumeric + hyphens, lowercase).
@@ -794,5 +824,190 @@ mod tests {
         };
         let result = validate_oidc_claims(&claims, &config);
         assert!(matches!(result, Err(OAuthLoginError::InvalidIdToken(_))));
+    }
+
+    #[test]
+    fn test_validate_oidc_claims_missing_iss() {
+        let claims = OidcClaims {
+            sub: "user1".to_owned(),
+            extra: {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "aud".to_owned(),
+                    serde_json::Value::String("my-client".to_owned()),
+                );
+                m.insert(
+                    "exp".to_owned(),
+                    serde_json::Value::Number(9999999999_i64.into()),
+                );
+                m
+            },
+            ..Default::default()
+        };
+        let config = OidcConfig {
+            issuer_url: url::Url::parse("https://example.com").unwrap(),
+            client_id: "my-client".to_owned(),
+            client_secret: String::new(),
+            scopes: Vec::new(),
+            allow_signups: true,
+            email_domain: Vec::new(),
+            username_field: "preferred_username".to_owned(),
+            email_field: "email".to_owned(),
+            name_field: "name".to_owned(),
+            ignore_email_verified: false,
+        };
+        let result = validate_oidc_claims(&claims, &config);
+        assert!(matches!(result, Err(OAuthLoginError::InvalidIdToken(_))));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing required 'iss' claim")
+        );
+    }
+
+    #[test]
+    fn test_validate_oidc_claims_missing_aud() {
+        let claims = OidcClaims {
+            sub: "user1".to_owned(),
+            extra: {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "iss".to_owned(),
+                    serde_json::Value::String("https://example.com".to_owned()),
+                );
+                m.insert(
+                    "exp".to_owned(),
+                    serde_json::Value::Number(9999999999_i64.into()),
+                );
+                m
+            },
+            ..Default::default()
+        };
+        let config = OidcConfig {
+            issuer_url: url::Url::parse("https://example.com").unwrap(),
+            client_id: "my-client".to_owned(),
+            client_secret: String::new(),
+            scopes: Vec::new(),
+            allow_signups: true,
+            email_domain: Vec::new(),
+            username_field: "preferred_username".to_owned(),
+            email_field: "email".to_owned(),
+            name_field: "name".to_owned(),
+            ignore_email_verified: false,
+        };
+        let result = validate_oidc_claims(&claims, &config);
+        assert!(matches!(result, Err(OAuthLoginError::InvalidIdToken(_))));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing required 'aud' claim")
+        );
+    }
+
+    #[test]
+    fn test_validate_oidc_claims_missing_exp() {
+        let claims = OidcClaims {
+            sub: "user1".to_owned(),
+            extra: {
+                let mut m = serde_json::Map::new();
+                m.insert(
+                    "iss".to_owned(),
+                    serde_json::Value::String("https://example.com".to_owned()),
+                );
+                m.insert(
+                    "aud".to_owned(),
+                    serde_json::Value::String("my-client".to_owned()),
+                );
+                m
+            },
+            ..Default::default()
+        };
+        let config = OidcConfig {
+            issuer_url: url::Url::parse("https://example.com").unwrap(),
+            client_id: "my-client".to_owned(),
+            client_secret: String::new(),
+            scopes: Vec::new(),
+            allow_signups: true,
+            email_domain: Vec::new(),
+            username_field: "preferred_username".to_owned(),
+            email_field: "email".to_owned(),
+            name_field: "name".to_owned(),
+            ignore_email_verified: false,
+        };
+        let result = validate_oidc_claims(&claims, &config);
+        assert!(matches!(result, Err(OAuthLoginError::InvalidIdToken(_))));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("missing required 'exp' claim")
+        );
+    }
+
+    #[test]
+    fn test_github_oauth_url_standard() {
+        let config = GithubOAuthConfig {
+            client_id: String::new(),
+            client_secret: String::new(),
+            allow_signups: true,
+            allow_everyone: true,
+            allowed_orgs: Vec::new(),
+            allowed_teams: Vec::new(),
+            api_url: url::Url::parse("https://api.github.com").unwrap(),
+        };
+        assert_eq!(
+            github_oauth_url(&config, "/login/oauth/access_token"),
+            "https://github.com/login/oauth/access_token"
+        );
+        assert_eq!(
+            github_oauth_url(&config, "/login/device/code"),
+            "https://github.com/login/device/code"
+        );
+    }
+
+    #[test]
+    fn test_github_oauth_url_enterprise() {
+        let config = GithubOAuthConfig {
+            client_id: String::new(),
+            client_secret: String::new(),
+            allow_signups: true,
+            allow_everyone: true,
+            allowed_orgs: Vec::new(),
+            allowed_teams: Vec::new(),
+            api_url: url::Url::parse("https://ghe.example.com/api/v3").unwrap(),
+        };
+        assert_eq!(
+            github_oauth_url(&config, "/login/oauth/access_token"),
+            "https://ghe.example.com/login/oauth/access_token"
+        );
+        assert_eq!(
+            github_oauth_url(&config, "/login/device/code"),
+            "https://ghe.example.com/login/device/code"
+        );
+    }
+
+    #[test]
+    fn test_oidc_derive_username_multibyte_sub() {
+        let claims = OidcClaims {
+            sub: "αβγδεζηθ-long".to_owned(),
+            ..Default::default()
+        };
+        let config = OidcConfig {
+            issuer_url: url::Url::parse("https://example.com").unwrap(),
+            client_id: String::new(),
+            client_secret: String::new(),
+            scopes: Vec::new(),
+            allow_signups: true,
+            email_domain: Vec::new(),
+            username_field: "preferred_username".to_owned(),
+            email_field: "email".to_owned(),
+            name_field: "name".to_owned(),
+            ignore_email_verified: false,
+        };
+        // Should not panic on multi-byte chars
+        let username = oidc_derive_username(&claims, &config);
+        assert!(username.starts_with("user-"));
     }
 }
