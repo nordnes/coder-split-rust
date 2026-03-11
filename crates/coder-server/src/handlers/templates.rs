@@ -1487,6 +1487,7 @@ pub(crate) async fn post_template_version_dynamic_parameters_evaluate(
                 name: p.name.clone(),
                 display_name: p.display_name.clone(),
                 description: p.description.clone(),
+                // TODO: strip Markdown from description for description_plaintext
                 description_plaintext: p.description.clone(),
                 param_type: p.param_type.clone(),
                 form_type: p.form_type.clone(),
@@ -1720,13 +1721,17 @@ pub(crate) async fn get_template_version_rich_parameters_impl(
 
     let body: Vec<TemplateVersionParameter> = params
         .iter()
-        .map(|p| {
+        .map(|p| -> Result<TemplateVersionParameter, AppError> {
             let options: Vec<coder_core::api::TemplateVersionParameterOption> =
-                serde_json::from_value(p.options.clone()).unwrap_or_default();
-            TemplateVersionParameter {
+                serde_json::from_value(p.options.clone()).map_err(|e| AppError::InternalError {
+                    message: format!("Failed to deserialize options for parameter '{}'", p.name),
+                    detail: e.to_string(),
+                })?;
+            Ok(TemplateVersionParameter {
                 name: p.name.clone(),
                 display_name: p.display_name.clone(),
                 description: p.description.clone(),
+                // TODO: strip Markdown from description for description_plaintext
                 description_plaintext: p.description.clone(),
                 param_type: p.param_type.clone(),
                 form_type: p.form_type.clone(),
@@ -1741,9 +1746,9 @@ pub(crate) async fn get_template_version_rich_parameters_impl(
                 validation_monotonic: p.validation_monotonic.clone(),
                 required: p.required,
                 ephemeral: p.ephemeral,
-            }
+            })
         })
-        .collect();
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok((StatusCode::OK, Json(body)).into_response())
 }

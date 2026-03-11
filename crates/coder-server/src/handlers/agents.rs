@@ -1312,6 +1312,9 @@ pub(crate) async fn get_workspace_agent_external_auth(
         return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
+    // TODO: when query.listen is true, Go long-polls until the token is
+    // available (workspaceAgentsExternalAuth).  Implement long-polling support.
+
     // Validate that the provider id is provided.
     if query.id.is_empty() {
         return Ok((
@@ -1351,7 +1354,9 @@ pub(crate) async fn get_workspace_agent_external_auth(
 
     let authenticated = link
         .as_ref()
-        .map(|l| l.authenticated && l.validate_error.is_empty())
+        .map(|l| {
+            l.authenticated && l.validate_error.is_empty() && l.expires > OffsetDateTime::now_utc()
+        })
         .unwrap_or(false);
 
     // Build the agent-facing response (WorkspaceAgentExternalAuthResponse),
@@ -1370,17 +1375,15 @@ pub(crate) async fn get_workspace_agent_external_auth(
         url: if authenticated {
             String::new()
         } else {
-            let mut redirect = state.config.access_url.clone();
-            redirect
-                .path_segments_mut()
-                .map_err(|()| AppError::InternalError {
+            state
+                .config
+                .access_url
+                .join(&format!("external-auth/{}", query.id))
+                .map_err(|e| AppError::InternalError {
                     message: "Failed to construct external auth redirect URL.".into(),
-                    detail: "access_url cannot be used as a base URL".into(),
+                    detail: e.to_string(),
                 })?
-                .pop_if_empty()
-                .push("external-auth")
-                .push(&query.id);
-            redirect.to_string()
+                .to_string()
         },
         auth_type: provider_config.provider_type.clone(),
         authenticated,

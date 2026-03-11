@@ -7125,7 +7125,10 @@ mod tests {
             ssh: SshConfig {
                 hostname_prefix: "coder".to_owned(),
                 hostname_suffix: "example.internal".to_owned(),
-                ssh_config_options: vec![("StrictHostKeyChecking".to_owned(), "no".to_owned())],
+                ssh_config_options: HashMap::from([(
+                    "StrictHostKeyChecking".to_owned(),
+                    "no".to_owned(),
+                )]),
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),

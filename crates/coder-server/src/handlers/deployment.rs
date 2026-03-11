@@ -105,13 +105,7 @@ pub(crate) async fn deployment_ssh(State(state): State<AppState>) -> Json<SshCon
     Json(SshConfigResponse {
         hostname_prefix: state.config.ssh.hostname_prefix.clone(),
         hostname_suffix: state.config.ssh.hostname_suffix.clone(),
-        ssh_config_options: state
-            .config
-            .ssh
-            .ssh_config_options
-            .iter()
-            .cloned()
-            .collect(),
+        ssh_config_options: state.config.ssh.ssh_config_options.clone(),
     })
 }
 
