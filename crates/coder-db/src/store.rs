@@ -1056,6 +1056,7 @@ impl AppStore for PostgresStore {
         token_hash: &[u8],
     ) -> Result<Option<AuthenticatedUser>, StorageError> {
         let query_start = std::time::Instant::now();
+        let result: Result<Option<AuthenticatedUser>, StorageError> = async {
         let row = sqlx::query_as::<_, StoredUserRow>(
             "SELECT
                 u.id,
@@ -1108,10 +1109,13 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)?;
 
         auth_user.org_roles = org_roles;
-        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("db_query_duration_ms", "operation" => "find_user_by_session_token_hash", "success" => "true").record(query_duration);
-        metrics::counter!("db_queries_total", "operation" => "find_user_by_session_token_hash", "success" => "true").increment(1);
         Ok(Some(auth_user))
+        }.await;
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        let success = result.is_ok();
+        metrics::histogram!("db_query_duration_ms", "operation" => "find_user_by_session_token_hash", "success" => if success { "true" } else { "false" }).record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "find_user_by_session_token_hash", "success" => if success { "true" } else { "false" }).increment(1);
+        result
     }
 
     #[instrument(skip(self, token_hash), err(level = tracing::Level::WARN))]
@@ -2509,7 +2513,7 @@ impl AppStore for PostgresStore {
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
     async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
         let query_start = std::time::Instant::now();
-        sqlx::query(
+        let result = sqlx::query(
             "INSERT INTO audit_logs (
                 id,
                 request_id,
@@ -2554,12 +2558,14 @@ impl AppStore for PostgresStore {
         .bind(input.user_id)
         .execute(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map(|_| ())
+        .map_err(storage_error);
 
         let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("db_query_duration_ms", "operation" => "insert_audit_log", "success" => "true").record(query_duration);
-        metrics::counter!("db_queries_total", "operation" => "insert_audit_log", "success" => "true").increment(1);
-        Ok(())
+        let success = result.is_ok();
+        metrics::histogram!("db_query_duration_ms", "operation" => "insert_audit_log", "success" => if success { "true" } else { "false" }).record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "insert_audit_log", "success" => if success { "true" } else { "false" }).increment(1);
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -5528,6 +5534,7 @@ impl AppStore for PostgresStore {
         filter: WorkspaceListFilter,
     ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
         let query_start = std::time::Instant::now();
+        let result: Result<(Vec<WorkspaceRecord>, i64), StorageError> = async {
         let search = filter
             .name
             .as_deref()
@@ -5615,10 +5622,13 @@ impl AppStore for PostgresStore {
 
         let workspaces: Vec<WorkspaceRecord> =
             rows.into_iter().map(workspace_record_from_row).collect();
-        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
-        metrics::histogram!("db_query_duration_ms", "operation" => "list_workspaces", "success" => "true").record(query_duration);
-        metrics::counter!("db_queries_total", "operation" => "list_workspaces", "success" => "true").increment(1);
         Ok((workspaces, total))
+        }.await;
+        let query_duration = query_start.elapsed().as_secs_f64() * 1000.0;
+        let success = result.is_ok();
+        metrics::histogram!("db_query_duration_ms", "operation" => "list_workspaces", "success" => if success { "true" } else { "false" }).record(query_duration);
+        metrics::counter!("db_queries_total", "operation" => "list_workspaces", "success" => if success { "true" } else { "false" }).increment(1);
+        result
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
