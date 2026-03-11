@@ -4247,7 +4247,7 @@ mod tests {
             let msg = msgs
                 .iter_mut()
                 .find(|m| m.id == input.message_id && m.chat_id == input.chat_id)
-                .ok_or_else(|| StorageError::invalid_data("chat message not found"))?;
+                .ok_or_else(|| StorageError::not_found("chat message not found"))?;
             msg.content = input.content;
             Ok(msg.clone())
         }
@@ -4284,7 +4284,7 @@ mod tests {
             let msg = msgs
                 .iter_mut()
                 .find(|m| m.id == queued_message_id && m.chat_id == chat_id)
-                .ok_or_else(|| StorageError::invalid_data("queued message not found"))?;
+                .ok_or_else(|| StorageError::not_found("queued message not found"))?;
             msg.created_at = promoted_at;
             Ok(msg.clone())
         }
