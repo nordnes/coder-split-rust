@@ -6809,6 +6809,84 @@ where
     ) -> Result<Option<FileRecord>, StorageError> {
         AppStore::get_file_by_hash_and_creator(self, hash, creator_id).await
     }
+
+    async fn update_chat_message_content(
+        &self,
+        input: UpdateChatMessageContentInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        AppStore::update_chat_message_content(self, input).await
+    }
+
+    async fn delete_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<(), StorageError> {
+        AppStore::delete_chat_queued_message(self, chat_id, queued_message_id).await
+    }
+
+    async fn promote_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<ChatQueuedMessageRecord, StorageError> {
+        AppStore::promote_chat_queued_message(self, chat_id, queued_message_id).await
+    }
+
+    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
+        AppStore::list_chat_providers(self).await
+    }
+
+    async fn insert_chat_provider(
+        &self,
+        input: InsertChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        AppStore::insert_chat_provider(self, input).await
+    }
+
+    async fn update_chat_provider(
+        &self,
+        input: UpdateChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        AppStore::update_chat_provider(self, input).await
+    }
+
+    async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
+        AppStore::delete_chat_provider(self, provider_id).await
+    }
+
+    async fn list_chat_model_configs(
+        &self,
+        enabled_only: bool,
+    ) -> Result<Vec<ChatModelConfigRecord>, StorageError> {
+        AppStore::list_chat_model_configs(self, enabled_only).await
+    }
+
+    async fn insert_chat_model_config(
+        &self,
+        input: InsertChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        AppStore::insert_chat_model_config(self, input).await
+    }
+
+    async fn update_chat_model_config(
+        &self,
+        input: UpdateChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        AppStore::update_chat_model_config(self, input).await
+    }
+
+    async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
+        AppStore::delete_chat_model_config(self, config_id).await
+    }
+
+    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+        AppStore::ensure_default_chat_model_config(self).await
+    }
+
+    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+        AppStore::unset_default_chat_model_configs(self).await
+    }
 }
 
 #[async_trait]
@@ -6930,6 +7008,88 @@ where
         (**self)
             .get_file_by_hash_and_creator(hash, creator_id)
             .await
+    }
+
+    async fn update_chat_message_content(
+        &self,
+        input: UpdateChatMessageContentInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        (**self).update_chat_message_content(input).await
+    }
+
+    async fn delete_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .delete_chat_queued_message(chat_id, queued_message_id)
+            .await
+    }
+
+    async fn promote_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<ChatQueuedMessageRecord, StorageError> {
+        (**self)
+            .promote_chat_queued_message(chat_id, queued_message_id)
+            .await
+    }
+
+    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
+        (**self).list_chat_providers().await
+    }
+
+    async fn insert_chat_provider(
+        &self,
+        input: InsertChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        (**self).insert_chat_provider(input).await
+    }
+
+    async fn update_chat_provider(
+        &self,
+        input: UpdateChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        (**self).update_chat_provider(input).await
+    }
+
+    async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
+        (**self).delete_chat_provider(provider_id).await
+    }
+
+    async fn list_chat_model_configs(
+        &self,
+        enabled_only: bool,
+    ) -> Result<Vec<ChatModelConfigRecord>, StorageError> {
+        (**self).list_chat_model_configs(enabled_only).await
+    }
+
+    async fn insert_chat_model_config(
+        &self,
+        input: InsertChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        (**self).insert_chat_model_config(input).await
+    }
+
+    async fn update_chat_model_config(
+        &self,
+        input: UpdateChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        (**self).update_chat_model_config(input).await
+    }
+
+    async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
+        (**self).delete_chat_model_config(config_id).await
+    }
+
+    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+        (**self).ensure_default_chat_model_config().await
+    }
+
+    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+        (**self).unset_default_chat_model_configs().await
     }
 }
 

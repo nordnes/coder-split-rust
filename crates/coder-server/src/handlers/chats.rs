@@ -1194,9 +1194,9 @@ pub(crate) async fn create_chat_model_config(
         None => serde_json::json!({}),
     };
 
-    // Handle default logic: if explicitly set as default, unset others first.
-    // If no default currently exists, make this one the default.
-    let mut set_as_default = is_default;
+    // Disabled configs cannot be the default.
+    let mut set_as_default = if enabled { is_default } else { false };
+    // If no enabled default currently exists, make this one the default (if enabled).
     if !set_as_default && enabled {
         let existing = state.store.list_chat_model_configs(false).await?;
         if !existing.iter().any(|c| c.is_default && c.enabled) {
@@ -1293,7 +1293,12 @@ pub(crate) async fn update_chat_model_config(
         }
     };
     let enabled = request.enabled.unwrap_or(existing.enabled);
-    let is_default = request.is_default.unwrap_or(existing.is_default);
+    // Disabled configs cannot be the default.
+    let is_default = if enabled {
+        request.is_default.unwrap_or(existing.is_default)
+    } else {
+        false
+    };
 
     let context_limit = match request.context_limit {
         Some(limit) => {
@@ -1324,8 +1329,7 @@ pub(crate) async fn update_chat_model_config(
     };
 
     // Handle default logic: if setting as new default, unset others first.
-    let set_as_default = is_default && !existing.is_default;
-    if set_as_default {
+    if is_default && !existing.is_default {
         state.store.unset_default_chat_model_configs().await?;
     }
 
