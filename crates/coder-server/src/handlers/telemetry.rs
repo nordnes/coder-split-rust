@@ -24,7 +24,7 @@ pub(crate) async fn get_telemetry_status(
     };
 
     let response = TelemetryStatusResponse {
-        enabled: false, // TODO: wire telemetry_enabled into ServerConfig
+        enabled: state.config.telemetry.enabled,
         deployment_id: state.deployment_id.to_string(),
     };
 
