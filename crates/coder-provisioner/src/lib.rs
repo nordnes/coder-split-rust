@@ -1,6 +1,8 @@
 //! Provisioner and job-orchestration helpers for the Rust `coderd` rewrite.
 #![forbid(unsafe_code)]
 
+pub mod server;
+
 use std::sync::Arc;
 
 use base64::Engine as _;
