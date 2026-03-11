@@ -92,6 +92,14 @@ pub trait AuditSink: Send + Sync {
             self.record(event).await;
         }
     }
+
+    /// Gracefully shuts down the sink, flushing any buffered events.
+    ///
+    /// The default implementation is a no-op.  Sinks that buffer events
+    /// internally (e.g. [`BatchedAuditSink`](batched_sink::BatchedAuditSink))
+    /// should override this to drain their buffer before the database pool
+    /// is closed.
+    async fn close(&self) {}
 }
 
 /// Tracing-backed audit sink used by the current binary.

@@ -321,10 +321,12 @@ async fn run() -> Result<(), MainError> {
 
     let mut coordinator = ShutdownCoordinator::new();
 
-    // 1. Flush audit sink.  The PersistingAuditSink is synchronous-per-event
-    //    so there is no buffered state to drain, but the slot is kept here so
-    //    a future batched implementation gets wired in automatically.
-    coordinator.register("audit", async {});
+    // 1. Flush the batched audit sink so buffered events are persisted
+    //    before the database pool is closed.
+    let audit_sink = state.audit.clone();
+    coordinator.register("audit", async move {
+        audit_sink.close().await;
+    });
 
     // 2. Close pub/sub background listener and release its PgListener connection.
     coordinator.register("pubsub", async move {
