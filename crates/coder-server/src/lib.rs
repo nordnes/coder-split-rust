@@ -4,6 +4,9 @@
 mod app;
 mod error;
 mod extractors;
+mod handlers;
+pub(crate) mod helpers;
 pub mod metrics;
+pub(crate) mod middleware;
 
 pub use app::{AppState, build_router};
