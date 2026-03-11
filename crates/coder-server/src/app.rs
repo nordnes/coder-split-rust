@@ -4335,7 +4335,7 @@ mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let provider = providers
                 .get_mut(&input.id)
-                .ok_or_else(|| StorageError::invalid_data("chat provider not found"))?;
+                .ok_or_else(|| StorageError::not_found("chat provider not found"))?;
             provider.display_name = input.display_name;
             provider.api_key = input.api_key;
             provider.base_url = input.base_url;
@@ -4405,7 +4405,7 @@ mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let config = configs
                 .get_mut(&input.id)
-                .ok_or_else(|| StorageError::invalid_data("chat model config not found"))?;
+                .ok_or_else(|| StorageError::not_found("chat model config not found"))?;
             config.provider = input.provider;
             config.model = input.model;
             config.display_name = input.display_name;
