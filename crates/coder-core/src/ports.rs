@@ -4576,6 +4576,42 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ))
     }
 
+    /// Deletes webpush subscriptions by their IDs.
+    async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError> {
+        let _ = ids;
+        Err(StorageError::unavailable(
+            "webpush subscriptions are not implemented",
+        ))
+    }
+
+    /// Deletes all webpush subscriptions (used when regenerating VAPID keys).
+    async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError> {
+        Err(StorageError::unavailable(
+            "webpush subscriptions are not implemented",
+        ))
+    }
+
+    /// Retrieves the stored VAPID key pair for web push.
+    async fn get_webpush_vapid_keys(
+        &self,
+    ) -> Result<Option<crate::api::VapidKeyPair>, StorageError> {
+        Err(StorageError::unavailable(
+            "webpush VAPID keys are not implemented",
+        ))
+    }
+
+    /// Stores or updates the VAPID key pair for web push.
+    async fn upsert_webpush_vapid_keys(
+        &self,
+        public_key: &str,
+        private_key: &str,
+    ) -> Result<(), StorageError> {
+        let _ = (public_key, private_key);
+        Err(StorageError::unavailable(
+            "webpush VAPID keys are not implemented",
+        ))
+    }
+
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.

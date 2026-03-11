@@ -2,13 +2,25 @@
 //!
 //! Provides a background dispatch loop that polls pending notification messages
 //! and delivers them via SMTP email, HTTP webhook, or in-app inbox.
+//!
+//! Also provides the [`Webpusher`] dispatcher for sending Web Push notifications
+//! to browser subscriptions using VAPID authentication.
 #![forbid(unsafe_code)]
 
 use std::sync::{Arc, Weak};
 
+use base64::Engine;
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use coder_core::AppStore;
 use coder_core::IdentityStore;
+use coder_core::api::{WebpushMessage, WebpushSubscription};
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
-use tracing::{info, warn};
+use tracing::{error, info, warn};
+use uuid::Uuid;
+use web_push::{
+    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, VapidSignatureBuilder, WebPushClient,
+    WebPushMessageBuilder,
+};
 
 /// Current milestone for the notifications crate.
 pub const STATUS: &str = "active";
@@ -244,6 +256,296 @@ where
             Ok(n) => info!(dispatched = n, "notification dispatch cycle completed"),
             Err(error) => warn!(error = %error, "notification dispatch cycle failed"),
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Web Push dispatcher
+// ---------------------------------------------------------------------------
+
+/// Errors from the web push dispatcher.
+#[derive(Debug, thiserror::Error)]
+pub enum WebpushError {
+    /// Storage-level error.
+    #[error("storage error: {0}")]
+    Storage(#[from] coder_core::StorageError),
+    /// Web push protocol or encoding error.
+    #[error("web push error: {0}")]
+    WebPush(String),
+    /// JSON serialization failure.
+    #[error("serialization error: {0}")]
+    Serialization(String),
+}
+
+/// Web Push notification dispatcher using VAPID authentication.
+///
+/// Manages VAPID key pairs and sends push notifications to browser
+/// subscriptions. Keys are loaded from the database on construction,
+/// and regenerated if missing.
+pub struct Webpusher<S> {
+    store: S,
+    /// VAPID subscriber contact (mailto: or https:// URL).
+    vapid_sub: String,
+    /// Base64url-encoded VAPID public key (for clients).
+    vapid_public_key: String,
+    /// PEM-encoded VAPID private key.
+    vapid_private_pem: String,
+    /// Reusable web push HTTP client.
+    client: IsahcWebPushClient,
+}
+
+impl<S> Webpusher<S>
+where
+    S: AppStore + Clone + Send + Sync + 'static,
+{
+    /// Creates a new web push dispatcher.
+    ///
+    /// Loads VAPID keys from the database. If no keys exist, generates a new
+    /// key pair and stores it, deleting any existing subscriptions that would
+    /// be invalid with the new keys.
+    pub async fn new(store: S, vapid_sub: String) -> Result<Self, WebpushError> {
+        let keys = store.get_webpush_vapid_keys().await?;
+
+        let (public_key, private_pem) = match keys {
+            Some(kp) if !kp.public_key.is_empty() && !kp.private_key.is_empty() => {
+                (kp.public_key, kp.private_key)
+            }
+            _ => {
+                // Generate new VAPID keys and delete stale subscriptions.
+                regenerate_vapid_keys(&store).await?
+            }
+        };
+
+        // Validate that the private key can be parsed before accepting it.
+        let _partial = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
+            .map_err(|e| WebpushError::WebPush(format!("invalid stored VAPID key: {e}")))?;
+
+        let client = IsahcWebPushClient::new().map_err(|e| WebpushError::WebPush(e.to_string()))?;
+
+        Ok(Self {
+            store,
+            vapid_sub,
+            vapid_public_key: public_key,
+            vapid_private_pem: private_pem,
+            client,
+        })
+    }
+
+    /// Returns the VAPID public key for client-side subscription setup.
+    #[must_use]
+    pub fn public_key(&self) -> &str {
+        &self.vapid_public_key
+    }
+
+    /// Dispatches a web push notification to all subscriptions for a user.
+    ///
+    /// Subscriptions that return HTTP 410 (Gone) are automatically cleaned up.
+    /// Errors for individual subscriptions are logged but do not prevent
+    /// delivery to other subscriptions.
+    pub async fn dispatch(
+        &self,
+        user_id: Uuid,
+        message: &WebpushMessage,
+    ) -> Result<(), WebpushError> {
+        let subscriptions = self
+            .store
+            .get_webpush_subscriptions_by_user_id(user_id)
+            .await?;
+
+        if subscriptions.is_empty() {
+            return Ok(());
+        }
+
+        let msg_json =
+            serde_json::to_vec(message).map_err(|e| WebpushError::Serialization(e.to_string()))?;
+
+        let mut stale_ids: Vec<Uuid> = Vec::new();
+
+        for sub in &subscriptions {
+            match self
+                .send_single(
+                    &msg_json,
+                    &sub.endpoint,
+                    &sub.endpoint_auth_key,
+                    &sub.endpoint_p256dh_key,
+                )
+                .await
+            {
+                Ok(()) => {}
+                Err(WebpushSendOutcome::Gone) => {
+                    stale_ids.push(sub.id);
+                }
+                Err(WebpushSendOutcome::Failed(err)) => {
+                    warn!(
+                        endpoint = %sub.endpoint,
+                        error = %err,
+                        "web push send failed"
+                    );
+                }
+            }
+        }
+
+        if !stale_ids.is_empty() {
+            if let Err(err) = self.store.delete_webpush_subscriptions(&stale_ids).await {
+                error!(error = %err, "failed to delete stale webpush subscriptions");
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Sends a test push notification to verify a subscription is valid.
+    pub async fn test(&self, subscription: &WebpushSubscription) -> Result<(), WebpushError> {
+        let test_msg = WebpushMessage {
+            icon: String::new(),
+            title: "Test".to_owned(),
+            body: "This is a test Web Push notification".to_owned(),
+            tag: String::new(),
+            actions: Vec::new(),
+            data: std::collections::HashMap::new(),
+        };
+
+        let msg_json = serde_json::to_vec(&test_msg)
+            .map_err(|e| WebpushError::Serialization(e.to_string()))?;
+
+        match self
+            .send_single(
+                &msg_json,
+                &subscription.endpoint,
+                &subscription.auth_key,
+                &subscription.p256dh_key,
+            )
+            .await
+        {
+            Ok(()) => Ok(()),
+            Err(WebpushSendOutcome::Gone) => Err(WebpushError::WebPush(
+                "subscription is no longer valid (410 Gone)".to_owned(),
+            )),
+            Err(WebpushSendOutcome::Failed(err)) => Err(WebpushError::WebPush(err)),
+        }
+    }
+
+    /// Sends a single web push message to one subscription endpoint.
+    async fn send_single(
+        &self,
+        payload: &[u8],
+        endpoint: &str,
+        auth_key: &str,
+        p256dh_key: &str,
+    ) -> Result<(), WebpushSendOutcome> {
+        let subscription_info = SubscriptionInfo::new(endpoint, p256dh_key, auth_key);
+
+        // Build VAPID signature: load private key from PEM, attach subscription
+        // info, add the subscriber contact ("sub" claim), then build.
+        let partial = VapidSignatureBuilder::from_pem_no_sub(self.vapid_private_pem.as_bytes())
+            .map_err(|e| WebpushSendOutcome::Failed(format!("VAPID key load: {e}")))?;
+        let mut sig_builder = partial.add_sub_info(&subscription_info);
+        sig_builder.add_claim("sub", self.vapid_sub.as_str());
+        let sig = sig_builder
+            .build()
+            .map_err(|e| WebpushSendOutcome::Failed(format!("VAPID signature build: {e}")))?;
+
+        let mut builder = WebPushMessageBuilder::new(&subscription_info);
+        builder.set_vapid_signature(sig);
+        builder.set_payload(ContentEncoding::Aes128Gcm, payload);
+
+        let web_push_msg = builder
+            .build()
+            .map_err(|e| WebpushSendOutcome::Failed(format!("message build: {e}")))?;
+
+        match self.client.send(web_push_msg).await {
+            Ok(()) => Ok(()),
+            Err(err) => {
+                // Check if the subscription is gone (HTTP 410).
+                let err_str = err.to_string();
+                if err_str.contains("410") || err_str.to_lowercase().contains("gone") {
+                    Err(WebpushSendOutcome::Gone)
+                } else {
+                    Err(WebpushSendOutcome::Failed(err_str))
+                }
+            }
+        }
+    }
+}
+
+/// Internal outcome for a single web push send attempt.
+enum WebpushSendOutcome {
+    /// The subscription has been removed by the push service (HTTP 410).
+    Gone,
+    /// A transport or protocol error occurred.
+    Failed(String),
+}
+
+/// Generates a new VAPID key pair, stores it, and deletes all existing
+/// subscriptions (which are invalid with the new keys).
+///
+/// Returns `(public_key_b64, private_key_pem)` where the public key is
+/// base64url-no-pad encoded and the private key is PEM-encoded.
+async fn regenerate_vapid_keys<S>(store: &S) -> Result<(String, String), WebpushError>
+where
+    S: AppStore + Send + Sync,
+{
+    // Generate a fresh EC P-256 private key in PEM format.
+    let private_pem = generate_ec_p256_pem()
+        .map_err(|e| WebpushError::WebPush(format!("key generation: {e}")))?;
+
+    // Parse the PEM to extract the uncompressed public key bytes.
+    let partial = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
+        .map_err(|e| WebpushError::WebPush(format!("PEM parse: {e}")))?;
+
+    let public_key_bytes = partial.get_public_key();
+    let public_key_b64 = URL_SAFE_NO_PAD.encode(&public_key_bytes);
+
+    // Delete all existing subscriptions (they're invalid with new keys)
+    // then store the new keys.
+    store.delete_all_webpush_subscriptions().await?;
+    store
+        .upsert_webpush_vapid_keys(&public_key_b64, &private_pem)
+        .await?;
+
+    info!("regenerated VAPID key pair for web push");
+    Ok((public_key_b64, private_pem))
+}
+
+/// Generates a PEM-encoded EC P-256 private key using the openssl command.
+fn generate_ec_p256_pem() -> Result<String, String> {
+    let output = std::process::Command::new("openssl")
+        .args(["ecparam", "-name", "prime256v1", "-genkey", "-noout"])
+        .output()
+        .map_err(|e| format!("failed to run openssl: {e}"))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("openssl failed: {stderr}"));
+    }
+
+    String::from_utf8(output.stdout).map_err(|e| format!("invalid UTF-8 from openssl: {e}"))
+}
+
+/// A no-op web push dispatcher that always returns an error.
+///
+/// Used when web push is disabled or VAPID key generation failed.
+pub struct NoopWebpusher {
+    /// Reason why web push is disabled.
+    msg: String,
+}
+
+impl NoopWebpusher {
+    /// Creates a no-op dispatcher with the given reason message.
+    pub fn new(msg: impl Into<String>) -> Self {
+        Self { msg: msg.into() }
+    }
+
+    /// Returns the reason why web push is disabled.
+    #[must_use]
+    pub fn message(&self) -> &str {
+        &self.msg
+    }
+
+    /// Always returns the empty string (no VAPID key available).
+    #[must_use]
+    pub fn public_key(&self) -> &str {
+        ""
     }
 }
 
@@ -970,5 +1272,165 @@ mod tests {
             config.webhook_timeout_secs, 30,
             "default webhook timeout should be 30s"
         );
+    }
+
+    // ── 20. WebpushError display messages ─────────────────────
+
+    #[test]
+    fn webpush_error_storage_variant() {
+        let err = WebpushError::Storage(StorageError::unavailable("db down"));
+        let msg = err.to_string();
+        assert!(msg.contains("storage error"), "should contain prefix");
+        assert!(msg.contains("db down"));
+    }
+
+    #[test]
+    fn webpush_error_webpush_variant() {
+        let err = WebpushError::WebPush("bad key".to_owned());
+        let msg = err.to_string();
+        assert!(msg.contains("web push error"), "should contain prefix");
+        assert!(msg.contains("bad key"));
+    }
+
+    #[test]
+    fn webpush_error_serialization_variant() {
+        let err = WebpushError::Serialization("invalid json".to_owned());
+        let msg = err.to_string();
+        assert!(msg.contains("serialization error"), "should contain prefix");
+        assert!(msg.contains("invalid json"));
+    }
+
+    // ── 21. NoopWebpusher behavior ────────────────────────────
+
+    #[test]
+    fn noop_webpusher_stores_message() {
+        let noop = NoopWebpusher::new("web push disabled");
+        assert_eq!(noop.message(), "web push disabled");
+    }
+
+    #[test]
+    fn noop_webpusher_public_key_is_empty() {
+        let noop = NoopWebpusher::new("no VAPID keys");
+        assert!(
+            noop.public_key().is_empty(),
+            "noop should return empty public key"
+        );
+    }
+
+    // ── 22. EC P-256 key generation ───────────────────────────
+
+    #[test]
+    fn generate_ec_p256_pem_produces_valid_key() {
+        let pem = generate_ec_p256_pem();
+        assert!(pem.is_ok(), "openssl should produce a PEM key");
+        let pem_str = pem.unwrap_or_else(|e| panic!("unexpected error: {e}"));
+        assert!(
+            pem_str.contains("BEGIN EC PRIVATE KEY"),
+            "PEM should contain EC header"
+        );
+        assert!(
+            pem_str.contains("END EC PRIVATE KEY"),
+            "PEM should contain EC footer"
+        );
+    }
+
+    #[test]
+    fn generate_ec_p256_pem_is_parseable_by_vapid_builder() {
+        let pem = generate_ec_p256_pem().unwrap_or_else(|e| panic!("keygen: {e}"));
+        let result = VapidSignatureBuilder::from_pem_no_sub(pem.as_bytes());
+        assert!(
+            result.is_ok(),
+            "generated PEM should be parseable by web-push crate"
+        );
+    }
+
+    #[test]
+    fn generate_ec_p256_pem_produces_65_byte_public_key() {
+        let pem = generate_ec_p256_pem().unwrap_or_else(|e| panic!("keygen: {e}"));
+        let partial = VapidSignatureBuilder::from_pem_no_sub(pem.as_bytes())
+            .unwrap_or_else(|e| panic!("PEM parse: {e}"));
+        let pub_key = partial.get_public_key();
+        // Uncompressed EC P-256 public key = 65 bytes (0x04 prefix + 32x + 32y)
+        assert_eq!(
+            pub_key.len(),
+            65,
+            "EC P-256 uncompressed public key should be 65 bytes"
+        );
+        assert_eq!(pub_key[0], 0x04, "uncompressed key should start with 0x04");
+    }
+
+    // ── 23. WebpushMessage serialization ──────────────────────
+
+    #[test]
+    fn webpush_message_serializes_to_json() {
+        let msg = WebpushMessage {
+            icon: "/icon.png".to_owned(),
+            title: "Test Title".to_owned(),
+            body: "Test Body".to_owned(),
+            tag: "test-tag".to_owned(),
+            actions: Vec::new(),
+            data: std::collections::HashMap::new(),
+        };
+        let json = serde_json::to_string(&msg);
+        assert!(json.is_ok(), "WebpushMessage should serialize");
+        let json_str = json.unwrap_or_else(|e| panic!("serialize: {e}"));
+        assert!(json_str.contains("Test Title"));
+        assert!(json_str.contains("Test Body"));
+        assert!(json_str.contains("/icon.png"));
+    }
+
+    #[test]
+    fn webpush_message_round_trip() {
+        let msg = WebpushMessage {
+            icon: String::new(),
+            title: "Hello".to_owned(),
+            body: "World".to_owned(),
+            tag: String::new(),
+            actions: Vec::new(),
+            data: std::collections::HashMap::new(),
+        };
+        let json = serde_json::to_vec(&msg).unwrap_or_else(|e| panic!("serialize: {e}"));
+        let decoded: WebpushMessage =
+            serde_json::from_slice(&json).unwrap_or_else(|e| panic!("deserialize: {e}"));
+        assert_eq!(decoded.title, "Hello");
+        assert_eq!(decoded.body, "World");
+    }
+
+    // ── 24. WebpushSendOutcome variants ───────────────────────
+
+    #[test]
+    fn webpush_send_outcome_gone_variant() {
+        let outcome = WebpushSendOutcome::Gone;
+        assert!(matches!(outcome, WebpushSendOutcome::Gone));
+    }
+
+    #[test]
+    fn webpush_send_outcome_failed_variant() {
+        let outcome = WebpushSendOutcome::Failed("timeout".to_owned());
+        match outcome {
+            WebpushSendOutcome::Failed(msg) => assert_eq!(msg, "timeout"),
+            WebpushSendOutcome::Gone => panic!("expected Failed variant"),
+        }
+    }
+
+    // ── 25. VAPID public key base64url encoding ───────────────
+
+    #[test]
+    fn vapid_public_key_base64url_encoding() {
+        let pem = generate_ec_p256_pem().unwrap_or_else(|e| panic!("keygen: {e}"));
+        let partial = VapidSignatureBuilder::from_pem_no_sub(pem.as_bytes())
+            .unwrap_or_else(|e| panic!("PEM parse: {e}"));
+        let pub_key = partial.get_public_key();
+        let encoded = URL_SAFE_NO_PAD.encode(&pub_key);
+        // Base64url encoding of 65 bytes = 87 chars (no padding)
+        assert_eq!(
+            encoded.len(),
+            87,
+            "base64url of 65 bytes should be 87 chars"
+        );
+        // Should not contain '+', '/', or '=' (standard base64 chars)
+        assert!(!encoded.contains('+'), "should use URL-safe encoding");
+        assert!(!encoded.contains('/'), "should use URL-safe encoding");
+        assert!(!encoded.contains('='), "should have no padding");
     }
 }

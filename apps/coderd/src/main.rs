@@ -21,6 +21,7 @@ use coder_core::{
     config::{GithubOAuthConfig, OidcConfig, RateLimitConfig},
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
+use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
@@ -459,6 +460,11 @@ async fn run() -> Result<(), MainError> {
         .install_recorder()
         .map_err(|error| MainError::Config(format!("install prometheus recorder: {error}")))?;
 
+    // Start the notification dispatch background worker.
+    let notification_service =
+        NotificationDispatchService::new(store.clone(), NotificationConfig::default())
+            .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -521,7 +527,12 @@ async fn run() -> Result<(), MainError> {
         state.close_deployment_stats();
     });
 
-    // 4. Flush and shut down the OpenTelemetry tracer provider so buffered
+    // 4. Drop the notification dispatch service so its background loop stops.
+    coordinator.register("notifications", async move {
+        drop(notification_service);
+    });
+
+    // 5. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
     //    sends to a remote collector (gRPC), not to the database, so this
     //    is safe to run before closing the DB pool.
@@ -533,7 +544,7 @@ async fn run() -> Result<(), MainError> {
         }
     });
 
-    // 5. Close the database connection pool last so preceding tasks can
+    // 6. Close the database connection pool last so preceding tasks can
     //    still issue final queries during their own shutdown.
     coordinator.register("database", async move {
         store_pool.close().await;
