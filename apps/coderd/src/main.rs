@@ -189,8 +189,8 @@ async fn run() -> Result<(), MainError> {
     let cli = Cli::parse();
     let Command::Server(args) = cli.command;
 
-    init_panic_hook();
     init_tracing(args.log_format);
+    init_panic_hook();
 
     let config = build_config(args)?;
 
