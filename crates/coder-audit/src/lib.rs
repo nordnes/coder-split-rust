@@ -326,4 +326,183 @@ mod tests {
         })
         .await;
     }
+
+    // ── AuditEvent creation for each resource kind ──────────
+
+    #[test]
+    fn audit_event_for_workspace_resource() {
+        let event = AuditEvent {
+            action: AuditAction::Start,
+            resource: ResourceKind::Workspace,
+            actor_user_id: Some(Uuid::new_v4()),
+            target_id: Some("ws-123".to_owned()),
+            summary: "Started workspace".to_owned(),
+        };
+        assert_eq!(event.action, AuditAction::Start);
+        assert_eq!(event.resource, ResourceKind::Workspace);
+    }
+
+    #[test]
+    fn audit_event_for_template_resource() {
+        let event = AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::Template,
+            actor_user_id: Some(Uuid::new_v4()),
+            target_id: Some("tmpl-abc".to_owned()),
+            summary: "Updated template version".to_owned(),
+        };
+        assert_eq!(event.action, AuditAction::Write);
+        assert_eq!(event.resource, ResourceKind::Template);
+        assert!(event.summary.contains("template"));
+    }
+
+    #[test]
+    fn audit_event_for_organization_resource() {
+        let org_id = Uuid::new_v4();
+        let event = AuditEvent {
+            action: AuditAction::Create,
+            resource: ResourceKind::Organization,
+            actor_user_id: Some(Uuid::new_v4()),
+            target_id: Some(org_id.to_string()),
+            summary: format!("Created organization {org_id}"),
+        };
+        assert_eq!(event.resource, ResourceKind::Organization);
+        assert!(
+            event
+                .target_id
+                .as_ref()
+                .is_some_and(|id| id.contains(&org_id.to_string()))
+        );
+    }
+
+    #[test]
+    fn audit_event_for_authentication_resource() {
+        let event = AuditEvent {
+            action: AuditAction::Login,
+            resource: ResourceKind::Authentication,
+            actor_user_id: Some(Uuid::new_v4()),
+            target_id: None,
+            summary: "User logged in via password".to_owned(),
+        };
+        assert_eq!(event.action, AuditAction::Login);
+        assert_eq!(event.resource, ResourceKind::Authentication);
+    }
+
+    // ── AuditEvent with long summary ────────────────────────
+
+    #[test]
+    fn audit_event_with_long_summary() {
+        let long_summary = "x".repeat(10_000);
+        let event = AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::User,
+            actor_user_id: Some(Uuid::new_v4()),
+            target_id: Some("user-1".to_owned()),
+            summary: long_summary.clone(),
+        };
+        assert_eq!(event.summary.len(), 10_000);
+        assert_eq!(event.summary, long_summary);
+    }
+
+    // ── AuditEvent inequality ───────────────────────────────
+
+    #[test]
+    fn audit_events_with_different_actions_are_not_equal() {
+        let base = AuditEvent {
+            action: AuditAction::Create,
+            resource: ResourceKind::User,
+            actor_user_id: Some(Uuid::nil()),
+            target_id: Some("t".to_owned()),
+            summary: "summary".to_owned(),
+        };
+        let modified = AuditEvent {
+            action: AuditAction::Delete,
+            ..base.clone()
+        };
+        assert_ne!(base, modified);
+    }
+
+    #[test]
+    fn audit_events_with_different_resources_are_not_equal() {
+        let base = AuditEvent {
+            action: AuditAction::Create,
+            resource: ResourceKind::User,
+            actor_user_id: None,
+            target_id: None,
+            summary: String::new(),
+        };
+        let modified = AuditEvent {
+            resource: ResourceKind::Workspace,
+            ..base.clone()
+        };
+        assert_ne!(base, modified);
+    }
+
+    // ── MockAuditSink empty state ───────────────────────────
+
+    #[test]
+    fn mock_sink_starts_empty() {
+        let sink = MockAuditSink::new();
+        assert!(sink.recorded_events().is_empty());
+    }
+
+    // ── TracingAuditSink exercises all actions ───────────────
+
+    #[tokio::test]
+    async fn tracing_sink_handles_all_actions() {
+        let sink = TracingAuditSink;
+        let actions = [
+            AuditAction::Create,
+            AuditAction::Write,
+            AuditAction::Delete,
+            AuditAction::Start,
+            AuditAction::Stop,
+            AuditAction::Login,
+            AuditAction::Logout,
+            AuditAction::Register,
+            AuditAction::RequestPasswordReset,
+            AuditAction::Connect,
+            AuditAction::Disconnect,
+            AuditAction::Open,
+            AuditAction::Close,
+        ];
+        for action in &actions {
+            sink.record(AuditEvent {
+                action: *action,
+                resource: ResourceKind::User,
+                actor_user_id: None,
+                target_id: None,
+                summary: format!("testing {}", action.as_str()),
+            })
+            .await;
+        }
+        // No panic means success — tracing sink is fire-and-forget.
+    }
+
+    // ── AuditAction debug representation ────────────────────
+
+    #[test]
+    fn audit_action_debug_representation() {
+        let action = AuditAction::RequestPasswordReset;
+        let debug = format!("{action:?}");
+        assert_eq!(debug, "RequestPasswordReset");
+    }
+
+    // ── AuditEvent debug includes all fields ────────────────
+
+    #[test]
+    fn audit_event_debug_includes_fields() {
+        let user_id = Uuid::nil();
+        let event = AuditEvent {
+            action: AuditAction::Delete,
+            resource: ResourceKind::ApiKey,
+            actor_user_id: Some(user_id),
+            target_id: Some("key-99".to_owned()),
+            summary: "Deleted API key".to_owned(),
+        };
+        let debug = format!("{event:?}");
+        assert!(debug.contains("Delete"), "debug should contain action");
+        assert!(debug.contains("ApiKey"), "debug should contain resource");
+        assert!(debug.contains("key-99"), "debug should contain target_id");
+    }
 }
