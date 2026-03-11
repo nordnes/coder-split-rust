@@ -1479,7 +1479,10 @@ pub(crate) async fn post_template_version_dynamic_parameters_evaluate(
         .iter()
         .map(|p| {
             let options: Vec<coder_core::api::TemplateVersionParameterOption> =
-                serde_json::from_value(p.options.clone()).unwrap_or_default();
+                serde_json::from_value(p.options.clone()).map_err(|e| AppError::InternalError {
+                    message: format!("Failed to deserialize options for parameter '{}'", p.name),
+                    detail: e.to_string(),
+                })?;
             serde_json::to_value(TemplateVersionParameter {
                 name: p.name.clone(),
                 display_name: p.display_name.clone(),
@@ -1499,9 +1502,12 @@ pub(crate) async fn post_template_version_dynamic_parameters_evaluate(
                 required: p.required,
                 ephemeral: p.ephemeral,
             })
-            .unwrap_or_default()
+            .map_err(|e| AppError::InternalError {
+                message: format!("Failed to serialize parameter '{}'", p.name),
+                detail: e.to_string(),
+            })
         })
-        .collect();
+        .collect::<Result<Vec<Value>, _>>()?;
 
     let response = DynamicParametersResponse {
         id: req.id,

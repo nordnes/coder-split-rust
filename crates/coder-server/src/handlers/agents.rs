@@ -1370,7 +1370,17 @@ pub(crate) async fn get_workspace_agent_external_auth(
         url: if authenticated {
             String::new()
         } else {
-            format!("{}external-auth/{}", state.config.access_url, query.id)
+            let mut redirect = state.config.access_url.clone();
+            redirect
+                .path_segments_mut()
+                .map_err(|()| AppError::InternalError {
+                    message: "Failed to construct external auth redirect URL.".into(),
+                    detail: "access_url cannot be used as a base URL".into(),
+                })?
+                .pop_if_empty()
+                .push("external-auth")
+                .push(&query.id);
+            redirect.to_string()
         },
         auth_type: provider_config.provider_type.clone(),
         authenticated,
