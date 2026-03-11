@@ -1180,6 +1180,27 @@ pub trait AuthStore: Send + Sync {
         user_id: Uuid,
         link: &UpsertExternalAuthLinkInput,
     ) -> Result<ExternalAuthLinkRecord, StorageError>;
+
+    /// Updates an API key's `last_used` and `expires_at` timestamps.
+    ///
+    /// Used by the auth middleware to track key activity with a 1-hour
+    /// debounce window (matching Go's `updateAPIKeyLastUsed`).
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Updates the `last_seen_at` timestamp for a user.
+    ///
+    /// Called alongside `update_api_key_last_used` when the debounce
+    /// window has elapsed.
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
 }
 
 /// Narrow storage contract for identity-owned domain logic.
@@ -2811,6 +2832,21 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     /// Returns token-lifetime settings for the given user.
     async fn token_config(&self, user_id: Uuid) -> Result<TokenConfigRecord, StorageError>;
+
+    /// Updates an API key's `last_used` and `expires_at` timestamps.
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Updates the `last_seen_at` timestamp for a user.
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
 
     /// Lists audit logs using the supplied filter.
     async fn list_audit_logs(
@@ -5537,6 +5573,23 @@ where
     ) -> Result<ExternalAuthLinkRecord, StorageError> {
         AppStore::upsert_external_auth_link(self, user_id, link).await
     }
+
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        AppStore::update_api_key_last_used(self, id, last_used, expires_at).await
+    }
+
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        AppStore::update_user_last_seen_at(self, user_id, last_seen_at).await
+    }
 }
 
 #[async_trait]
@@ -5690,6 +5743,27 @@ where
         link: &UpsertExternalAuthLinkInput,
     ) -> Result<ExternalAuthLinkRecord, StorageError> {
         (**self).upsert_external_auth_link(user_id, link).await
+    }
+
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_api_key_last_used(id, last_used, expires_at)
+            .await
+    }
+
+    async fn update_user_last_seen_at(
+        &self,
+        user_id: Uuid,
+        last_seen_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_user_last_seen_at(user_id, last_seen_at)
+            .await
     }
 }
 

@@ -255,13 +255,11 @@ pub fn build_router(
         .nest(
             "/api/v2",
             Router::new()
-                .route("/", get(api_root))
+                // -------------------------------------------------------
+                // Protected routes — covered by the API-key auth middleware.
+                // -------------------------------------------------------
                 .route("/audit", get(list_audit_logs))
                 .route("/audit/testgenerate", post(post_generate_test_audit_log))
-                .route("/auth/scopes", get(list_api_key_scopes))
-                .route("/buildinfo", get(build_info))
-                .route("/csp/reports", post(post_csp_report))
-                .route("/deployment/config", get(deployment_config))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
                 .route("/debug/health", get(debug_health))
@@ -354,30 +352,7 @@ pub fn build_router(
                     get(get_org_member_workspace_available_users),
                 )
                 .route("/users", get(list_users).post(post_user))
-                .route("/users/authmethods", get(auth_methods))
-                .route("/updatecheck", get(update_check))
-                .route("/users/first", get(get_first_user).post(post_first_user))
-                .route("/users/login", post(login_with_password))
                 .route("/users/logout", post(logout))
-                .route(
-                    "/users/validate-password",
-                    post(post_validate_user_password),
-                )
-                .route("/users/otp/request", post(post_request_one_time_passcode))
-                .route(
-                    "/users/otp/change-password",
-                    post(post_change_password_with_one_time_passcode),
-                )
-                .route(
-                    "/users/oauth2/github/device",
-                    get(get_github_oauth_device_disabled)
-                        .post(post_github_oauth_device),
-                )
-                .route(
-                    "/users/oauth2/github/callback",
-                    get(get_github_oauth_callback),
-                )
-                .route("/users/oidc/callback", get(get_oidc_callback))
                 .route("/users/roles", get(list_site_roles))
                 .route("/users/{user}/keys", post(create_session_api_key))
                 .route(
@@ -789,6 +764,47 @@ pub fn build_router(
                 .route("/files/{fileid}", get(get_file_by_id))
                 .route("/derp-map", get(derp_map_updates))
                 .route("/regions", get(get_regions))
+                .route_layer(middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::auth_middleware::api_key_auth_middleware,
+                ))
+                // -------------------------------------------------------
+                // Public / unauthenticated routes — NOT covered by the
+                // API-key auth middleware.  Users with expired cookies must
+                // still be able to reach these endpoints.
+                // -------------------------------------------------------
+                .route("/", get(api_root))
+                .route("/buildinfo", get(build_info))
+                .route("/updatecheck", get(update_check))
+                .route("/csp/reports", post(post_csp_report))
+                .route("/users/first", get(get_first_user).post(post_first_user))
+                .route("/users/login", post(login_with_password))
+                .route("/users/authmethods", get(auth_methods))
+                .route(
+                    "/users/validate-password",
+                    post(post_validate_user_password),
+                )
+                .route("/users/otp/request", post(post_request_one_time_passcode))
+                .route(
+                    "/users/otp/change-password",
+                    post(post_change_password_with_one_time_passcode),
+                )
+                .route(
+                    "/users/oauth2/github/device",
+                    get(get_github_oauth_device_disabled)
+                        .post(post_github_oauth_device),
+                )
+                .route(
+                    "/users/oauth2/github/callback",
+                    get(get_github_oauth_callback),
+                )
+                .route("/users/oidc/callback", get(get_oidc_callback))
+                .route("/auth/scopes", get(list_api_key_scopes))
+                .route("/deployment/config", get(deployment_config))
+                // -------------------------------------------------------
+                // Agent routes — use agent-token authentication handled
+                // inside the handler itself.
+                // -------------------------------------------------------
                 .route("/tailnet", get(tailnet_rpc_conn))
                 .route("/applications/host", get(applications_host))
                 .route(
@@ -1244,7 +1260,7 @@ impl AgentConnection for WebSocketAgentConnection {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::{
         collections::HashMap,
         error::Error,
@@ -3205,6 +3221,41 @@ mod tests {
             key.expires_at = now;
             key.updated_at = now;
             Ok(true)
+        }
+
+        async fn update_api_key_last_used(
+            &self,
+            id: &str,
+            last_used: OffsetDateTime,
+            expires_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut api_keys = self
+                .api_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let Some(key) = api_keys.get_mut(id) else {
+                return Ok(());
+            };
+            key.last_used = last_used;
+            key.expires_at = expires_at;
+            key.updated_at = OffsetDateTime::now_utc();
+            Ok(())
+        }
+
+        async fn update_user_last_seen_at(
+            &self,
+            user_id: Uuid,
+            last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            let mut users = self
+                .users
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.last_seen_at = Some(last_seen_at);
+                user.updated_at = OffsetDateTime::now_utc();
+            }
+            Ok(())
         }
 
         async fn token_config(&self, user_id: Uuid) -> Result<TokenConfigRecord, StorageError> {
@@ -7540,7 +7591,7 @@ mod tests {
         ))
     }
 
-    fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
+    pub(crate) fn test_state(health_ok: bool) -> Result<AppState, Box<dyn Error>> {
         test_state_with_store(health_ok).map(|(state, _)| state)
     }
 
@@ -7624,7 +7675,7 @@ mod tests {
         Ok(serde_json::from_slice(&bytes)?)
     }
 
-    async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
+    pub(crate) async fn create_and_login(app: &Router) -> Result<String, Box<dyn Error>> {
         let create_response = call(
             app.clone(),
             json_request(
