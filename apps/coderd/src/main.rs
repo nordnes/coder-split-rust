@@ -106,6 +106,30 @@ struct ServerArgs {
     #[arg(long, env = "CODER_LOG_FORMAT", value_enum, default_value_t = LogFormatArg::Pretty)]
     log_format: LogFormatArg,
 
+    /// Session cache TTL in seconds.
+    #[arg(long, env = "CODER_SESSION_CACHE_TTL_SECS", default_value_t = 30)]
+    session_cache_ttl_secs: u64,
+
+    /// Audit batch flush interval in milliseconds.
+    #[arg(
+        long,
+        env = "CODER_AUDIT_BATCH_FLUSH_INTERVAL_MS",
+        default_value_t = 500
+    )]
+    audit_batch_flush_interval_ms: u64,
+
+    /// Maximum number of audit events per batch.
+    #[arg(long, env = "CODER_AUDIT_BATCH_MAX_SIZE", default_value_t = 50)]
+    audit_batch_max_size: usize,
+
+    /// Maximum number of concurrent HTTP requests before returning 503.
+    #[arg(long, env = "CODER_MAX_CONCURRENT_REQUESTS", default_value_t = 1024)]
+    max_concurrent_requests: usize,
+
+    /// Maximum number of concurrent database queries.
+    #[arg(long, env = "CODER_MAX_CONCURRENT_DB_QUERIES", default_value_t = 0)]
+    max_concurrent_db_queries: usize,
+
     /// Enable HTTP rate limiting.
     #[arg(long, env = "CODER_RATE_LIMIT_ENABLED", default_value_t = true)]
     rate_limit_enabled: bool,
@@ -149,12 +173,6 @@ struct PersistingAuditSink {
     store: Arc<dyn AppStore>,
 }
 
-impl PersistingAuditSink {
-    fn new(store: Arc<dyn AppStore>) -> Self {
-        Self { store }
-    }
-}
-
 #[async_trait]
 impl AuditSink for PersistingAuditSink {
     async fn record(&self, event: AuditEvent) {
@@ -169,32 +187,81 @@ impl AuditSink for PersistingAuditSink {
 
         if let Err(error) = self
             .store
-            .insert_audit_log(PersistAuditLogInput {
-                id: Uuid::new_v4(),
-                request_id: None,
-                time: OffsetDateTime::now_utc(),
-                ip: String::new(),
-                user_agent: String::new(),
-                resource_type: resource_kind_name(event.resource).to_owned(),
-                resource_id: event
-                    .target_id
-                    .as_deref()
-                    .and_then(|target_id| Uuid::parse_str(target_id).ok()),
-                resource_target: event.target_id.unwrap_or_default(),
-                resource_icon: String::new(),
-                action: event.action.as_str().to_owned(),
-                diff: serde_json::json!({}),
-                status_code: 0,
-                additional_fields: serde_json::json!({}),
-                description: event.summary,
-                resource_link: String::new(),
-                is_deleted: matches!(event.action, coder_audit::AuditAction::Delete),
-                organization_id: None,
-                user_id: event.actor_user_id,
-            })
+            .insert_audit_log(Self::event_to_input(&event))
             .await
         {
             warn!(error = %error, "failed to persist audit event");
+        }
+    }
+
+    /// Persists a batch of audit events using a single multi-row INSERT
+    /// via [`AppStore::batch_insert_audit_logs`].  Falls back to
+    /// individual inserts if the batch call fails.
+    async fn record_batch(&self, events: Vec<AuditEvent>) {
+        if events.is_empty() {
+            return;
+        }
+
+        for event in &events {
+            info!(
+                action = event.action.as_str(),
+                resource = ?event.resource,
+                actor_user_id = event.actor_user_id.as_ref().map(Uuid::to_string),
+                target_id = event.target_id,
+                summary = event.summary,
+                "audit event"
+            );
+        }
+
+        let inputs: Vec<PersistAuditLogInput> = events.iter().map(Self::event_to_input).collect();
+
+        if let Err(batch_error) = self.store.batch_insert_audit_logs(inputs).await {
+            warn!(
+                error = %batch_error,
+                count = events.len(),
+                "batch audit insert failed, falling back to individual inserts"
+            );
+            for event in &events {
+                if let Err(error) = self
+                    .store
+                    .insert_audit_log(Self::event_to_input(event))
+                    .await
+                {
+                    warn!(error = %error, "failed to persist audit event (individual fallback)");
+                }
+            }
+        }
+    }
+}
+
+impl PersistingAuditSink {
+    fn new(store: Arc<dyn AppStore>) -> Self {
+        Self { store }
+    }
+
+    fn event_to_input(event: &AuditEvent) -> PersistAuditLogInput {
+        PersistAuditLogInput {
+            id: Uuid::new_v4(),
+            request_id: None,
+            time: OffsetDateTime::now_utc(),
+            ip: String::new(),
+            user_agent: String::new(),
+            resource_type: resource_kind_name(event.resource).to_owned(),
+            resource_id: event
+                .target_id
+                .as_deref()
+                .and_then(|target_id| Uuid::parse_str(target_id).ok()),
+            resource_target: event.target_id.clone().unwrap_or_default(),
+            resource_icon: String::new(),
+            action: event.action.as_str().to_owned(),
+            diff: serde_json::json!({}),
+            status_code: 0,
+            additional_fields: serde_json::json!({}),
+            description: event.summary.clone(),
+            resource_link: String::new(),
+            is_deleted: matches!(event.action, coder_audit::AuditAction::Delete),
+            organization_id: None,
+            user_id: event.actor_user_id,
         }
     }
 }
@@ -282,10 +349,12 @@ async fn run() -> Result<(), MainError> {
 
     let mut coordinator = ShutdownCoordinator::new();
 
-    // 1. Flush audit sink.  The PersistingAuditSink is synchronous-per-event
-    //    so there is no buffered state to drain, but the slot is kept here so
-    //    a future batched implementation gets wired in automatically.
-    coordinator.register("audit", async {});
+    // 1. Flush the batched audit sink so buffered events are persisted
+    //    before the database pool is closed.
+    let audit_sink = state.audit.clone();
+    coordinator.register("audit", async move {
+        audit_sink.close().await;
+    });
 
     // 2. Close pub/sub background listener and release its PgListener connection.
     coordinator.register("pubsub", async move {
@@ -345,6 +414,15 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         log_format: match args.log_format {
             LogFormatArg::Pretty => LogFormat::Pretty,
             LogFormatArg::Json => LogFormat::Json,
+        },
+        session_cache_ttl_secs: args.session_cache_ttl_secs,
+        audit_batch_flush_interval_ms: args.audit_batch_flush_interval_ms,
+        audit_batch_max_size: args.audit_batch_max_size,
+        max_concurrent_requests: args.max_concurrent_requests,
+        max_concurrent_db_queries: if args.max_concurrent_db_queries > 0 {
+            args.max_concurrent_db_queries
+        } else {
+            args.db_max_connections as usize * 2
         },
         rate_limit: RateLimitConfig {
             enabled: args.rate_limit_enabled,

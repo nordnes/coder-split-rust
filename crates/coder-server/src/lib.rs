@@ -2,6 +2,7 @@
 #![forbid(unsafe_code)]
 
 mod app;
+pub mod connection_guard;
 mod error;
 mod extractors;
 mod handlers;

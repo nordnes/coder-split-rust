@@ -26,6 +26,16 @@ pub struct ServerConfig {
     pub shutdown_grace_period_secs: u64,
     /// Log format used by the binary.
     pub log_format: LogFormat,
+    /// TTL in seconds for the in-memory session authentication cache.
+    pub session_cache_ttl_secs: u64,
+    /// Flush interval in milliseconds for the batched audit sink.
+    pub audit_batch_flush_interval_ms: u64,
+    /// Maximum batch size before the batched audit sink forces a flush.
+    pub audit_batch_max_size: usize,
+    /// Maximum number of concurrent HTTP requests before returning 503.
+    pub max_concurrent_requests: usize,
+    /// Maximum number of concurrent database queries (semaphore permits).
+    pub max_concurrent_db_queries: usize,
     /// Rate-limiting configuration for the HTTP layer.
     pub rate_limit: RateLimitConfig,
 }
@@ -131,6 +141,36 @@ impl ServerConfig {
                 env: "CODER_LOG_FORMAT",
                 default: Some("pretty"),
                 description: "Structured log output format.",
+            },
+            ConfigOption {
+                name: "session-cache-ttl-secs",
+                env: "CODER_SESSION_CACHE_TTL_SECS",
+                default: Some("30"),
+                description: "TTL in seconds for the in-memory session authentication cache.",
+            },
+            ConfigOption {
+                name: "audit-batch-flush-interval-ms",
+                env: "CODER_AUDIT_BATCH_FLUSH_INTERVAL_MS",
+                default: Some("500"),
+                description: "Flush interval in milliseconds for the batched audit log sink.",
+            },
+            ConfigOption {
+                name: "audit-batch-max-size",
+                env: "CODER_AUDIT_BATCH_MAX_SIZE",
+                default: Some("50"),
+                description: "Maximum batch size before the audit sink forces a flush.",
+            },
+            ConfigOption {
+                name: "max-concurrent-requests",
+                env: "CODER_MAX_CONCURRENT_REQUESTS",
+                default: Some("1024"),
+                description: "Maximum number of concurrent HTTP requests before returning 503.",
+            },
+            ConfigOption {
+                name: "max-concurrent-db-queries",
+                env: "CODER_MAX_CONCURRENT_DB_QUERIES",
+                default: Some("40"),
+                description: "Maximum number of concurrent database queries.",
             },
         ]
     }

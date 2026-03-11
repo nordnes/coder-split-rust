@@ -14,11 +14,10 @@ workspace = true
 async-trait.workspace = true
 base64.workspace = true
 coder-core = { path = "../coder-core" }
-metrics.workspace = true
 coder-rbac = { path = "../coder-rbac" }
 http.workspace = true
+metrics.workspace = true
 rand.workspace = true
-tokio.workspace = true
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true
@@ -26,6 +25,7 @@ sha2.workspace = true
 subtle.workspace = true
 thiserror.workspace = true
 time.workspace = true
+tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 uuid.workspace = true

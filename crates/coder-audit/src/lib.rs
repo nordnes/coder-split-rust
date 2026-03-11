@@ -1,6 +1,8 @@
 //! Audit boundary for the Rust `coderd` rewrite.
 #![forbid(unsafe_code)]
 
+pub mod batched_sink;
+
 use async_trait::async_trait;
 use coder_rbac::ResourceKind;
 use tracing::info;
@@ -79,6 +81,25 @@ pub struct AuditEvent {
 pub trait AuditSink: Send + Sync {
     /// Records a structured audit event.
     async fn record(&self, event: AuditEvent);
+
+    /// Records a batch of audit events.
+    ///
+    /// The default implementation falls back to calling [`record`](Self::record)
+    /// per-event.  Implementors that have access to a batch INSERT path (e.g.
+    /// `batch_insert_audit_logs`) should override this for efficiency.
+    async fn record_batch(&self, events: Vec<AuditEvent>) {
+        for event in events {
+            self.record(event).await;
+        }
+    }
+
+    /// Gracefully shuts down the sink, flushing any buffered events.
+    ///
+    /// The default implementation is a no-op.  Sinks that buffer events
+    /// internally (e.g. [`BatchedAuditSink`](batched_sink::BatchedAuditSink))
+    /// should override this to drain their buffer before the database pool
+    /// is closed.
+    async fn close(&self) {}
 }
 
 /// Tracing-backed audit sink used by the current binary.
