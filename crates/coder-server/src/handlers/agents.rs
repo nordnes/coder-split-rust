@@ -1299,16 +1299,23 @@ pub(crate) async fn patch_workspace_agent_app_status(
 }
 
 /// GET /api/v2/workspaceagents/me/external-auth — agent external auth.
+///
+/// Returns the external auth status for the calling agent's workspace owner
+/// for the requested provider, matching Go's
+/// `workspaceAgentsExternalAuth` handler.
 pub(crate) async fn get_workspace_agent_external_auth(
     State(state): State<AppState>,
     headers: HeaderMap,
     Query(query): Query<AgentExternalAuthQuery>,
 ) -> Result<Response, AppError> {
-    let Some(_agent) = authenticate_agent_request(&state, &headers).await? else {
+    let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
-    // Validate that either id or match is provided.
+    // TODO: when query.listen is true, Go long-polls until the token is
+    // available (workspaceAgentsExternalAuth).  Implement long-polling support.
+
+    // Validate that the provider id is provided.
     if query.id.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
@@ -1317,12 +1324,74 @@ pub(crate) async fn get_workspace_agent_external_auth(
             .into_response());
     }
 
-    // External auth configuration lookup is not yet available in the Rust
-    // backend. Return a stub response indicating the provider was not found.
-    Ok(not_found_detail_response(
-        "External auth provider not found.",
-        "External auth configuration is not yet supported.",
-    ))
+    // Find the matching provider configuration.
+    let Some(provider_config) = find_external_auth_provider(&state, &query.id) else {
+        return Ok(not_found_detail_response(
+            "External auth provider not found.",
+            format!(
+                "No external auth provider with id {:?} is configured.",
+                query.id
+            ),
+        ));
+    };
+
+    // Resolve the workspace owner via agent → workspace → owner.
+    let workspace = state.store.find_workspace_by_agent_id(agent.id).await?;
+    let owner_id = match workspace {
+        Some(ref ws) => ws.owner_id,
+        None => {
+            return Ok(internal_server_error_response(
+                "Failed to get workspace for agent.",
+            ));
+        }
+    };
+
+    // Check whether the workspace owner has linked this external auth provider.
+    let link = state
+        .store
+        .find_external_auth_link(owner_id, &query.id)
+        .await?;
+
+    let authenticated = link
+        .as_ref()
+        .map(|l| {
+            l.authenticated && l.validate_error.is_empty() && l.expires > OffsetDateTime::now_utc()
+        })
+        .unwrap_or(false);
+
+    // Build the agent-facing response (WorkspaceAgentExternalAuthResponse),
+    // NOT the user-facing ExternalAuthResponse.  Agents need the access_token
+    // and credential fields to perform git operations.
+    let resp = coder_core::api::WorkspaceAgentExternalAuthResponse {
+        access_token: link
+            .as_ref()
+            .filter(|_| authenticated)
+            .map(|l| l.access_token.clone())
+            .unwrap_or_default(),
+        // When not authenticated, provide the user-facing redirect URL through
+        // the Coder server so the agent can tell the user where to authenticate
+        // (matching Go's pattern: `{access_url}/external-auth/{provider_id}`).
+        // When already authenticated the URL is left empty.
+        url: if authenticated {
+            String::new()
+        } else {
+            state
+                .config
+                .access_url
+                .join(&format!("external-auth/{}", query.id))
+                .map_err(|e| AppError::InternalError {
+                    message: "Failed to construct external auth redirect URL.".into(),
+                    detail: e.to_string(),
+                })?
+                .to_string()
+        },
+        auth_type: provider_config.provider_type.clone(),
+        authenticated,
+        username: None,
+        password: None,
+    };
+
+    Ok((StatusCode::OK, Json(resp)).into_response())
 }
 
 /// POST /api/v2/workspaceagents/me/log-source — create agent log source.

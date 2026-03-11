@@ -10,6 +10,8 @@ use crate::api::BuildInfoResponse;
 pub struct BuildMetadata {
     /// Semantic version for the running build.
     pub version: String,
+    /// Short git commit hash for the running build.
+    pub git_commit: String,
     /// Canonical link for this build or repository.
     pub external_url: String,
     /// Current agent API version.
@@ -41,14 +43,27 @@ impl BuildMetadata {
             provisioner_api_version: self.provisioner_api_version.clone(),
             upgrade_message: self.upgrade_message.clone(),
             deployment_id: deployment_id.to_string(),
+            webpush_public_key: String::new(),
         }
     }
 }
 
 impl Default for BuildMetadata {
     fn default() -> Self {
+        let base_version = env!("CARGO_PKG_VERSION");
+        let git_commit = env!("GIT_COMMIT_HASH");
+
+        // Build a version string that includes the commit hash when known,
+        // mirroring Go's convention (e.g. "v0.1.0+abcdef1").
+        let version = if git_commit == "unknown" {
+            format!("v{base_version}")
+        } else {
+            format!("v{base_version}+{git_commit}")
+        };
+
         Self {
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version,
+            git_commit: git_commit.to_owned(),
             external_url: option_env!("CARGO_PKG_REPOSITORY")
                 .unwrap_or("https://github.com/coder/coder")
                 .to_owned(),
