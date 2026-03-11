@@ -30299,7 +30299,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn happy_delete_external_auth_returns_no_content() -> Result<(), Box<dyn Error>> {
+    async fn happy_delete_external_auth_returns_not_found_without_provider() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
@@ -30559,7 +30559,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn happy_post_request_one_time_passcode_returns_ok() -> Result<(), Box<dyn Error>> {
+    async fn happy_post_request_one_time_passcode_returns_no_content() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?, None);
         let _session_token = create_and_login(&app).await?;
         let response = call(
