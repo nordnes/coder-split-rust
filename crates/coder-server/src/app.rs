@@ -13821,10 +13821,6 @@ async fn get_prometheus_metrics(State(state): State<AppState>) -> Response {
 /// crate.  Counters and histograms are registered lazily on first use.
 /// Tracks per-request latency, status codes, and active connection count.
 async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> Response {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    static ACTIVE_CONNECTIONS: AtomicUsize = AtomicUsize::new(0);
-
     let method = request.method().to_string();
     let path = request
         .extensions()
@@ -13832,15 +13828,13 @@ async fn prometheus_middleware(request: axum::extract::Request, next: Next) -> R
         .map(|m| m.as_str().to_owned())
         .unwrap_or_else(|| "unmatched".to_owned());
 
-    let current = ACTIVE_CONNECTIONS.fetch_add(1, Ordering::Relaxed) + 1;
-    crate::metrics::set_active_connections(current);
+    metrics::gauge!("active_connections").increment(1.0);
 
     let start = std::time::Instant::now();
     let response = next.run(request).await;
     let elapsed_ms = start.elapsed().as_secs_f64() * 1000.0;
 
-    let current = ACTIVE_CONNECTIONS.fetch_sub(1, Ordering::Relaxed) - 1;
-    crate::metrics::set_active_connections(current);
+    metrics::gauge!("active_connections").decrement(1.0);
 
     let status = response.status().as_u16();
     crate::metrics::record_request(&method, &path, status, elapsed_ms);

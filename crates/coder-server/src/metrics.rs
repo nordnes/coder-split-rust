@@ -21,11 +21,6 @@ pub fn record_db_query(operation: &str, duration_ms: f64, success: bool) {
     metrics::counter!("db_queries_total", &labels).increment(1);
 }
 
-/// Sets the current active HTTP connection count gauge.
-pub fn set_active_connections(count: usize) {
-    metrics::gauge!("active_connections").set(count as f64);
-}
-
 /// Records an authentication event (login_success, login_failure, logout, session_expired).
 pub fn record_auth_event(event_type: &str) {
     metrics::counter!("auth_events_total", "type" => event_type.to_owned()).increment(1);
