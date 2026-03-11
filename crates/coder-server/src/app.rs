@@ -160,6 +160,8 @@ pub struct AppState {
     pub(crate) health: HealthService<Arc<dyn AppStore>>,
     pub(crate) external_auth: ExternalAuthService<Arc<dyn AppStore>>,
     pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
+    /// Shared HTTP client for outbound requests (connection pooling).
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -191,6 +193,7 @@ impl AppState {
         let health = HealthService::new(store.clone())?;
         let external_auth = ExternalAuthService::new(store.clone())?;
         let oauth2_provider = OAuth2ProviderService::new(store.clone());
+        let http_client = reqwest::Client::new();
 
         Ok(Self {
             config,
@@ -209,6 +212,7 @@ impl AppState {
             health,
             external_auth,
             oauth2_provider,
+            http_client,
         })
     }
 
@@ -366,13 +370,14 @@ pub fn build_router(
                 )
                 .route(
                     "/users/oauth2/github/device",
-                    get(get_github_oauth_device_disabled),
+                    get(get_github_oauth_device_disabled)
+                        .post(post_github_oauth_device),
                 )
                 .route(
                     "/users/oauth2/github/callback",
-                    get(get_github_oauth_callback_disabled),
+                    get(get_github_oauth_callback),
                 )
-                .route("/users/oidc/callback", get(get_oidc_callback_disabled))
+                .route("/users/oidc/callback", get(get_oidc_callback))
                 .route("/users/roles", get(list_site_roles))
                 .route("/users/{user}/keys", post(create_session_api_key))
                 .route(
@@ -6598,6 +6603,54 @@ mod tests {
         }
 
         // -----------------------------------------------------------------
+        // User Lookup by Linked ID / Email
+        // -----------------------------------------------------------------
+
+        async fn find_user_by_linked_id(
+            &self,
+            login_type: LoginType,
+            linked_id: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let links = self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for link in links.values() {
+                if link.login_type == login_type && link.linked_id == linked_id {
+                    if let Some(user) = users.get(&link.user_id) {
+                        return Ok(Some(user.clone()));
+                    }
+                }
+            }
+            Ok(None)
+        }
+
+        async fn find_active_user_by_email_and_login_type(
+            &self,
+            email: &str,
+            login_type: LoginType,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(users
+                .values()
+                .find(|u| {
+                    u.email.eq_ignore_ascii_case(email)
+                        && !u.deleted
+                        && !u.is_system
+                        && u.status == UserStatus::Active
+                        && u.login_type == login_type
+                })
+                .cloned())
+        }
+
+        // -----------------------------------------------------------------
         // User Links
         // -----------------------------------------------------------------
 
@@ -7172,6 +7225,8 @@ mod tests {
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
+            github_oauth: None,
+            oidc: None,
             otel: coder_core::config::OtelConfig::default(),
             cors: coder_core::config::CorsConfig::default(),
         })
@@ -29202,6 +29257,277 @@ mod tests {
                 .unwrap_or("")
                 .contains("authorization_code"),
             "expected detail listing supported grant types"
+        );
+        Ok(())
+    }
+
+    // ── GitHub OAuth / OIDC handler tests ──────────────────────
+
+    #[tokio::test]
+    async fn github_device_disabled_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        // GET returns the disabled stub
+        let response = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_device_post_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        // POST to the real handler also returns bad request when not configured
+        let response = call(
+            app,
+            request(Method::POST, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oidc/callback?code=test&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("OIDC is not enabled.")
+        );
+        Ok(())
+    }
+
+    fn test_state_with_github_oauth() -> Result<AppState, Box<dyn Error>> {
+        let mut config = test_config()?;
+        config.github_oauth = Some(coder_core::config::GithubOAuthConfig {
+            client_id: "test-client-id".to_owned(),
+            client_secret: "test-client-secret".to_owned(),
+            allow_signups: true,
+            allow_everyone: true,
+            allowed_orgs: Vec::new(),
+            allowed_teams: Vec::new(),
+            api_url: Url::parse("http://127.0.0.1:9999")?,
+        });
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        Ok(AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    fn test_state_with_oidc() -> Result<AppState, Box<dyn Error>> {
+        let mut config = test_config()?;
+        config.oidc = Some(coder_core::config::OidcConfig {
+            issuer_url: Url::parse("http://127.0.0.1:9999")?,
+            client_id: "test-oidc-client".to_owned(),
+            client_secret: "test-oidc-secret".to_owned(),
+            scopes: vec![
+                "openid".to_owned(),
+                "profile".to_owned(),
+                "email".to_owned(),
+            ],
+            allow_signups: true,
+            email_domain: Vec::new(),
+            username_field: "preferred_username".to_owned(),
+            email_field: "email".to_owned(),
+            name_field: "name".to_owned(),
+            ignore_email_verified: false,
+        });
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        Ok(AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_state_mismatch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Send a callback with a state that does not match the cookie
+        let response = call(
+            app,
+            request_with_cookies(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test-code&state=wrong-state",
+                &[(OAUTH2_STATE_COOKIE, "correct-state")],
+            )?,
+        )
+        .await?;
+        // Should redirect to login with an error message
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message, got: {location}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_missing_state_cookie() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Send a callback with no state cookie at all
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test-code&state=some-state",
+            )?,
+        )
+        .await?;
+        // Should redirect to login with state mismatch error
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_provider_error() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Simulate GitHub returning an error
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?error=access_denied&error_description=User+denied+access&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_redirects_on_state_mismatch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_oidc()?, None);
+        let response = call(
+            app,
+            request_with_cookies(
+                Method::GET,
+                "/api/v2/users/oidc/callback?code=test-code&state=wrong-state",
+                &[(OAUTH2_STATE_COOKIE, "correct-state")],
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message, got: {location}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_redirects_on_provider_error() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_oidc()?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oidc/callback?error=server_error&error_description=Something+went+wrong&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message"
         );
         Ok(())
     }

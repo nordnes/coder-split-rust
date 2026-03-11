@@ -1,6 +1,7 @@
 //! Authentication, sessions, and external-auth lifecycle helpers.
 #![forbid(unsafe_code)]
 
+pub mod oauth_login;
 pub mod session_cache;
 
 use std::{sync::Arc, time::Duration};
@@ -382,6 +383,24 @@ where
             user: AuthenticatedUser::from(user_record.user),
             response: LoginWithPasswordResponse { session_token },
         })
+    }
+
+    /// Creates a session for an OAuth/OIDC-authenticated user.
+    ///
+    /// This is called after the OAuth callback has verified the user's identity
+    /// and either found an existing user or created a new one.
+    #[tracing::instrument(skip(self))]
+    pub async fn create_oauth_session(
+        &self,
+        user: &UserRecord,
+    ) -> Result<String, AuthServiceError> {
+        let session_token = new_session_token();
+        let session_token_hash = hash_session_token(&session_token);
+        self.store
+            .insert_auth_session(&session_token_hash, user.id)
+            .await?;
+        metrics::counter!("auth_events_total", "type" => "oauth_login_success").increment(1);
+        Ok(session_token)
     }
 
     /// Revokes the current session token and evicts it from the cache.
