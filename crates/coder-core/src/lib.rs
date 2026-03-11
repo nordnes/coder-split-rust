@@ -26,7 +26,8 @@
 //! # Design Principles
 //!
 //! * **No unsafe code** — enforced by `#![forbid(unsafe_code)]`.
-//! * **No business logic** — pure data definitions and trait contracts.
+//! * **Minimal domain utilities** — data definitions, trait contracts, and
+//!   lightweight helpers (password hashing, retry loops) with no external I/O.
 //! * **Serde-first** — API types derive `Serialize` / `Deserialize` for
 //!   zero-copy JSON round-tripping.
 //! * **Go parity** — types mirror the original Go SDK (`codersdk/`) so that

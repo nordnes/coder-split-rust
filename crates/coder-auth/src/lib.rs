@@ -13,7 +13,7 @@
 //!   [`oauth_login`] sub-module
 //!
 //! The crate is generic over any store that implements [`coder_core::AuthStore`],
-//! making it easy to test with the in-memory `FakeStore`.
+//! making it easy to test with a mock or in-memory store implementation.
 #![forbid(unsafe_code)]
 
 pub mod oauth_login;

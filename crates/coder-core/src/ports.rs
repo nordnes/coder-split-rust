@@ -9,7 +9,7 @@
 //!
 //! Concrete implementations live in downstream crates:
 //!
-//! * [`coder_db::PostgresStore`](crate) — production Postgres implementation.
+//! * `coder_db::PostgresStore` — production Postgres implementation.
 //! * `FakeStore` (test-only) — in-memory `HashMap`-backed mock.
 
 use std::collections::HashMap;
