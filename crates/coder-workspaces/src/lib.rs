@@ -10,6 +10,7 @@ use std::sync::{Arc, Weak};
 use coder_core::{DeploymentStatsResponse, OperationalStore, StorageError};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const DEPLOYMENT_STATS_REFRESH_SECS: u64 = 60;
@@ -19,6 +20,7 @@ pub struct DeploymentStatsService<S> {
     store: S,
     cache: RwLock<Option<DeploymentStatsResponse>>,
     refresh_lock: Mutex<()>,
+    cancel: CancellationToken,
 }
 
 impl<S> DeploymentStatsService<S>
@@ -28,13 +30,27 @@ where
     /// Creates the cached deployment-stats service and starts background refresh.
     #[must_use]
     pub fn new(store: S) -> Arc<Self> {
+        let cancel = CancellationToken::new();
         let service = Arc::new(Self {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel,
         });
         Self::spawn_refresh_loop(&service);
         service
+    }
+
+    /// Signals the background refresh loop to stop.
+    ///
+    /// Note: this only sets the cancellation token; it does **not** wait for
+    /// the background task to finish.  The loop will exit on its next
+    /// iteration after it observes the token.
+    ///
+    /// Calling this more than once is harmless — subsequent calls return
+    /// immediately because the token is already cancelled.
+    pub fn close(&self) {
+        self.cancel.cancel();
     }
 
     /// Returns the latest cached stats, refreshing on demand when needed.
@@ -62,13 +78,14 @@ where
 
     fn spawn_refresh_loop(service: &Arc<Self>) {
         let weak = Arc::downgrade(service);
+        let cancel = service.cancel.clone();
         tokio::spawn(async move {
-            run_refresh_loop(weak).await;
+            run_refresh_loop(weak, cancel).await;
         });
     }
 }
 
-async fn run_refresh_loop<S>(service: Weak<DeploymentStatsService<S>>)
+async fn run_refresh_loop<S>(service: Weak<DeploymentStatsService<S>>, cancel: CancellationToken)
 where
     S: OperationalStore + Clone + Send + Sync + 'static,
 {
@@ -78,7 +95,13 @@ where
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("deployment stats refresh loop cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
         let Some(service) = service.upgrade() else {
             return;
         };
@@ -468,6 +491,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         // First call triggers refresh
@@ -487,6 +511,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         let _r1 = service.refresh().await;
@@ -507,6 +532,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         // Populate cache
@@ -531,6 +557,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         let result = service.get().await;
@@ -546,6 +573,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         // Populate cache successfully

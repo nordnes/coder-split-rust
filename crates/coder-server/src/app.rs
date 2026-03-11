@@ -243,6 +243,15 @@ impl AppState {
             oauth2_provider,
         })
     }
+
+    /// Cancels the background deployment-stats refresh loop.
+    ///
+    /// This should be called during the graceful shutdown sequence before
+    /// closing the database pool, so the loop does not attempt further
+    /// queries after the pool is closed.
+    pub fn close_deployment_stats(&self) {
+        self.deployment_stats.close();
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
