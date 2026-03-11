@@ -318,7 +318,7 @@ where
     pub async fn new(store: S, vapid_sub: String) -> Result<Self, WebpushError> {
         let keys = store.get_webpush_vapid_keys().await?;
 
-        let (public_key, private_pem) = match keys {
+        let (_stored_public, private_pem) = match keys {
             Some(kp) if !kp.public_key.is_empty() && !kp.private_key.is_empty() => {
                 (kp.public_key, kp.private_key)
             }
@@ -328,16 +328,19 @@ where
             }
         };
 
-        // Validate that the private key can be parsed before accepting it.
-        let _partial = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
+        // Validate the private key and derive the public key from it rather
+        // than trusting the stored public key.  This guards against a
+        // mismatched/rotated value in the database.
+        let partial = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
             .map_err(|e| WebpushError::WebPush(format!("invalid stored VAPID key: {e}")))?;
+        let derived_public = URL_SAFE_NO_PAD.encode(partial.get_public_key());
 
         let client = IsahcWebPushClient::new().map_err(|e| WebpushError::WebPush(e.to_string()))?;
 
         Ok(Self {
             store,
             vapid_sub,
-            vapid_public_key: public_key,
+            vapid_public_key: derived_public,
             vapid_private_pem: private_pem,
             client,
         })
@@ -609,9 +612,11 @@ fn der_push_length(buf: &mut Vec<u8>, len: usize) {
     }
 }
 
-/// A no-op web push dispatcher that always returns an error.
+/// A no-op web push dispatcher placeholder.
 ///
-/// Used when web push is disabled or VAPID key generation failed.
+/// Used when web push is disabled or VAPID key generation failed. This type
+/// does not send notifications; it only exposes the disable reason and an
+/// empty public key.
 pub struct NoopWebpusher {
     /// Reason why web push is disabled.
     msg: String,
