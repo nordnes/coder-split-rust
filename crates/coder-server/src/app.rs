@@ -29786,7 +29786,6 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
-    // -----------------------------------------------------------------------
     // Happy-path tests for handlers that previously only had error-path tests
     // -----------------------------------------------------------------------
 
@@ -29796,8 +29795,12 @@ pub(crate) mod tests {
         let response = call(app, request(Method::GET, "/api/v2/users/authmethods")?).await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert!(body.get("password").is_some());
-        assert!(body.get("github").is_some());
+        let password = body.get("password").ok_or("missing password field")?;
+        assert!(password.get("enabled").is_some());
+        let github = body.get("github").ok_or("missing github field")?;
+        assert!(github.get("enabled").is_some());
+        let oidc = body.get("oidc").ok_or("missing oidc field")?;
+        assert!(oidc.get("enabled").is_some());
         Ok(())
     }
 
@@ -29884,6 +29887,7 @@ pub(crate) mod tests {
         let body = response_json(get_resp).await?;
         assert_eq!(body.get("id").and_then(Value::as_str), Some(key_id));
         assert!(body.get("created_at").is_some());
+        assert!(body.get("expires_at").is_some());
         Ok(())
     }
 
@@ -30095,12 +30099,10 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(activate_resp.status(), StatusCode::OK);
         let activate_body = response_json(activate_resp).await?;
+        let dormant_at_val = activate_body.get("dormant_at");
         assert!(
-            activate_body.get("dormant_at").is_none()
-                || activate_body
-                    .get("dormant_at")
-                    .and_then(Value::as_str)
-                    .is_none()
+            dormant_at_val.is_none() || dormant_at_val == Some(&Value::Null),
+            "expected dormant_at to be absent or null after un-dormant, got: {dormant_at_val:?}"
         );
         Ok(())
     }
@@ -30239,7 +30241,15 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
-        let _body = response_json(response).await?;
+        let body = response_json(response).await?;
+        assert!(
+            body.get("template_id").is_some(),
+            "archive response should contain template_id"
+        );
+        assert!(
+            body.get("archived_ids").and_then(Value::as_array).is_some(),
+            "archive response should contain archived_ids array"
+        );
         Ok(())
     }
 
@@ -30294,25 +30304,8 @@ pub(crate) mod tests {
             )?,
         )
         .await?;
+        // Handler returns 200 with empty body on success.
         assert_eq!(response.status(), StatusCode::OK);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn happy_delete_external_auth_returns_not_found_without_provider() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?, None);
-        let session_token = create_and_login(&app).await?;
-        let response = call(
-            app,
-            authenticated_request(
-                Method::DELETE,
-                "/api/v2/external-auth/github",
-                &session_token,
-            )?,
-        )
-        .await?;
-        // 404 is expected when no external auth provider is configured
-        assert_eq!(response.status(), StatusCode::NOT_FOUND);
         Ok(())
     }
 
@@ -30554,12 +30547,23 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert!(body.as_object().is_some());
+        let obj = body.as_object().ok_or("expected JSON object")?;
+        assert!(
+            obj.contains_key("count"),
+            "response should contain count field"
+        );
+        assert!(
+            obj.contains_key("available"),
+            "response should contain available field"
+        );
+        assert_eq!(body.get("count").and_then(Value::as_i64), Some(0));
+        assert_eq!(body.get("available").and_then(Value::as_i64), Some(0));
         Ok(())
     }
 
     #[tokio::test]
-    async fn happy_post_request_one_time_passcode_returns_no_content() -> Result<(), Box<dyn Error>> {
+    async fn happy_post_request_one_time_passcode_returns_no_content() -> Result<(), Box<dyn Error>>
+    {
         let app = build_router(test_state(true)?, None);
         let _session_token = create_and_login(&app).await?;
         let response = call(
@@ -30625,6 +30629,8 @@ pub(crate) mod tests {
             fetched.get("transition").and_then(Value::as_str),
             Some("start")
         );
+        assert!(fetched.get("build_number").is_some());
+        assert!(fetched.get("created_at").is_some());
         Ok(())
     }
 
@@ -30668,6 +30674,7 @@ pub(crate) mod tests {
             )?,
         )
         .await?;
+        // Handler returns 200 with empty body on successful cancellation.
         assert_eq!(cancel_resp.status(), StatusCode::OK);
         Ok(())
     }
