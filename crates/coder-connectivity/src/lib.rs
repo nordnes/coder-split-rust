@@ -995,6 +995,7 @@ mod tests {
             web_terminal_renderer: String::new(),
             allow_workspace_renames: false,
             additional_csp_policy: Vec::new(),
+            disable_workspace_sharing: false,
             docs_url: String::new(),
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),

@@ -100,6 +100,8 @@ pub struct ServerConfig {
     pub allow_workspace_renames: bool,
     /// Additional Content-Security-Policy directives.
     pub additional_csp_policy: Vec<String>,
+    /// Whether workspace sharing is disabled.
+    pub disable_workspace_sharing: bool,
     /// Custom documentation URL override.
     pub docs_url: String,
     /// SCIM API key for user provisioning. Empty disables SCIM.
@@ -149,8 +151,20 @@ impl ServerConfig {
             browser_only: self.browser_only,
             disable_password_auth: self.disable_password_auth,
             disable_path_apps: self.disable_path_apps,
+            disable_owner_workspace_exec: self.disable_owner_workspace_exec,
             strict_transport_security: self.strict_transport_security,
+            strict_transport_security_options: self.strict_transport_security_options.clone(),
             experiments: self.experiments.clone(),
+            agent_fallback_troubleshooting_url: self.agent_fallback_troubleshooting_url.clone(),
+            terms_of_service_url: self.terms_of_service_url.clone(),
+            web_terminal_renderer: self.web_terminal_renderer.clone(),
+            allow_workspace_renames: self.allow_workspace_renames,
+            additional_csp_policy: self.additional_csp_policy.clone(),
+            disable_workspace_sharing: self.disable_workspace_sharing,
+            ssh_keygen_algorithm: self.ssh_keygen_algorithm.clone(),
+            cache_dir: self.cache_dir.clone(),
+            cli_upgrade_message: self.cli_upgrade_message.clone(),
+            workspace: self.workspace.clone(),
             docs_url: self.docs_url.clone(),
         }
     }
@@ -268,21 +282,21 @@ impl ServerConfig {
                 description: "Set the Secure flag on session cookies.",
             },
             ConfigOption {
-                name: "same-site-auth-cookie",
-                env: "CODER_SAME_SITE_AUTH_COOKIE",
+                name: "samesite-auth-cookie",
+                env: "CODER_SAMESITE_AUTH_COOKIE",
                 default: Some("lax"),
                 description: "SameSite attribute for session cookies (lax, strict, none).",
             },
             // -- Telemetry --
             ConfigOption {
-                name: "telemetry-enabled",
-                env: "CODER_TELEMETRY_ENABLED",
+                name: "telemetry",
+                env: "CODER_TELEMETRY_ENABLE",
                 default: Some("false"),
                 description: "Enables deployment telemetry reporting.",
             },
             ConfigOption {
-                name: "telemetry-trace",
-                env: "CODER_TELEMETRY_TRACE",
+                name: "trace-enable",
+                env: "CODER_TRACE_ENABLE",
                 default: Some("false"),
                 description: "Enables trace-level telemetry data collection.",
             },
@@ -499,8 +513,8 @@ impl ServerConfig {
             },
             // -- Dangerous --
             ConfigOption {
-                name: "dangerous-allow-all-cors",
-                env: "CODER_DANGEROUS_ALLOW_ALL_CORS",
+                name: "dangerous-allow-cors-requests",
+                env: "CODER_DANGEROUS_ALLOW_CORS_REQUESTS",
                 default: Some("false"),
                 description: "DANGEROUS: Allow all CORS origins. Not recommended for production.",
             },
@@ -518,14 +532,14 @@ impl ServerConfig {
             },
             // -- Healthcheck --
             ConfigOption {
-                name: "healthcheck-refresh-secs",
-                env: "CODER_HEALTHCHECK_REFRESH",
+                name: "health-check-refresh",
+                env: "CODER_HEALTH_CHECK_REFRESH",
                 default: Some("600"),
                 description: "Interval in seconds between automatic health check refreshes.",
             },
             ConfigOption {
-                name: "healthcheck-threshold-database-ms",
-                env: "CODER_HEALTHCHECK_THRESHOLD_DATABASE",
+                name: "health-check-threshold-database",
+                env: "CODER_HEALTH_CHECK_THRESHOLD_DATABASE",
                 default: Some("15"),
                 description: "Database health check latency threshold in milliseconds.",
             },
@@ -562,10 +576,16 @@ impl ServerConfig {
                 description: "Disable path-based workspace application routing.",
             },
             ConfigOption {
-                name: "disable-owner-workspace-exec",
-                env: "CODER_DISABLE_OWNER_WORKSPACE_EXEC",
+                name: "disable-owner-workspace-access",
+                env: "CODER_DISABLE_OWNER_WORKSPACE_ACCESS",
                 default: Some("false"),
                 description: "Disable workspace exec for site owners.",
+            },
+            ConfigOption {
+                name: "disable-workspace-sharing",
+                env: "CODER_DISABLE_WORKSPACE_SHARING",
+                default: Some("false"),
+                description: "Disable workspace sharing via ACLs.",
             },
             ConfigOption {
                 name: "strict-transport-security",
@@ -637,8 +657,8 @@ impl ServerConfig {
                 description: "Message displayed to users suggesting they upgrade the CLI.",
             },
             ConfigOption {
-                name: "scim-api-key",
-                env: "CODER_SCIM_API_KEY",
+                name: "scim-auth-header",
+                env: "CODER_SCIM_AUTH_HEADER",
                 default: Some(""),
                 description: "SCIM API key for user provisioning. Empty disables SCIM.",
             },
@@ -842,7 +862,7 @@ pub enum LogFormat {
 // -- New configuration domain structs --
 
 /// TLS configuration for HTTPS termination.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct TlsConfig {
     /// Whether TLS is enabled.
     pub enabled: bool,
@@ -856,6 +876,19 @@ pub struct TlsConfig {
     pub key_files: Vec<String>,
     /// Minimum TLS version accepted (e.g. "tls12", "tls13").
     pub min_version: String,
+}
+
+impl Default for TlsConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            address: "127.0.0.1:3443".to_owned(),
+            redirect_http: true,
+            cert_files: Vec::new(),
+            key_files: Vec::new(),
+            min_version: "tls12".to_owned(),
+        }
+    }
 }
 
 /// Networking settings for proxy and redirect behaviour.
@@ -1074,10 +1107,34 @@ pub struct PublicDeploymentConfig {
     pub disable_password_auth: bool,
     /// Whether path-based apps are disabled.
     pub disable_path_apps: bool,
+    /// Disable workspace exec for site owners.
+    pub disable_owner_workspace_exec: bool,
     /// HSTS max-age in seconds.
     pub strict_transport_security: u64,
+    /// Additional Strict-Transport-Security header options.
+    pub strict_transport_security_options: Vec<String>,
     /// Enabled experiments.
     pub experiments: Vec<String>,
+    /// Fallback troubleshooting URL for workspace agents.
+    pub agent_fallback_troubleshooting_url: String,
+    /// Terms of service URL displayed to users.
+    pub terms_of_service_url: String,
+    /// Web terminal renderer setting.
+    pub web_terminal_renderer: String,
+    /// Whether workspace renames are allowed.
+    pub allow_workspace_renames: bool,
+    /// Additional Content-Security-Policy directives.
+    pub additional_csp_policy: Vec<String>,
+    /// Whether workspace sharing is disabled.
+    pub disable_workspace_sharing: bool,
+    /// SSH key generation algorithm.
+    pub ssh_keygen_algorithm: String,
+    /// Cache directory.
+    pub cache_dir: String,
+    /// CLI upgrade message.
+    pub cli_upgrade_message: String,
+    /// Workspace default settings.
+    pub workspace: WorkspaceConfig,
     /// Custom docs URL.
     pub docs_url: String,
 }
@@ -1185,6 +1242,7 @@ mod tests {
             web_terminal_renderer: String::new(),
             allow_workspace_renames: false,
             additional_csp_policy: Vec::new(),
+            disable_workspace_sharing: false,
             docs_url: "https://coder.com/docs/coder-oss".to_owned(),
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
@@ -1295,7 +1353,9 @@ mod tests {
     fn tls_config_defaults_disabled() {
         let config = TlsConfig::default();
         assert!(!config.enabled);
-        assert!(config.address.is_empty());
+        assert_eq!(config.address, "127.0.0.1:3443");
+        assert!(config.redirect_http);
+        assert_eq!(config.min_version, "tls12");
         assert!(config.cert_files.is_empty());
         assert!(config.key_files.is_empty());
     }
@@ -1363,8 +1423,8 @@ mod tests {
         assert!(names.contains(&"telemetry-url"));
         assert!(names.contains(&"verbose"));
         assert!(names.contains(&"session-duration-hours"));
-        assert!(names.contains(&"dangerous-allow-all-cors"));
-        assert!(names.contains(&"healthcheck-refresh-secs"));
+        assert!(names.contains(&"dangerous-allow-cors-requests"));
+        assert!(names.contains(&"health-check-refresh"));
         assert!(names.contains(&"swagger-enable"));
         assert!(names.contains(&"update-check"));
         assert!(names.contains(&"browser-only"));

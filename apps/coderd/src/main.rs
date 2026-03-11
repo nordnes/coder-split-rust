@@ -137,16 +137,20 @@ struct ServerArgs {
     secure_auth_cookie: bool,
 
     /// SameSite attribute for session cookies (lax, strict, none).
-    #[arg(long, env = "CODER_SAME_SITE_AUTH_COOKIE", default_value = "lax")]
+    #[arg(long, env = "CODER_SAMESITE_AUTH_COOKIE", default_value = "lax")]
     same_site_auth_cookie: String,
 
     // ----- Telemetry -----
     /// Enable deployment telemetry.
-    #[arg(long, env = "CODER_TELEMETRY_ENABLED", default_value_t = false)]
+    #[arg(
+        long = "telemetry",
+        env = "CODER_TELEMETRY_ENABLE",
+        default_value_t = false
+    )]
     telemetry_enabled: bool,
 
     /// Enable trace-level telemetry data collection.
-    #[arg(long, env = "CODER_TELEMETRY_TRACE", default_value_t = false)]
+    #[arg(long, env = "CODER_TRACE_ENABLE", default_value_t = false)]
     telemetry_trace: bool,
 
     /// URL of the telemetry collection endpoint.
@@ -404,7 +408,11 @@ struct ServerArgs {
 
     // ----- Dangerous -----
     /// DANGEROUS: Allow all CORS origins.
-    #[arg(long, env = "CODER_DANGEROUS_ALLOW_ALL_CORS", default_value_t = false)]
+    #[arg(
+        long,
+        env = "CODER_DANGEROUS_ALLOW_CORS_REQUESTS",
+        default_value_t = false
+    )]
     dangerous_allow_all_cors: bool,
 
     /// DANGEROUS: Allow sharing path-based workspace applications.
@@ -425,13 +433,13 @@ struct ServerArgs {
 
     // ----- Healthcheck -----
     /// Interval in seconds between automatic health check refreshes.
-    #[arg(long, env = "CODER_HEALTHCHECK_REFRESH", default_value_t = 600)]
+    #[arg(long, env = "CODER_HEALTH_CHECK_REFRESH", default_value_t = 600)]
     healthcheck_refresh_secs: u64,
 
     /// Database health check latency threshold in milliseconds.
     #[arg(
         long,
-        env = "CODER_HEALTHCHECK_THRESHOLD_DATABASE",
+        env = "CODER_HEALTH_CHECK_THRESHOLD_DATABASE",
         default_value_t = 15
     )]
     healthcheck_threshold_database_ms: u64,
@@ -465,10 +473,14 @@ struct ServerArgs {
     /// Disable workspace exec for site owners.
     #[arg(
         long,
-        env = "CODER_DISABLE_OWNER_WORKSPACE_EXEC",
+        env = "CODER_DISABLE_OWNER_WORKSPACE_ACCESS",
         default_value_t = false
     )]
     disable_owner_workspace_exec: bool,
+
+    /// Disable workspace sharing.
+    #[arg(long, env = "CODER_DISABLE_WORKSPACE_SHARING", default_value_t = false)]
+    disable_workspace_sharing: bool,
 
     /// HSTS max-age in seconds. Zero disables HSTS.
     #[arg(long, env = "CODER_STRICT_TRANSPORT_SECURITY", default_value_t = 0)]
@@ -528,7 +540,7 @@ struct ServerArgs {
     docs_url: String,
 
     /// SCIM API key for user provisioning. Empty disables SCIM.
-    #[arg(long, env = "CODER_SCIM_API_KEY", default_value = "")]
+    #[arg(long, env = "CODER_SCIM_AUTH_HEADER", default_value = "")]
     scim_api_key: String,
 
     /// Message displayed to users suggesting they upgrade the CLI.
@@ -1001,6 +1013,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         web_terminal_renderer: args.web_terminal_renderer,
         allow_workspace_renames: args.allow_workspace_renames,
         additional_csp_policy: split_csv(&args.additional_csp_policy),
+        disable_workspace_sharing: args.disable_workspace_sharing,
         docs_url: args.docs_url,
         scim_api_key: args.scim_api_key,
         cli_upgrade_message: args.cli_upgrade_message,
