@@ -810,4 +810,162 @@ mod tests {
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].1, NotificationMessageStatus::TemporaryFailure);
     }
+
+    // ── 13. Multiple pending messages dispatched in order ────
+
+    #[tokio::test]
+    async fn dispatch_multiple_inbox_messages() {
+        let msg1 = make_message(NotificationMethod::Inbox, "{}");
+        let msg2 = make_message(NotificationMethod::Inbox, "{}");
+        let id1 = msg1.id;
+        let id2 = msg2.id;
+        let store = MockStore::new().with_pending(vec![msg1, msg2]);
+        let config = NotificationConfig::default();
+        let service = NotificationDispatchService::new(store.clone(), config)
+            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 2);
+
+        let updates = store
+            .status_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(updates.len(), 2);
+        // Both should be marked as Sent
+        assert!(
+            updates
+                .iter()
+                .all(|(_, s)| *s == NotificationMessageStatus::Sent)
+        );
+        // Both IDs should be present
+        let ids: Vec<Uuid> = updates.iter().map(|(id, _)| *id).collect();
+        assert!(ids.contains(&id1));
+        assert!(ids.contains(&id2));
+    }
+
+    // ── 14. Dispatch config accessor reflects construction ───
+
+    #[tokio::test]
+    async fn service_config_reflects_custom_values() {
+        let store = MockStore::new();
+        let config = NotificationConfig {
+            smtp_host: "custom.smtp.example.com".to_owned(),
+            smtp_port: 2525,
+            smtp_from: "sender@custom.com".to_owned(),
+            webhook_timeout_secs: 5,
+        };
+        let service = NotificationDispatchService::new(store, config)
+            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        assert_eq!(service.config().smtp_host, "custom.smtp.example.com");
+        assert_eq!(service.config().smtp_port, 2525);
+        assert_eq!(service.config().smtp_from, "sender@custom.com");
+        assert_eq!(service.config().webhook_timeout_secs, 5);
+    }
+
+    // ── 15. NotificationDispatchError variants ──────────────
+
+    #[test]
+    fn dispatch_error_transport_variant() {
+        let err = NotificationDispatchError::Transport("connection refused".to_owned());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("transport error"),
+            "should contain error prefix"
+        );
+        assert!(msg.contains("connection refused"));
+    }
+
+    #[test]
+    fn dispatch_error_config_missing_variant() {
+        let err = NotificationDispatchError::ConfigMissing("smtp_host".to_owned());
+        let msg = err.to_string();
+        assert!(msg.contains("config missing"), "should contain error prefix");
+        assert!(msg.contains("smtp_host"));
+    }
+
+    // ── 16. Message status transitions ──────────────────────
+
+    #[test]
+    fn notification_message_status_equality() {
+        assert_eq!(
+            NotificationMessageStatus::Pending,
+            NotificationMessageStatus::Pending
+        );
+        assert_ne!(
+            NotificationMessageStatus::Pending,
+            NotificationMessageStatus::Sent
+        );
+        assert_ne!(
+            NotificationMessageStatus::Leased,
+            NotificationMessageStatus::Failed
+        );
+    }
+
+    // ── 17. Webhook with valid URL but still fails (no server) ─
+
+    #[tokio::test]
+    async fn dispatch_webhook_with_unreachable_url() {
+        // targets_json has a URL but no server is listening.
+        let msg = make_message(
+            NotificationMethod::Webhook,
+            r#"{"url":"http://127.0.0.1:1/nonexistent"}"#,
+        );
+        let msg_id = msg.id;
+        let store = MockStore::new().with_pending(vec![msg]);
+        let config = NotificationConfig {
+            webhook_timeout_secs: 1,
+            ..NotificationConfig::default()
+        };
+        let service = NotificationDispatchService::new(store.clone(), config)
+            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 1);
+
+        // Should fail with temporary failure (connection refused).
+        let updates = store
+            .status_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, msg_id);
+        assert_eq!(updates[0].1, NotificationMessageStatus::TemporaryFailure);
+    }
+
+    // ── 18. Method clone and debug ──────────────────────────
+
+    #[test]
+    fn notification_method_clone_and_debug() {
+        let method = NotificationMethod::Inbox;
+        let cloned = method;
+        assert_eq!(method, cloned);
+        let debug = format!("{method:?}");
+        assert!(debug.contains("Inbox"));
+    }
+
+    // ── 19. Config default values are sensible ──────────────
+
+    #[test]
+    fn notification_config_default_smtp_port_is_587() {
+        let config = NotificationConfig::default();
+        assert_eq!(config.smtp_port, 587, "default SMTP port should be 587");
+    }
+
+    #[test]
+    fn notification_config_default_webhook_timeout_is_30() {
+        let config = NotificationConfig::default();
+        assert_eq!(
+            config.webhook_timeout_secs, 30,
+            "default webhook timeout should be 30s"
+        );
+    }
 }

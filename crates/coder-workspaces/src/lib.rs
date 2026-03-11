@@ -10,6 +10,7 @@ use std::sync::{Arc, Weak};
 use coder_core::{DeploymentStatsResponse, OperationalStore, StorageError};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, RwLock};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 const DEPLOYMENT_STATS_REFRESH_SECS: u64 = 60;
@@ -19,6 +20,7 @@ pub struct DeploymentStatsService<S> {
     store: S,
     cache: RwLock<Option<DeploymentStatsResponse>>,
     refresh_lock: Mutex<()>,
+    cancel: CancellationToken,
 }
 
 impl<S> DeploymentStatsService<S>
@@ -28,13 +30,27 @@ where
     /// Creates the cached deployment-stats service and starts background refresh.
     #[must_use]
     pub fn new(store: S) -> Arc<Self> {
+        let cancel = CancellationToken::new();
         let service = Arc::new(Self {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel,
         });
         Self::spawn_refresh_loop(&service);
         service
+    }
+
+    /// Signals the background refresh loop to stop.
+    ///
+    /// Note: this only sets the cancellation token; it does **not** wait for
+    /// the background task to finish.  The loop will exit on its next
+    /// iteration after it observes the token.
+    ///
+    /// Calling this more than once is harmless — subsequent calls return
+    /// immediately because the token is already cancelled.
+    pub fn close(&self) {
+        self.cancel.cancel();
     }
 
     /// Returns the latest cached stats, refreshing on demand when needed.
@@ -62,13 +78,14 @@ where
 
     fn spawn_refresh_loop(service: &Arc<Self>) {
         let weak = Arc::downgrade(service);
+        let cancel = service.cancel.clone();
         tokio::spawn(async move {
-            run_refresh_loop(weak).await;
+            run_refresh_loop(weak, cancel).await;
         });
     }
 }
 
-async fn run_refresh_loop<S>(service: Weak<DeploymentStatsService<S>>)
+async fn run_refresh_loop<S>(service: Weak<DeploymentStatsService<S>>, cancel: CancellationToken)
 where
     S: OperationalStore + Clone + Send + Sync + 'static,
 {
@@ -78,7 +95,13 @@ where
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("deployment stats refresh loop cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
         let Some(service) = service.upgrade() else {
             return;
         };
@@ -468,6 +491,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         // First call triggers refresh
@@ -487,6 +511,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         let _r1 = service.refresh().await;
@@ -507,6 +532,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         // Populate cache
@@ -531,6 +557,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         let result = service.get().await;
@@ -546,6 +573,7 @@ mod tests {
             store,
             cache: RwLock::new(None),
             refresh_lock: Mutex::new(()),
+            cancel: CancellationToken::new(),
         });
 
         // Populate cache successfully
@@ -909,5 +937,240 @@ mod tests {
             !large_policy.should_stop(recent),
             "large TTL should not stop recent activity"
         );
+    }
+
+    // ── AutobuildExecutor tests ─────────────────────────────
+
+    #[tokio::test]
+    async fn autobuild_executor_evaluate_returns_workspace_count() {
+        let stats = default_stats();
+        let store = MockOperationalStore::new(stats);
+
+        let executor = StdArc::new(AutobuildExecutor {
+            store,
+            _refresh_lock: Mutex::new(()),
+        });
+
+        let count = executor.evaluate_once().await;
+        assert!(count.is_ok());
+        // pending(1) + running(5) + stopped(3) = 9
+        let workspace_count = count.unwrap_or_else(|_| unreachable!());
+        assert_eq!(workspace_count, 9);
+    }
+
+    #[tokio::test]
+    async fn autobuild_executor_evaluate_handles_store_failure() {
+        let store = MockOperationalStore::new(default_stats()).with_failure();
+
+        let executor = StdArc::new(AutobuildExecutor {
+            store,
+            _refresh_lock: Mutex::new(()),
+        });
+
+        // When the store fails, evaluate_once returns Ok(0) because
+        // deployment_stats().ok() returns None and unwrap_or(0) kicks in.
+        let count = executor.evaluate_once().await;
+        assert!(count.is_ok());
+        assert_eq!(count.unwrap_or_else(|_| unreachable!()), 0);
+    }
+
+    #[tokio::test]
+    async fn autobuild_executor_evaluate_zero_workspaces() {
+        let mut stats = default_stats();
+        stats.workspaces.pending = 0;
+        stats.workspaces.running = 0;
+        stats.workspaces.stopped = 0;
+        stats.workspaces.building = 0;
+        stats.workspaces.failed = 0;
+        let store = MockOperationalStore::new(stats);
+
+        let executor = StdArc::new(AutobuildExecutor {
+            store,
+            _refresh_lock: Mutex::new(()),
+        });
+
+        let count = executor.evaluate_once().await;
+        assert!(count.is_ok());
+        assert_eq!(count.unwrap_or_else(|_| unreachable!()), 0);
+    }
+
+    // ── TemplateScheduleConstraints tests ───────────────────
+
+    #[test]
+    fn template_schedule_constraints_default_values() {
+        let constraints = TemplateScheduleConstraints {
+            max_autostart_interval: None,
+            max_ttl_minutes: None,
+            quiet_hours: None,
+            dormancy_threshold_days: None,
+            dormancy_auto_deletion_days: None,
+        };
+
+        assert!(constraints.max_autostart_interval.is_none());
+        assert!(constraints.max_ttl_minutes.is_none());
+        assert!(constraints.quiet_hours.is_none());
+        assert!(constraints.dormancy_threshold_days.is_none());
+        assert!(constraints.dormancy_auto_deletion_days.is_none());
+    }
+
+    #[test]
+    fn template_schedule_constraints_with_values() {
+        let constraints = TemplateScheduleConstraints {
+            max_autostart_interval: Some(std::time::Duration::from_secs(3600)),
+            max_ttl_minutes: Some(480),
+            quiet_hours: Some(QuietHoursWindow {
+                start_hour: 22,
+                end_hour: 6,
+            }),
+            dormancy_threshold_days: Some(30),
+            dormancy_auto_deletion_days: Some(90),
+        };
+
+        assert_eq!(
+            constraints.max_autostart_interval,
+            Some(std::time::Duration::from_secs(3600))
+        );
+        assert_eq!(constraints.max_ttl_minutes, Some(480));
+        assert!(constraints.quiet_hours.is_some());
+        assert_eq!(constraints.dormancy_threshold_days, Some(30));
+        assert_eq!(constraints.dormancy_auto_deletion_days, Some(90));
+
+        // Verify the quiet hours window works within the constraints
+        let qh = constraints
+            .quiet_hours
+            .as_ref()
+            .unwrap_or_else(|| unreachable!());
+        let midnight = time::macros::datetime!(2026-03-09 00:00:00 UTC);
+        assert!(
+            qh.is_quiet(midnight),
+            "midnight should be in quiet window 22-6"
+        );
+    }
+
+    // ── QuietHoursWindow edge cases ─────────────────────────
+
+    #[test]
+    fn quiet_hours_same_start_end_is_never_quiet() {
+        // When start == end, the window is zero-width
+        let window = QuietHoursWindow {
+            start_hour: 12,
+            end_hour: 12,
+        };
+        let noon = time::macros::datetime!(2026-03-09 12:00:00 UTC);
+        assert!(
+            !window.is_quiet(noon),
+            "zero-width window should never be quiet"
+        );
+        let other = time::macros::datetime!(2026-03-09 06:00:00 UTC);
+        assert!(
+            !window.is_quiet(other),
+            "zero-width window should never be quiet for any hour"
+        );
+    }
+
+    #[test]
+    fn quiet_hours_full_day_wrap() {
+        // start=0, end=0 wrapping case — wraps midnight, covers all 24 hours
+        let window = QuietHoursWindow {
+            start_hour: 0,
+            end_hour: 0,
+        };
+        // With start==end and start<=end path, hour >= 0 && hour < 0 is false
+        let t = time::macros::datetime!(2026-03-09 15:00:00 UTC);
+        assert!(
+            !window.is_quiet(t),
+            "start==end==0 non-wrapping path returns false"
+        );
+    }
+
+    // ── Dormancy edge cases ─────────────────────────────────
+
+    #[test]
+    fn dormancy_zero_threshold_always_dormant() {
+        let recent = OffsetDateTime::now_utc();
+        assert_eq!(
+            evaluate_dormancy(recent, 0),
+            AutobuildAction::Dormant,
+            "zero threshold means always dormant"
+        );
+    }
+
+    #[test]
+    fn dormancy_very_large_threshold_never_dormant() {
+        let old = OffsetDateTime::now_utc() - time::Duration::days(365 * 10);
+        // u64::MAX days is much larger than 10 years
+        assert_eq!(
+            evaluate_dormancy(old, u64::MAX),
+            AutobuildAction::None,
+            "enormous threshold should never be dormant"
+        );
+    }
+
+    // ── AutostopPolicy edge cases ───────────────────────────
+
+    #[test]
+    fn autostop_policy_zero_ttl_always_stops() {
+        let policy = AutostopPolicy { ttl_minutes: 0 };
+        let now = OffsetDateTime::now_utc();
+        assert!(
+            policy.should_stop(now),
+            "zero TTL should always trigger stop"
+        );
+    }
+
+    #[test]
+    fn autostop_policy_future_activity_does_not_stop() {
+        let policy = AutostopPolicy { ttl_minutes: 60 };
+        // Activity 1 second in the future (clock skew scenario)
+        let future = OffsetDateTime::now_utc() + time::Duration::seconds(1);
+        assert!(
+            !policy.should_stop(future),
+            "future activity should not trigger stop"
+        );
+    }
+
+    // ── ScheduleParseError display ──────────────────────────
+
+    #[test]
+    fn schedule_parse_error_display() {
+        let err = ScheduleParseError::InvalidCron("bad expression".to_owned());
+        let msg = err.to_string();
+        assert!(
+            msg.contains("invalid cron expression"),
+            "error message should describe invalid cron"
+        );
+        assert!(msg.contains("bad expression"));
+    }
+
+    // ── AutostartSchedule timezone edge cases ───────────────
+
+    #[test]
+    fn autostart_schedule_utc_default_when_no_prefix() {
+        let schedule = AutostartSchedule::parse("0 12 * * *");
+        assert!(schedule.is_ok());
+        let s = schedule.unwrap_or_else(|_| unreachable!());
+        assert_eq!(s.timezone(), "UTC");
+    }
+
+    #[test]
+    fn autostart_schedule_cron_tz_with_various_timezones() {
+        let timezones = [
+            "America/New_York",
+            "Europe/London",
+            "Asia/Tokyo",
+            "Australia/Sydney",
+        ];
+        for tz in &timezones {
+            let raw = format!("CRON_TZ={tz} 0 9 * * *");
+            let schedule = AutostartSchedule::parse(&raw);
+            assert!(schedule.is_ok(), "should parse cron with TZ={tz}");
+            let s = schedule.unwrap_or_else(|_| unreachable!());
+            assert_eq!(s.timezone(), *tz);
+            // Should always have a next occurrence
+            assert!(
+                s.next_after_utc().is_some(),
+                "should have next occurrence for TZ={tz}"
+            );
+        }
     }
 }
