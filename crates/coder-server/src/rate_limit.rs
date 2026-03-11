@@ -35,7 +35,21 @@ const HEADER_RETRY_AFTER: &str = "retry-after";
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
 enum RateLimitKey {
     Ip(IpAddr),
-    User(String),
+    /// Hashed session token — avoids storing raw secrets in memory while still
+    /// providing per-session bucketing.
+    HashedToken(String),
+}
+
+// ---------------------------------------------------------------------------
+// Endpoint category
+// ---------------------------------------------------------------------------
+
+/// Which rate-limit bucket an incoming request belongs to.
+enum EndpointCategory {
+    Login,
+    Audit,
+    AuthenticatedApi,
+    Unauthenticated,
 }
 
 // ---------------------------------------------------------------------------
@@ -45,13 +59,20 @@ enum RateLimitKey {
 type KeyedLimiter = RateLimiter<RateLimitKey, DashMapStateStore<RateLimitKey>, DefaultClock>;
 
 /// Shared, cheaply-cloneable rate-limit state created once at startup.
+///
+/// Four separate governor limiters enforce truly distinct quotas for each
+/// endpoint category (login, audit, general authenticated, unauthenticated).
 #[derive(Clone)]
 pub struct RateLimitState {
     config: RateLimitConfig,
-    /// Per-IP limiter used for login and unauthenticated requests.
-    ip_limiter: Arc<KeyedLimiter>,
-    /// Per-user limiter used for general authenticated requests.
+    /// Login endpoint limiter — per IP, strict quota (`login_per_minute`).
+    login_limiter: Arc<KeyedLimiter>,
+    /// Audit endpoint limiter — per user/IP, moderate quota (`audit_per_minute`).
+    audit_limiter: Arc<KeyedLimiter>,
+    /// General authenticated API limiter — per user, generous quota (`api_per_minute`).
     user_limiter: Arc<KeyedLimiter>,
+    /// Unauthenticated endpoint limiter — per IP, moderate quota (`unauthenticated_per_minute`).
+    ip_limiter: Arc<KeyedLimiter>,
 }
 
 impl RateLimitState {
@@ -65,13 +86,20 @@ impl RateLimitState {
             return None;
         }
 
-        let ip_quota = per_minute_quota(config.unauthenticated_per_minute);
-        let user_quota = per_minute_quota(config.api_per_minute);
-
         Some(Self {
+            login_limiter: Arc::new(RateLimiter::dashmap(per_minute_quota(
+                config.login_per_minute,
+            ))),
+            audit_limiter: Arc::new(RateLimiter::dashmap(per_minute_quota(
+                config.audit_per_minute,
+            ))),
+            user_limiter: Arc::new(RateLimiter::dashmap(per_minute_quota(
+                config.api_per_minute,
+            ))),
+            ip_limiter: Arc::new(RateLimiter::dashmap(per_minute_quota(
+                config.unauthenticated_per_minute,
+            ))),
             config: config.clone(),
-            ip_limiter: Arc::new(RateLimiter::dashmap(ip_quota)),
-            user_limiter: Arc::new(RateLimiter::dashmap(user_quota)),
         })
     }
 }
@@ -107,12 +135,14 @@ pub async fn rate_limit_middleware(
     let path = request.uri().path().to_owned();
     let headers = request.headers().clone();
 
-    // Determine the key and which limiter to use.
-    let (key, limit_per_minute) = resolve_key_and_limit(&headers, &path, &rl.config);
+    // Determine the endpoint category, key, and which limiter to use.
+    let (category, key) = resolve_category_and_key(&headers, &path);
 
-    let limiter: &KeyedLimiter = match &key {
-        RateLimitKey::User(_) => &rl.user_limiter,
-        RateLimitKey::Ip(_) => &rl.ip_limiter,
+    let (limiter, limit_per_minute): (&KeyedLimiter, u32) = match category {
+        EndpointCategory::Login => (&rl.login_limiter, rl.config.login_per_minute),
+        EndpointCategory::Audit => (&rl.audit_limiter, rl.config.audit_per_minute),
+        EndpointCategory::AuthenticatedApi => (&rl.user_limiter, rl.config.api_per_minute),
+        EndpointCategory::Unauthenticated => (&rl.ip_limiter, rl.config.unauthenticated_per_minute),
     };
 
     // Attempt to acquire a token.
@@ -164,49 +194,58 @@ pub async fn rate_limit_middleware(
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Determines the rate-limit key (IP or user) and the applicable per-minute
-/// limit based on the request path and headers.
-fn resolve_key_and_limit(
-    headers: &HeaderMap,
-    path: &str,
-    config: &RateLimitConfig,
-) -> (RateLimitKey, u32) {
-    // Check for an authenticated user (session token header).
-    let user_id = headers
+/// Determines the endpoint category and rate-limit key based on the request
+/// path and headers.
+fn resolve_category_and_key(headers: &HeaderMap, path: &str) -> (EndpointCategory, RateLimitKey) {
+    // Hash the session token (if present) to avoid storing raw secrets in the
+    // DashMap.  The hash is deterministic so the same token always maps to the
+    // same bucket.
+    let hashed_token = headers
         .get("coder-session-token")
         .and_then(|v| v.to_str().ok())
-        .map(|s| s.to_owned());
+        .map(hash_token);
 
-    // Extract client IP from X-Forwarded-For or X-Real-Ip.
     let client_ip = extract_client_ip(headers);
 
     // Login endpoint: always keyed by IP with strict limit.
     if path.ends_with("/users/login") || path.ends_with("/users/otp/request") {
-        let key = RateLimitKey::Ip(client_ip);
-        return (key, config.login_per_minute);
+        return (EndpointCategory::Login, RateLimitKey::Ip(client_ip));
     }
 
-    // Audit endpoint: keyed by user with moderate limit.
+    // Audit endpoint: keyed by hashed token (or IP if unauthenticated).
     if path.contains("/audit") {
-        if let Some(uid) = user_id {
-            return (RateLimitKey::User(uid), config.audit_per_minute);
+        if let Some(hash) = hashed_token {
+            return (EndpointCategory::Audit, RateLimitKey::HashedToken(hash));
         }
         return (
+            EndpointCategory::Unauthenticated,
             RateLimitKey::Ip(client_ip),
-            config.unauthenticated_per_minute,
         );
     }
 
     // Authenticated request: generous per-user limit.
-    if let Some(uid) = user_id {
-        return (RateLimitKey::User(uid), config.api_per_minute);
+    if let Some(hash) = hashed_token {
+        return (
+            EndpointCategory::AuthenticatedApi,
+            RateLimitKey::HashedToken(hash),
+        );
     }
 
     // Unauthenticated: moderate per-IP limit.
     (
+        EndpointCategory::Unauthenticated,
         RateLimitKey::Ip(client_ip),
-        config.unauthenticated_per_minute,
     )
+}
+
+/// Hash a session token using the standard library `DefaultHasher` to produce
+/// a fixed-length hex key.  This avoids keeping the raw secret in the governor
+/// `DashMap`.
+fn hash_token(token: &str) -> String {
+    use std::hash::{DefaultHasher, Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    token.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
 }
 
 /// Best-effort extraction of the client IP from standard proxy headers,

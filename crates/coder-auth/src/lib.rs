@@ -1854,7 +1854,13 @@ async fn post_form_once(
                 format!("status {}: body: {body}", status.as_u16())
             }
         });
-        return Err(ExternalAuthServiceError::BadRequest(detail));
+        // Classify 4xx (except 429) as BadRequest (non-retryable) and
+        // everything else (5xx, 429) as Internal so the retry wrapper can
+        // re-attempt the request on transient failures.
+        if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(ExternalAuthServiceError::BadRequest(detail));
+        }
+        return Err(ExternalAuthServiceError::Internal(detail));
     }
 
     Ok(parsed)
