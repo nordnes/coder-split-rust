@@ -1772,10 +1772,14 @@ async fn bearer_get_once(
         ));
     }
     if !status.is_success() {
-        return Err(ExternalAuthServiceError::Internal(format!(
-            "status {}: body: {body}",
-            status.as_u16()
-        )));
+        let detail = format!("status {}: body: {body}", status.as_u16());
+        // Classify 4xx (except 429) as BadRequest (non-retryable), matching
+        // the same logic in `post_form_once`.  Only 5xx, 429, and connection
+        // errors should be retried.
+        if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(ExternalAuthServiceError::BadRequest(detail));
+        }
+        return Err(ExternalAuthServiceError::Internal(detail));
     }
 
     parse_response_body(content_type.as_deref(), &body)

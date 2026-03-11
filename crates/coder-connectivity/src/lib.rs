@@ -230,19 +230,22 @@ where
                     healthz_response: result.body,
                 }
             }
-            Err(error) => AccessUrlHealthReport {
-                base: BaseHealthReport {
-                    error: Some(error.message),
-                    severity: HealthSeverity::Error,
-                    warnings: Vec::new(),
-                    dismissed: false,
-                },
-                healthy: false,
-                access_url,
-                reachable: false,
-                status_code: 0,
-                healthz_response: String::new(),
-            },
+            Err(error) => {
+                let code = i32::from(error.status_code);
+                AccessUrlHealthReport {
+                    base: BaseHealthReport {
+                        error: Some(error.message),
+                        severity: HealthSeverity::Error,
+                        warnings: Vec::new(),
+                        dismissed: false,
+                    },
+                    healthy: false,
+                    access_url,
+                    reachable: error.status_code != 0,
+                    status_code: code,
+                    healthz_response: String::new(),
+                }
+            }
         }
     }
 
@@ -297,7 +300,7 @@ where
                     dismissed: false,
                 },
                 body: String::new(),
-                code: 0,
+                code: i32::from(error.status_code),
             },
         }
     }
@@ -334,9 +337,14 @@ where
                     }
                     Err(probe_error) => {
                         severity = HealthSeverity::Error;
+                        let status_label = if probe_error.status_code != 0 {
+                            "error"
+                        } else {
+                            "unreachable"
+                        };
                         let message = format!(
-                            "region={} node={} status=unreachable error={}",
-                            region.name, node.name, probe_error.message
+                            "region={} node={} status={status_label} code={} error={}",
+                            region.name, node.name, probe_error.status_code, probe_error.message
                         );
                         error = Some(message.clone());
                         logs.push(message);
@@ -490,6 +498,9 @@ struct HealthProbeResult {
 #[derive(Debug)]
 struct HealthProbeError {
     message: String,
+    /// The HTTP status code that triggered the error, or `0` for connection-
+    /// level failures where no response was received.
+    status_code: u16,
     /// True when the error is a client-side 4xx that should not be retried.
     is_client_error: bool,
 }
@@ -528,11 +539,13 @@ async fn health_probe_get(
                         if (400..500).contains(&status_code) {
                             Err(HealthProbeError {
                                 message: format!("HTTP {status_code}: {body}"),
+                                status_code,
                                 is_client_error: true,
                             })
                         } else if status_code >= 500 {
                             Err(HealthProbeError {
                                 message: format!("HTTP {status_code}: {body}"),
+                                status_code,
                                 is_client_error: false,
                             })
                         } else {
@@ -541,6 +554,7 @@ async fn health_probe_get(
                     }
                     Err(error) => Err(HealthProbeError {
                         message: error.to_string(),
+                        status_code: 0,
                         is_client_error: false,
                     }),
                 }
