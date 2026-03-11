@@ -48,6 +48,7 @@ use crate::handlers::audit::*;
 use crate::handlers::auth::*;
 use crate::handlers::chats::*;
 use crate::handlers::deployment::*;
+use crate::handlers::derp::*;
 use crate::handlers::external_auth::*;
 use crate::handlers::files::*;
 use crate::handlers::health::*;
@@ -250,6 +251,8 @@ pub fn build_router(
         .route("/", get(server_root))
         .route("/healthz", get(healthz))
         .route("/latency-check", get(latency_check))
+        .route("/derp", get(derp_websocket))
+        .route("/derp/latency-check", get(derp_latency_check))
         .route("/metrics", get(get_prometheus_metrics))
         .route("/mcp/http", post(mcp_http_handler))
         .route(
