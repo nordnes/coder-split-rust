@@ -53,7 +53,7 @@ time = { version = "0.3", features = ["formatting", "parsing", "serde", "serde-w
 tokio = { version = "1.44", features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 tower = { version = "0.5", features = ["util"] }
-tower-http = { version = "0.6", default-features = false, features = ["normalize-path", "request-id", "trace", "util"] }
+tower-http = { version = "0.6", default-features = false, features = ["cors", "normalize-path", "request-id", "trace", "util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "json", "time"] }
 url = { version = "2.5", features = ["serde"] }

@@ -73,7 +73,7 @@ pub use api::{
 };
 pub use build_info::BuildMetadata;
 pub use config::{
-    DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, PublicDatabaseConfig,
+    CorsConfig, DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, PublicDatabaseConfig,
     PublicDeploymentConfig, ServerConfig, SshConfig,
 };
 pub use identity::{
