@@ -974,6 +974,91 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        sqlx::query_as::<_, StoredUserRow>(
+            "SELECT
+                u.id,
+                u.email,
+                u.username,
+                u.name,
+                u.avatar_url,
+                u.created_at,
+                u.updated_at,
+                u.last_seen_at,
+                u.login_type::text AS login_type,
+                u.status::text AS status,
+                u.deleted,
+                u.is_system,
+                COALESCE(
+                    array_agg(DISTINCT om.organization_id) FILTER (WHERE om.organization_id IS NOT NULL),
+                    ARRAY[]::uuid[]
+                ) AS organization_ids,
+                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles
+             FROM users u
+             JOIN user_links ul ON ul.user_id = u.id
+             LEFT JOIN organization_members om ON om.user_id = u.id
+             WHERE ul.login_type = $1::login_type AND ul.linked_id = $2
+             GROUP BY u.id
+             LIMIT 1",
+        )
+        .bind(login_type.as_str())
+        .bind(linked_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .map(user_record_from_row)
+        .transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        sqlx::query_as::<_, StoredUserRow>(
+            "SELECT
+                u.id,
+                u.email,
+                u.username,
+                u.name,
+                u.avatar_url,
+                u.created_at,
+                u.updated_at,
+                u.last_seen_at,
+                u.login_type::text AS login_type,
+                u.status::text AS status,
+                u.deleted,
+                u.is_system,
+                COALESCE(
+                    array_agg(DISTINCT om.organization_id) FILTER (WHERE om.organization_id IS NOT NULL),
+                    ARRAY[]::uuid[]
+                ) AS organization_ids,
+                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles
+             FROM users u
+             LEFT JOIN organization_members om ON om.user_id = u.id
+             WHERE lower(u.email) = lower($1)
+               AND u.login_type = $2::login_type
+               AND u.deleted = false
+               AND u.is_system = false
+               AND u.status = 'active'
+             GROUP BY u.id
+             LIMIT 1",
+        )
+        .bind(email)
+        .bind(login_type.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?
+        .map(user_record_from_row)
+        .transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredUserLinkRow>(
             "SELECT

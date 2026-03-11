@@ -770,7 +770,11 @@ pub struct OAuth2ProviderAppRecord {
     /// Additional redirect URIs.
     pub redirect_uris: Vec<String>,
     /// User who created the application.
-    pub created_by: Uuid,
+    ///
+    /// `None` for dynamically registered clients (RFC 7591) which have no
+    /// user context. The Go reference uses `InsertOAuth2ProviderApp` without
+    /// a `created_by` column for dynamic registrations.
+    pub created_by: Option<Uuid>,
 }
 
 /// Input for creating an OAuth2 provider app.
@@ -783,7 +787,9 @@ pub struct CreateOAuth2ProviderAppInput {
     /// Primary callback URL.
     pub callback_url: String,
     /// User who created the application.
-    pub created_by: Uuid,
+    ///
+    /// `None` for dynamically registered clients (RFC 7591).
+    pub created_by: Option<Uuid>,
 }
 
 /// Input for updating an OAuth2 provider app.

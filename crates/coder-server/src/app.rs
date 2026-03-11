@@ -160,6 +160,8 @@ pub struct AppState {
     pub(crate) health: HealthService<Arc<dyn AppStore>>,
     pub(crate) external_auth: ExternalAuthService<Arc<dyn AppStore>>,
     pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
+    /// Shared HTTP client for outbound requests (connection pooling).
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -191,6 +193,7 @@ impl AppState {
         let health = HealthService::new(store.clone())?;
         let external_auth = ExternalAuthService::new(store.clone())?;
         let oauth2_provider = OAuth2ProviderService::new(store.clone());
+        let http_client = reqwest::Client::new();
 
         Ok(Self {
             config,
@@ -209,6 +212,7 @@ impl AppState {
             health,
             external_auth,
             oauth2_provider,
+            http_client,
         })
     }
 
@@ -758,13 +762,14 @@ pub fn build_router(
                 )
                 .route(
                     "/users/oauth2/github/device",
-                    get(get_github_oauth_device_disabled),
+                    get(get_github_oauth_device_disabled)
+                        .post(post_github_oauth_device),
                 )
                 .route(
                     "/users/oauth2/github/callback",
-                    get(get_github_oauth_callback_disabled),
+                    get(get_github_oauth_callback),
                 )
-                .route("/users/oidc/callback", get(get_oidc_callback_disabled))
+                .route("/users/oidc/callback", get(get_oidc_callback))
                 .route("/auth/scopes", get(list_api_key_scopes))
                 .route("/deployment/config", get(deployment_config))
                 // -------------------------------------------------------
@@ -870,6 +875,22 @@ pub fn build_router(
                     post(post_workspace_agent_instance_identity_google),
                 ),
         )
+        .route(
+            "/.well-known/oauth-authorization-server",
+            get(get_oauth2_authorization_server_metadata),
+        )
+        .route(
+            "/.well-known/oauth-protected-resource",
+            get(get_oauth2_protected_resource_metadata),
+        )
+        .route("/oauth2/register", post(post_oauth2_register))
+        .route(
+            "/oauth2/clients/{client_id}",
+            get(get_oauth2_client_configuration)
+                .put(put_oauth2_client_configuration)
+                .delete(delete_oauth2_client_configuration),
+        )
+        .route("/oauth2/revoke", post(post_oauth2_revoke))
         .route(
             "/oauth2/authorize",
             get(get_oauth2_authorize).post(post_oauth2_authorize),
@@ -6633,6 +6654,54 @@ pub(crate) mod tests {
         }
 
         // -----------------------------------------------------------------
+        // User Lookup by Linked ID / Email
+        // -----------------------------------------------------------------
+
+        async fn find_user_by_linked_id(
+            &self,
+            login_type: LoginType,
+            linked_id: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let links = self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for link in links.values() {
+                if link.login_type == login_type && link.linked_id == linked_id {
+                    if let Some(user) = users.get(&link.user_id) {
+                        return Ok(Some(user.clone()));
+                    }
+                }
+            }
+            Ok(None)
+        }
+
+        async fn find_active_user_by_email_and_login_type(
+            &self,
+            email: &str,
+            login_type: LoginType,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(users
+                .values()
+                .find(|u| {
+                    u.email.eq_ignore_ascii_case(email)
+                        && !u.deleted
+                        && !u.is_system
+                        && u.status == UserStatus::Active
+                        && u.login_type == login_type
+                })
+                .cloned())
+        }
+
+        // -----------------------------------------------------------------
         // User Links
         // -----------------------------------------------------------------
 
@@ -7207,6 +7276,8 @@ pub(crate) mod tests {
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
+            github_oauth: None,
+            oidc: None,
             otel: coder_core::config::OtelConfig::default(),
             cors: coder_core::config::CorsConfig::default(),
         })
@@ -19949,6 +20020,489 @@ pub(crate) mod tests {
     }
 
     // =====================================================================
+    // OAuth2 RFC Compliance Tests (8414, 9728, 7591, 7592, 7009)
+    // =====================================================================
+
+    #[tokio::test]
+    async fn rfc8414_authorization_server_metadata() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, "/.well-known/oauth-authorization-server")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+
+        // RFC 8414 REQUIRED fields
+        assert!(
+            body.get("issuer").and_then(Value::as_str).is_some(),
+            "missing issuer"
+        );
+        assert!(
+            body.get("authorization_endpoint")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing authorization_endpoint"
+        );
+        assert!(
+            body.get("token_endpoint").and_then(Value::as_str).is_some(),
+            "missing token_endpoint"
+        );
+        assert!(
+            body.get("response_types_supported")
+                .and_then(Value::as_array)
+                .is_some(),
+            "missing response_types_supported"
+        );
+
+        // Verify issuer matches access_url (no trailing slash)
+        let issuer = body
+            .get("issuer")
+            .and_then(Value::as_str)
+            .ok_or("no issuer")?;
+        assert!(!issuer.ends_with('/'), "issuer should not end with /");
+
+        // Verify endpoints are well-formed
+        let auth_ep = body
+            .get("authorization_endpoint")
+            .and_then(Value::as_str)
+            .ok_or("no auth ep")?;
+        assert!(
+            auth_ep.ends_with("/oauth2/authorize"),
+            "unexpected authorization_endpoint: {auth_ep}"
+        );
+        let token_ep = body
+            .get("token_endpoint")
+            .and_then(Value::as_str)
+            .ok_or("no token ep")?;
+        assert!(
+            token_ep.ends_with("/oauth2/tokens"),
+            "unexpected token_endpoint: {token_ep}"
+        );
+
+        // Verify scopes_supported is sorted
+        let scopes = body
+            .get("scopes_supported")
+            .and_then(Value::as_array)
+            .ok_or("no scopes")?;
+        let scope_strings: Vec<&str> = scopes.iter().filter_map(Value::as_str).collect();
+        let mut sorted = scope_strings.clone();
+        sorted.sort();
+        assert_eq!(scope_strings, sorted, "scopes_supported should be sorted");
+
+        // Verify grant_types_supported
+        let grants = body
+            .get("grant_types_supported")
+            .and_then(Value::as_array)
+            .ok_or("no grants")?;
+        let grant_strings: Vec<&str> = grants.iter().filter_map(Value::as_str).collect();
+        assert!(
+            grant_strings.contains(&"authorization_code"),
+            "missing authorization_code grant"
+        );
+        assert!(
+            grant_strings.contains(&"refresh_token"),
+            "missing refresh_token grant"
+        );
+
+        // Verify code_challenge_methods_supported includes S256
+        let methods = body
+            .get("code_challenge_methods_supported")
+            .and_then(Value::as_array)
+            .ok_or("no methods")?;
+        let method_strings: Vec<&str> = methods.iter().filter_map(Value::as_str).collect();
+        assert!(
+            method_strings.contains(&"S256"),
+            "missing S256 code challenge method"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc9728_protected_resource_metadata() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, "/.well-known/oauth-protected-resource")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+
+        // RFC 9728 REQUIRED fields
+        assert!(
+            body.get("resource").and_then(Value::as_str).is_some(),
+            "missing resource"
+        );
+        assert!(
+            body.get("authorization_servers")
+                .and_then(Value::as_array)
+                .is_some(),
+            "missing authorization_servers"
+        );
+
+        // Verify resource matches access_url
+        let resource = body
+            .get("resource")
+            .and_then(Value::as_str)
+            .ok_or("no resource")?;
+        assert!(!resource.ends_with('/'), "resource should not end with /");
+
+        // Verify authorization_servers contains the resource itself
+        let servers = body
+            .get("authorization_servers")
+            .and_then(Value::as_array)
+            .ok_or("no servers")?;
+        let server_strings: Vec<&str> = servers.iter().filter_map(Value::as_str).collect();
+        assert!(
+            server_strings.contains(&resource),
+            "authorization_servers should contain resource"
+        );
+
+        // Verify bearer_methods_supported
+        let bearer = body
+            .get("bearer_methods_supported")
+            .and_then(Value::as_array)
+            .ok_or("no bearer")?;
+        let bearer_strings: Vec<&str> = bearer.iter().filter_map(Value::as_str).collect();
+        assert!(
+            bearer_strings.contains(&"header"),
+            "missing header bearer method"
+        );
+        assert!(
+            bearer_strings.contains(&"query"),
+            "missing query bearer method"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_happy_path() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["https://example.com/callback"]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+
+        // RFC 7591 §3.2.1 REQUIRED fields
+        assert!(
+            body.get("client_id").and_then(Value::as_str).is_some(),
+            "missing client_id"
+        );
+        assert!(
+            body.get("client_secret").and_then(Value::as_str).is_some(),
+            "missing client_secret"
+        );
+        assert!(
+            body.get("registration_access_token")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing registration_access_token"
+        );
+        assert!(
+            body.get("registration_client_uri")
+                .and_then(Value::as_str)
+                .is_some(),
+            "missing registration_client_uri"
+        );
+
+        // Verify client_id is a valid UUID
+        let client_id = body
+            .get("client_id")
+            .and_then(Value::as_str)
+            .ok_or("no client_id")?;
+        assert!(
+            Uuid::parse_str(client_id).is_ok(),
+            "client_id should be a valid UUID"
+        );
+
+        // Verify registration_client_uri contains client_id
+        let reg_uri = body
+            .get("registration_client_uri")
+            .and_then(Value::as_str)
+            .ok_or("no reg uri")?;
+        assert!(
+            reg_uri.contains(client_id),
+            "registration_client_uri should contain client_id"
+        );
+
+        // Verify client_id_issued_at is present
+        assert!(
+            body.get("client_id_issued_at").is_some(),
+            "missing client_id_issued_at"
+        );
+
+        // Verify client_secret_expires_at is 0 (no expiration)
+        assert_eq!(
+            body.get("client_secret_expires_at").and_then(Value::as_i64),
+            Some(0),
+            "client_secret_expires_at should be 0"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_with_client_name() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["https://example.com/callback"],
+                    "client_name": "My Custom App"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("client_name").and_then(Value::as_str),
+            Some("My Custom App"),
+            "client_name should be echoed back"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_missing_redirect_uris() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(Method::POST, "/oauth2/register", &json!({}))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+            "error code should be invalid_client_metadata"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_invalid_redirect_uri() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["not-a-valid-uri"]
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+        );
+        let desc = body
+            .get("error_description")
+            .and_then(Value::as_str)
+            .ok_or("no desc")?;
+        assert!(
+            desc.contains("invalid redirect_uri"),
+            "error should mention invalid redirect_uri, got: {desc}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7591_register_invalid_json() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/register")
+            .header(CONTENT_TYPE, "application/json")
+            .body(Body::from("not valid json"))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_client_metadata"),
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_get_client_without_auth_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            request(Method::GET, &format!("/oauth2/clients/{}", Uuid::new_v4()))?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_get_client_with_bearer_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/oauth2/clients/{}", Uuid::new_v4()))
+            .header("authorization", "Bearer some-fake-token")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+        let desc = body
+            .get("error_description")
+            .and_then(Value::as_str)
+            .ok_or("no desc")?;
+        assert!(
+            desc.contains("not yet implemented"),
+            "should say not yet implemented, got: {desc}"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7592_delete_client_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::DELETE)
+            .uri(format!("/oauth2/clients/{}", Uuid::new_v4()))
+            .header("authorization", "Bearer some-token")
+            .body(Body::empty())?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_token")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_missing_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("client_id=abc"))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_request")
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_invalid_client_id_returns_200() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from("token=some-token&client_id=not-a-uuid"))?;
+        let response = call(app, req).await?;
+        // RFC 7009: return 200 even for invalid client_id to not reveal info
+        assert_eq!(response.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_valid_format_returns_unsupported() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // First create an app so the client_id is valid
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                &session_token,
+                &json!({
+                    "name": "Revoke Test App",
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        let created = response_json(create_resp).await?;
+        let app_id = created
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id")?;
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!("token=some-token&client_id={app_id}")))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("unsupported_token_type"),
+            "should return unsupported_token_type"
+        );
+
+        Ok(())
+    }
+
+    // =====================================================================
     // Happy-path integration tests — Insights
     // =====================================================================
 
@@ -28754,6 +29308,277 @@ pub(crate) mod tests {
                 .unwrap_or("")
                 .contains("authorization_code"),
             "expected detail listing supported grant types"
+        );
+        Ok(())
+    }
+
+    // ── GitHub OAuth / OIDC handler tests ──────────────────────
+
+    #[tokio::test]
+    async fn github_device_disabled_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        // GET returns the disabled stub
+        let response = call(
+            app.clone(),
+            request(Method::GET, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_device_post_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        // POST to the real handler also returns bad request when not configured
+        let response = call(
+            app,
+            request(Method::POST, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_returns_bad_request_when_no_config() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oidc/callback?code=test&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("OIDC is not enabled.")
+        );
+        Ok(())
+    }
+
+    fn test_state_with_github_oauth() -> Result<AppState, Box<dyn Error>> {
+        let mut config = test_config()?;
+        config.github_oauth = Some(coder_core::config::GithubOAuthConfig {
+            client_id: "test-client-id".to_owned(),
+            client_secret: "test-client-secret".to_owned(),
+            allow_signups: true,
+            allow_everyone: true,
+            allowed_orgs: Vec::new(),
+            allowed_teams: Vec::new(),
+            api_url: Url::parse("http://127.0.0.1:9999")?,
+        });
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        Ok(AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    fn test_state_with_oidc() -> Result<AppState, Box<dyn Error>> {
+        let mut config = test_config()?;
+        config.oidc = Some(coder_core::config::OidcConfig {
+            issuer_url: Url::parse("http://127.0.0.1:9999")?,
+            client_id: "test-oidc-client".to_owned(),
+            client_secret: "test-oidc-secret".to_owned(),
+            scopes: vec![
+                "openid".to_owned(),
+                "profile".to_owned(),
+                "email".to_owned(),
+            ],
+            allow_signups: true,
+            email_domain: Vec::new(),
+            username_field: "preferred_username".to_owned(),
+            email_field: "email".to_owned(),
+            name_field: "name".to_owned(),
+            ignore_email_verified: false,
+        });
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        Ok(AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_state_mismatch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Send a callback with a state that does not match the cookie
+        let response = call(
+            app,
+            request_with_cookies(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test-code&state=wrong-state",
+                &[(OAUTH2_STATE_COOKIE, "correct-state")],
+            )?,
+        )
+        .await?;
+        // Should redirect to login with an error message
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message, got: {location}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_missing_state_cookie() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Send a callback with no state cookie at all
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?code=test-code&state=some-state",
+            )?,
+        )
+        .await?;
+        // Should redirect to login with state mismatch error
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn github_callback_redirects_on_provider_error() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_github_oauth()?, None);
+        // Simulate GitHub returning an error
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oauth2/github/callback?error=access_denied&error_description=User+denied+access&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_redirects_on_state_mismatch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_oidc()?, None);
+        let response = call(
+            app,
+            request_with_cookies(
+                Method::GET,
+                "/api/v2/users/oidc/callback?code=test-code&state=wrong-state",
+                &[(OAUTH2_STATE_COOKIE, "correct-state")],
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message, got: {location}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oidc_callback_redirects_on_provider_error() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_oidc()?, None);
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/users/oidc/callback?error=server_error&error_description=Something+went+wrong&state=test",
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        let location = response
+            .headers()
+            .get(http::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            location.contains("message="),
+            "redirect should contain error message"
         );
         Ok(())
     }

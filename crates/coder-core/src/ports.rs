@@ -1199,6 +1199,39 @@ pub trait IdentityStore: Send + Sync {
 
     // ----- User identity supplements -----
 
+    /// Finds a user by their external linked ID (login_type + linked_id).
+    ///
+    /// Returns the user record if a user link with the given login type and
+    /// linked ID exists. Used by OAuth/OIDC callbacks to look up users by
+    /// their provider-specific identifier.
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: crate::identity::LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (login_type, linked_id);
+        Err(StorageError::unavailable(
+            "find_user_by_linked_id is not implemented",
+        ))
+    }
+
+    /// Finds an active, non-deleted user by email AND login_type.
+    ///
+    /// Only returns users where `deleted = false`, `is_system = false`,
+    /// `status = Active`, AND `login_type` matches the requested type.
+    /// This prevents account takeover where an OAuth callback matches a
+    /// password-based user by email.
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: crate::identity::LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (email, login_type);
+        Err(StorageError::unavailable(
+            "find_active_user_by_email_and_login_type is not implemented",
+        ))
+    }
+
     /// Lists user links for a user.
     async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
         let _ = user_id;
@@ -2419,6 +2452,30 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     ) -> Result<Option<UserPreferenceRecord>, StorageError>;
 
     // ----- User identity supplements -----
+
+    /// Finds a user by their external linked ID (login_type + linked_id).
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: crate::identity::LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (login_type, linked_id);
+        Err(StorageError::unavailable(
+            "find_user_by_linked_id is not implemented",
+        ))
+    }
+
+    /// Finds an active, non-deleted user by email AND login_type.
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: crate::identity::LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let _ = (email, login_type);
+        Err(StorageError::unavailable(
+            "find_active_user_by_email_and_login_type is not implemented",
+        ))
+    }
 
     /// Lists user links for a user.
     async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {

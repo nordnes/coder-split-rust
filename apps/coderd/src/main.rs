@@ -17,7 +17,8 @@ use coder_core::pubsub::PubSub;
 use coder_core::{
     AppStore, BuildMetadata, CorsConfig, DatabaseConfig, DeploymentStore, DerpRegionConfig,
     ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
-    StorageError, config::RateLimitConfig,
+    StorageError,
+    config::{GithubOAuthConfig, OidcConfig, RateLimitConfig},
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_server::{AppState, build_router};
@@ -171,6 +172,92 @@ struct ServerArgs {
         default_value_t = 60
     )]
     rate_limit_unauthenticated_per_minute: u32,
+
+    // ----- GitHub OAuth2 -----
+    /// GitHub OAuth2 client ID.
+    #[arg(long, env = "CODER_GITHUB_CLIENT_ID", default_value = "")]
+    github_client_id: String,
+
+    /// GitHub OAuth2 client secret.
+    #[arg(long, env = "CODER_GITHUB_CLIENT_SECRET", default_value = "")]
+    github_client_secret: String,
+
+    /// Allow new user signups via GitHub OAuth.
+    #[arg(long, env = "CODER_GITHUB_ALLOW_SIGNUPS", default_value_t = false)]
+    github_allow_signups: bool,
+
+    /// Allow all GitHub users (skip org/team checks).
+    #[arg(long, env = "CODER_GITHUB_ALLOW_EVERYONE", default_value_t = false)]
+    github_allow_everyone: bool,
+
+    /// Comma-separated list of allowed GitHub organization logins.
+    #[arg(long, env = "CODER_GITHUB_ALLOWED_ORGS", default_value = "")]
+    github_allowed_orgs: String,
+
+    /// Comma-separated list of allowed GitHub team slugs (org/team format).
+    #[arg(long, env = "CODER_GITHUB_ALLOWED_TEAMS", default_value = "")]
+    github_allowed_teams: String,
+
+    /// GitHub API base URL.
+    #[arg(
+        long,
+        env = "CODER_GITHUB_API_URL",
+        default_value = "https://api.github.com"
+    )]
+    github_api_url: Url,
+
+    // ----- OIDC -----
+    /// OIDC issuer URL.
+    #[arg(long, env = "CODER_OIDC_ISSUER_URL", default_value = "")]
+    oidc_issuer_url: String,
+
+    /// OIDC client ID.
+    #[arg(long, env = "CODER_OIDC_CLIENT_ID", default_value = "")]
+    oidc_client_id: String,
+
+    /// OIDC client secret.
+    #[arg(long, env = "CODER_OIDC_CLIENT_SECRET", default_value = "")]
+    oidc_client_secret: String,
+
+    /// Comma-separated OIDC scopes to request.
+    #[arg(
+        long,
+        env = "CODER_OIDC_SCOPES",
+        default_value = "openid,profile,email"
+    )]
+    oidc_scopes: String,
+
+    /// Allow new user signups via OIDC.
+    #[arg(long, env = "CODER_OIDC_ALLOW_SIGNUPS", default_value_t = true)]
+    oidc_allow_signups: bool,
+
+    /// Comma-separated list of allowed email domains for OIDC.
+    #[arg(long, env = "CODER_OIDC_EMAIL_DOMAIN", default_value = "")]
+    oidc_email_domain: String,
+
+    /// OIDC claim field to use as username.
+    #[arg(
+        long,
+        env = "CODER_OIDC_USERNAME_FIELD",
+        default_value = "preferred_username"
+    )]
+    oidc_username_field: String,
+
+    /// OIDC claim field to use as email.
+    #[arg(long, env = "CODER_OIDC_EMAIL_FIELD", default_value = "email")]
+    oidc_email_field: String,
+
+    /// OIDC claim field to use as display name.
+    #[arg(long, env = "CODER_OIDC_NAME_FIELD", default_value = "name")]
+    oidc_name_field: String,
+
+    /// Ignore the email_verified claim from the OIDC provider.
+    #[arg(
+        long,
+        env = "CODER_OIDC_IGNORE_EMAIL_VERIFIED",
+        default_value_t = false
+    )]
+    oidc_ignore_email_verified: bool,
 
     /// Run database migrations and exit without starting the server.
     #[arg(long, env = "CODER_MIGRATE_ONLY", default_value_t = false)]
@@ -522,6 +609,37 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             unauthenticated_per_minute: args.rate_limit_unauthenticated_per_minute,
             audit_per_minute: 30,
         },
+        github_oauth: if args.github_client_id.is_empty() {
+            None
+        } else {
+            Some(GithubOAuthConfig {
+                client_id: args.github_client_id,
+                client_secret: args.github_client_secret,
+                allow_signups: args.github_allow_signups,
+                allow_everyone: args.github_allow_everyone,
+                allowed_orgs: split_csv(&args.github_allowed_orgs),
+                allowed_teams: split_csv(&args.github_allowed_teams),
+                api_url: args.github_api_url,
+            })
+        },
+        oidc: if args.oidc_issuer_url.is_empty() {
+            None
+        } else {
+            let issuer_url = Url::parse(&args.oidc_issuer_url)
+                .map_err(|error| MainError::Config(format!("invalid OIDC issuer URL: {error}")))?;
+            Some(OidcConfig {
+                issuer_url,
+                client_id: args.oidc_client_id,
+                client_secret: args.oidc_client_secret,
+                scopes: split_csv(&args.oidc_scopes),
+                allow_signups: args.oidc_allow_signups,
+                email_domain: split_csv(&args.oidc_email_domain),
+                username_field: args.oidc_username_field,
+                email_field: args.oidc_email_field,
+                name_field: args.oidc_name_field,
+                ignore_email_verified: args.oidc_ignore_email_verified,
+            })
+        },
         otel: OtelConfig {
             enabled: args.otel_enabled,
             endpoint: args.otel_endpoint,
@@ -539,6 +657,17 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             max_age_secs: 3600,
         },
     })
+}
+
+/// Splits a comma-separated string into a `Vec<String>`, trimming whitespace
+/// and discarding empty entries.
+fn split_csv(input: &str) -> Vec<String> {
+    input
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(String::from)
+        .collect()
 }
 
 fn init_panic_hook() {
