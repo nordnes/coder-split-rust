@@ -2,12 +2,10 @@
 
 use crate::helpers::forbidden_response;
 use axum::{
-    Json,
-    http::{HeaderName, HeaderValue, StatusCode},
+    http::{HeaderName, HeaderValue},
     middleware::Next,
-    response::{IntoResponse, Response},
+    response::Response,
 };
-use coder_core::ApiResponse;
 use std::net::IpAddr;
 
 /// Stored in request extensions so downstream handlers can read the real

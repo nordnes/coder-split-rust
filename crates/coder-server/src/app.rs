@@ -1,103 +1,35 @@
 //! Router construction and HTTP handlers.
 
-use std::{collections::HashMap, str::FromStr, sync::Arc};
+use std::{collections::HashMap, sync::Arc};
 
 use async_trait::async_trait;
 use axum::{
-    Form, Json, Router,
-    body::Bytes,
-    extract::{
-        DefaultBodyLimit, OriginalUri, Path, Query, State,
-        rejection::JsonRejection,
-        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
-    },
+    Json, Router,
+    extract::{DefaultBodyLimit, State, rejection::JsonRejection},
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
         header::{
             ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
-            ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE, LOCATION,
+            ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN,
         },
     },
-    middleware::{self, Next},
+    middleware::{self},
     response::{IntoResponse, Response},
     routing::{delete, get, patch, post, put},
 };
-use coder_audit::{AuditAction, AuditEvent, AuditSink};
-use coder_auth::{
-    AuthService, AuthServiceError, AuthenticatedRequest, ExternalAuthService,
-    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
-    OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
-};
+use coder_audit::AuditSink;
+use coder_auth::{AuthService, ExternalAuthService, OAuth2ProviderService};
 use coder_connectivity::{
     HealthService,
     agents::{AgentConnection, AgentError, AgentProvider},
-    generate_git_ssh_key,
     tailnet::{DerpTrafficTracker, TailnetCoordinator},
 };
-use coder_core::StorageError;
-use coder_core::api::{
-    ArchiveTemplateVersionsRequest, ArchiveTemplateVersionsResponse, CreateTemplateRequest,
-    CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest, DAUEntry, DAUsResponse,
-    DynamicParametersRequest, DynamicParametersResponse, MatchedProvisioners, MinimalUser,
-    PatchTemplateVersionRequest, ProvisionerJobLog, ProvisionerJobResponse, ProvisionerJobStatus,
-    TemplateExample, TemplateFilter, TemplateResponse, TemplateVersionExternalAuth,
-    TemplateVersionParameter, TemplateVersionPreset, TemplateVersionPresetParameter,
-    TemplateVersionResponse, TemplateVersionVariable, UpdateActiveTemplateVersionRequest,
-    UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceResource, WorkspaceResourceMetadata,
-    WorkspaceResourceResponse,
-};
-use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
-use coder_core::api::{
-    UpdateWorkspaceACLRequest, WorkspaceACLGroup, WorkspaceACLResponse, WorkspaceACLUser,
-};
-use coder_core::ports::UpdateWorkspaceACLInput;
 use coder_core::pubsub::PubSub;
-use coder_core::template::{
-    CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
-    CreateTemplateVersionInput, ProvisionerJobRecord as TemplateProvisionerJobRecord,
-    TemplateListFilter, TemplateRecord, TemplateVersionListFilter, TemplateVersionRecord,
-    UpdateTemplateMetaInput,
-};
-use coder_core::{
-    AWSInstanceIdentityToken, ApiResponse, AppHostResponse, AppStore, AuditLogListFilter,
-    AuthMethods, AuthenticatedUser, AuthorizationRequest, AvailableExperiments,
-    AzureInstanceIdentityToken, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
-    ChatMessagePart, ChatMessageRecord, ChatMessageResponse, ChatMessageUsage,
-    ChatMessageVisibility, ChatQueuedMessageRecord, ChatQueuedMessageResponse, ChatRecord,
-    ChatResponse, ChatWithMessagesResponse, ConvertLoginRequest, CreateChatMessageApiResponse,
-    CreateChatMessageRequest, CreateChatRequest, CreateFirstUserRequest, CreateFirstUserResponse,
-    CreateLogSourceRequest, CreateTaskRequest, CreateTestAuditLogRequest, CreateTokenRequest,
-    CreateUserRequestWithOrgs, CreateWorkspaceBuildInput, CreateWorkspaceInput, DERPMap,
-    DERPMapRegion, DERPNode, DeploymentConfigResponse, ExternalApiKeyScopes,
-    ExternalAuthDeviceExchangeRequest, GCPInstanceIdentityToken, GetUsersResponse, HealthSettings,
-    HealthcheckReport, InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertTaskInput,
-    LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
-    OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
-    OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse, OrganizationMember,
-    OrganizationMemberWithUserData, OrganizationRecord, OrganizationResponse,
-    PaginatedMembersResponse, PatchAgentLogsRequest, PatchAppStatusRequest, PersistAuditLogInput,
-    PostOAuth2ProviderAppRequest, PutOAuth2ProviderAppRequest, RequestOneTimePasscodeRequest,
-    ServerConfig, SshConfigResponse, TaskListFilter, TaskLogSnapshotEnvelope, TaskLogsResponse,
-    TaskRecord, TaskResponse, TaskSendRequest, TasksListResponse, UpdateCheckResponse,
-    UpdateInboxNotificationReadStatusRequest, UpdateNotificationTemplateMethod, UpdateRolesRequest,
-    UpdateUserAppearanceSettingsRequest, UpdateUserNotificationPreferences,
-    UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
-    UploadFileResponse, UpsertPortShareInput, UserAppearanceSettings, UserListFilter,
-    UserParameter, UserPreferenceSettings, UserRecord, UserResponse, UserRolesResponse, UserStatus,
-    ValidateUserPasswordRequest, ValidationError, WebpushSubscription,
-    WorkspaceAgentAuthenticateResponse, WorkspaceAgentConnectionInfo,
-    WorkspaceAgentListContainersResponse, WorkspaceAgentListeningPortsResponse,
-    WorkspaceListFilter,
-};
-use coder_identity::{IdentityService, IdentityServiceError};
-use coder_provisioner::{InitScriptError, render_init_script};
-use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
+use coder_core::{ApiResponse, AppStore, BuildMetadata, ServerConfig};
+use coder_identity::IdentityService;
 use coder_workspaces::DeploymentStatsService;
-use futures_util::StreamExt;
 use serde::Deserialize;
-use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::net::IpAddr;
+use serde_json::Value;
 use time::OffsetDateTime;
 use tower_http::{
     normalize_path::NormalizePathLayer,
@@ -975,7 +907,7 @@ async fn post_csp_report(
 
     debug!(report = ?report.report, "CSP violation reported");
 
-    Ok((StatusCode::OK, Json("ok")).into_response())
+    Ok((StatusCode::OK, Json(ApiResponse::ok("ok"))).into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -7410,7 +7342,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert_eq!(body, Value::String("ok".to_owned()));
+        assert_eq!(body.get("message").and_then(Value::as_str), Some("ok"));
         Ok(())
     }
 

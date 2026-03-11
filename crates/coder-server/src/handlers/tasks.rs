@@ -35,8 +35,12 @@ pub(crate) async fn create_task(
     State(state): State<AppState>,
     Path(user_param): Path<String>,
     headers: HeaderMap,
-    Json(request): Json<CreateTaskRequest>,
+    payload: Result<Json<CreateTaskRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
@@ -151,8 +155,12 @@ pub(crate) async fn patch_task_input(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<coder_core::UpdateTaskInputRequest>,
+    payload: Result<Json<coder_core::UpdateTaskInputRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
@@ -324,8 +332,12 @@ pub(crate) async fn post_task_send(
     State(state): State<AppState>,
     Path((user_param, task_param)): Path<(String, String)>,
     headers: HeaderMap,
-    Json(request): Json<TaskSendRequest>,
+    payload: Result<Json<TaskSendRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
@@ -524,8 +536,12 @@ pub(crate) async fn post_task_log_snapshot(
     State(state): State<AppState>,
     Path(task_id): Path<Uuid>,
     headers: HeaderMap,
-    Json(request): Json<TaskLogSnapshotEnvelope>,
+    payload: Result<Json<TaskLogSnapshotEnvelope>, JsonRejection>,
 ) -> Result<Response, AppError> {
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
     // This endpoint supports both agent auth and user auth.
     // Agents post log snapshots for tasks running in their workspace.
     let agent = authenticate_agent_request(&state, &headers).await?;

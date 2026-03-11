@@ -8,7 +8,7 @@ pub(crate) async fn workspace_agent_git_ssh_key(
 ) -> Result<Response, AppError> {
     // Try agent auth first, fall back to user auth for backwards compatibility.
     let agent = authenticate_agent_request(&state, &headers).await?;
-    if agent.is_none() {
+    let Some(agent) = agent else {
         let Some(_context) = authenticate_request(&state, &headers).await? else {
             return Ok(unauthorized_response("Missing or invalid session token."));
         };
@@ -19,10 +19,6 @@ pub(crate) async fn workspace_agent_git_ssh_key(
             Json(json!({"public_key":"","private_key":""})),
         )
             .into_response());
-    }
-    let agent = match agent {
-        Some(a) => a,
-        None => return Ok(unauthorized_response("Missing or invalid agent token.")),
     };
 
     // Look up the workspace to find the owner, then fetch their git SSH key.
