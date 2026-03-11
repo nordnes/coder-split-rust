@@ -389,10 +389,10 @@ async fn run() -> Result<(), MainError> {
         state.close_deployment_stats();
     });
 
-    // 4. Close the database connection pool last so preceding tasks can still
-    //    issue final queries during their own shutdown.
-    // 5. Flush and shut down the OpenTelemetry tracer provider so buffered
-    //    spans are exported before the process exits.
+    // 4. Flush and shut down the OpenTelemetry tracer provider so buffered
+    //    spans are exported before the process exits.  The OTLP exporter
+    //    sends to a remote collector (gRPC), not to the database, so this
+    //    is safe to run before closing the DB pool.
     coordinator.register("opentelemetry", async move {
         if let Some(provider) = tracer_provider {
             if let Err(e) = provider.shutdown() {
@@ -401,6 +401,8 @@ async fn run() -> Result<(), MainError> {
         }
     });
 
+    // 5. Close the database connection pool last so preceding tasks can
+    //    still issue final queries during their own shutdown.
     coordinator.register("database", async move {
         store_pool.close().await;
     });
