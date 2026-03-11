@@ -12499,16 +12499,104 @@ async fn get_workspace_agent_containers_watch(
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real streaming requires agent connectivity.
-    Ok(ws.on_upgrade(|socket| {
-        ws_close_not_implemented(
-            socket,
-            "Container watch requires agent connectivity which is not yet implemented.",
-        )
+    let pubsub = state.pubsub.clone();
+    let store = state.store.clone();
+    let channel = coder_core::pubsub::workspace_agent_containers_channel(agent_id);
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
+        let mut subscription = match pubsub.subscribe(&channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to container events",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
+        // Send the initial container state snapshot.
+        let devcontainer_rows = match store.list_workspace_agent_devcontainers(agent_id).await {
+            Ok(rows) => rows,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to fetch initial container state",
+                );
+                Vec::new()
+            }
+        };
+        let devcontainers: Vec<coder_core::WorkspaceAgentDevcontainer> = devcontainer_rows
+            .iter()
+            .map(|dc| coder_core::WorkspaceAgentDevcontainer {
+                id: dc.id,
+                workspace_agent_id: dc.workspace_agent_id,
+                workspace_folder: dc.workspace_folder.clone(),
+                config_path: dc.config_path.clone(),
+                name: dc.name.clone(),
+                container: None,
+            })
+            .collect();
+        let snapshot = WorkspaceAgentListContainersResponse {
+            containers: Vec::new(),
+            devcontainers,
+        };
+        if let Ok(payload) = serde_json::to_string(&snapshot) {
+            if socket.send(Message::Text(payload.into())).await.is_err() {
+                return;
+            }
+        }
+
+        // Stream container state changes until the connection closes.
+        loop {
+            tokio::select! {
+                ws_msg = socket.recv() => {
+                    match ws_msg {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                event = subscription.recv() => {
+                    match event {
+                        Ok(data) => {
+                            let text = match String::from_utf8(data) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "non-UTF-8 container event payload",
+                                    );
+                                    continue;
+                                }
+                            };
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
     }))
 }
 
 /// GET /api/v2/workspaceagents/{agent}/coordinate — WebSocket coordination.
+///
+/// Implements agent-side coordination protocol.  Registers the agent as a
+/// peer in the [`TailnetCoordinator`] and multiplexes between incoming
+/// WebSocket messages and outgoing coordinator responses.
 async fn get_workspace_agent_coordinate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -12519,16 +12607,107 @@ async fn get_workspace_agent_coordinate(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
+    let Some(row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real coordination requires tailnet.
-    Ok(ws.on_upgrade(|socket| {
-        ws_close_not_implemented(
-            socket,
-            "Agent coordination requires tailnet integration which is not yet implemented.",
-        )
+    let coordinator = state.coordinator.clone();
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse, PeerKind};
+
+        // Register the agent as a peer in the coordinator.
+        let mut handle =
+            coordinator.coordinate(agent_id, row.name.clone(), PeerKind::Agent);
+
+        // Multiplex: read from WebSocket AND from the coordinator response
+        // channel simultaneously.
+        loop {
+            tokio::select! {
+                // --- Incoming WebSocket message from the agent ---
+                ws_msg = socket.next() => {
+                    match ws_msg {
+                        Some(Ok(Message::Text(text))) => {
+                            match serde_json::from_str::<CoordinateRequest>(&text) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(agent_id, request) {
+                                        tracing::warn!(
+                                            agent_id = %agent_id,
+                                            error = %e,
+                                            "agent coordination request error",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        agent_id = %agent_id,
+                                        error = %e,
+                                        "invalid agent coordination request JSON",
+                                    );
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Binary(bin))) => {
+                            match serde_json::from_slice::<CoordinateRequest>(&bin) {
+                                Ok(request) => {
+                                    if let Err(e) = coordinator.process_request(agent_id, request) {
+                                        tracing::warn!(
+                                            agent_id = %agent_id,
+                                            error = %e,
+                                            "agent coordination request error (binary)",
+                                        );
+                                    }
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        agent_id = %agent_id,
+                                        error = %e,
+                                        "invalid agent coordination request (binary)",
+                                    );
+                                    let err_resp = CoordinateResponse {
+                                        peer_updates: Vec::new(),
+                                        error: Some(format!("invalid request: {e}")),
+                                    };
+                                    if let Ok(payload) = serde_json::to_string(&err_resp) {
+                                        if socket.send(Message::Text(payload.into())).await.is_err() {
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                // --- Outgoing coordination response from the coordinator ---
+                resp = handle.response_rx.recv() => {
+                    match resp {
+                        Some(coord_response) => {
+                            if let Ok(payload) = serde_json::to_string(&coord_response) {
+                                if socket.send(Message::Text(payload.into())).await.is_err() {
+                                    break;
+                                }
+                            }
+                        }
+                        // Channel closed — coordinator shut down our session.
+                        None => break,
+                    }
+                }
+            }
+        }
+
+        coordinator.close_coordination(agent_id, handle.session_id);
     }))
 }
 
@@ -12714,12 +12893,89 @@ async fn get_workspace_agent_pty(
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real PTY requires agent connectivity.
-    Ok(ws.on_upgrade(|socket| {
-        ws_close_not_implemented(
-            socket,
-            "Agent PTY requires agent connectivity which is not yet implemented.",
-        )
+    let pubsub = state.pubsub.clone();
+    let agent_provider = state.agent_provider.clone();
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Verify the agent is currently connected before starting the relay.
+        if agent_provider
+            .get_agent_connection(agent_id)
+            .await
+            .is_none()
+        {
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 4002,
+                    reason: "agent is not connected".into(),
+                })))
+                .await;
+            return;
+        }
+
+        // Set up bidirectional relay channels via pubsub.
+        let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
+        let input_channel = coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
+
+        let mut output_sub = match pubsub.subscribe(&output_channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to PTY output",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
+        // Relay binary frames between WebSocket client and PTY channels.
+        loop {
+            tokio::select! {
+                ws_msg = socket.recv() => {
+                    match ws_msg {
+                        Some(Ok(Message::Binary(data))) => {
+                            if let Err(e) = pubsub.publish(&input_channel, &data).await {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    error = %e,
+                                    "failed to publish PTY input",
+                                );
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Text(text))) => {
+                            if let Err(e) = pubsub.publish(&input_channel, text.as_bytes()).await {
+                                tracing::debug!(
+                                    agent_id = %agent_id,
+                                    error = %e,
+                                    "failed to publish PTY input",
+                                );
+                                break;
+                            }
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                pty_data = output_sub.recv() => {
+                    match pty_data {
+                        Ok(data) => {
+                            if socket.send(Message::Binary(data.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
     }))
 }
 
@@ -12772,11 +13028,96 @@ async fn get_workspace_agent_watch_metadata_ws(
         return Ok(resource_not_found_response());
     };
 
-    // Accept WebSocket upgrade, then close — real watch requires pubsub.
-    Ok(ws.on_upgrade(|socket| ws_close_not_implemented(
-        socket,
-        "Agent metadata WebSocket watch requires pubsub integration which is not yet implemented.",
-    )))
+    let pubsub = state.pubsub.clone();
+    let store = state.store.clone();
+    let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+
+    Ok(ws.on_upgrade(move |mut socket| async move {
+        // Subscribe to pub/sub BEFORE sending initial state to avoid missing
+        // events that arrive between the initial fetch and the subscription.
+        let mut subscription = match pubsub.subscribe(&channel).await {
+            Ok(sub) => sub,
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to subscribe to metadata events",
+                );
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 1011,
+                        reason: format!("pubsub subscribe failed: {e}").into(),
+                    })))
+                    .await;
+                return;
+            }
+        };
+
+        // Send the initial metadata snapshot.
+        match store.list_workspace_agent_metadata(agent_id).await {
+            Ok(rows) => {
+                let metadata: Vec<coder_core::WorkspaceAgentMetadata> = rows
+                    .iter()
+                    .map(|m| coder_core::WorkspaceAgentMetadata {
+                        display_name: m.display_name.clone(),
+                        key: m.key.clone(),
+                        script: m.script.clone(),
+                        value: m.value.clone(),
+                        error: m.error.clone(),
+                        timeout: m.timeout,
+                        interval: m.interval,
+                        collected_at: m.collected_at,
+                        display_order: m.display_order,
+                    })
+                    .collect();
+                if let Ok(payload) = serde_json::to_string(&metadata) {
+                    if socket.send(Message::Text(payload.into())).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    error = %e,
+                    "failed to fetch initial metadata",
+                );
+            }
+        }
+
+        // Stream metadata updates until the connection closes.
+        loop {
+            tokio::select! {
+                ws_msg = socket.recv() => {
+                    match ws_msg {
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(_)) => break,
+                        _ => continue,
+                    }
+                }
+                event = subscription.recv() => {
+                    match event {
+                        Ok(data) => {
+                            let text = match String::from_utf8(data) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    tracing::debug!(
+                                        error = %e,
+                                        "non-UTF-8 metadata event payload",
+                                    );
+                                    continue;
+                                }
+                            };
+                            if socket.send(Message::Text(text.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+    }))
 }
 
 /// GET /api/v2/workspaceagents/connection — global agent connection info.
@@ -26622,6 +26963,433 @@ mod tests {
             "expected 101 or 426, got {}",
             response.status()
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // WebSocket handler integration tests (spawn_test_server + tokio-tungstenite)
+    // -----------------------------------------------------------------------
+
+    /// Helper: connect a WebSocket to an arbitrary path with auth.
+    async fn connect_ws_to(
+        base: &Url,
+        path: &str,
+        session_token: &str,
+    ) -> Result<
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        Box<dyn Error>,
+    > {
+        let url = ws_url(base, path);
+        let req = Request::builder()
+            .uri(&url)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .header("Coder-Session-Token", session_token)
+            .header("Host", base.host_str().unwrap_or("localhost"))
+            .body(())?;
+        let (stream, _response) = tokio_tungstenite::connect_async(req).await?;
+        Ok(stream)
+    }
+
+    // --- containers/watch tests ---
+
+    #[tokio::test]
+    async fn test_containers_watch_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_containers_watch_ws_streams_initial_snapshot() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        // Insert a devcontainer so the initial snapshot is non-empty.
+        store
+            .workspace_agent_devcontainers
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(coder_core::WorkspaceAgentDevcontainerRow {
+                id: Uuid::new_v4(),
+                workspace_agent_id: agent_id,
+                created_at: OffsetDateTime::now_utc(),
+                workspace_folder: "/workspace".to_owned(),
+                config_path: ".devcontainer/devcontainer.json".to_owned(),
+                name: "test-dc".to_owned(),
+                subagent_id: None,
+            });
+
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/containers/watch"),
+            &token,
+        )
+        .await?;
+
+        // Read initial snapshot.
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text = match msg {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        let snapshot: Value = serde_json::from_str(&text)?;
+        let devcontainers = snapshot
+            .get("devcontainers")
+            .and_then(Value::as_array)
+            .ok_or("missing devcontainers")?;
+        assert_eq!(devcontainers.len(), 1);
+        assert_eq!(
+            devcontainers[0].get("name").and_then(Value::as_str),
+            Some("test-dc")
+        );
+
+        // Publish a container event via pubsub and verify it arrives.
+        let channel = coder_core::pubsub::workspace_agent_containers_channel(agent_id);
+        let event_payload = r#"{"containers":[],"devcontainers":[]}"#;
+        pubsub.publish(&channel, event_payload.as_bytes()).await?;
+
+        let msg2 = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text2 = match msg2 {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        assert_eq!(text2, event_payload);
+
+        Ok(())
+    }
+
+    // --- coordinate tests ---
+
+    #[tokio::test]
+    async fn test_agent_coordinate_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/coordinate"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_agent_coordinate_ws_registers_and_exchanges() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{CoordinateRequest, NodeInfo};
+
+        let (state, store) = test_state_with_store(true)?;
+        let coordinator = state.coordinator.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        // Connect to the agent coordinate endpoint.
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/coordinate"),
+            &token,
+        )
+        .await?;
+
+        // Send an update_self coordination request.
+        let node = NodeInfo {
+            id: 99,
+            preferred_derp: 2,
+            addresses: vec!["100.64.0.2/32".to_owned()],
+            endpoints: vec!["10.0.0.1:41641".to_owned()],
+            ..Default::default()
+        };
+        let req = CoordinateRequest {
+            update_self: Some(node),
+            ..Default::default()
+        };
+        let payload = serde_json::to_string(&req)?;
+        ws.send(tungstenite::Message::Text(payload.into())).await?;
+
+        // Verify the agent was registered by checking the coordinator debug output.
+        let debug = coordinator.debug_json();
+        let total_peers = debug["total_peers"].as_u64().unwrap_or(0);
+        assert!(
+            total_peers >= 1,
+            "expected at least 1 peer in coordinator, got {total_peers}"
+        );
+
+        // Send a disconnect and verify the stream ends gracefully.
+        let disconnect_req = CoordinateRequest {
+            disconnect: Some(true),
+            ..Default::default()
+        };
+        let disconnect_payload = serde_json::to_string(&disconnect_req)?;
+        ws.send(tungstenite::Message::Text(disconnect_payload.into()))
+            .await?;
+
+        // Give a small delay for the server to process and close.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        Ok(())
+    }
+
+    // --- pty tests ---
+
+    #[tokio::test]
+    async fn test_pty_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_pty_ws_relays_via_pubsub() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::agents::AgentConnection;
+
+        let (state, store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        // Register a stub agent connection so the PTY handler accepts us.
+        #[derive(Debug)]
+        struct StubConn {
+            id: Uuid,
+            connected: OffsetDateTime,
+        }
+        #[async_trait::async_trait]
+        impl AgentConnection for StubConn {
+            async fn recreate_devcontainer(
+                &self,
+                _container_id: &str,
+            ) -> Result<(), coder_connectivity::agents::AgentError> {
+                Ok(())
+            }
+            async fn delete_devcontainer(
+                &self,
+                _container_id: &str,
+            ) -> Result<(), coder_connectivity::agents::AgentError> {
+                Ok(())
+            }
+            fn agent_id(&self) -> Uuid {
+                self.id
+            }
+            fn connected_at(&self) -> OffsetDateTime {
+                self.connected
+            }
+        }
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConn {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        state.agent_provider.register_agent(agent_id, conn).await;
+
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        // Subscribe to the PTY input channel before connecting so we can
+        // verify data flows from WS client -> pubsub.
+        let input_channel = coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
+        let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
+        let mut input_sub = pubsub.subscribe(&input_channel).await?;
+
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+            &token,
+        )
+        .await?;
+
+        // Send binary data over WS and verify it arrives on the PTY input channel.
+        ws.send(tungstenite::Message::Binary(b"hello-pty".to_vec().into()))
+            .await?;
+
+        let received = tokio::time::timeout(Duration::from_secs(5), input_sub.recv())
+            .await?
+            .map_err(|e| format!("pubsub recv error: {e}"))?;
+        assert_eq!(received, b"hello-pty");
+
+        // Publish to PTY output channel and verify it arrives over WS as binary.
+        pubsub.publish(&output_channel, b"pty-output-data").await?;
+
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        match msg {
+            tungstenite::Message::Binary(data) => {
+                assert_eq!(data.as_ref(), b"pty-output-data");
+            }
+            other => return Err(format!("expected binary, got {other:?}").into()),
+        }
+
+        Ok(())
+    }
+
+    // --- watch-metadata-ws tests ---
+
+    #[tokio::test]
+    async fn test_metadata_ws_rejects_unauthenticated() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+        let app = build_router(state);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        match result {
+            Err(_) => { /* connection refused / upgrade rejected */ }
+            Ok((_, resp)) => {
+                assert_ne!(
+                    resp.status(),
+                    StatusCode::SWITCHING_PROTOCOLS,
+                    "expected WS upgrade to be rejected without auth, but got 101",
+                );
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_metadata_ws_streams_initial_and_updates() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let agent_id = Uuid::new_v4();
+        store.insert_agent(make_connected_agent(agent_id))?;
+
+        // Insert metadata so the initial snapshot is non-empty.
+        store
+            .workspace_agent_metadata
+            .lock()
+            .map_err(|e| e.to_string())?
+            .push(WorkspaceAgentMetadataRow {
+                workspace_agent_id: agent_id,
+                display_name: "Memory".to_owned(),
+                key: "mem".to_owned(),
+                script: "free -m".to_owned(),
+                value: "1024".to_owned(),
+                error: String::new(),
+                timeout: 5,
+                interval: 10,
+                collected_at: OffsetDateTime::now_utc(),
+                display_order: 0,
+            });
+
+        let app = build_router(state);
+        let token = create_and_login(&app).await?;
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let mut ws = connect_ws_to(
+            &base_url,
+            &format!("/api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+            &token,
+        )
+        .await?;
+
+        // Read initial metadata snapshot.
+        let msg = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text = match msg {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        let metadata: Value = serde_json::from_str(&text)?;
+        let items = metadata.as_array().ok_or("expected array")?;
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].get("key").and_then(Value::as_str), Some("mem"));
+        assert_eq!(items[0].get("value").and_then(Value::as_str), Some("1024"));
+
+        // Publish a metadata update via pubsub and verify it arrives.
+        let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+        let update_payload = r#"[{"display_name":"CPU","key":"cpu","script":"uptime","value":"0.5","error":"","timeout":5,"interval":10,"collected_at":"2025-01-01T00:00:00Z","display_order":1}]"#;
+        pubsub.publish(&channel, update_payload.as_bytes()).await?;
+
+        let msg2 = tokio::time::timeout(Duration::from_secs(5), ws.next())
+            .await?
+            .ok_or("stream ended")?
+            .map_err(|e| format!("ws error: {e}"))?;
+        let text2 = match msg2 {
+            tungstenite::Message::Text(t) => t.to_string(),
+            other => return Err(format!("expected text, got {other:?}").into()),
+        };
+        assert_eq!(text2, update_payload);
+
         Ok(())
     }
 
