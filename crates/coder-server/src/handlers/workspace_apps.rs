@@ -58,8 +58,9 @@ pub(crate) mod appurl {
     const NAME_REGEX: &str = "[a-zA-Z0-9]+(?:-[a-zA-Z0-9]+)*";
 
     /// Port regex: 4-5 digit number with optional trailing `s` for HTTPS.
-    static PORT_REGEX: LazyLock<Regex> =
-        LazyLock::new(|| Regex::new(r"^\d{4,5}s?$").unwrap_or_else(|_| unreachable!()));
+    pub(crate) static PORT_REGEX: LazyLock<Regex> = LazyLock::new(|| {
+        Regex::new(r"^\d{4,5}s?$").expect("PORT_REGEX is a valid hardcoded pattern")
+    });
 
     /// Application URL regex supporting optional agent name.
     ///
@@ -69,12 +70,13 @@ pub(crate) mod appurl {
             r"^(?P<AppSlug>{name})(?:--(?P<AgentName>{name}))?--(?P<WorkspaceName>{name})--(?P<Username>{name})$",
             name = NAME_REGEX,
         );
-        Regex::new(&pattern).unwrap_or_else(|_| unreachable!())
+        Regex::new(&pattern).expect("APP_URL_REGEX is a valid hardcoded pattern")
     });
 
     /// Valid hostname label regex for pattern compilation.
     static VALID_HOSTNAME_LABEL: LazyLock<Regex> = LazyLock::new(|| {
-        Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$").unwrap_or_else(|_| unreachable!())
+        Regex::new(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?$")
+            .expect("VALID_HOSTNAME_LABEL is a valid hardcoded pattern")
     });
 
     /// Parsed application URL hostname.
@@ -354,7 +356,7 @@ pub(crate) mod appurl {
         fn parse_app_slug_no_agent() {
             let result = parse_subdomain_app_url("myapp--dev--dean");
             assert!(result.is_ok());
-            let app = result.unwrap_or_else(|_| unreachable!());
+            let app = result.expect("test: parsing should succeed");
             assert_eq!(app.app_slug_or_port, "myapp");
             assert_eq!(app.agent_name, "");
             assert_eq!(app.workspace_name, "dev");
@@ -367,7 +369,7 @@ pub(crate) mod appurl {
             // For app slugs, the "agent" capture is cleared.
             let result = parse_subdomain_app_url("myapp--main--dev--dean");
             assert!(result.is_ok());
-            let app = result.unwrap_or_else(|_| unreachable!());
+            let app = result.expect("test: parsing should succeed");
             assert_eq!(app.app_slug_or_port, "myapp");
             assert_eq!(app.agent_name, "");
             assert_eq!(app.workspace_name, "dev");
@@ -378,7 +380,7 @@ pub(crate) mod appurl {
         fn parse_port_with_agent() {
             let result = parse_subdomain_app_url("8080--main--dev--dean");
             assert!(result.is_ok());
-            let app = result.unwrap_or_else(|_| unreachable!());
+            let app = result.expect("test: parsing should succeed");
             assert_eq!(app.app_slug_or_port, "8080");
             assert_eq!(app.agent_name, "main");
             assert_eq!(app.workspace_name, "dev");
@@ -389,7 +391,7 @@ pub(crate) mod appurl {
         fn parse_https_port_with_agent() {
             let result = parse_subdomain_app_url("8080s--main--dev--dean");
             assert!(result.is_ok());
-            let app = result.unwrap_or_else(|_| unreachable!());
+            let app = result.expect("test: parsing should succeed");
             assert_eq!(app.app_slug_or_port, "8080s");
             assert_eq!(app.agent_name, "main");
             assert_eq!(app.workspace_name, "dev");
@@ -406,7 +408,7 @@ pub(crate) mod appurl {
         fn parse_with_prefix() {
             let result = parse_subdomain_app_url("prefix---myapp--dev--dean");
             assert!(result.is_ok());
-            let app = result.unwrap_or_else(|_| unreachable!());
+            let app = result.expect("test: parsing should succeed");
             assert_eq!(app.prefix, "prefix---");
             assert_eq!(app.app_slug_or_port, "myapp");
             assert_eq!(app.workspace_name, "dev");
@@ -417,7 +419,7 @@ pub(crate) mod appurl {
         fn parse_with_port_prefix() {
             let result = parse_subdomain_app_url("prefix---8080--main--dev--dean");
             assert!(result.is_ok());
-            let app = result.unwrap_or_else(|_| unreachable!());
+            let app = result.expect("test: parsing should succeed");
             assert_eq!(app.prefix, "prefix---");
             assert_eq!(app.app_slug_or_port, "8080");
             assert_eq!(app.agent_name, "main");
@@ -486,7 +488,7 @@ pub(crate) mod appurl {
             };
             let info = app.port_info();
             assert!(info.is_some());
-            let info = info.unwrap_or_else(|| unreachable!());
+            let info = info.expect("test: port info should be present");
             assert_eq!(info.port, 8080);
             assert_eq!(info.protocol, "http");
         }
@@ -499,7 +501,7 @@ pub(crate) mod appurl {
             };
             let info = app.port_info();
             assert!(info.is_some());
-            let info = info.unwrap_or_else(|| unreachable!());
+            let info = info.expect("test: port info should be present");
             assert_eq!(info.port, 8080);
             assert_eq!(info.protocol, "https");
         }
@@ -519,7 +521,7 @@ pub(crate) mod appurl {
         fn compile_and_execute_simple_wildcard() {
             let re = compile_hostname_pattern("*.example.com");
             assert!(re.is_ok());
-            let re = re.unwrap_or_else(|_| unreachable!());
+            let re = re.expect("test: parsing should succeed");
 
             let result = execute_hostname_pattern(&re, "myapp--dev--dean.example.com");
             assert_eq!(result.as_deref(), Some("myapp--dev--dean"));
@@ -529,7 +531,7 @@ pub(crate) mod appurl {
         fn compile_and_execute_with_suffix() {
             let re = compile_hostname_pattern("*--apps.example.com");
             assert!(re.is_ok());
-            let re = re.unwrap_or_else(|_| unreachable!());
+            let re = re.expect("test: parsing should succeed");
 
             let result = execute_hostname_pattern(&re, "myapp--dev--dean--apps.example.com");
             assert_eq!(result.as_deref(), Some("myapp--dev--dean"));
@@ -539,7 +541,7 @@ pub(crate) mod appurl {
         fn compile_and_execute_with_port() {
             let re = compile_hostname_pattern("*.example.com:8080");
             assert!(re.is_ok());
-            let re = re.unwrap_or_else(|_| unreachable!());
+            let re = re.expect("test: parsing should succeed");
 
             let result = execute_hostname_pattern(&re, "myapp--dev--dean.example.com:8080");
             assert_eq!(result.as_deref(), Some("myapp--dev--dean"));
@@ -553,7 +555,7 @@ pub(crate) mod appurl {
         fn compile_and_execute_no_match() {
             let re = compile_hostname_pattern("*.example.com");
             assert!(re.is_ok());
-            let re = re.unwrap_or_else(|_| unreachable!());
+            let re = re.expect("test: parsing should succeed");
 
             assert!(execute_hostname_pattern(&re, "other.domain.com").is_none());
             assert!(execute_hostname_pattern(&re, "example.com").is_none());
@@ -1018,7 +1020,7 @@ impl IntoResponse for WorkspaceAppError {
 /// 5. Proxies the request to the workspace agent
 pub(crate) async fn workspace_apps_proxy_path(
     State(state): State<AppState>,
-    method: axum::http::Method,
+    method: http::Method,
     headers: HeaderMap,
     Path(params): Path<PathAppParams>,
     OriginalUri(original_uri): OriginalUri,
@@ -1271,7 +1273,7 @@ pub(crate) struct AppAuthContext {
 /// Returns the authentication context.
 async fn authenticate_app_request(
     state: &AppState,
-    headers: &HeaderMap,
+    _headers: &HeaderMap,
     session_token: Option<&str>,
 ) -> Result<AppAuthContext, WorkspaceAppError> {
     // If there's a session token, try to authenticate.
@@ -1295,26 +1297,6 @@ async fn authenticate_app_request(
             Err(_) => {
                 // Auth error — treat as unauthenticated for app requests.
             }
-        }
-    }
-
-    // Check for standard headers as fallback.
-    let token_from_header = headers
-        .get("coder-session-token")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| !v.is_empty());
-
-    if let Some(token) = token_from_header {
-        let mut auth_headers = HeaderMap::new();
-        if let Ok(val) = HeaderValue::from_str(token) {
-            auth_headers.insert(HeaderName::from_static("coder-session-token"), val);
-        }
-
-        if let Ok(Some(auth_req)) = state.auth.authenticate(&auth_headers).await {
-            return Ok(AppAuthContext {
-                user_id: Some(auth_req.user.id),
-                username: Some(auth_req.user.username.clone()),
-            });
         }
     }
 
@@ -1356,7 +1338,7 @@ async fn proxy_workspace_app(
     _server: &WorkspaceAppServer,
     auth_context: &AppAuthContext,
     app_request: &AppRequest,
-    method: axum::http::Method,
+    method: http::Method,
     original_headers: &HeaderMap,
     body: axum::body::Body,
     app_path: &str,
@@ -1447,8 +1429,12 @@ async fn proxy_workspace_app(
         .map_err(|e| WorkspaceAppError::ProxyError(e.to_string()))?;
 
     // Convert the reqwest response to an axum response.
-    let status =
-        StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
+    let status = StatusCode::from_u16(response.status().as_u16()).map_err(|_| {
+        WorkspaceAppError::ProxyError(format!(
+            "upstream returned invalid status code: {}",
+            response.status().as_u16()
+        ))
+    })?;
 
     let mut builder = Response::builder().status(status);
 
@@ -1478,22 +1464,40 @@ async fn proxy_workspace_app(
 
 /// Resolves the target URL for a workspace app.
 ///
-/// For port-based apps, constructs `http://127.0.0.1:{port}`.
+/// For port-based apps (matching `PORT_REGEX`: 4-5 digits, optional `s`
+/// suffix), constructs `http(s)://127.0.0.1:{port}`.
+///
+/// **IMPORTANT / TODO**: The `127.0.0.1` target is a placeholder. In a full
+/// implementation, the proxy must route through the workspace agent connection
+/// (`AgentProvider`) so that requests reach the *workspace*, not the Coder
+/// server's own loopback interface. Without this, an authenticated user could
+/// reach arbitrary ports on the server itself (SSRF).
+///
 /// For slug-based apps, this would look up the app URL from the database
 /// in a full implementation.
 fn resolve_app_url(request: &AppRequest) -> Result<url::Url, WorkspaceAppError> {
-    // Check if it's a port-based app.
+    // Check if it's a port-based app using the same PORT_REGEX that
+    // parse_subdomain_app_url enforces (4-5 digits, optional trailing 's').
+    // This ensures consistent access-control between subdomain and path access.
     let slug = &request.app_slug_or_port;
-    let (port_str, protocol) = if slug.ends_with('s') {
-        (&slug[..slug.len() - 1], "https")
-    } else {
-        (slug.as_str(), "http")
-    };
 
-    if let Ok(port) = port_str.parse::<u16>() {
-        let url_str = format!("{protocol}://127.0.0.1:{port}");
-        return url::Url::parse(&url_str)
-            .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
+    if appurl::PORT_REGEX.is_match(slug) {
+        let (port_str, protocol) = if slug.ends_with('s') {
+            (&slug[..slug.len() - 1], "https")
+        } else {
+            (slug.as_str(), "http")
+        };
+
+        if let Ok(port) = port_str.parse::<u16>() {
+            // NOTE: This currently resolves to 127.0.0.1 which is a placeholder.
+            // In a full implementation, the proxy should connect through the
+            // workspace agent connection (via AgentProvider) rather than
+            // directly to the server's localhost. See SSRF note in the doc
+            // comment.
+            let url_str = format!("{protocol}://127.0.0.1:{port}");
+            return url::Url::parse(&url_str)
+                .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
+        }
     }
 
     // For slug-based apps, we'd look up the app in the database.
@@ -1854,7 +1858,7 @@ mod tests {
         };
         let result = resolve_app_url(&req);
         assert!(result.is_ok());
-        let url = result.unwrap_or_else(|_| unreachable!());
+        let url = result.expect("test: parsing should succeed");
         assert_eq!(url.scheme(), "http");
         assert_eq!(url.port(), Some(8080));
     }
@@ -1873,7 +1877,7 @@ mod tests {
         };
         let result = resolve_app_url(&req);
         assert!(result.is_ok());
-        let url = result.unwrap_or_else(|_| unreachable!());
+        let url = result.expect("test: parsing should succeed");
         assert_eq!(url.scheme(), "https");
         assert_eq!(url.port(), Some(8080));
     }
@@ -1894,24 +1898,55 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn resolve_short_numeric_slug_rejected() {
+        // A 3-digit number does NOT match PORT_REGEX (requires 4-5 digits),
+        // so it falls through to slug-based resolution → NotFound.
+        let req = AppRequest {
+            access_method: AccessMethod::Path,
+            base_path: "/".to_owned(),
+            prefix: String::new(),
+            username_or_id: "dean".to_owned(),
+            workspace_and_agent: String::new(),
+            workspace_name_or_id: "dev".to_owned(),
+            agent_name_or_id: "main".to_owned(),
+            app_slug_or_port: "80".to_owned(),
+        };
+        let result = resolve_app_url(&req);
+        assert!(
+            result.is_err(),
+            "2-digit number must not be treated as port"
+        );
+
+        let req2 = AppRequest {
+            app_slug_or_port: "123".to_owned(),
+            ..req
+        };
+        let result2 = resolve_app_url(&req2);
+        assert!(
+            result2.is_err(),
+            "3-digit number must not be treated as port"
+        );
+    }
+
     // -- WorkspaceAppServer tests --
 
     #[test]
     fn workspace_app_server_no_hostname() {
-        let url = url::Url::parse("http://localhost:3000").unwrap_or_else(|_| unreachable!());
+        let url = url::Url::parse("http://localhost:3000").expect("test: parsing should succeed");
         let server = WorkspaceAppServer::new(url.clone(), url, String::new(), false);
         assert!(server.is_ok());
-        let server = server.unwrap_or_else(|_| unreachable!());
+        let server = server.expect("test: parsing should succeed");
         assert!(server.hostname_regex.is_none());
     }
 
     #[test]
     fn workspace_app_server_with_hostname() {
-        let url = url::Url::parse("http://localhost:3000").unwrap_or_else(|_| unreachable!());
+        let url = url::Url::parse("http://localhost:3000").expect("test: parsing should succeed");
         let server =
             WorkspaceAppServer::new(url.clone(), url, "*.apps.example.com".to_owned(), false);
         assert!(server.is_ok());
-        let server = server.unwrap_or_else(|_| unreachable!());
+        let server = server.expect("test: parsing should succeed");
         assert!(server.hostname_regex.is_some());
     }
 }
