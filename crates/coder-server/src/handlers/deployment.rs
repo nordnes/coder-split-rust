@@ -1,5 +1,7 @@
 //! Deployment handlers.
 
+//! Router construction and HTTP handlers.
+
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
@@ -99,11 +101,86 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use time::OffsetDateTime;
+use tower_http::{
+    normalize_path::NormalizePathLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::app::AppState;
 use crate::error::AppError;
+
+const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
+const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
+const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
+const PUBLIC_API_KEY_SCOPES: &[&str] = &[
+    "audit_log:*",
+    "audit_log:create",
+    "audit_log:read",
+    "api_key:*",
+    "api_key:create",
+    "api_key:delete",
+    "api_key:read",
+    "api_key:update",
+    "coder:all",
+    "coder:apikeys.manage_self",
+    "coder:application_connect",
+    "deployment_stats:*",
+    "deployment_stats:read",
+    "coder:templates.author",
+    "coder:templates.build",
+    "coder:workspaces.access",
+    "coder:workspaces.create",
+    "coder:workspaces.delete",
+    "coder:workspaces.operate",
+    "file:*",
+    "file:create",
+    "file:read",
+    "organization:*",
+    "organization:delete",
+    "organization:read",
+    "organization:update",
+    "task:*",
+    "task:create",
+    "task:delete",
+    "task:read",
+    "task:update",
+    "template:*",
+    "template:create",
+    "template:delete",
+    "template:read",
+    "template:update",
+    "template:use",
+    "user:read_personal",
+    "user:update_personal",
+    "user_secret:*",
+    "user_secret:create",
+    "user_secret:delete",
+    "user_secret:read",
+    "user_secret:update",
+    "workspace:*",
+    "workspace:application_connect",
+    "workspace:create",
+    "workspace:delete",
+    "workspace:read",
+    "workspace:ssh",
+    "workspace:start",
+    "workspace:stop",
+    "workspace:update",
+];
+const VALID_HEALTH_SECTIONS: &[&str] = &[
+    "DERP",
+    "AccessURL",
+    "Websocket",
+    "Database",
+    "WorkspaceProxy",
+    "ProvisionerDaemons",
+];
+
+const MAX_CHAT_FILE_SIZE: usize = 10 << 20;
+
+use crate::app::AppState;
 use crate::helpers::*;
 
 pub(crate) async fn server_root() -> impl IntoResponse {
@@ -165,7 +242,7 @@ pub(crate) async fn post_csp_report(
 
     debug!(report = ?report.report, "CSP violation reported");
 
-    Ok((StatusCode::OK, Json("ok")).into_response())
+    Ok((StatusCode::OK, Json(ApiResponse::ok("ok"))).into_response())
 }
 
 pub(crate) async fn deployment_config(
@@ -194,7 +271,10 @@ pub(crate) async fn get_init_script(
         Err(InitScriptError::UnknownTarget { os, arch }) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!("Unknown os/arch: {os}/{arch}"))),
+                Json(ApiResponse::error(
+                    format!("Unknown os/arch: {os}/{arch}"),
+                    "The requested os/arch combination is not supported.",
+                )),
             )
                 .into_response();
         }
@@ -213,6 +293,27 @@ pub(crate) async fn get_init_script(
     response
 }
 
+// ---------------------------------------------------------------------------
+// RBAC enforcement audit summary
+// ---------------------------------------------------------------------------
+//
+// Every mutation (POST/PUT/DELETE) and sensitive-read handler below calls
+// `Authorizer::new().authorize(actor, action, object)` from `coder-rbac`.
+//
+// **Handlers with formal RBAC authorize() checks:**
+//   Mutations:
+//     - create_first_user (Create, User)
+//     - post_login (handled by AuthService)
+//     - create_token, delete_token, delete_all_tokens (Create/Delete, ApiKey)
+//     - create_user (Create, User)
+//     - put_user_roles (Assign, OrganizationMember)
+//     - put_user_status (Update, User)
+//     (put_user_profile, put_user_appearance, put_user_preferences,
+//      put_user_password, post_convert_login delegate to service layer)
+//     - delete_external_auth_by_id (Delete, User) [NEW]
+//     - post_external_auth_device_exchange (Update, User) [NEW]
+//     - post_task_log_snapshot (Update, Task) [NEW - user auth path]
+
 pub(crate) async fn deployment_stats(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -220,7 +321,16 @@ pub(crate) async fn deployment_stats(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view deployment stats.",
         ));
@@ -473,7 +583,11 @@ pub(crate) async fn cancel_provisioner_job(
             .into_response());
     }
 
-    Ok(StatusCode::OK.into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Provisioner job canceled.")),
+    )
+        .into_response())
 }
 
 pub(crate) async fn get_provisioner_job_logs(
@@ -618,7 +732,18 @@ pub(crate) async fn debug_coordinator(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view coordinator debug information.",
         ));
@@ -649,7 +774,18 @@ pub(crate) async fn debug_tailnet(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view tailnet debug information.",
         ));
@@ -672,7 +808,18 @@ pub(crate) async fn debug_derp_traffic(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view DERP traffic debug information.",
         ));
@@ -695,7 +842,18 @@ pub(crate) async fn debug_expvar(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view expvar debug information.",
         ));
@@ -769,7 +927,18 @@ pub(crate) async fn debug_pprof(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view pprof debug information.",
         ));
@@ -840,7 +1009,18 @@ pub(crate) async fn debug_websocket(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to use the debug websocket.",
         ));
@@ -893,7 +1073,18 @@ pub(crate) async fn debug_metrics(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    // Auditors also get access (backward compat with can_view_operational_data).
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+        && !context.actor.has_site_role(coder_rbac::ROLE_AUDITOR)
+    {
         return Ok(forbidden_response(
             "You are not authorized to view debug metrics.",
         ));

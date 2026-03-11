@@ -1,39 +1,186 @@
 //! Shared helper functions for HTTP handlers.
 
-use std::{collections::HashMap, sync::Arc};
+//! Router construction and HTTP handlers.
 
+use std::{collections::HashMap, str::FromStr, sync::Arc};
+
+use async_trait::async_trait;
 use axum::{
-    Json,
-    extract::State,
+    Form, Json, Router,
+    body::Bytes,
+    extract::{
+        DefaultBodyLimit, OriginalUri, Path, Query, State,
+        rejection::JsonRejection,
+        ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade},
+    },
     http::{
         HeaderMap, HeaderName, HeaderValue, StatusCode,
-        header::{CONTENT_TYPE, LOCATION},
+        header::{
+            ACCESS_CONTROL_ALLOW_CREDENTIALS, ACCESS_CONTROL_ALLOW_HEADERS,
+            ACCESS_CONTROL_ALLOW_METHODS, ACCESS_CONTROL_ALLOW_ORIGIN, CONTENT_TYPE, LOCATION,
+        },
     },
+    middleware::{self, Next},
     response::{IntoResponse, Response},
+    routing::{delete, get, patch, post, put},
 };
 use coder_audit::{AuditAction, AuditEvent, AuditSink};
 use coder_auth::{
     AuthService, AuthServiceError, AuthenticatedRequest, ExternalAuthService,
-    ExternalAuthServiceError, cookie_from_headers,
+    ExternalAuthServiceError, OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError,
+    OAuth2ProviderService, cookie_from_headers, supported_auth_methods,
 };
-use coder_connectivity::{HealthService, generate_git_ssh_key};
+use coder_connectivity::{
+    HealthService,
+    agents::{AgentConnection, AgentError, AgentProvider},
+    generate_git_ssh_key,
+    tailnet::{DerpTrafficTracker, TailnetCoordinator},
+};
+use coder_core::StorageError;
+use coder_core::api::{
+    ArchiveTemplateVersionsRequest, ArchiveTemplateVersionsResponse, CreateTemplateRequest,
+    CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest, DAUEntry, DAUsResponse,
+    DynamicParametersRequest, DynamicParametersResponse, MatchedProvisioners, MinimalUser,
+    PatchTemplateVersionRequest, ProvisionerJobLog, ProvisionerJobResponse, ProvisionerJobStatus,
+    TemplateExample, TemplateFilter, TemplateResponse, TemplateVersionExternalAuth,
+    TemplateVersionParameter, TemplateVersionPreset, TemplateVersionPresetParameter,
+    TemplateVersionResponse, TemplateVersionVariable, UpdateActiveTemplateVersionRequest,
+    UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceResource, WorkspaceResourceMetadata,
+    WorkspaceResourceResponse,
+};
+use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
+use coder_core::api::{
+    UpdateWorkspaceACLRequest, WorkspaceACLGroup, WorkspaceACLResponse, WorkspaceACLUser,
+};
+use coder_core::ports::UpdateWorkspaceACLInput;
+use coder_core::pubsub::PubSub;
+use coder_core::template::{
+    CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
+    CreateTemplateVersionInput, ProvisionerJobRecord as TemplateProvisionerJobRecord,
+    TemplateListFilter, TemplateRecord, TemplateVersionListFilter, TemplateVersionRecord,
+    UpdateTemplateMetaInput,
+};
 use coder_core::{
-    ApiResponse, AppStore, AuthenticatedUser, HealthSettings, OrganizationRecord, ServerConfig,
-    UserRecord, ValidationError,
+    AWSInstanceIdentityToken, ApiResponse, AppHostResponse, AppStore, AuditLogListFilter,
+    AuthMethods, AuthenticatedUser, AuthorizationRequest, AvailableExperiments,
+    AzureInstanceIdentityToken, BuildMetadata, ChangePasswordWithOneTimePasscodeRequest,
+    ChatMessagePart, ChatMessageRecord, ChatMessageResponse, ChatMessageUsage,
+    ChatMessageVisibility, ChatQueuedMessageRecord, ChatQueuedMessageResponse, ChatRecord,
+    ChatResponse, ChatWithMessagesResponse, ConvertLoginRequest, CreateChatMessageApiResponse,
+    CreateChatMessageRequest, CreateChatRequest, CreateFirstUserRequest, CreateFirstUserResponse,
+    CreateLogSourceRequest, CreateTaskRequest, CreateTestAuditLogRequest, CreateTokenRequest,
+    CreateUserRequestWithOrgs, CreateWorkspaceBuildInput, CreateWorkspaceInput, DERPMap,
+    DERPMapRegion, DERPNode, DeploymentConfigResponse, ExternalApiKeyScopes,
+    ExternalAuthDeviceExchangeRequest, GCPInstanceIdentityToken, GetUsersResponse, HealthSettings,
+    HealthcheckReport, InsertChatInput, InsertChatMessageInput, InsertFileInput, InsertTaskInput,
+    LoginType, LoginWithPasswordRequest, OAuth2AuthorizeRequest, OAuth2ProviderAppEndpoints,
+    OAuth2ProviderAppResponse, OAuth2ProviderAppSecretFullResponse,
+    OAuth2ProviderAppSecretResponse, OAuth2TokenRequest, OAuth2TokenResponse, OrganizationMember,
+    OrganizationMemberWithUserData, OrganizationRecord, OrganizationResponse,
+    PaginatedMembersResponse, PatchAgentLogsRequest, PatchAppStatusRequest, PersistAuditLogInput,
+    PostOAuth2ProviderAppRequest, PutOAuth2ProviderAppRequest, RequestOneTimePasscodeRequest,
+    ServerConfig, SshConfigResponse, TaskListFilter, TaskLogSnapshotEnvelope, TaskLogsResponse,
+    TaskRecord, TaskResponse, TaskSendRequest, TasksListResponse, UpdateCheckResponse,
+    UpdateInboxNotificationReadStatusRequest, UpdateNotificationTemplateMethod, UpdateRolesRequest,
+    UpdateUserAppearanceSettingsRequest, UpdateUserNotificationPreferences,
+    UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
+    UploadFileResponse, UpsertPortShareInput, UserAppearanceSettings, UserListFilter,
+    UserParameter, UserPreferenceSettings, UserRecord, UserResponse, UserRolesResponse, UserStatus,
+    ValidateUserPasswordRequest, ValidationError, WebpushSubscription,
+    WorkspaceAgentAuthenticateResponse, WorkspaceAgentConnectionInfo,
+    WorkspaceAgentListContainersResponse, WorkspaceAgentListeningPortsResponse,
+    WorkspaceListFilter,
 };
 use coder_identity::{IdentityService, IdentityServiceError};
-use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceType};
+use coder_provisioner::{InitScriptError, render_init_script};
+use coder_rbac::{Action, Actor, Authorizer, Object, ROLE_AUDITOR, ResourceKind, ResourceType};
+use coder_workspaces::DeploymentStatsService;
+use futures_util::StreamExt;
+use serde::Deserialize;
 use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::net::IpAddr;
+use time::OffsetDateTime;
+use tower_http::{
+    normalize_path::NormalizePathLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
+use tracing::debug;
 use uuid::Uuid;
 
-use crate::app::AppState;
 use crate::error::AppError;
 
-use axum::extract::rejection::JsonRejection;
-use axum::extract::ws::{CloseFrame, Message, WebSocket};
-use coder_core::HealthcheckReport;
-use coder_rbac::ResourceKind;
-use std::str::FromStr;
+const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
+const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
+const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
+const PUBLIC_API_KEY_SCOPES: &[&str] = &[
+    "audit_log:*",
+    "audit_log:create",
+    "audit_log:read",
+    "api_key:*",
+    "api_key:create",
+    "api_key:delete",
+    "api_key:read",
+    "api_key:update",
+    "coder:all",
+    "coder:apikeys.manage_self",
+    "coder:application_connect",
+    "deployment_stats:*",
+    "deployment_stats:read",
+    "coder:templates.author",
+    "coder:templates.build",
+    "coder:workspaces.access",
+    "coder:workspaces.create",
+    "coder:workspaces.delete",
+    "coder:workspaces.operate",
+    "file:*",
+    "file:create",
+    "file:read",
+    "organization:*",
+    "organization:delete",
+    "organization:read",
+    "organization:update",
+    "task:*",
+    "task:create",
+    "task:delete",
+    "task:read",
+    "task:update",
+    "template:*",
+    "template:create",
+    "template:delete",
+    "template:read",
+    "template:update",
+    "template:use",
+    "user:read_personal",
+    "user:update_personal",
+    "user_secret:*",
+    "user_secret:create",
+    "user_secret:delete",
+    "user_secret:read",
+    "user_secret:update",
+    "workspace:*",
+    "workspace:application_connect",
+    "workspace:create",
+    "workspace:delete",
+    "workspace:read",
+    "workspace:ssh",
+    "workspace:start",
+    "workspace:stop",
+    "workspace:update",
+];
+const VALID_HEALTH_SECTIONS: &[&str] = &[
+    "DERP",
+    "AccessURL",
+    "Websocket",
+    "Database",
+    "WorkspaceProxy",
+    "ProvisionerDaemons",
+];
+
+const MAX_CHAT_FILE_SIZE: usize = 10 << 20;
+
+use crate::app::AppState;
 
 pub(crate) async fn authenticate_request(
     state: &AppState,
@@ -107,6 +254,10 @@ pub(crate) async fn resolve_user(
         .map_err(AppError::from)
 }
 
+/// Deprecated: all call-sites now use `Authorizer::new().authorize()` with
+/// the appropriate `ResourceType` and `Action` instead of this coarse check.
+/// Retained temporarily for reference; safe to remove once confirmed unused.
+#[allow(dead_code)]
 pub(crate) fn can_view_operational_data(actor: &Actor) -> bool {
     actor.is_owner() || actor.has_site_role(ROLE_AUDITOR)
 }
@@ -455,78 +606,3 @@ pub(crate) async fn resolve_organization(
     }
     Ok(state.store.find_organization_by_name(org_ref).await?)
 }
-
-// Constants moved from app.rs
-pub(crate) const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
-
-pub(crate) const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
-
-pub(crate) const SLIM_BUILD_MESSAGE: &str =
-    "Slim build of Coder, does not contain the frontend static files.";
-
-pub(crate) const PUBLIC_API_KEY_SCOPES: &[&str] = &[
-    "audit_log:*",
-    "audit_log:create",
-    "audit_log:read",
-    "api_key:*",
-    "api_key:create",
-    "api_key:delete",
-    "api_key:read",
-    "api_key:update",
-    "coder:all",
-    "coder:apikeys.manage_self",
-    "coder:application_connect",
-    "deployment_stats:*",
-    "deployment_stats:read",
-    "coder:templates.author",
-    "coder:templates.build",
-    "coder:workspaces.access",
-    "coder:workspaces.create",
-    "coder:workspaces.delete",
-    "coder:workspaces.operate",
-    "file:*",
-    "file:create",
-    "file:read",
-    "organization:*",
-    "organization:delete",
-    "organization:read",
-    "organization:update",
-    "task:*",
-    "task:create",
-    "task:delete",
-    "task:read",
-    "task:update",
-    "template:*",
-    "template:create",
-    "template:delete",
-    "template:read",
-    "template:update",
-    "template:use",
-    "user:read_personal",
-    "user:update_personal",
-    "user_secret:*",
-    "user_secret:create",
-    "user_secret:delete",
-    "user_secret:read",
-    "user_secret:update",
-    "workspace:*",
-    "workspace:application_connect",
-    "workspace:create",
-    "workspace:delete",
-    "workspace:read",
-    "workspace:ssh",
-    "workspace:start",
-    "workspace:stop",
-    "workspace:update",
-];
-
-pub(crate) const VALID_HEALTH_SECTIONS: &[&str] = &[
-    "DERP",
-    "AccessURL",
-    "Websocket",
-    "Database",
-    "WorkspaceProxy",
-    "ProvisionerDaemons",
-];
-
-pub(crate) const MAX_CHAT_FILE_SIZE: usize = 10 << 20;

@@ -3,7 +3,7 @@
 
 mod app;
 mod error;
-mod handlers;
+pub(crate) mod handlers;
 pub(crate) mod helpers;
 pub(crate) mod mw;
 

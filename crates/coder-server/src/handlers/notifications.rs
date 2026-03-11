@@ -1,5 +1,7 @@
 //! Notifications handlers.
 
+//! Router construction and HTTP handlers.
+
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
@@ -99,20 +101,115 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use time::OffsetDateTime;
+use tower_http::{
+    normalize_path::NormalizePathLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::app::AppState;
 use crate::error::AppError;
+
+const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
+const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
+const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
+const PUBLIC_API_KEY_SCOPES: &[&str] = &[
+    "audit_log:*",
+    "audit_log:create",
+    "audit_log:read",
+    "api_key:*",
+    "api_key:create",
+    "api_key:delete",
+    "api_key:read",
+    "api_key:update",
+    "coder:all",
+    "coder:apikeys.manage_self",
+    "coder:application_connect",
+    "deployment_stats:*",
+    "deployment_stats:read",
+    "coder:templates.author",
+    "coder:templates.build",
+    "coder:workspaces.access",
+    "coder:workspaces.create",
+    "coder:workspaces.delete",
+    "coder:workspaces.operate",
+    "file:*",
+    "file:create",
+    "file:read",
+    "organization:*",
+    "organization:delete",
+    "organization:read",
+    "organization:update",
+    "task:*",
+    "task:create",
+    "task:delete",
+    "task:read",
+    "task:update",
+    "template:*",
+    "template:create",
+    "template:delete",
+    "template:read",
+    "template:update",
+    "template:use",
+    "user:read_personal",
+    "user:update_personal",
+    "user_secret:*",
+    "user_secret:create",
+    "user_secret:delete",
+    "user_secret:read",
+    "user_secret:update",
+    "workspace:*",
+    "workspace:application_connect",
+    "workspace:create",
+    "workspace:delete",
+    "workspace:read",
+    "workspace:ssh",
+    "workspace:start",
+    "workspace:stop",
+    "workspace:update",
+];
+const VALID_HEALTH_SECTIONS: &[&str] = &[
+    "DERP",
+    "AccessURL",
+    "Websocket",
+    "Database",
+    "WorkspaceProxy",
+    "ProvisionerDaemons",
+];
+
+const MAX_CHAT_FILE_SIZE: usize = 10 << 20;
+
+use crate::app::AppState;
 use crate::helpers::*;
+
+/// Maximum length for custom notification title.
+const MAX_CUSTOM_NOTIFICATION_TITLE_LEN: usize = 120;
+/// Maximum length for custom notification message.
+const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
 
 pub(crate) async fn get_notifications_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification settings.",
+        ));
+    }
 
     let settings = state.store.get_notifications_settings().await?;
     Ok((StatusCode::OK, Json(settings)).into_response())
@@ -156,9 +253,13 @@ pub(crate) async fn get_system_notification_templates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
+    // to any non-owner role, but any authenticated user should be able to view
+    // available notification templates (e.g., to configure preferences).
 
     let templates = state
         .store
@@ -171,9 +272,13 @@ pub(crate) async fn get_custom_notification_templates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // NOTE: No RBAC beyond authentication — NotificationTemplate is not granted
+    // to any non-owner role, but any authenticated user should be able to view
+    // available notification templates (e.g., to configure preferences).
 
     let templates = state
         .store
@@ -276,9 +381,24 @@ pub(crate) async fn get_notification_dispatch_methods(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification dispatch methods.",
+        ));
+    }
 
     let _ = &state;
     let response = coder_core::NotificationMethodsResponse {
@@ -868,8 +988,3 @@ pub(crate) struct InboxNotificationsQuery {
     #[serde(default)]
     read_status: Option<String>,
 }
-
-/// Maximum length for custom notification title.
-const MAX_CUSTOM_NOTIFICATION_TITLE_LEN: usize = 120;
-/// Maximum length for custom notification message.
-const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;

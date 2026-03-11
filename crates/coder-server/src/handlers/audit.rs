@@ -1,5 +1,7 @@
 //! Audit handlers.
 
+//! Router construction and HTTP handlers.
+
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
@@ -99,12 +101,137 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use time::OffsetDateTime;
+use tower_http::{
+    normalize_path::NormalizePathLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::app::AppState;
 use crate::error::AppError;
+
+const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
+const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
+const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
+const PUBLIC_API_KEY_SCOPES: &[&str] = &[
+    "audit_log:*",
+    "audit_log:create",
+    "audit_log:read",
+    "api_key:*",
+    "api_key:create",
+    "api_key:delete",
+    "api_key:read",
+    "api_key:update",
+    "coder:all",
+    "coder:apikeys.manage_self",
+    "coder:application_connect",
+    "deployment_stats:*",
+    "deployment_stats:read",
+    "coder:templates.author",
+    "coder:templates.build",
+    "coder:workspaces.access",
+    "coder:workspaces.create",
+    "coder:workspaces.delete",
+    "coder:workspaces.operate",
+    "file:*",
+    "file:create",
+    "file:read",
+    "organization:*",
+    "organization:delete",
+    "organization:read",
+    "organization:update",
+    "task:*",
+    "task:create",
+    "task:delete",
+    "task:read",
+    "task:update",
+    "template:*",
+    "template:create",
+    "template:delete",
+    "template:read",
+    "template:update",
+    "template:use",
+    "user:read_personal",
+    "user:update_personal",
+    "user_secret:*",
+    "user_secret:create",
+    "user_secret:delete",
+    "user_secret:read",
+    "user_secret:update",
+    "workspace:*",
+    "workspace:application_connect",
+    "workspace:create",
+    "workspace:delete",
+    "workspace:read",
+    "workspace:ssh",
+    "workspace:start",
+    "workspace:stop",
+    "workspace:update",
+];
+const VALID_HEALTH_SECTIONS: &[&str] = &[
+    "DERP",
+    "AccessURL",
+    "Websocket",
+    "Database",
+    "WorkspaceProxy",
+    "ProvisionerDaemons",
+];
+
+const MAX_CHAT_FILE_SIZE: usize = 10 << 20;
+
+use crate::app::AppState;
 use crate::helpers::*;
+
+//     - create_task (Create, Task)
+//     - create_workspace, patch_workspace (Create/Update, Workspace)
+//     - post_org_template (Create, Template)
+//     - create_org_member, delete_org_member (Create/Delete, OrganizationMember)
+//     - put_org_member_roles (Assign, OrganizationMember)
+//     - post_oauth2_app, put_oauth2_app, delete_oauth2_app (CRUD, OAuth2ProviderApp)
+//     - post_file (Create, File)
+//     - put_health_settings (Update, DeploymentConfig)
+//     - put_notifications_settings (Update, DeploymentConfig)
+//     - put_notification_template_method (Update, NotificationTemplate)
+//     - put_user_notification_preferences (Update, NotificationPreference)
+//     - post_webpush_subscription, delete_webpush_subscription (Create/Delete, NotificationPreference)
+//     - post_test_audit_log (Create, AuditLog)
+//
+//   Sensitive reads:
+//     - list_audit_logs (Read, AuditLog)
+//     - list_users (owner-only check, preserves can_list_users() semantics) [NEW]
+//     - deployment_stats (Read, DeploymentStats) [NEW - replaced can_view_operational_data()]
+//     - debug_health (Read, DeploymentConfig) [NEW]
+//     - get_health_settings (Read, DeploymentConfig) [NEW]
+//     - get_notifications_settings (Read, DeploymentConfig) [NEW]
+//     - get_notification_dispatch_methods (Read, DeploymentConfig) [NEW]
+//     - get_system_notification_templates (auth-only, no RBAC — see note in handler)
+//     - get_custom_notification_templates (auth-only, no RBAC — see note in handler)
+//     - insights_daus, insights_templates, insights_user_activity,
+//       insights_user_latency, insights_user_status_counts (Read, DeploymentStats) [NEW]
+//     - debug_coordinator, debug_tailnet, debug_derp_traffic,
+//       debug_expvar, debug_pprof, debug_websocket,
+//       debug_metrics (Read, DebugInfo; also allows auditor role) [NEW]
+//     - get_deployment_config (Read, DeploymentConfig)
+//     - list_templates (Read, Template - filter-based)
+//
+//   Service-layer delegation (RBAC checked inside service):
+//     - get_user, get_user_roles (via IdentityService)
+//     - get_organization, list_organization_members (via IdentityService)
+//     - list_token_api_keys, get_api_key (via AuthService)
+//
+// **Public / unauthenticated endpoints (no RBAC needed):**
+//     - healthz, latency_check, build_info, deployment_ssh
+//     - auth_methods, get_first_user (existence check)
+//     - login_with_password (pre-auth), OAuth disabled stubs
+//     - DERP map, SSH config (public deployment info)
+//
+// **resolve_organization / resolve_user patterns:**
+//   All instances correctly use `let Some(...) = resolve_*(...) else { return Ok(not_found) }`
+//   or `match ... { Some => ..., None => return Ok(not_found) }`, ensuring the handler
+//   stops processing when the target cannot be resolved. No RBAC bypass bugs detected.
+//
+// ---------------------------------------------------------------------------
 
 pub(crate) async fn list_audit_logs(
     State(state): State<AppState>,

@@ -1,5 +1,7 @@
 //! External Auth handlers.
 
+//! Router construction and HTTP handlers.
+
 use std::{collections::HashMap, str::FromStr, sync::Arc};
 
 use async_trait::async_trait;
@@ -99,11 +101,86 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::net::IpAddr;
 use time::OffsetDateTime;
+use tower_http::{
+    normalize_path::NormalizePathLayer,
+    request_id::{MakeRequestUuid, PropagateRequestIdLayer, SetRequestIdLayer},
+    trace::{DefaultMakeSpan, DefaultOnResponse, TraceLayer},
+};
 use tracing::debug;
 use uuid::Uuid;
 
-use crate::app::AppState;
 use crate::error::AppError;
+
+const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
+const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
+const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
+const PUBLIC_API_KEY_SCOPES: &[&str] = &[
+    "audit_log:*",
+    "audit_log:create",
+    "audit_log:read",
+    "api_key:*",
+    "api_key:create",
+    "api_key:delete",
+    "api_key:read",
+    "api_key:update",
+    "coder:all",
+    "coder:apikeys.manage_self",
+    "coder:application_connect",
+    "deployment_stats:*",
+    "deployment_stats:read",
+    "coder:templates.author",
+    "coder:templates.build",
+    "coder:workspaces.access",
+    "coder:workspaces.create",
+    "coder:workspaces.delete",
+    "coder:workspaces.operate",
+    "file:*",
+    "file:create",
+    "file:read",
+    "organization:*",
+    "organization:delete",
+    "organization:read",
+    "organization:update",
+    "task:*",
+    "task:create",
+    "task:delete",
+    "task:read",
+    "task:update",
+    "template:*",
+    "template:create",
+    "template:delete",
+    "template:read",
+    "template:update",
+    "template:use",
+    "user:read_personal",
+    "user:update_personal",
+    "user_secret:*",
+    "user_secret:create",
+    "user_secret:delete",
+    "user_secret:read",
+    "user_secret:update",
+    "workspace:*",
+    "workspace:application_connect",
+    "workspace:create",
+    "workspace:delete",
+    "workspace:read",
+    "workspace:ssh",
+    "workspace:start",
+    "workspace:stop",
+    "workspace:update",
+];
+const VALID_HEALTH_SECTIONS: &[&str] = &[
+    "DERP",
+    "AccessURL",
+    "Websocket",
+    "Database",
+    "WorkspaceProxy",
+    "ProvisionerDaemons",
+];
+
+const MAX_CHAT_FILE_SIZE: usize = 10 << 20;
+
+use crate::app::AppState;
 use crate::helpers::*;
 
 pub(crate) async fn list_external_auths(
@@ -158,6 +235,22 @@ pub(crate) async fn delete_external_auth_by_id(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can delete their own external auth links.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::User).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete external auth links.",
+        ));
+    }
+
     let Some(response) = state
         .external_auth
         .delete(
@@ -215,6 +308,22 @@ pub(crate) async fn post_external_auth_device_exchange(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update their own external auth links.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::User).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to exchange external auth device codes.",
+        ));
+    }
+
     let Some(config) = find_external_auth_provider(&state, &provider) else {
         return Ok(resource_not_found_response());
     };
@@ -265,7 +374,10 @@ pub(crate) async fn get_external_auth_callback_by_id(
     let Some(state_value) = query.state.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("State must be provided.")),
+            Json(ApiResponse::error(
+                "State must be provided.",
+                "The state query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
@@ -280,7 +392,10 @@ pub(crate) async fn get_external_auth_callback_by_id(
     let Some(code) = query.code.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Code must be provided.")),
+            Json(ApiResponse::error(
+                "Code must be provided.",
+                "The code query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
