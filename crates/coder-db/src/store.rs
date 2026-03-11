@@ -4791,7 +4791,7 @@ impl AppStore for PostgresStore {
         .bind(input.chat_id)
         .fetch_one(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error_or_not_found)?;
 
         chat_message_record_from_row(row)
     }
@@ -4832,7 +4832,7 @@ impl AppStore for PostgresStore {
         .bind(chat_id)
         .fetch_one(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error_or_not_found)?;
 
         Ok(ChatQueuedMessageRecord {
             id: row.id,
@@ -4906,7 +4906,7 @@ impl AppStore for PostgresStore {
         .bind(input.enabled)
         .fetch_one(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error_or_not_found)?;
 
         Ok(chat_provider_record_from_row(row))
     }
@@ -4993,7 +4993,7 @@ impl AppStore for PostgresStore {
         .bind(input.updated_by)
         .fetch_one(&self.pool)
         .await
-        .map_err(storage_error)?;
+        .map_err(storage_error_or_not_found)?;
 
         Ok(chat_model_config_record_from_row(row))
     }
@@ -10174,6 +10174,14 @@ fn escape_like(input: &str) -> String {
 }
 
 fn storage_error(error: sqlx::Error) -> StorageError {
+    StorageError::unavailable(error.to_string())
+}
+
+/// Like [`storage_error`] but maps [`sqlx::Error::RowNotFound`] to
+/// [`StorageError::NotFound`] instead of [`StorageError::Unavailable`].
+/// Use this only for queries where a missing row is an expected
+/// "not found" condition (e.g. UPDATE … RETURNING on a specific row).
+fn storage_error_or_not_found(error: sqlx::Error) -> StorageError {
     if matches!(error, sqlx::Error::RowNotFound) {
         return StorageError::not_found(error.to_string());
     }
