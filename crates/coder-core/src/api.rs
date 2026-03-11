@@ -2793,6 +2793,15 @@ pub fn chat_event_channel(owner_id: Uuid) -> String {
     format!("chat:owner:{owner_id}")
 }
 
+/// Returns the pub/sub channel name for streaming events on a specific chat.
+///
+/// Used by `stream_chat` to receive live message parts, status updates, and
+/// errors for an individual chat session.
+#[must_use]
+pub fn chat_stream_channel(chat_id: Uuid) -> String {
+    format!("chat:stream:{chat_id}")
+}
+
 /// Helper to serialize an optional OffsetDateTime in RFC 3339.
 fn serialize_optional_rfc3339<S>(
     value: &Option<OffsetDateTime>,

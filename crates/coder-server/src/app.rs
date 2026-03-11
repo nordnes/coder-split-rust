@@ -4179,7 +4179,7 @@ mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let chat = chats
                 .get_mut(&id)
-                .ok_or_else(|| StorageError::unavailable("chat not found"))?;
+                .ok_or_else(|| StorageError::invalid_data("chat not found"))?;
             chat.status = status;
             chat.updated_at = OffsetDateTime::now_utc();
             Ok(chat.clone())
@@ -19594,6 +19594,36 @@ mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn test_stream_chat_accepts_after_id_query() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let chat_id = create_chat_get_id(&app, &session_token, "after_id test").await?;
+
+        // Request with after_id query parameter — should still succeed with SSE.
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}/stream?after_id=0"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            ct.contains("text/event-stream"),
+            "expected text/event-stream content-type, got {ct}",
+        );
+        Ok(())
+    }
+
     // -- interrupt_chat ---------------------------------------------------
 
     #[tokio::test]
@@ -19648,6 +19678,76 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_json(resp).await?;
         assert_eq!(body.get("status").and_then(Value::as_str), Some("waiting"),);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_interrupt_chat_forbidden_for_other_user() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        // User A creates a chat.
+        let token_a = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token_a).await?;
+        let chat_id = create_chat_get_id(&app, &token_a, "private chat").await?;
+
+        // Create user B.
+        let create_user_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &token_a,
+                &CreateUserRequestWithOrgs {
+                    email: "interrupter@example.com".to_owned(),
+                    username: "interrupter".to_owned(),
+                    name: "Interrupter".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![org_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_user_resp.status(), StatusCode::CREATED);
+
+        let login_resp = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "interrupter@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(login_resp.status(), StatusCode::CREATED);
+        let login_body = response_json(login_resp).await?;
+        let token_b = login_body
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing session_token")?
+            .to_owned();
+
+        // User B tries to interrupt user A's chat — ownership check returns 404.
+        let resp = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/interrupt"),
+                &token_b,
+                &json!({}),
+            )?,
+        )
+        .await?;
+        assert_eq!(
+            resp.status(),
+            StatusCode::NOT_FOUND,
+            "expected 404 for other user's chat, got {}",
+            resp.status(),
+        );
         Ok(())
     }
 
@@ -19765,12 +19865,12 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         let body = response_json(resp).await?;
         assert_eq!(body.get("chat_id").and_then(Value::as_str), Some(&*chat_id));
-        // FakeStore returns empty diff; empty strings are omitted by skip_serializing_if.
-        // The field should either be absent (None) or an empty string.
-        let diff_val = body.get("diff").and_then(Value::as_str);
+        // FakeStore returns empty diff; empty strings are omitted by
+        // skip_serializing_if = "String::is_empty", so the field must be absent.
         assert!(
-            diff_val.is_none() || diff_val == Some(""),
-            "expected absent or empty diff, got {diff_val:?}",
+            body.get("diff").is_none(),
+            "expected diff field to be absent, got {:?}",
+            body.get("diff"),
         );
         Ok(())
     }

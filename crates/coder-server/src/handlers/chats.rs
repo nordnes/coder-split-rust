@@ -643,21 +643,37 @@ pub(crate) async fn watch_chats(
             event_type: coder_core::api::ServerSentEventType::Ping,
             data: None,
         };
-        if let Ok(json) = serde_json::to_string(&ping) {
-            yield Ok::<_, Infallible>(Event::default().data(json));
+        match serde_json::to_string(&ping) {
+            Ok(json) => {
+                yield Ok::<_, Infallible>(Event::default().data(json));
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "failed to serialize watch_chats ping event");
+            }
         }
 
         // Stream chat events from pub/sub.
         let mut sub = subscription;
         while let Ok(message) = sub.recv().await {
             // Parse the message as a ChatEvent.
-            if let Ok(chat_event) = serde_json::from_slice::<coder_core::api::ChatEvent>(&message) {
-                let sse = coder_core::api::ServerSentEvent {
-                    event_type: coder_core::api::ServerSentEventType::Data,
-                    data: Some(chat_event),
-                };
-                if let Ok(json) = serde_json::to_string(&sse) {
-                    yield Ok::<_, Infallible>(Event::default().data(json));
+            match serde_json::from_slice::<coder_core::api::ChatEvent>(&message) {
+                Ok(chat_event) => {
+                    let sse = coder_core::api::ServerSentEvent {
+                        event_type: coder_core::api::ServerSentEventType::Data,
+                        data: Some(chat_event),
+                    };
+                    match serde_json::to_string(&sse) {
+                        Ok(json) => {
+                            yield Ok::<_, Infallible>(Event::default().data(json));
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "failed to serialize watch_chats SSE event");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to deserialize watch_chats pub/sub message");
+                    continue;
                 }
             }
         }
@@ -674,10 +690,14 @@ pub(crate) async fn watch_chats(
 /// The Go reference queries the database for enabled providers and models,
 /// then merges with deployment-level API keys. This implementation returns
 /// the providers from the store.
+///
+/// Authentication is required but no RBAC check is performed — any
+/// authenticated user can list available models, matching the Go reference.
 pub(crate) async fn list_chat_models(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    // Auth only — no RBAC needed for read-only model catalog.
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
@@ -717,8 +737,12 @@ pub(crate) async fn stream_chat(
     // Subscribe to pub/sub BEFORE fetching the snapshot to avoid missing
     // events that arrive between the initial fetch and the subscription.
     // This matches the established pattern in agents.rs and workspaces.rs.
-    let channel = format!("chat:stream:{chat_id}");
-    let subscription = state.pubsub.subscribe(&channel).await.ok();
+    let channel = coder_core::api::chat_stream_channel(chat_id);
+    let subscription = state
+        .pubsub
+        .subscribe(&channel)
+        .await
+        .map_err(|e| StorageError::unavailable(e.to_string()))?;
 
     // Load initial message snapshot (optionally filtered by after_id).
     let after_id = query.after_id.unwrap_or(0);
@@ -775,28 +799,44 @@ pub(crate) async fn stream_chat(
 
     let stream = async_stream::stream! {
         // Send snapshot in batches (up to 256 events per SSE message).
+        // The batch size of 256 matches the Go reference `chatStreamBatchSize`.
         const BATCH_SIZE: usize = 256;
         for chunk in snapshot.chunks(BATCH_SIZE) {
             let sse = coder_core::api::ServerSentEvent {
                 event_type: coder_core::api::ServerSentEventType::Data,
                 data: Some(chunk),
             };
-            if let Ok(json) = serde_json::to_string(&sse) {
-                yield Ok::<_, Infallible>(Event::default().data(json));
+            match serde_json::to_string(&sse) {
+                Ok(json) => {
+                    yield Ok::<_, Infallible>(Event::default().data(json));
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to serialize stream_chat snapshot batch");
+                }
             }
         }
 
-        // Stream live events if we have a subscription.
-        if let Some(mut sub) = subscription {
-            while let Ok(message) = sub.recv().await {
-                if let Ok(events) = serde_json::from_slice::<Vec<coder_core::api::ChatStreamEvent>>(&message) {
+        // Stream live events from pub/sub subscription.
+        let mut sub = subscription;
+        while let Ok(message) = sub.recv().await {
+            match serde_json::from_slice::<Vec<coder_core::api::ChatStreamEvent>>(&message) {
+                Ok(events) => {
                     let sse = coder_core::api::ServerSentEvent {
                         event_type: coder_core::api::ServerSentEventType::Data,
                         data: Some(events),
                     };
-                    if let Ok(json) = serde_json::to_string(&sse) {
-                        yield Ok::<_, Infallible>(Event::default().data(json));
+                    match serde_json::to_string(&sse) {
+                        Ok(json) => {
+                            yield Ok::<_, Infallible>(Event::default().data(json));
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "failed to serialize stream_chat SSE event");
+                        }
                     }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to deserialize stream_chat pub/sub message");
+                    continue;
                 }
             }
         }
@@ -811,6 +851,10 @@ pub(crate) async fn stream_chat(
 ///
 /// Cancels an ongoing AI response generation by updating the chat status
 /// to "waiting". Returns the updated chat.
+///
+/// Note: No chat-status guard is applied intentionally — the Go reference
+/// (`interruptChat` in `coder/coderd/chats.go`) unconditionally sets the
+/// status to `Waiting` regardless of the chat’s current state.
 pub(crate) async fn interrupt_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
@@ -845,7 +889,9 @@ pub(crate) async fn interrupt_chat(
         ));
     }
 
-    // Update the chat status to "waiting" (interrupt).
+    // Unconditionally set status to Waiting — no current-state guard,
+    // matching the Go reference which also sets Waiting regardless of
+    // whether the chat is Running, Pending, or already Waiting.
     let updated = state
         .store
         .update_chat_status(chat_id, coder_core::api::ChatStatus::Waiting)

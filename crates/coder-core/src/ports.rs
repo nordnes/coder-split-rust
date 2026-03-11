@@ -3103,6 +3103,11 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Fetches the diff status for a chat.
+    ///
+    /// Returns an API response type directly because this data is a
+    /// pass-through from an external diff/PR service — there is no
+    /// intermediate storage record. The handler returns the response
+    /// as-is (or a default when `None`).
     async fn get_chat_diff_status(
         &self,
         chat_id: Uuid,
@@ -3112,6 +3117,10 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Fetches the diff contents for a chat.
+    ///
+    /// Returns an API response type directly because the diff text is
+    /// fetched from an external service (e.g. a git provider) and has
+    /// no corresponding storage record type.
     async fn get_chat_diff_contents(
         &self,
         chat_id: Uuid,
@@ -3121,6 +3130,10 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Lists enabled chat model providers.
+    ///
+    /// Returns API response types directly because model provider
+    /// configuration is aggregated from deployment settings and
+    /// external LLM services — there is no single storage record.
     async fn get_enabled_chat_providers(
         &self,
     ) -> Result<Vec<crate::api::ChatModelProvider>, StorageError> {
