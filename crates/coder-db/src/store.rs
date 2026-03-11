@@ -12708,7 +12708,7 @@ mod tests {
 
         // Filter by search
         let (users, total) = store
-            .list_users(coder_core::UserListFilter {
+            .list_users(UserListFilter {
                 search: tag.clone(),
                 status: None,
                 limit: 50,
@@ -12733,7 +12733,7 @@ mod tests {
 
         // Filter by status=suspended
         let (suspended, _) = store
-            .list_users(coder_core::UserListFilter {
+            .list_users(UserListFilter {
                 search: tag.clone(),
                 status: Some(UserStatus::Suspended),
                 limit: 50,
@@ -12751,7 +12751,7 @@ mod tests {
 
         // Pagination: limit 1, offset 0
         let (page, _) = store
-            .list_users(coder_core::UserListFilter {
+            .list_users(UserListFilter {
                 search: tag.clone(),
                 status: None,
                 limit: 1,
