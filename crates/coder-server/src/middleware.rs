@@ -6,7 +6,62 @@ use axum::{
     middleware::Next,
     response::Response,
 };
+use coder_core::config::CorsConfig;
+use http::Method;
 use std::net::IpAddr;
+use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
+
+/// Builds a [`CorsLayer`] from the given [`CorsConfig`].
+///
+/// When `allowed_origins` is empty the layer allows every origin (wildcard).
+/// Otherwise only the listed origins are permitted.
+pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
+    let allow_origin = if config.allowed_origins.is_empty() {
+        AllowOrigin::any()
+    } else {
+        let origins: Vec<HeaderValue> = config
+            .allowed_origins
+            .iter()
+            .filter_map(|o| HeaderValue::from_str(o).ok())
+            .collect();
+        AllowOrigin::list(origins)
+    };
+
+    let allow_methods = AllowMethods::list([
+        Method::GET,
+        Method::POST,
+        Method::PUT,
+        Method::PATCH,
+        Method::DELETE,
+        Method::OPTIONS,
+    ]);
+
+    let allow_headers = AllowHeaders::list([
+        HeaderName::from_static("content-type"),
+        HeaderName::from_static("authorization"),
+        HeaderName::from_static("coder-session-token"),
+        HeaderName::from_static("accept"),
+        HeaderName::from_static("x-csrf-token"),
+    ]);
+
+    let expose_headers = ExposeHeaders::list([
+        HeaderName::from_static("content-range"),
+        HeaderName::from_static("x-content-type-options"),
+    ]);
+
+    let mut layer = CorsLayer::new()
+        .allow_origin(allow_origin)
+        .allow_methods(allow_methods)
+        .allow_headers(allow_headers)
+        .expose_headers(expose_headers)
+        .max_age(std::time::Duration::from_secs(config.max_age_secs));
+
+    if config.allow_credentials && !config.allowed_origins.is_empty() {
+        layer = layer.allow_credentials(true);
+    }
+
+    layer
+}
 
 /// Stored in request extensions so downstream handlers can read the real
 /// client IP even when the server is behind a reverse proxy.

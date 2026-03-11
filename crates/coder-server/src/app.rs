@@ -61,7 +61,8 @@ use crate::handlers::users::*;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
-    csp_middleware, csrf_middleware, hsts_middleware, prometheus_middleware, real_ip_middleware,
+    build_cors_layer, csp_middleware, csrf_middleware, hsts_middleware, prometheus_middleware,
+    real_ip_middleware,
 };
 
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
@@ -862,6 +863,7 @@ pub fn build_router(
         .route_layer(middleware::from_fn(prometheus_middleware))
         .layer(middleware::from_fn_with_state(rate_limit_state, crate::rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn(csrf_middleware))
+        .layer(build_cors_layer(&state.config.cors))
         .layer(middleware::from_fn(csp_middleware))
         .layer(middleware::from_fn(hsts_middleware))
         .layer(middleware::from_fn(real_ip_middleware))
@@ -7137,6 +7139,7 @@ mod tests {
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
+            cors: coder_core::config::CorsConfig::default(),
         })
     }
 
@@ -28668,6 +28671,178 @@ mod tests {
                 .unwrap_or("")
                 .contains("authorization_code"),
             "expected detail listing supported grant types"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // CORS middleware tests
+    // -----------------------------------------------------------------------
+
+    fn test_config_with_cors(
+        cors: coder_core::config::CorsConfig,
+    ) -> Result<ServerConfig, url::ParseError> {
+        let mut config = test_config()?;
+        config.cors = cors;
+        Ok(config)
+    }
+
+    fn test_state_with_cors(
+        cors: coder_core::config::CorsConfig,
+    ) -> Result<AppState, Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+        let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+
+        Ok(AppState::new(
+            test_config_with_cors(cors)?,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            None,
+        )?)
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_returns_headers() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .header("access-control-request-method", "GET")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://example.com"),
+        );
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-methods")
+                .is_some(),
+            "preflight should include allow-methods"
+        );
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-headers")
+                .is_some(),
+            "preflight should include allow-headers"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_configured_origin_reflected() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://app.example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 7200,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://app.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("https://app.example.com"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_credentials_header_set_when_configured() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://creds.example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://creds.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .and_then(|v| v.to_str().ok()),
+            Some("true"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_wildcard_when_no_origins_configured() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec![],
+            allow_credentials: false,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://any-origin.example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(
+            response
+                .headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("*"),
+        );
+        // Credentials must NOT be set with wildcard origin.
+        assert!(
+            response
+                .headers()
+                .get("access-control-allow-credentials")
+                .is_none(),
+            "credentials header must not be present with wildcard origin"
         );
         Ok(())
     }

@@ -38,6 +38,8 @@ pub struct ServerConfig {
     pub max_concurrent_db_queries: usize,
     /// Rate-limiting configuration for the HTTP layer.
     pub rate_limit: RateLimitConfig,
+    /// CORS (Cross-Origin Resource Sharing) configuration.
+    pub cors: CorsConfig,
 }
 
 impl ServerConfig {
@@ -173,6 +175,28 @@ impl ServerConfig {
                 description: "Maximum number of concurrent database queries.",
             },
         ]
+    }
+}
+
+/// CORS (Cross-Origin Resource Sharing) configuration.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CorsConfig {
+    /// Allowed origins for cross-origin requests.  When empty every origin is
+    /// permitted (wildcard).
+    pub allowed_origins: Vec<String>,
+    /// Whether the `Access-Control-Allow-Credentials` header is set.
+    pub allow_credentials: bool,
+    /// How long browsers may cache preflight responses, in seconds.
+    pub max_age_secs: u64,
+}
+
+impl Default for CorsConfig {
+    fn default() -> Self {
+        Self {
+            allowed_origins: Vec::new(),
+            allow_credentials: true,
+            max_age_secs: 3600,
+        }
     }
 }
 
