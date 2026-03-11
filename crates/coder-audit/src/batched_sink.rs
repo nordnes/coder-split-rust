@@ -119,7 +119,10 @@ async fn flush_loop(
     }
 }
 
-/// Flushes the current batch by forwarding each event to the inner sink.
+/// Flushes the current batch by forwarding all events to the inner sink's
+/// [`record_batch`](AuditSink::record_batch) method so that implementors
+/// with a bulk INSERT path (e.g. `batch_insert_audit_logs`) can persist
+/// the entire batch in a single round-trip.
 async fn flush_batch(inner: &Arc<dyn AuditSink>, batch: &mut Vec<AuditEvent>) {
     if batch.is_empty() {
         return;
@@ -128,9 +131,8 @@ async fn flush_batch(inner: &Arc<dyn AuditSink>, batch: &mut Vec<AuditEvent>) {
     let count = batch.len();
     info!(count, "flushing batched audit events");
 
-    for event in batch.drain(..) {
-        inner.record(event).await;
-    }
+    let events: Vec<AuditEvent> = std::mem::take(batch);
+    inner.record_batch(events).await;
 }
 
 #[cfg(test)]

@@ -81,6 +81,17 @@ pub struct AuditEvent {
 pub trait AuditSink: Send + Sync {
     /// Records a structured audit event.
     async fn record(&self, event: AuditEvent);
+
+    /// Records a batch of audit events.
+    ///
+    /// The default implementation falls back to calling [`record`](Self::record)
+    /// per-event.  Implementors that have access to a batch INSERT path (e.g.
+    /// `batch_insert_audit_logs`) should override this for efficiency.
+    async fn record_batch(&self, events: Vec<AuditEvent>) {
+        for event in events {
+            self.record(event).await;
+        }
+    }
 }
 
 /// Tracing-backed audit sink used by the current binary.
