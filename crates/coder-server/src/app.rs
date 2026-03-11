@@ -1055,7 +1055,7 @@ async fn post_csp_report(
 
     debug!(report = ?report.report, "CSP violation reported");
 
-    Ok((StatusCode::OK, Json("ok")).into_response())
+    Ok((StatusCode::OK, Json(ApiResponse::ok("ok"))).into_response())
 }
 
 async fn deployment_config(State(state): State<AppState>) -> Json<DeploymentConfigResponse> {
@@ -1082,7 +1082,10 @@ async fn get_init_script(
         Err(InitScriptError::UnknownTarget { os, arch }) => {
             return (
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!("Unknown os/arch: {os}/{arch}"))),
+                Json(ApiResponse::error(
+                    format!("Unknown os/arch: {os}/{arch}"),
+                    "The requested os/arch combination is not supported.",
+                )),
             )
                 .into_response();
         }
@@ -1371,7 +1374,10 @@ async fn debug_health(
             .into_response()),
         Some(other) => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok(format!("Invalid format option {other:?}."))),
+            Json(ApiResponse::error(
+                format!("Invalid format option {other:?}."),
+                "Supported formats are: json, text.",
+            )),
         )
             .into_response()),
     }
@@ -1693,7 +1699,10 @@ async fn get_external_auth_callback_by_id(
     let Some(state_value) = query.state.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("State must be provided.")),
+            Json(ApiResponse::error(
+                "State must be provided.",
+                "The state query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
@@ -1708,7 +1717,10 @@ async fn get_external_auth_callback_by_id(
     let Some(code) = query.code.filter(|value| !value.trim().is_empty()) else {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Code must be provided.")),
+            Json(ApiResponse::error(
+                "Code must be provided.",
+                "The code query parameter is required for OAuth2 callbacks.",
+            )),
         )
             .into_response());
     };
@@ -1893,7 +1905,10 @@ async fn post_change_password_with_one_time_passcode(
 async fn get_github_oauth_device_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -1901,7 +1916,10 @@ async fn get_github_oauth_device_disabled() -> Response {
 async fn get_github_oauth_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("GitHub OAuth2 is not enabled.")),
+        Json(ApiResponse::error(
+            "GitHub OAuth2 is not enabled.",
+            "This deployment does not have GitHub OAuth2 configured.",
+        )),
     )
         .into_response()
 }
@@ -1909,7 +1927,10 @@ async fn get_github_oauth_callback_disabled() -> Response {
 async fn get_oidc_callback_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
-        Json(ApiResponse::ok("OIDC is not enabled.")),
+        Json(ApiResponse::error(
+            "OIDC is not enabled.",
+            "This deployment does not have OIDC configured.",
+        )),
     )
         .into_response()
 }
@@ -1933,7 +1954,10 @@ async fn get_user_debug_link(
     if target_user.login_type != LoginType::Oidc {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("User is not an OIDC user.")),
+            Json(ApiResponse::error(
+                "User is not an OIDC user.",
+                "Debug links are only available for OIDC-authenticated users.",
+            )),
         )
             .into_response());
     }
@@ -3424,7 +3448,11 @@ async fn cancel_provisioner_job(
             .into_response());
     }
 
-    Ok(StatusCode::OK.into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Provisioner job canceled.")),
+    )
+        .into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -7238,7 +7266,11 @@ async fn patch_active_template_version(
         return Ok(not_found_response("Template not found."));
     }
 
-    Ok(StatusCode::OK.into_response())
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Active template version updated.")),
+    )
+        .into_response())
 }
 
 /// POST /templates/{template}/versions/archive — archive unused template versions
@@ -9472,7 +9504,10 @@ async fn patch_cancel_workspace_build(
     if !canceled {
         return Ok((
             StatusCode::PRECONDITION_FAILED,
-            Json(ApiResponse::ok("Build is already completed or canceled.")),
+            Json(ApiResponse::error(
+                "Build cannot be canceled.",
+                "The workspace build has already completed or been canceled.",
+            )),
         )
             .into_response());
     }
@@ -10705,7 +10740,10 @@ async fn get_oauth2_authorize(
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -10714,7 +10752,10 @@ async fn get_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -10728,7 +10769,10 @@ async fn get_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The registered callback URL could not be parsed.",
+                )),
             )
                 .into_response());
         }
@@ -10773,7 +10817,10 @@ async fn post_oauth2_authorize(
     if params.response_type != "code" {
         return Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("response_type must be \"code\".")),
+            Json(ApiResponse::error(
+                "response_type must be \"code\".",
+                "Only the authorization code flow is supported.",
+            )),
         )
             .into_response());
     }
@@ -10782,7 +10829,10 @@ async fn post_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("Invalid client_id.")),
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
             )
                 .into_response());
         }
@@ -10796,7 +10846,10 @@ async fn post_oauth2_authorize(
         Err(_) => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok("App has invalid callback URL.")),
+                Json(ApiResponse::error(
+                    "App has invalid callback URL.",
+                    "The registered callback URL could not be parsed.",
+                )),
             )
                 .into_response());
         }
@@ -10836,7 +10889,10 @@ async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
@@ -10864,7 +10920,10 @@ async fn post_oauth2_token(
                 Err(_) => {
                     return Ok((
                         StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::ok("Invalid client_id.")),
+                        Json(ApiResponse::error(
+                            "Invalid client_id.",
+                            "The client_id must be a valid UUID.",
+                        )),
                     )
                         .into_response());
                 }
@@ -10883,7 +10942,10 @@ async fn post_oauth2_token(
         }
         _ => Ok((
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::ok("Unsupported grant_type.")),
+            Json(ApiResponse::error(
+                "Unsupported grant_type.",
+                "Supported grant types are: authorization_code, refresh_token.",
+            )),
         )
             .into_response()),
     }
@@ -13925,9 +13987,10 @@ async fn post_file(
         _ => {
             return Ok((
                 StatusCode::BAD_REQUEST,
-                Json(ApiResponse::ok(format!(
-                    "Unsupported content type header \"{content_type}\"."
-                ))),
+                Json(ApiResponse::error(
+                    format!("Unsupported content type header \"{content_type}\"."),
+                    "Allowed content types are: application/x-tar, application/zip, application/x-zip-compressed.",
+                )),
             )
                 .into_response());
         }
@@ -20284,7 +20347,7 @@ mod tests {
 
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
-        assert_eq!(body, Value::String("ok".to_owned()));
+        assert_eq!(body.get("message").and_then(Value::as_str), Some("ok"));
         Ok(())
     }
 
@@ -39398,6 +39461,208 @@ mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Error response consistency audit — regression tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn get_init_script_returns_error_for_unknown_os_arch() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/init-script/badOS/badArch")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Unknown os/arch"),
+            "expected ApiResponse::error with message containing 'Unknown os/arch', got: {body}"
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn debug_health_rejects_invalid_format() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/debug/health?format=xml",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("Invalid format option"),
+            "expected ApiResponse::error with message, got: {body}"
+        );
+        assert!(
+            body.get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("json, text"),
+            "expected detail listing supported formats"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_github_oauth_device_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/users/oauth2/github/device")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_github_oauth_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/users/oauth2/github/callback")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("GitHub OAuth2 is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn disabled_oidc_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/users/oidc/callback")?).await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("OIDC is not enabled.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_rejects_invalid_response_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/oauth2/authorize?response_type=token&client_id=abc&redirect_uri=http://x",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("response_type must be \"code\".")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_rejects_invalid_client_id() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/oauth2/authorize?response_type=code&client_id=not-a-uuid&redirect_uri=http://x",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Invalid client_id.")
+        );
+        assert!(
+            body.get("detail").is_some(),
+            "expected detail field in error response"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_token_rejects_unsupported_grant_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            {
+                let body = "grant_type=implicit&client_id=00000000-0000-0000-0000-000000000000&client_secret=secret";
+                Request::builder()
+                    .method(Method::POST)
+                    .uri("/oauth2/tokens")
+                    .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                    .body(Body::from(body))?
+            },
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Unsupported grant_type.")
+        );
+        assert!(
+            body.get("detail")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("authorization_code"),
+            "expected detail listing supported grant types"
+        );
         Ok(())
     }
 }

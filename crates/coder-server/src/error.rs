@@ -195,7 +195,7 @@ impl From<OAuth2ProviderError> for AppError {
             OAuth2ProviderError::Storage(e) => Self::Storage(e),
             OAuth2ProviderError::BadRequest { message } => Self::BadRequest {
                 message,
-                detail: None,
+                detail: Some(String::new()),
                 validations: Vec::new(),
             },
             OAuth2ProviderError::NotFound { message } => Self::NotFound { message },
