@@ -15382,7 +15382,7 @@ mod tests {
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             Ok(organizations
                 .values()
-                .find(|org| org.name.eq_ignore_ascii_case(name))
+                .find(|org| !org.deleted && org.name.eq_ignore_ascii_case(name))
                 .cloned())
         }
 
@@ -17277,11 +17277,13 @@ mod tests {
                     t.updated_at = OffsetDateTime::now_utc();
                     drop(templates);
                     // Cascade: archive all template versions belonging to this template.
-                    if let Ok(mut versions) = self.template_versions.lock() {
-                        for v in versions.values_mut() {
-                            if v.template_id == Some(template_id) {
-                                v.archived = true;
-                            }
+                    let mut versions = self
+                        .template_versions
+                        .lock()
+                        .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                    for v in versions.values_mut() {
+                        if v.template_id == Some(template_id) {
+                            v.archived = true;
                         }
                     }
                     Ok(true)
@@ -18718,10 +18720,6 @@ mod tests {
             &self,
             filter: WorkspaceListFilter,
         ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
-            let workspaces = self
-                .workspaces
-                .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
             // Pre-resolve owner_username -> owner_id so we can filter by username.
             let resolved_owner_id: Option<Uuid> = if filter.owner_id.is_some() {
                 filter.owner_id
@@ -18751,6 +18749,10 @@ mod tests {
                 } else {
                     None
                 };
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
             let mut rows: Vec<WorkspaceRecord> = workspaces
                 .values()
                 .filter(|w| !w.deleted)
@@ -18848,12 +18850,17 @@ mod tests {
             ws.updated_at = OffsetDateTime::now_utc();
             drop(workspaces);
             // Cascade: remove associated port shares and ACLs.
-            if let Ok(mut port_shares) = self.workspace_port_shares.lock() {
-                port_shares.retain(|ps| ps.workspace_id != workspace_id);
-            }
-            if let Ok(mut acls) = self.workspace_acls.lock() {
-                acls.remove(&workspace_id);
-            }
+            let mut port_shares = self
+                .workspace_port_shares
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            port_shares.retain(|ps| ps.workspace_id != workspace_id);
+            drop(port_shares);
+            let mut acls = self
+                .workspace_acls
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            acls.remove(&workspace_id);
             Ok(true)
         }
 
