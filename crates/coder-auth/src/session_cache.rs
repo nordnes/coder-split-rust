@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use coder_core::AuthenticatedUser;
@@ -27,11 +28,40 @@ pub struct CachedSession {
 ///
 /// Read-heavy workloads benefit from the shared read lock, while cache
 /// misses and evictions take a brief exclusive write lock.
+///
+/// ## Sweep strategy
+///
+/// Expired entries are swept lazily during [`insert`](Self::insert) using
+/// a probabilistic approach: a full `retain()` scan only runs once every
+/// [`SWEEP_INTERVAL`] inserts **or** when the map exceeds
+/// [`SWEEP_SIZE_THRESHOLD`] entries.  This keeps the amortised cost of
+/// `insert` at O(1) for the common case while still bounding memory
+/// growth.
+///
+/// ## Cache coherence with `IdentityService` mutations
+///
+/// The cache is evicted on logout and password changes via
+/// [`evict`](Self::evict) / [`evict_user`](Self::evict_user).  However,
+/// `IdentityService` mutations such as role changes, status changes, or
+/// user deletion do **not** currently evict the cache.  This means a
+/// recently-deleted or suspended user may continue to authenticate
+/// successfully until their cached session expires (bounded by the TTL).
+/// A future improvement would have `IdentityService` call `evict_user`
+/// on every identity-mutating operation, but this requires wiring the
+/// cache (or an eviction channel) into that service.
 #[derive(Debug)]
 pub struct SessionCache {
     entries: Arc<RwLock<HashMap<Vec<u8>, CachedSession>>>,
     ttl: Duration,
+    /// Monotonically increasing insert counter used for probabilistic sweeps.
+    insert_count: AtomicU64,
 }
+
+/// Sweep expired entries every N inserts.
+const SWEEP_INTERVAL: u64 = 100;
+
+/// Always sweep when the map exceeds this many entries.
+const SWEEP_SIZE_THRESHOLD: usize = 10_000;
 
 impl SessionCache {
     /// Creates a new cache with the given time-to-live for entries.
@@ -40,6 +70,7 @@ impl SessionCache {
         Self {
             entries: Arc::new(RwLock::new(HashMap::new())),
             ttl,
+            insert_count: AtomicU64::new(0),
         }
     }
 
@@ -66,18 +97,27 @@ impl SessionCache {
 
     /// Inserts or replaces a cached session entry.
     ///
-    /// Also sweeps all expired entries from the cache to prevent unbounded
-    /// memory growth.  This is safe because we already hold the write lock.
+    /// Expired entries are swept probabilistically: a full `retain()` scan
+    /// runs once every [`SWEEP_INTERVAL`] inserts or when the map size
+    /// exceeds [`SWEEP_SIZE_THRESHOLD`].  This keeps the common-case cost
+    /// at O(1) rather than O(n) on every write.
     #[instrument(skip(self, token_hash, user))]
     pub async fn insert(&self, token_hash: Vec<u8>, user: AuthenticatedUser) {
+        let count = self.insert_count.fetch_add(1, Ordering::Relaxed);
         let mut entries = self.entries.write().await;
-        let ttl = self.ttl;
-        let before = entries.len();
-        entries.retain(|_, cached| cached.cached_at.elapsed() < ttl);
-        let swept = before.saturating_sub(entries.len());
-        if swept > 0 {
-            counter!("session_cache_evictions").increment(swept as u64);
+
+        let should_sweep = count % SWEEP_INTERVAL == 0 || entries.len() >= SWEEP_SIZE_THRESHOLD;
+
+        if should_sweep {
+            let ttl = self.ttl;
+            let before = entries.len();
+            entries.retain(|_, cached| cached.cached_at.elapsed() < ttl);
+            let swept = before.saturating_sub(entries.len());
+            if swept > 0 {
+                counter!("session_cache_evictions").increment(swept as u64);
+            }
         }
+
         entries.insert(
             token_hash,
             CachedSession {

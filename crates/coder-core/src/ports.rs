@@ -1715,17 +1715,6 @@ pub trait OperationalStore: Send + Sync {
         ))
     }
 
-    /// Lists workspaces joined with their latest builds in a single query.
-    async fn batch_list_workspaces_with_builds(
-        &self,
-        filter: WorkspaceListFilter,
-    ) -> Result<Vec<(WorkspaceRecord, Option<WorkspaceBuildRecord>)>, StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable(
-            "batch workspace listing is not implemented",
-        ))
-    }
-
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
         &self,
@@ -2651,17 +2640,6 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         let _ = logs;
         Err(StorageError::unavailable(
             "batch audit log inserts are not implemented",
-        ))
-    }
-
-    /// Lists workspaces joined with their latest builds in a single query.
-    async fn batch_list_workspaces_with_builds(
-        &self,
-        filter: WorkspaceListFilter,
-    ) -> Result<Vec<(WorkspaceRecord, Option<WorkspaceBuildRecord>)>, StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable(
-            "batch workspace listing is not implemented",
         ))
     }
 

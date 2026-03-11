@@ -17,11 +17,18 @@ use crate::{AuditEvent, AuditSink};
 
 /// Fire-and-forget audit sink backed by an internal buffer and a
 /// background flush task.
+///
+/// Call [`close`](AuditSink::close) during graceful shutdown to drain
+/// buffered events before the database pool is closed.  Dropping the
+/// sink without calling `close()` will detach the flush task, which may
+/// race with pool teardown and lose the final batch.
 pub struct BatchedAuditSink {
     /// Send side of the unbounded event channel.
-    tx: mpsc::UnboundedSender<AuditEvent>,
-    /// Handle to the background flush task (kept alive via ownership).
-    _flush_task: JoinHandle<()>,
+    /// `None` after [`close`](AuditSink::close) has been called.
+    tx: std::sync::Mutex<Option<mpsc::UnboundedSender<AuditEvent>>>,
+    /// Handle to the background flush task.
+    /// `None` after [`close`](AuditSink::close) has been called.
+    flush_task: tokio::sync::Mutex<Option<JoinHandle<()>>>,
 }
 
 impl BatchedAuditSink {
@@ -32,8 +39,8 @@ impl BatchedAuditSink {
         let flush_task = tokio::spawn(flush_loop(rx, inner, flush_interval, max_batch_size));
 
         Self {
-            tx,
-            _flush_task: flush_task,
+            tx: std::sync::Mutex::new(Some(tx)),
+            flush_task: tokio::sync::Mutex::new(Some(flush_task)),
         }
     }
 }
@@ -43,8 +50,34 @@ impl AuditSink for BatchedAuditSink {
     async fn record(&self, event: AuditEvent) {
         // Fire-and-forget: if the channel is closed the event is dropped
         // (server is shutting down).
-        if self.tx.send(event).is_err() {
-            warn!("batched audit sink channel closed, event dropped");
+        let guard = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some(tx) = guard.as_ref() {
+            if tx.send(event).is_err() {
+                warn!("batched audit sink channel closed, event dropped");
+            }
+        } else {
+            warn!("batched audit sink already closed, event dropped");
+        }
+    }
+
+    /// Gracefully closes the sink: drops the channel sender so the
+    /// background flush loop receives channel-closed, then awaits the
+    /// flush task to ensure all buffered events are persisted.
+    async fn close(&self) {
+        // Drop the sender to signal the flush loop that no more events
+        // will arrive.  The std::sync::Mutex is held only long enough
+        // to take the sender out.
+        {
+            let mut guard = self.tx.lock().unwrap_or_else(|p| p.into_inner());
+            let _ = guard.take();
+        }
+
+        // Await the flush task so remaining events are persisted before
+        // the database pool is torn down.
+        if let Some(handle) = self.flush_task.lock().await.take() {
+            if let Err(join_error) = handle.await {
+                warn!(error = %join_error, "audit flush task panicked during shutdown");
+            }
         }
     }
 }
@@ -119,7 +152,10 @@ async fn flush_loop(
     }
 }
 
-/// Flushes the current batch by forwarding each event to the inner sink.
+/// Flushes the current batch by forwarding all events to the inner sink's
+/// [`record_batch`](AuditSink::record_batch) method so that implementors
+/// with a bulk INSERT path (e.g. `batch_insert_audit_logs`) can persist
+/// the entire batch in a single round-trip.
 async fn flush_batch(inner: &Arc<dyn AuditSink>, batch: &mut Vec<AuditEvent>) {
     if batch.is_empty() {
         return;
@@ -128,9 +164,8 @@ async fn flush_batch(inner: &Arc<dyn AuditSink>, batch: &mut Vec<AuditEvent>) {
     let count = batch.len();
     info!(count, "flushing batched audit events");
 
-    for event in batch.drain(..) {
-        inner.record(event).await;
-    }
+    let events: Vec<AuditEvent> = std::mem::take(batch);
+    inner.record_batch(events).await;
 }
 
 #[cfg(test)]
@@ -217,6 +252,24 @@ mod tests {
 
         let collected = inner.collected();
         assert_eq!(collected.len(), 3);
+    }
+
+    #[tokio::test]
+    async fn batched_sink_flushes_on_close() {
+        let inner = Arc::new(CollectingSink::new());
+        let sink = BatchedAuditSink::new(
+            Arc::clone(&inner) as Arc<dyn AuditSink>,
+            Duration::from_secs(60),
+            100,
+        );
+
+        sink.record(make_event(AuditAction::Delete)).await;
+
+        // Graceful close: awaits flush completion.
+        sink.close().await;
+
+        let collected = inner.collected();
+        assert_eq!(collected.len(), 1);
     }
 
     #[tokio::test]
