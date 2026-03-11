@@ -29,16 +29,17 @@ use coder_core::{
     AcquireProvisionerJobInput, ApiAllowListTarget, ApiKeyListFilter, ApiKeyRecord,
     ApiKeyWithOwnerRecord, AppStore, AuditDiff, AuditLog, AuditLogAction, AuditLogListFilter,
     AuditLogResponse, AuditResourceType, AuthenticatedUser, CancelProvisionerJobInput,
-    ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatQueuedMessageRecord, ChatRecord,
-    ChatStatus, CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError,
-    CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
-    CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateUserInput,
-    CreateUserStoreError, CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord,
-    DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse, DeploymentStore,
-    ExternalAuthAppInstallation, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-    FirstUserRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
-    HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
-    InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+    ChatFileRecord, ChatMessageRecord, ChatMessageVisibility, ChatModelConfigRecord,
+    ChatProviderRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
+    CompleteProvisionerJobInput, CreateApiKeyInput, CreateApiKeyStoreError, CreateFirstUserInput,
+    CreateFirstUserStoreError, CreateGroupInput, CreateOAuth2ProviderAppInput,
+    CreateOAuth2ProviderAppTokenInput, CreateUserInput, CreateUserStoreError,
+    CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig,
+    DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, ExternalAuthAppInstallation,
+    ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, FirstUserRecord, GetJobsToBeReapedInput,
+    GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings, InsertAgentLogInput,
+    InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertChatModelConfigInput,
+    InsertChatProviderInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
     InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
     InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
     MinimalOrganization, MinimalUser, NotificationMessageRecord, NotificationMessageStatus,
@@ -50,7 +51,8 @@ use coder_core::{
     ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
     ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
     SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
-    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateOAuth2ProviderAppInput,
+    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateChatMessageContentInput,
+    UpdateChatModelConfigInput, UpdateChatProviderInput, UpdateOAuth2ProviderAppInput,
     UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
     UpsertProvisionerDaemonInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
     UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
@@ -470,6 +472,33 @@ struct StoredChatFileRow {
     name: String,
     mimetype: String,
     data: Vec<u8>,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatProviderRow {
+    id: Uuid,
+    provider: String,
+    display_name: String,
+    api_key: String,
+    base_url: String,
+    enabled: bool,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredChatModelConfigRow {
+    id: Uuid,
+    provider: String,
+    model: String,
+    display_name: String,
+    enabled: bool,
+    is_default: bool,
+    context_limit: i64,
+    compression_threshold: i32,
+    options: Value,
+    created_at: OffsetDateTime,
+    updated_at: OffsetDateTime,
 }
 
 #[derive(Debug, FromRow)]
@@ -4741,6 +4770,273 @@ impl AppStore for PostgresStore {
             mimetype: r.mimetype,
             data: r.data,
         }))
+    }
+
+    // -----------------------------------------------------------------------
+    // Chat message editing, queue ops, providers, model configs
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_chat_message_content(
+        &self,
+        input: UpdateChatMessageContentInput,
+    ) -> Result<ChatMessageRecord, StorageError> {
+        let row: StoredChatMessageRow = sqlx::query_as(
+            "UPDATE chat_messages SET content = $1
+             WHERE id = $2 AND chat_id = $3
+             RETURNING id, chat_id, model_config_id, created_at, role, content, visibility::text, input_tokens, output_tokens, total_tokens, reasoning_tokens, cache_creation_tokens, cache_read_tokens, context_limit, compressed",
+        )
+        .bind(&input.content)
+        .bind(input.message_id)
+        .bind(input.chat_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        chat_message_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM chat_queued_messages WHERE id = $1 AND chat_id = $2")
+            .bind(queued_message_id)
+            .bind(chat_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn promote_chat_queued_message(
+        &self,
+        chat_id: Uuid,
+        queued_message_id: i64,
+    ) -> Result<ChatQueuedMessageRecord, StorageError> {
+        // Update the queued message's created_at to be earliest (promoting it to front).
+        let row: StoredChatQueuedMessageRow = sqlx::query_as(
+            "UPDATE chat_queued_messages
+             SET created_at = (
+                 SELECT COALESCE(MIN(created_at), now()) - INTERVAL '1 second'
+                 FROM chat_queued_messages WHERE chat_id = $2
+             )
+             WHERE id = $1 AND chat_id = $2
+             RETURNING id, chat_id, content, created_at",
+        )
+        .bind(queued_message_id)
+        .bind(chat_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(ChatQueuedMessageRecord {
+            id: row.id,
+            chat_id: row.chat_id,
+            content: row.content,
+            created_at: row.created_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
+        let rows: Vec<StoredChatProviderRow> = sqlx::query_as(
+            "SELECT id, provider, display_name, api_key, base_url, enabled, created_at, updated_at
+             FROM chat_providers
+             ORDER BY provider ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(chat_provider_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_chat_provider(
+        &self,
+        input: InsertChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let row: StoredChatProviderRow = sqlx::query_as(
+            "INSERT INTO chat_providers (provider, display_name, api_key, base_url, enabled, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6)
+             RETURNING id, provider, display_name, api_key, base_url, enabled, created_at, updated_at",
+        )
+        .bind(&input.provider)
+        .bind(&input.display_name)
+        .bind(&input.api_key)
+        .bind(&input.base_url)
+        .bind(input.enabled)
+        .bind(input.created_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(chat_provider_record_from_row(row))
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_chat_provider(
+        &self,
+        input: UpdateChatProviderInput,
+    ) -> Result<ChatProviderRecord, StorageError> {
+        let row: StoredChatProviderRow = sqlx::query_as(
+            "UPDATE chat_providers
+             SET display_name = $2, api_key = $3, base_url = $4, enabled = $5, updated_at = now()
+             WHERE id = $1
+             RETURNING id, provider, display_name, api_key, base_url, enabled, created_at, updated_at",
+        )
+        .bind(input.id)
+        .bind(&input.display_name)
+        .bind(&input.api_key)
+        .bind(&input.base_url)
+        .bind(input.enabled)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(chat_provider_record_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM chat_providers WHERE id = $1")
+            .bind(provider_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_chat_model_configs(
+        &self,
+        enabled_only: bool,
+    ) -> Result<Vec<ChatModelConfigRecord>, StorageError> {
+        let rows: Vec<StoredChatModelConfigRow> = sqlx::query_as(
+            "SELECT id, provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options, created_at, updated_at
+             FROM chat_model_configs
+             WHERE deleted = false AND ($1 = false OR enabled = true)
+             ORDER BY provider ASC, model ASC",
+        )
+        .bind(enabled_only)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(chat_model_config_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_chat_model_config(
+        &self,
+        input: InsertChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let row: StoredChatModelConfigRow = sqlx::query_as(
+            "INSERT INTO chat_model_configs (provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options, created_by)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             RETURNING id, provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options, created_at, updated_at",
+        )
+        .bind(&input.provider)
+        .bind(&input.model)
+        .bind(&input.display_name)
+        .bind(input.enabled)
+        .bind(input.is_default)
+        .bind(input.context_limit)
+        .bind(input.compression_threshold)
+        .bind(&input.options)
+        .bind(input.created_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(chat_model_config_record_from_row(row))
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_chat_model_config(
+        &self,
+        input: UpdateChatModelConfigInput,
+    ) -> Result<ChatModelConfigRecord, StorageError> {
+        let row: StoredChatModelConfigRow = sqlx::query_as(
+            "UPDATE chat_model_configs
+             SET provider = $2, model = $3, display_name = $4, enabled = $5, is_default = $6, context_limit = $7, compression_threshold = $8, options = $9, updated_by = $10, updated_at = now()
+             WHERE id = $1 AND deleted = false
+             RETURNING id, provider, model, display_name, enabled, is_default, context_limit, compression_threshold, options, created_at, updated_at",
+        )
+        .bind(input.id)
+        .bind(&input.provider)
+        .bind(&input.model)
+        .bind(&input.display_name)
+        .bind(input.enabled)
+        .bind(input.is_default)
+        .bind(input.context_limit)
+        .bind(input.compression_threshold)
+        .bind(&input.options)
+        .bind(input.updated_by)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(chat_model_config_record_from_row(row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chat_model_configs SET deleted = true, deleted_at = now(), updated_at = now() WHERE id = $1",
+        )
+        .bind(config_id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
+        // If no default exists, set the first enabled config as default.
+        sqlx::query(
+            "UPDATE chat_model_configs SET is_default = true, updated_at = now()
+             WHERE id = (
+                 SELECT id FROM chat_model_configs
+                 WHERE deleted = false AND enabled = true AND is_default = false
+                 ORDER BY created_at ASC
+                 LIMIT 1
+             )
+             AND NOT EXISTS (
+                 SELECT 1 FROM chat_model_configs WHERE deleted = false AND is_default = true
+             )",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE chat_model_configs SET is_default = false, updated_at = now() WHERE is_default = true AND deleted = false",
+        )
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
@@ -9593,6 +9889,35 @@ fn chat_message_record_from_row(
         context_limit: row.context_limit,
         compressed: row.compressed,
     })
+}
+
+fn chat_provider_record_from_row(row: StoredChatProviderRow) -> ChatProviderRecord {
+    ChatProviderRecord {
+        id: row.id,
+        provider: row.provider,
+        display_name: row.display_name,
+        api_key: row.api_key,
+        base_url: row.base_url,
+        enabled: row.enabled,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn chat_model_config_record_from_row(row: StoredChatModelConfigRow) -> ChatModelConfigRecord {
+    ChatModelConfigRecord {
+        id: row.id,
+        provider: row.provider,
+        model: row.model,
+        display_name: row.display_name,
+        enabled: row.enabled,
+        is_default: row.is_default,
+        context_limit: row.context_limit,
+        compression_threshold: row.compression_threshold,
+        options: row.options,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
 }
 
 fn inbox_notification_from_row(
