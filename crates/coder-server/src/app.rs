@@ -1041,7 +1041,7 @@ async fn build_info(State(state): State<AppState>) -> Json<coder_core::BuildInfo
 }
 
 async fn post_csp_report(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Auth(_context): Auth,
     payload: Result<Json<CspViolationReport>, JsonRejection>,
 ) -> Result<Response, AppError> {
@@ -1466,14 +1466,14 @@ async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
 }
 
 async fn get_enabled_experiments(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Auth(_context): Auth,
 ) -> Result<Response, AppError> {
     Ok(Json(Vec::<String>::new()).into_response())
 }
 
 async fn get_available_experiments(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Auth(_context): Auth,
 ) -> Result<Response, AppError> {
     Ok(Json(AvailableExperiments { safe: Vec::new() }).into_response())
@@ -3354,7 +3354,7 @@ async fn get_provisioner_job_logs(
 // applications (currently empty).
 // ---------------------------------------------------------------------------
 async fn applications_host(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Auth(_context): Auth,
 ) -> Result<Response, AppError> {
     Ok((
@@ -3371,7 +3371,7 @@ async fn applications_host(
 // Stub: returns 400 because subdomain apps are not supported yet.
 // ---------------------------------------------------------------------------
 async fn applications_auth_redirect(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     Auth(_context): Auth,
 ) -> Result<Response, AppError> {
     Ok((
@@ -12525,7 +12525,7 @@ async fn patch_workspace_agent_app_status(
 
 /// GET /api/v2/workspaceagents/me/external-auth — agent external auth.
 async fn get_workspace_agent_external_auth(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     AgentAuth(_agent): AgentAuth,
     Query(query): Query<AgentExternalAuthQuery>,
 ) -> Result<Response, AppError> {
