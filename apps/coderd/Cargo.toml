@@ -18,6 +18,7 @@ coder-audit = { path = "../../crates/coder-audit" }
 coder-connectivity = { path = "../../crates/coder-connectivity" }
 coder-core = { path = "../../crates/coder-core" }
 coder-db = { path = "../../crates/coder-db" }
+coder-notifications = { path = "../../crates/coder-notifications" }
 coder-rbac = { path = "../../crates/coder-rbac" }
 coder-server = { path = "../../crates/coder-server" }
 coder-telemetry = { path = "../../crates/coder-telemetry" }
