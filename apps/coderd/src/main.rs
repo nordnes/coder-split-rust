@@ -295,7 +295,20 @@ async fn run() -> Result<(), MainError> {
 
     let store = PostgresStore::connect(&config.database).await?;
     let pool = store.pool();
-    run_migrations(&pool).await?;
+    let report = run_migrations(&pool).await?;
+
+    if report.applied_count > 0 {
+        info!(
+            applied = report.applied_count,
+            total = report.total_count,
+            "applied new database migrations"
+        );
+    } else {
+        info!(
+            total = report.total_count,
+            "database schema is up to date"
+        );
+    }
 
     if migrate_only {
         info!("--migrate-only requested, exiting after migrations");

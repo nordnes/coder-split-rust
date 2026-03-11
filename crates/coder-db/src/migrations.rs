@@ -6,7 +6,7 @@
 
 use sqlx::PgPool;
 use thiserror::Error;
-use tracing::{info, instrument};
+use tracing::instrument;
 
 /// Compile-time embedded migrator produced by `sqlx::migrate!`.
 static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("./migrations");
@@ -66,16 +66,6 @@ pub async fn run_migrations(pool: &PgPool) -> Result<MigrationReport, MigrationE
     let after = count_applied_migrations(pool).await?;
     let applied_count = (after.saturating_sub(before)) as usize;
     let total_count = after as usize;
-
-    if applied_count > 0 {
-        info!(
-            applied = applied_count,
-            total = total_count,
-            "applied new database migrations"
-        );
-    } else {
-        info!(total = total_count, "database schema is up to date");
-    }
 
     Ok(MigrationReport {
         applied_count,
