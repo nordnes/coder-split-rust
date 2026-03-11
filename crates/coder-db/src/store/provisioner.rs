@@ -216,13 +216,14 @@ impl ProvisionerStore for PostgresStore {
                     logs_overflowed, logs_length
              FROM provisioner_jobs
              WHERE (
-                 -- Pending too long
-                 (started_at IS NULL AND completed_at IS NULL AND created_at < $1)
+                 -- Pending too long (no heartbeat since pending_since)
+                 (updated_at < $1 AND started_at IS NULL AND completed_at IS NULL)
                  OR
-                 -- Running but no heartbeat (hung)
-                 (started_at IS NOT NULL AND completed_at IS NULL AND updated_at < $2)
+                 -- Running but no heartbeat (hung since hung_since)
+                 (updated_at < $2 AND started_at IS NOT NULL AND completed_at IS NULL)
              )
-             ORDER BY created_at ASC
+             -- Random order avoids repeatedly reaping the same jobs when limit < total.
+             ORDER BY random()
              LIMIT $3",
         )
         .bind(input.pending_since)

@@ -7136,4 +7136,390 @@ mod tests {
 
         Ok(())
     }
+
+    // =========================================================================
+    // Deployment Store
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_deployment_ping() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        use coder_core::DeploymentStore;
+        store.ping().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_deployment_metadata_idempotent() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        use coder_core::DeploymentStore;
+
+        // First call creates the deployment_id.
+        let meta1 = store.ensure_deployment_metadata().await?;
+        // Second call must return the same UUID (idempotent).
+        let meta2 = store.ensure_deployment_metadata().await?;
+        assert_eq!(
+            meta1.deployment_id, meta2.deployment_id,
+            "ensure_deployment_metadata must be idempotent"
+        );
+        Ok(())
+    }
+
+    // =========================================================================
+    // Provisioner Store — Job Lifecycle
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_job_insert_acquire_complete() -> TestResult {
+        use coder_core::{
+            CompleteProvisionerJobInput, InsertProvisionerJobInput, ProvisionerJobStatus,
+            ProvisionerJobType, ProvisionerStorageMethod,
+        };
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+        let file_id = Uuid::new_v4();
+
+        // Insert a file stub so the FK is satisfied (provisioner_jobs.file_id is nullable, skip).
+        let job_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let job = store
+            .insert_provisioner_job(InsertProvisionerJobInput {
+                id: job_id,
+                created_at: now,
+                organization_id: org_id,
+                initiator_id: user_id,
+                provisioner: ProvisionerType::Echo,
+                storage_method: ProvisionerStorageMethod::File,
+                file_id,
+                job_type: ProvisionerJobType::TemplateVersionImport,
+                input: json!({}),
+                tags: json!({}),
+                trace_metadata: json!({}),
+            })
+            .await?;
+
+        assert_eq!(job.id, job_id);
+        assert_eq!(job.job_status, ProvisionerJobStatus::Pending);
+        assert!(job.started_at.is_none());
+
+        // Fetch by id
+        let fetched = store.get_provisioner_job_by_id(job_id).await?;
+        assert!(fetched.is_some());
+        assert_eq!(fetched.as_ref().map(|j| j.id), Some(job_id));
+
+        // Acquire the job
+        let worker_id = Uuid::new_v4();
+        let acquired = store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id,
+                started_at: OffsetDateTime::now_utc(),
+                organization_id: org_id,
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: json!({}),
+            })
+            .await?;
+        assert!(acquired.is_some());
+        let acquired = acquired.as_ref();
+        assert_eq!(acquired.map(|j| j.id), Some(job_id));
+        assert!(acquired.and_then(|j| j.started_at).is_some());
+
+        // Complete the job
+        let complete_time = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: job_id,
+                updated_at: complete_time,
+                completed_at: complete_time,
+                error: String::new(),
+                error_code: String::new(),
+            })
+            .await?;
+
+        let completed = store.get_provisioner_job_by_id(job_id).await?;
+        assert!(completed.is_some());
+        let completed = completed.as_ref();
+        assert!(completed.and_then(|j| j.completed_at).is_some());
+        assert_eq!(completed.map(|j| &j.error).map(String::as_str), Some(""));
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Provisioner Store — Log Insertion with Transaction
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_job_logs_insert() -> TestResult {
+        use coder_core::provisioner::{LogLevel, LogSource};
+        use coder_core::{
+            InsertProvisionerJobInput, InsertProvisionerJobLogsInput, ProvisionerJobType,
+            ProvisionerStorageMethod,
+        };
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let job_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        store
+            .insert_provisioner_job(InsertProvisionerJobInput {
+                id: job_id,
+                created_at: now,
+                organization_id: org_id,
+                initiator_id: user_id,
+                provisioner: ProvisionerType::Echo,
+                storage_method: ProvisionerStorageMethod::File,
+                file_id: Uuid::new_v4(),
+                job_type: ProvisionerJobType::TemplateVersionImport,
+                input: json!({}),
+                tags: json!({}),
+                trace_metadata: json!({}),
+            })
+            .await?;
+
+        // Insert 2 log entries
+        let logs = store
+            .insert_provisioner_job_logs(InsertProvisionerJobLogsInput {
+                job_id,
+                created_at: vec![now, now],
+                source: vec![LogSource::ProvisionerDaemon, LogSource::Provisioner],
+                level: vec![LogLevel::Info, LogLevel::Warn],
+                stage: vec!["init".to_string(), "plan".to_string()],
+                output: vec!["hello".to_string(), "world".to_string()],
+            })
+            .await?;
+
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0].source, LogSource::ProvisionerDaemon);
+        assert_eq!(logs[1].level, LogLevel::Warn);
+
+        // Verify logs_length was updated on the job
+        let job = store.get_provisioner_job_by_id(job_id).await?;
+        assert!(job.is_some());
+        let job = job.as_ref();
+        assert!(
+            job.map(|j| j.logs_length).unwrap_or(0) > 0,
+            "logs_length should be incremented"
+        );
+
+        // Get logs after id=0
+        let fetched = store.get_provisioner_logs_after_id(job_id, 0).await?;
+        assert_eq!(fetched.len(), 2);
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Provisioner Store — Daemon Upsert
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_daemon_upsert() -> TestResult {
+        use coder_core::UpsertProvisionerDaemonInput;
+        use std::collections::HashMap;
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+
+        let daemon_name = format!("test-daemon-{}", uniq());
+        let mut tags = HashMap::new();
+        tags.insert("scope".to_string(), "organization".to_string());
+
+        let daemon = store
+            .upsert_provisioner_daemon(UpsertProvisionerDaemonInput {
+                name: daemon_name.clone(),
+                provisioners: vec!["echo".to_string()],
+                tags: tags.clone(),
+                last_seen_at: OffsetDateTime::now_utc(),
+                version: "1.0.0".to_string(),
+                organization_id: org_id,
+                api_version: "1.0".to_string(),
+                key_id: None,
+            })
+            .await?;
+
+        assert_eq!(daemon.name, daemon_name);
+        assert_eq!(daemon.organization_id, org_id);
+
+        // Upsert again — should update, not create a second row.
+        let daemon2 = store
+            .upsert_provisioner_daemon(UpsertProvisionerDaemonInput {
+                name: daemon_name.clone(),
+                provisioners: vec!["echo".to_string(), "terraform".to_string()],
+                tags,
+                last_seen_at: OffsetDateTime::now_utc(),
+                version: "2.0.0".to_string(),
+                organization_id: org_id,
+                api_version: "1.1".to_string(),
+                key_id: None,
+            })
+            .await?;
+
+        assert_eq!(daemon2.id, daemon.id, "upsert should return same id");
+        assert_eq!(daemon2.version, "2.0.0");
+
+        // List daemons by org
+        let daemons = store
+            .get_provisioner_daemons_by_organization(org_id)
+            .await?;
+        let found = daemons.iter().any(|d| d.id == daemon.id);
+        assert!(found, "daemon should appear in org listing");
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Provisioner Store — Key CRUD
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_key_crud() -> TestResult {
+        use coder_core::InsertProvisionerKeyInput;
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+
+        let key_id = Uuid::new_v4();
+        let key_name = format!("test-key-{}", uniq());
+        let hashed = b"sha256hashbytes1234".to_vec();
+
+        let key = store
+            .insert_provisioner_key(InsertProvisionerKeyInput {
+                id: key_id,
+                created_at: OffsetDateTime::now_utc(),
+                organization_id: org_id,
+                name: key_name.clone(),
+                hashed_secret: hashed.clone(),
+                tags: json!({"env": "test"}),
+            })
+            .await?;
+        assert_eq!(key.id, key_id);
+        assert_eq!(key.name, key_name);
+
+        // Get by id
+        let by_id = store.get_provisioner_key_by_id(key_id).await?;
+        assert!(by_id.is_some());
+        assert_eq!(by_id.as_ref().map(|k| &k.name), Some(&key_name));
+
+        // Get by hashed secret
+        let by_hash = store.get_provisioner_key_by_hashed_secret(&hashed).await?;
+        assert!(by_hash.is_some());
+        assert_eq!(by_hash.as_ref().map(|k| k.id), Some(key_id));
+
+        // Get by name
+        let by_name = store.get_provisioner_key_by_name(org_id, &key_name).await?;
+        assert!(by_name.is_some());
+
+        // List by org
+        let keys = store.list_provisioner_keys_by_organization(org_id).await?;
+        let found = keys.iter().any(|k| k.id == key_id);
+        assert!(found);
+
+        // Delete
+        let deleted = store.delete_provisioner_key(key_id).await?;
+        assert!(deleted);
+
+        // Verify gone
+        let gone = store.get_provisioner_key_by_id(key_id).await?;
+        assert!(gone.is_none());
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Provisioner Store — Job Timings
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_provisioner_job_timings() -> TestResult {
+        use coder_core::{
+            InsertProvisionerJobInput, InsertProvisionerJobTimingsInput, ProvisionerJobTimingStage,
+            ProvisionerJobType, ProvisionerStorageMethod,
+        };
+
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let job_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        store
+            .insert_provisioner_job(InsertProvisionerJobInput {
+                id: job_id,
+                created_at: now,
+                organization_id: org_id,
+                initiator_id: user_id,
+                provisioner: ProvisionerType::Echo,
+                storage_method: ProvisionerStorageMethod::File,
+                file_id: Uuid::new_v4(),
+                job_type: ProvisionerJobType::TemplateVersionImport,
+                input: json!({}),
+                tags: json!({}),
+                trace_metadata: json!({}),
+            })
+            .await?;
+
+        let later = now + time::Duration::seconds(5);
+        let timings = store
+            .insert_provisioner_job_timings(InsertProvisionerJobTimingsInput {
+                job_id,
+                started_at: vec![now],
+                ended_at: vec![later],
+                stage: vec![ProvisionerJobTimingStage::Init],
+                source: vec!["terraform".to_string()],
+                action: vec!["create".to_string()],
+                resource: vec!["null_resource.test".to_string()],
+            })
+            .await?;
+
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].stage, ProvisionerJobTimingStage::Init);
+
+        // Fetch by job_id
+        let fetched = store.get_provisioner_job_timings_by_job_id(job_id).await?;
+        assert_eq!(fetched.len(), 1);
+
+        Ok(())
+    }
 }
