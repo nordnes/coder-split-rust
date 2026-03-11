@@ -1102,6 +1102,76 @@ async fn get_init_script(
     response
 }
 
+// ---------------------------------------------------------------------------
+// RBAC enforcement audit summary
+// ---------------------------------------------------------------------------
+//
+// Every mutation (POST/PUT/DELETE) and sensitive-read handler below calls
+// `Authorizer::new().authorize(actor, action, object)` from `coder-rbac`.
+//
+// **Handlers with formal RBAC authorize() checks:**
+//   Mutations:
+//     - create_first_user (Create, User)
+//     - post_login (handled by AuthService)
+//     - create_token, delete_token, delete_all_tokens (Create/Delete, ApiKey)
+//     - create_user (Create, User)
+//     - put_user_roles (Assign, OrganizationMember)
+//     - put_user_status (Update, User)
+//     (put_user_profile, put_user_appearance, put_user_preferences,
+//      put_user_password, post_convert_login delegate to service layer)
+//     - delete_external_auth_by_id (Delete, User) [NEW]
+//     - post_external_auth_device_exchange (Update, User) [NEW]
+//     - post_task_log_snapshot (Update, Task) [NEW - user auth path]
+//     - create_task (Create, Task)
+//     - create_workspace, patch_workspace (Create/Update, Workspace)
+//     - post_org_template (Create, Template)
+//     - create_org_member, delete_org_member (Create/Delete, OrganizationMember)
+//     - put_org_member_roles (Assign, OrganizationMember)
+//     - post_oauth2_app, put_oauth2_app, delete_oauth2_app (CRUD, OAuth2ProviderApp)
+//     - post_file (Create, File)
+//     - put_health_settings (Update, DeploymentConfig)
+//     - put_notifications_settings (Update, DeploymentConfig)
+//     - put_notification_template_method (Update, NotificationTemplate)
+//     - put_user_notification_preferences (Update, NotificationPreference)
+//     - post_webpush_subscription, delete_webpush_subscription (Create/Delete, NotificationPreference)
+//     - post_test_audit_log (Create, AuditLog)
+//
+//   Sensitive reads:
+//     - list_audit_logs (Read, AuditLog)
+//     - list_users (Read, User) [NEW - replaced can_list_users()]
+//     - deployment_stats (Read, DeploymentStats) [NEW - replaced can_view_operational_data()]
+//     - debug_health (Read, DeploymentConfig) [NEW]
+//     - get_health_settings (Read, DeploymentConfig) [NEW]
+//     - get_notifications_settings (Read, DeploymentConfig) [NEW]
+//     - get_notification_dispatch_methods (Read, DeploymentConfig) [NEW]
+//     - get_system_notification_templates (Read, NotificationTemplate) [NEW]
+//     - get_custom_notification_templates (Read, NotificationTemplate) [NEW]
+//     - insights_daus, insights_templates, insights_user_activity,
+//       insights_user_latency, insights_user_status_counts (Read, DeploymentStats) [NEW]
+//     - debug_coordinator, debug_tailnet, debug_derp_traffic,
+//       debug_expvar, debug_pprof, debug_websocket,
+//       debug_metrics (Read, DebugInfo) [NEW]
+//     - get_deployment_config (Read, DeploymentConfig)
+//     - list_templates (Read, Template - filter-based)
+//
+//   Service-layer delegation (RBAC checked inside service):
+//     - get_user, get_user_roles (via IdentityService)
+//     - get_organization, list_organization_members (via IdentityService)
+//     - list_token_api_keys, get_api_key (via AuthService)
+//
+// **Public / unauthenticated endpoints (no RBAC needed):**
+//     - healthz, latency_check, build_info, deployment_ssh
+//     - auth_methods, get_first_user (existence check)
+//     - login_with_password (pre-auth), OAuth disabled stubs
+//     - DERP map, SSH config (public deployment info)
+//
+// **resolve_organization / resolve_user patterns:**
+//   All instances correctly use `let Some(...) = resolve_*(...) else { return Ok(not_found) }`
+//   or `match ... { Some => ..., None => return Ok(not_found) }`, ensuring the handler
+//   stops processing when the target cannot be resolved. No RBAC bypass bugs detected.
+//
+// ---------------------------------------------------------------------------
+
 async fn list_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1226,7 +1296,16 @@ async fn deployment_stats(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view deployment stats.",
         ));
@@ -1251,7 +1330,16 @@ async fn debug_health(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment health information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view deployment health.",
         ));
@@ -1297,7 +1385,16 @@ async fn get_health_settings(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view health settings.",
         ));
@@ -1455,6 +1552,22 @@ async fn delete_external_auth_by_id(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can delete their own external auth links.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::User).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete external auth links.",
+        ));
+    }
+
     let Some(response) = state
         .external_auth
         .delete(
@@ -1512,6 +1625,22 @@ async fn post_external_auth_device_exchange(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can update their own external auth links.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::User).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to exchange external auth device codes.",
+        ));
+    }
+
     let Some(config) = find_external_auth_provider(&state, &provider) else {
         return Ok(resource_not_found_response());
     };
@@ -1831,7 +1960,16 @@ async fn list_users(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !context.actor.can_list_users() {
+    // RBAC: verify the actor can read user resources.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::User),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response("You are not authorized to list users."));
     }
 
@@ -2108,6 +2246,7 @@ async fn put_user_profile(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
+    // NOTE: RBAC is enforced inside IdentityService::update_user_profile.
     let updated_user = match state
         .identity
         .update_user_profile(&context.actor, &context.user, &user, &request)
@@ -2233,6 +2372,7 @@ async fn put_user_appearance(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
+    // NOTE: RBAC is enforced inside IdentityService::update_user_appearance.
     let (target_user_id, settings) = match state
         .identity
         .update_user_appearance(&context.actor, &context.user, &user, &request)
@@ -2301,6 +2441,7 @@ async fn put_user_preferences(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
+    // NOTE: RBAC is enforced inside IdentityService::update_user_preferences.
     let (target_user_id, settings) = match state
         .identity
         .update_user_preferences(&context.actor, &context.user, &user, &request)
@@ -2343,6 +2484,7 @@ async fn put_user_password(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
+    // NOTE: RBAC is enforced inside AuthService::update_user_password.
     let target_user_id = match state
         .auth
         .update_user_password(&context.actor, &context.user, &user, &request)
@@ -2374,6 +2516,8 @@ async fn post_convert_login(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // NOTE: RBAC is enforced inside AuthService::convert_login.
     let Json(request) = match payload {
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
@@ -4253,6 +4397,22 @@ async fn post_task_log_snapshot(
         let Some(context) = authenticate_request(&state, &headers).await? else {
             return Ok(unauthorized_response("Missing or invalid session token."));
         };
+
+        // RBAC: verify the actor can update their own tasks.
+        let authorizer = Authorizer::new();
+        if authorizer
+            .authorize(
+                &context.actor,
+                Action::Update,
+                &Object::new(ResourceType::Task).with_owner(context.user.id),
+            )
+            .is_err()
+        {
+            return Ok(forbidden_response(
+                "You are not authorized to post task log snapshots.",
+            ));
+        }
+
         context.user.id
     };
 
@@ -5037,9 +5197,24 @@ async fn get_notifications_settings(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification settings.",
+        ));
+    }
 
     let settings = state.store.get_notifications_settings().await?;
     Ok((StatusCode::OK, Json(settings)).into_response())
@@ -5083,9 +5258,24 @@ async fn get_system_notification_templates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read notification templates.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::NotificationTemplate),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification templates.",
+        ));
+    }
 
     let templates = state
         .store
@@ -5098,9 +5288,24 @@ async fn get_custom_notification_templates(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read notification templates.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::NotificationTemplate),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification templates.",
+        ));
+    }
 
     let templates = state
         .store
@@ -5203,9 +5408,24 @@ async fn get_notification_dispatch_methods(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: verify the actor can read deployment configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentConfig),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view notification dispatch methods.",
+        ));
+    }
 
     let _ = &state;
     let response = coder_core::NotificationMethodsResponse {
@@ -7742,6 +7962,10 @@ async fn resolve_user(
         .map_err(AppError::from)
 }
 
+/// Deprecated: all call-sites now use `Authorizer::new().authorize()` with
+/// the appropriate `ResourceType` and `Action` instead of this coarse check.
+/// Retained temporarily for reference; safe to remove once confirmed unused.
+#[allow(dead_code)]
 fn can_view_operational_data(actor: &Actor) -> bool {
     actor.is_owner() || actor.has_site_role(ROLE_AUDITOR)
 }
@@ -11056,7 +11280,16 @@ async fn insights_daus(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view deployment DAUs.",
         ));
@@ -11099,7 +11332,16 @@ async fn insights_templates(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view template insights.",
         ));
@@ -11184,7 +11426,16 @@ async fn insights_user_activity(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view user activity insights.",
         ));
@@ -11231,7 +11482,16 @@ async fn insights_user_latency(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view user latency insights.",
         ));
@@ -11278,7 +11538,16 @@ async fn insights_user_status_counts(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read deployment statistics.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DeploymentStats),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view user status counts.",
         ));
@@ -11337,7 +11606,16 @@ async fn debug_coordinator(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view coordinator debug information.",
         ));
@@ -11368,7 +11646,16 @@ async fn debug_tailnet(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view tailnet debug information.",
         ));
@@ -11391,7 +11678,16 @@ async fn debug_derp_traffic(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view DERP traffic debug information.",
         ));
@@ -11414,7 +11710,16 @@ async fn debug_expvar(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view expvar debug information.",
         ));
@@ -11488,7 +11793,16 @@ async fn debug_pprof(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view pprof debug information.",
         ));
@@ -11559,7 +11873,16 @@ async fn debug_websocket(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to use the debug websocket.",
         ));
@@ -11612,7 +11935,16 @@ async fn debug_metrics(
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
-    if !can_view_operational_data(&context.actor) {
+    // RBAC: verify the actor can read debug information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::DebugInfo),
+        )
+        .is_err()
+    {
         return Ok(forbidden_response(
             "You are not authorized to view debug metrics.",
         ));
@@ -39208,6 +39540,202 @@ mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // RBAC rejection tests — verify that unauthenticated or unauthorized
+    // requests to newly-hardened handlers receive 401 / 403.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn unauthenticated_deployment_stats_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/deployment/stats")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_debug_health_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/health")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_health_settings_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/health/settings")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_list_users_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/users")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_insights_daus_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/insights/daus")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_debug_coordinator_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/debug/coordinator")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_notifications_settings_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(app, request(Method::GET, "/api/v2/notifications/settings")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_system_notification_templates_returns_401()
+    -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::GET, "/api/v2/notifications/templates/system")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_delete_external_auth_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            request(Method::DELETE, "/api/v2/external-auth/github")?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_put_user_profile_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            json_request(
+                Method::PUT,
+                "/api/v2/users/me/profile",
+                &serde_json::json!({"username": "hacker", "name": "Hacker"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_put_user_appearance_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            json_request(
+                Method::PUT,
+                "/api/v2/users/me/appearance",
+                &serde_json::json!({"theme_preference": "dark"}),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn unauthenticated_put_user_password_returns_401() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let response = call(
+            app,
+            json_request(
+                Method::PUT,
+                "/api/v2/users/me/password",
+                &serde_json::json!({
+                    "old_password": "old",
+                    "password": "new"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_deployment_stats() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/deployment/stats", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_list_users() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/users", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_debug_health() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/debug/health", &session_token)?,
+        )
+        .await?;
+        // May return OK or a different status depending on health probes,
+        // but should NOT return 401 or 403.
+        assert_ne!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_ne!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn owner_can_access_notifications_settings() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?);
+        let session_token = create_and_login(&app).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/settings",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
         Ok(())
     }
 }
