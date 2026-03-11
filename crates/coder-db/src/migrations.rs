@@ -102,26 +102,37 @@ pub async fn migration_status(pool: &PgPool) -> Result<MigrationStatus, Migratio
 /// Helper: counts rows in the `_sqlx_migrations` table.
 ///
 /// Returns `0` if the table does not exist yet (fresh database).
+///
+/// The query references `_sqlx_migrations` directly.  On a brand-new database
+/// the table will not exist and PostgreSQL raises error code `42P01`
+/// (`undefined_table`).  We catch that specific error and return `0` instead
+/// of propagating it, so callers see a clean "zero migrations applied" state.
+///
+/// The `COALESCE(…, 0)` in the SQL is a belt-and-suspenders guard: if the
+/// table exists but contains no successful rows, `COUNT(*)` already returns 0,
+/// but the wrapper makes the intent explicit and protects against future query
+/// changes that might return `NULL`.
 async fn count_applied_migrations(pool: &PgPool) -> Result<i64, MigrationError> {
-    // First check whether the _sqlx_migrations table exists at all.
-    // On a brand-new database that has never been migrated the table will
-    // not be present, and we should return 0 rather than hitting a runtime
-    // error.
-    let table_exists: bool =
-        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
-            .fetch_one(pool)
-            .await
-            .map_err(|source| MigrationError::Query { source })?;
-
-    if !table_exists {
-        return Ok(0);
-    }
-
-    let count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = true")
-            .fetch_one(pool)
-            .await
-            .map_err(|source| MigrationError::Query { source })?;
+    let count: i64 = sqlx::query_scalar(
+        r#"
+        SELECT COALESCE(
+            (SELECT COUNT(*) FROM _sqlx_migrations WHERE success = true),
+            0
+        )
+        "#,
+    )
+    .fetch_one(pool)
+    .await
+    .or_else(|error| {
+        // PostgreSQL error code 42P01 = undefined_table.
+        // This is locale-independent and stable across Postgres/sqlx versions.
+        if let Some(db_err) = error.as_database_error() {
+            if db_err.code().as_deref() == Some("42P01") {
+                return Ok(0i64);
+            }
+        }
+        Err(MigrationError::Query { source: error })
+    })?;
 
     Ok(count)
 }
