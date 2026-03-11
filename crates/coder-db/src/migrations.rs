@@ -81,7 +81,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<MigrationReport, MigrationE
 pub async fn migration_status(pool: &PgPool) -> Result<MigrationStatus, MigrationError> {
     let applied_count = count_applied_migrations(pool).await?;
     let total_known = MIGRATOR.migrations.len() as i64;
-    let is_up_to_date = applied_count >= total_known;
+    let is_up_to_date = applied_count == total_known;
 
     Ok(MigrationStatus {
         applied_count,
