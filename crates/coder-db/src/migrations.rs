@@ -41,6 +41,8 @@ pub struct MigrationReport {
 
 /// Summary of the current schema version, returned by
 /// [`migration_status`].
+///
+/// Reserved for future use by health-check endpoints.
 #[derive(Debug, Clone)]
 pub struct MigrationStatus {
     /// Total number of migrations recorded in the `_sqlx_migrations` table.
@@ -65,7 +67,7 @@ pub async fn run_migrations(pool: &PgPool) -> Result<MigrationReport, MigrationE
 
     let after = count_applied_migrations(pool).await?;
     let applied_count = (after.saturating_sub(before)) as usize;
-    let total_count = after as usize;
+    let total_count = after.max(0) as usize;
 
     Ok(MigrationReport {
         applied_count,
