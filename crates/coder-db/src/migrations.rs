@@ -103,28 +103,25 @@ pub async fn migration_status(pool: &PgPool) -> Result<MigrationStatus, Migratio
 ///
 /// Returns `0` if the table does not exist yet (fresh database).
 async fn count_applied_migrations(pool: &PgPool) -> Result<i64, MigrationError> {
-    // The _sqlx_migrations table may not exist on a brand-new database that
-    // has never been migrated, so we guard with an EXISTS check first.
-    let count: i64 = sqlx::query_scalar(
-        r#"
-        SELECT COALESCE(
-            (SELECT COUNT(*) FROM _sqlx_migrations WHERE success = true),
-            0
-        )
-        "#,
-    )
-    .fetch_one(pool)
-    .await
-    .or_else(|error| {
-        // If the table simply doesn't exist yet, that means zero migrations
-        // have been applied.  Any *other* error is unexpected.
-        let msg = error.to_string();
-        if msg.contains("_sqlx_migrations") && msg.contains("does not exist") {
-            Ok(0i64)
-        } else {
-            Err(MigrationError::Query { source: error })
-        }
-    })?;
+    // First check whether the _sqlx_migrations table exists at all.
+    // On a brand-new database that has never been migrated the table will
+    // not be present, and we should return 0 rather than hitting a runtime
+    // error.
+    let table_exists: bool =
+        sqlx::query_scalar("SELECT to_regclass('_sqlx_migrations') IS NOT NULL")
+            .fetch_one(pool)
+            .await
+            .map_err(|source| MigrationError::Query { source })?;
+
+    if !table_exists {
+        return Ok(0);
+    }
+
+    let count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations WHERE success = true")
+            .fetch_one(pool)
+            .await
+            .map_err(|source| MigrationError::Query { source })?;
 
     Ok(count)
 }

@@ -294,12 +294,8 @@ async fn run() -> Result<(), MainError> {
     let config = build_config(args)?;
 
     let store = PostgresStore::connect(&config.database).await?;
-    let report = run_migrations(&store.pool()).await?;
-    info!(
-        applied = report.applied_count,
-        total = report.total_count,
-        "migration run complete"
-    );
+    let pool = store.pool();
+    run_migrations(&pool).await?;
 
     if migrate_only {
         info!("--migrate-only requested, exiting after migrations");
