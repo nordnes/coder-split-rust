@@ -14660,8 +14660,14 @@ mod tests {
         );
 
         // The second change should come after the first in the list
-        let pos1 = changes.iter().position(|c| c.id == sc1.id);
-        let pos2 = changes.iter().position(|c| c.id == sc2.id);
+        let pos1 = changes
+            .iter()
+            .position(|c| c.id == sc1.id)
+            .ok_or("sc1 not found in changes list")?;
+        let pos2 = changes
+            .iter()
+            .position(|c| c.id == sc2.id)
+            .ok_or("sc2 not found in changes list")?;
         assert!(pos1 < pos2, "changes should be ordered by changed_at ASC");
 
         Ok(())
