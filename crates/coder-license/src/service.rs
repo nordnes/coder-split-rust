@@ -132,11 +132,11 @@ impl<S: LicenseStore> LicenseService<S> {
         for license in &licenses {
             match self.validator.validate(&license.jwt) {
                 Ok(claims) => {
+                    if claims.is_expired(now) {
+                        warn!(license_id = license.id, "skipping fully expired license");
+                        continue;
+                    }
                     self.apply_claims(&mut ents, &claims, now);
-                }
-                Err(LicenseError::Expired) => {
-                    // Fully expired licenses are silently skipped.
-                    warn!(license_id = license.id, "skipping fully expired license");
                 }
                 Err(e) => {
                     ents.errors
@@ -155,11 +155,9 @@ impl<S: LicenseStore> LicenseService<S> {
     /// Applies a single license's claims to the entitlements snapshot.
     fn apply_claims(&self, ents: &mut Entitlements, claims: &LicenseClaims, now: OffsetDateTime) {
         // Determine the entitlement level for features from this license.
-        // Check expiry first so that fully expired licenses don't set any flags.
-        let entitlement = if claims.is_expired(now) {
-            // Fully expired (past grace period) — do not apply.
-            return;
-        } else if claims.in_grace_period(now) {
+        // Callers must filter out fully expired licenses before calling this
+        // method (see `refresh_entitlements`).
+        let entitlement = if claims.in_grace_period(now) {
             Entitlement::GracePeriod
         } else {
             Entitlement::Entitled
