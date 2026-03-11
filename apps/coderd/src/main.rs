@@ -312,6 +312,7 @@ async fn run() -> Result<(), MainError> {
 
     if migrate_only {
         info!("--migrate-only requested, exiting after migrations");
+        pool.close().await;
         return Ok(());
     }
 
