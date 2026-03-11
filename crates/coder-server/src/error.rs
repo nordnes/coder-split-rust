@@ -1,4 +1,13 @@
 //! HTTP error mapping for the Rust backend slice.
+//!
+//! Defines [`AppError`], the unified error type returned by all HTTP handlers.
+//! Each variant maps to a specific HTTP status code and is automatically
+//! converted into a JSON [`ApiResponse`](coder_core::ApiResponse) via the
+//! [`IntoResponse`](axum::response::IntoResponse) implementation.
+//!
+//! `From` conversions are provided for every domain-service error type
+//! ([`AuthServiceError`], [`IdentityServiceError`], [`OAuth2ProviderError`])
+//! so handlers can use `?` directly.
 
 use axum::{
     Json,

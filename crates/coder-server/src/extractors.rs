@@ -1,4 +1,10 @@
 //! Axum extractors for authentication, eliminating per-handler boilerplate.
+//!
+//! Provides three extractors:
+//!
+//! * [`Auth`] — requires a valid session token (returns 401 otherwise)
+//! * [`OptionalAuth`] — authenticates if a token is present, passes through if not
+//! * [`AgentAuth`] — requires a valid workspace-agent auth token
 
 use std::str::FromStr;
 

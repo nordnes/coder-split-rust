@@ -12,7 +12,9 @@ members = [
     "crates/coder-notifications",
     "crates/coder-provisioner",
     "crates/coder-rbac",
+    "crates/coder-mcp",
     "crates/coder-server",
+    "crates/coder-telemetry",
     "crates/coder-workspaces",
 ]
 resolver = "3"

@@ -502,6 +502,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "coder-mcp"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "coder-notifications"
 version = "0.1.0"
 dependencies = [
@@ -567,8 +578,10 @@ dependencies = [
  "coder-core",
  "coder-identity",
  "coder-license",
+ "coder-mcp",
  "coder-provisioner",
  "coder-rbac",
+ "coder-telemetry",
  "coder-workspaces",
  "futures-util",
  "governor",
@@ -592,6 +605,22 @@ dependencies = [
  "tracing",
  "tracing-opentelemetry",
  "tracing-subscriber",
+ "url",
+ "uuid",
+]
+
+[[package]]
+name = "coder-telemetry"
+version = "0.1.0"
+dependencies = [
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
+ "time",
+ "tokio",
+ "tracing",
  "url",
  "uuid",
 ]
@@ -626,6 +655,7 @@ dependencies = [
  "coder-db",
  "coder-rbac",
  "coder-server",
+ "coder-telemetry",
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry-otlp",
