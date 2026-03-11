@@ -337,14 +337,20 @@ pub(crate) mod appurl {
 
     /// Returns whether two hostnames match, ignoring case, trailing dots, and
     /// port numbers.
+    ///
+    /// Handles IPv6 addresses in bracket notation (e.g. `[::1]:3000`).
     pub fn hostnames_match(a: &str, b: &str) -> bool {
         let normalize = |s: &str| -> String {
             let s = s.trim_matches('.');
-            // Strip port if present.
-            s.rsplit_once(':')
-                .map(|(host, _)| host)
-                .unwrap_or(s)
-                .to_lowercase()
+            // Strip port if present, but handle IPv6 brackets.
+            let s = if let Some(bracketed) = s.strip_prefix('[') {
+                // IPv6: [::1]:port or [::1]
+                bracketed.split(']').next().unwrap_or(s)
+            } else {
+                // IPv4/hostname: host:port or host
+                s.rsplit_once(':').map(|(host, _)| host).unwrap_or(s)
+            };
+            s.to_lowercase()
         };
         normalize(a) == normalize(b)
     }
@@ -615,6 +621,16 @@ pub(crate) mod appurl {
         fn hostnames_no_match() {
             assert!(!hostnames_match("a.example.com", "b.example.com"));
             assert!(!hostnames_match("example.com", "other.com"));
+        }
+
+        #[test]
+        fn hostnames_match_ipv6() {
+            // IPv6 in bracket notation — port stripping must not break the address.
+            assert!(hostnames_match("[::1]:3000", "[::1]"));
+            assert!(hostnames_match("[::1]", "[::1]:8080"));
+            assert!(hostnames_match("[::1]:3000", "[::1]:8080"));
+            // Bare IPv6 without brackets is not valid in Host headers, so we
+            // only guarantee correctness for bracket notation.
         }
     }
 }
