@@ -245,8 +245,11 @@ async fn flush_batch(
                 .fetch_add(count, Ordering::Relaxed);
         }
         Err(e) => {
-            warn!(error = %e, count, "failed to submit telemetry batch");
+            warn!(error = %e, count, "failed to submit telemetry batch, re-queuing events");
             counters.submission_errors.fetch_add(1, Ordering::Relaxed);
+            // Re-queue events so they are retried on the next flush cycle
+            // instead of being permanently lost.
+            buffer.extend(snapshot.events);
         }
     }
 }

@@ -162,6 +162,8 @@ pub struct AppState {
     pub(crate) health: HealthService<Arc<dyn AppStore>>,
     pub(crate) external_auth: ExternalAuthService<Arc<dyn AppStore>>,
     pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
+    /// Telemetry event reporter for submitting events to the background worker.
+    pub telemetry_reporter: coder_telemetry::TelemetryReporter,
     /// Shared HTTP client for outbound requests (connection pooling).
     pub http_client: reqwest::Client,
 }
@@ -180,6 +182,7 @@ impl AppState {
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
         prometheus_handle: Option<PrometheusHandle>,
+        telemetry_reporter: coder_telemetry::TelemetryReporter,
     ) -> Result<Self, reqwest::Error> {
         let audit = Arc::new(BatchedAuditSink::new(
             audit,
@@ -208,6 +211,7 @@ impl AppState {
             coordinator,
             derp_tracker,
             prometheus_handle,
+            telemetry_reporter,
             auth,
             identity,
             deployment_stats,
@@ -7664,6 +7668,7 @@ pub(crate) mod tests {
                 coordinator,
                 derp_tracker,
                 None,
+                coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             )?,
             store,
         ))
@@ -30296,6 +30301,7 @@ pub(crate) mod tests {
             coordinator,
             derp_tracker,
             None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
     }
 
@@ -30337,6 +30343,7 @@ pub(crate) mod tests {
             coordinator,
             derp_tracker,
             None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
     }
 
@@ -30495,6 +30502,7 @@ pub(crate) mod tests {
             coordinator,
             derp_tracker,
             None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
     }
 

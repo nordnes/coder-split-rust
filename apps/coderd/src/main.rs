@@ -462,7 +462,7 @@ async fn run() -> Result<(), MainError> {
         version: BuildMetadata::default().version.clone(),
         ..coder_telemetry::TelemetryConfig::default()
     };
-    let (mut telemetry_worker, _telemetry_reporter) =
+    let (mut telemetry_worker, telemetry_reporter) =
         coder_telemetry::TelemetryWorker::start(telemetry_config);
 
     let prometheus_handle = PrometheusBuilder::new()
@@ -480,6 +480,7 @@ async fn run() -> Result<(), MainError> {
         coordinator,
         derp_tracker,
         Some(prometheus_handle),
+        telemetry_reporter,
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 

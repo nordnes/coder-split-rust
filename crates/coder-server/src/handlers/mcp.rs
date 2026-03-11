@@ -65,8 +65,8 @@ fn dispatch_mcp_request(
             // but since we're in request-response HTTP mode, return success.
             JsonRpcResponse::success(request.id.clone(), serde_json::json!({}))
         }
-        "tools/list" => handle_tools_list(state, request),
-        "tools/call" => handle_tools_call(state, request, tool_context),
+        "tools/list" => handle_tools_list(request),
+        "tools/call" => handle_tools_call(request, tool_context),
         "ping" => JsonRpcResponse::success(request.id.clone(), serde_json::json!({})),
         _ => JsonRpcResponse::error(
             request.id.clone(),
@@ -106,14 +106,11 @@ fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRpcRespo
 }
 
 /// Handles `tools/list` — returns all registered MCP tools.
-fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_tools_list(request: &JsonRpcRequest) -> JsonRpcResponse {
     let registry = coder_mcp::McpToolRegistry::new();
     let result = McpToolListResult {
         tools: registry.list_tools().to_vec(),
     };
-
-    // Use the deployment_id to suppress unused field warning.
-    let _ = state.deployment_id;
 
     match serde_json::to_value(&result) {
         Ok(value) => JsonRpcResponse::success(request.id.clone(), value),
@@ -128,11 +125,7 @@ fn handle_tools_list(state: &AppState, request: &JsonRpcRequest) -> JsonRpcRespo
 }
 
 /// Handles `tools/call` — invokes a named tool with arguments.
-fn handle_tools_call(
-    state: &AppState,
-    request: &JsonRpcRequest,
-    tool_context: &ToolContext,
-) -> JsonRpcResponse {
+fn handle_tools_call(request: &JsonRpcRequest, tool_context: &ToolContext) -> JsonRpcResponse {
     // Parse the tool call parameters from the request params.
     let params: McpToolCallParams = match &request.params {
         Some(params_value) => match serde_json::from_value(params_value.clone()) {
@@ -159,9 +152,6 @@ fn handle_tools_call(
     };
 
     let registry = coder_mcp::McpToolRegistry::new();
-
-    // Use the deployment_id to suppress unused field warning.
-    let _ = state.deployment_id;
 
     match registry.call_tool(&params.name, params.arguments.as_ref(), tool_context) {
         Ok(result) => match serde_json::to_value(&result) {

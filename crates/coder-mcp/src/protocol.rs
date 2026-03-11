@@ -22,6 +22,10 @@ pub struct JsonRpcRequest {
     #[serde(default)]
     pub params: Option<Value>,
     /// Request identifier — may be a number or string.
+    ///
+    /// Per JSON-RPC 2.0, notifications MUST NOT include `id`.  We default to
+    /// `Value::Null` so that notification payloads deserialize correctly.
+    #[serde(default)]
     pub id: Value,
 }
 
@@ -326,6 +330,16 @@ mod tests {
         let json = serde_json::to_value(&tool)?;
         assert_eq!(json["name"], "test_tool");
         assert_eq!(json["inputSchema"]["type"], "object");
+        Ok(())
+    }
+
+    #[test]
+    fn json_rpc_notification_without_id_deserializes() -> Result<(), Box<dyn Error>> {
+        // JSON-RPC 2.0 notifications MUST NOT include an `id` field.
+        let json = r#"{"jsonrpc":"2.0","method":"initialized"}"#;
+        let req: JsonRpcRequest = serde_json::from_str(json)?;
+        assert_eq!(req.method, "initialized");
+        assert_eq!(req.id, serde_json::Value::Null);
         Ok(())
     }
 
