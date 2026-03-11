@@ -5,7 +5,7 @@
 //! flows which link third-party tokens to existing users).
 
 use coder_core::config::{GithubOAuthConfig, OidcConfig};
-use coder_core::{LoginType, StorageError, UserLinkClaims, UserStatus};
+use coder_core::{LoginType, StorageError, UserLinkClaims};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 
@@ -84,11 +84,17 @@ pub struct GithubTeamOrg {
 /// GitHub OAuth2 token exchange response.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubTokenResponse {
+    #[serde(default)]
     pub access_token: String,
     #[serde(default)]
     pub token_type: String,
     #[serde(default)]
     pub scope: String,
+    /// GitHub may return HTTP 200 with an error field instead of a token.
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub error_description: Option<String>,
 }
 
 /// GitHub device authorization response.
@@ -163,11 +169,9 @@ fn github_oauth_url(config: &GithubOAuthConfig, path: &str) -> String {
     if api == "https://api.github.com" {
         return format!("https://github.com{path}");
     }
-    // GHE: strip the /api/v3 suffix (if present) to get the base host
-    let base = api
-        .strip_suffix("/api/v3")
-        .or_else(|| api.strip_suffix("/api/v3/"))
-        .unwrap_or(api);
+    // GHE: strip the /api/v3 suffix (if present) to get the base host.
+    // Note: trailing slashes are already stripped above, so "/api/v3/" is unreachable.
+    let base = api.strip_suffix("/api/v3").unwrap_or(api);
     format!("{base}{path}")
 }
 
@@ -202,10 +206,28 @@ pub async fn github_exchange_code(
         )));
     }
 
-    response
+    let token_response = response
         .json::<GithubTokenResponse>()
         .await
-        .map_err(|e| OAuthLoginError::CodeExchangeFailed(e.to_string()))
+        .map_err(|e| OAuthLoginError::CodeExchangeFailed(e.to_string()))?;
+
+    // GitHub may return HTTP 200 with an error field instead of a valid token.
+    if let Some(ref err) = token_response.error {
+        let detail = token_response
+            .error_description
+            .as_deref()
+            .unwrap_or("unknown");
+        return Err(OAuthLoginError::CodeExchangeFailed(format!(
+            "GitHub token error: {err} — {detail}"
+        )));
+    }
+    if token_response.access_token.is_empty() {
+        return Err(OAuthLoginError::CodeExchangeFailed(
+            "GitHub returned an empty access token".to_owned(),
+        ));
+    }
+
+    Ok(token_response)
 }
 
 /// Fetches the authenticated GitHub user profile.
@@ -216,14 +238,25 @@ pub async fn github_fetch_user(
     access_token: &str,
 ) -> Result<GithubUser, OAuthLoginError> {
     let url = format!("{}/user", api_url.as_str().trim_end_matches('/'));
-    client
+    let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Accept", "application/json")
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
-        .map_err(|e| OAuthLoginError::Http(e.to_string()))?
+        .map_err(|e| OAuthLoginError::Http(e.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_owned());
+        return Err(OAuthLoginError::Http(format!(
+            "GitHub /user returned {status}: {body}"
+        )));
+    }
+    response
         .json::<GithubUser>()
         .await
         .map_err(|e| OAuthLoginError::Http(e.to_string()))
@@ -237,14 +270,25 @@ pub async fn github_fetch_emails(
     access_token: &str,
 ) -> Result<Vec<GithubEmail>, OAuthLoginError> {
     let url = format!("{}/user/emails", api_url.as_str().trim_end_matches('/'));
-    client
+    let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Accept", "application/json")
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
-        .map_err(|e| OAuthLoginError::Http(e.to_string()))?
+        .map_err(|e| OAuthLoginError::Http(e.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_owned());
+        return Err(OAuthLoginError::Http(format!(
+            "GitHub /user/emails returned {status}: {body}"
+        )));
+    }
+    response
         .json::<Vec<GithubEmail>>()
         .await
         .map_err(|e| OAuthLoginError::Http(e.to_string()))
@@ -258,14 +302,25 @@ pub async fn github_fetch_orgs(
     access_token: &str,
 ) -> Result<Vec<GithubOrganization>, OAuthLoginError> {
     let url = format!("{}/user/orgs", api_url.as_str().trim_end_matches('/'));
-    client
+    let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Accept", "application/json")
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
-        .map_err(|e| OAuthLoginError::Http(e.to_string()))?
+        .map_err(|e| OAuthLoginError::Http(e.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_owned());
+        return Err(OAuthLoginError::Http(format!(
+            "GitHub /user/orgs returned {status}: {body}"
+        )));
+    }
+    response
         .json::<Vec<GithubOrganization>>()
         .await
         .map_err(|e| OAuthLoginError::Http(e.to_string()))
@@ -279,14 +334,25 @@ pub async fn github_fetch_teams(
     access_token: &str,
 ) -> Result<Vec<GithubTeam>, OAuthLoginError> {
     let url = format!("{}/user/teams", api_url.as_str().trim_end_matches('/'));
-    client
+    let response = client
         .get(&url)
         .header("Authorization", format!("Bearer {access_token}"))
         .header("Accept", "application/json")
         .timeout(HTTP_TIMEOUT)
         .send()
         .await
-        .map_err(|e| OAuthLoginError::Http(e.to_string()))?
+        .map_err(|e| OAuthLoginError::Http(e.to_string()))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_owned());
+        return Err(OAuthLoginError::Http(format!(
+            "GitHub /user/teams returned {status}: {body}"
+        )));
+    }
+    response
         .json::<Vec<GithubTeam>>()
         .await
         .map_err(|e| OAuthLoginError::Http(e.to_string()))
@@ -437,12 +503,25 @@ pub async fn oidc_exchange_code(
         .map_err(|e| OAuthLoginError::CodeExchangeFailed(e.to_string()))
 }
 
-/// Decodes an OIDC ID token's payload (WITHOUT signature verification for now).
+/// Decodes an OIDC ID token's payload (WITHOUT cryptographic signature verification).
 ///
-/// A proper implementation would verify the JWT signature against the JWKS.
-/// For the initial implementation, we decode the claims and validate basic fields.
-/// Signature verification should be added when a JWT/JWKS library is integrated.
+/// // TODO(security): This function base64-decodes the JWT payload WITHOUT verifying
+/// // the cryptographic signature against the provider's JWKS. The claims returned
+/// // here are NOT authenticated and could have been tampered with. A proper
+/// // implementation must:
+/// //   1. Fetch the JWKS from `discovery.jwks_uri`
+/// //   2. Cache the JWKS (with periodic refresh)
+/// //   3. Verify the JWT signature using the `jsonwebtoken` crate
+/// //   4. Only then trust the decoded claims
+/// // Until this is implemented, the token is partially validated by checking
+/// // issuer, audience, and expiry in `validate_oidc_claims`, but a malicious
+/// // actor could forge tokens if they control the network path.
 pub fn decode_id_token_claims(id_token: &str) -> Result<OidcClaims, OAuthLoginError> {
+    tracing::warn!(
+        "OIDC ID token signature is NOT cryptographically verified — \
+         claims are decoded but not authenticated. \
+         See TODO(security) in decode_id_token_claims."
+    );
     let parts: Vec<&str> = id_token.split('.').collect();
     if parts.len() != 3 {
         return Err(OAuthLoginError::InvalidIdToken(
@@ -556,7 +635,10 @@ pub fn oidc_derive_username(claims: &OidcClaims, config: &OidcConfig) -> String 
             return sanitize_username(prefix);
         }
     }
-    format!("user-{}", claims.sub.chars().take(8).collect::<String>())
+    sanitize_username(&format!(
+        "user-{}",
+        claims.sub.chars().take(8).collect::<String>()
+    ))
 }
 
 /// Sanitizes a string to be a valid username (alphanumeric + hyphens, lowercase).
@@ -608,13 +690,6 @@ pub struct OAuthCallbackQuery {
     #[serde(default)]
     pub error_description: Option<String>,
 }
-
-/// The login type constants used for linked IDs.
-pub const GITHUB_LOGIN_TYPE: LoginType = LoginType::Github;
-pub const OIDC_LOGIN_TYPE: LoginType = LoginType::Oidc;
-
-/// Default user status for OAuth-created users.
-pub const OAUTH_USER_STATUS: UserStatus = UserStatus::Active;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
@@ -1006,8 +1081,15 @@ mod tests {
             name_field: "name".to_owned(),
             ignore_email_verified: false,
         };
-        // Should not panic on multi-byte chars
+        // Should not panic on multi-byte chars, and should produce a valid username
         let username = oidc_derive_username(&claims, &config);
         assert!(username.starts_with("user-"));
+        // The sanitized username should only contain valid characters
+        assert!(
+            username
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "username contains invalid characters: {username}"
+        );
     }
 }

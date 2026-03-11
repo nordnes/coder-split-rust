@@ -1827,6 +1827,61 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredUserRow>(
+            "SELECT u.id, u.email, u.username, u.name, u.hashed_password,
+                    u.created_at, u.updated_at, u.status::text AS status,
+                    u.rbac_roles, u.login_type::text AS login_type,
+                    u.avatar_url, u.deleted, u.last_seen_at, u.quiet_hours_schedule,
+                    u.is_system, u.github_com_user_id
+             FROM users u
+             JOIN user_links ul ON ul.user_id = u.id
+             WHERE ul.login_type = $1::login_type AND ul.linked_id = $2
+             LIMIT 1",
+        )
+        .bind(login_type.as_str())
+        .bind(linked_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        row.map(user_record_from_row).transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredUserRow>(
+            "SELECT id, email, username, name, hashed_password,
+                    created_at, updated_at, status::text AS status,
+                    rbac_roles, login_type::text AS login_type,
+                    avatar_url, deleted, last_seen_at, quiet_hours_schedule,
+                    is_system, github_com_user_id
+             FROM users
+             WHERE lower(email) = lower($1)
+               AND login_type = $2::login_type
+               AND deleted = false
+               AND is_system = false
+               AND status = 'active'
+             LIMIT 1",
+        )
+        .bind(email)
+        .bind(login_type.as_str())
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        row.map(user_record_from_row).transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredUserLinkRow>(
             "SELECT

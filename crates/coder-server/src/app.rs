@@ -159,6 +159,8 @@ pub struct AppState {
     pub(crate) health: HealthService<Arc<dyn AppStore>>,
     pub(crate) external_auth: ExternalAuthService<Arc<dyn AppStore>>,
     pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
+    /// Shared HTTP client for outbound requests (connection pooling).
+    pub http_client: reqwest::Client,
 }
 
 impl AppState {
@@ -190,6 +192,7 @@ impl AppState {
         let health = HealthService::new(store.clone())?;
         let external_auth = ExternalAuthService::new(store.clone())?;
         let oauth2_provider = OAuth2ProviderService::new(store.clone());
+        let http_client = reqwest::Client::new();
 
         Ok(Self {
             config,
@@ -208,6 +211,7 @@ impl AppState {
             health,
             external_auth,
             oauth2_provider,
+            http_client,
         })
     }
 
@@ -6564,6 +6568,54 @@ mod tests {
             record.user_permissions.clone_from(&input.user_permissions);
             record.updated_at = now;
             Ok(record.clone())
+        }
+
+        // -----------------------------------------------------------------
+        // User Lookup by Linked ID / Email
+        // -----------------------------------------------------------------
+
+        async fn find_user_by_linked_id(
+            &self,
+            login_type: LoginType,
+            linked_id: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let links = self
+                .user_links
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for link in links.values() {
+                if link.login_type == login_type && link.linked_id == linked_id {
+                    if let Some(user) = users.get(&link.user_id) {
+                        return Ok(Some(user.clone()));
+                    }
+                }
+            }
+            Ok(None)
+        }
+
+        async fn find_active_user_by_email_and_login_type(
+            &self,
+            email: &str,
+            login_type: LoginType,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(users
+                .values()
+                .find(|u| {
+                    u.email.eq_ignore_ascii_case(email)
+                        && !u.deleted
+                        && !u.is_system
+                        && u.status == UserStatus::Active
+                        && u.login_type == login_type
+                })
+                .cloned())
         }
 
         // -----------------------------------------------------------------

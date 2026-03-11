@@ -199,27 +199,9 @@ pub(crate) async fn get_github_oauth_device_disabled() -> Response {
         .into_response()
 }
 
-pub(crate) async fn get_github_oauth_callback_disabled() -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ApiResponse::error(
-            "GitHub OAuth2 is not enabled.",
-            "This deployment does not have GitHub OAuth2 configured.",
-        )),
-    )
-        .into_response()
-}
-
-pub(crate) async fn get_oidc_callback_disabled() -> Response {
-    (
-        StatusCode::BAD_REQUEST,
-        Json(ApiResponse::error(
-            "OIDC is not enabled.",
-            "This deployment does not have OIDC configured.",
-        )),
-    )
-        .into_response()
-}
+// NOTE: get_github_oauth_callback_disabled and get_oidc_callback_disabled were
+// removed — the router now uses the real handlers which return appropriate
+// errors when OAuth/OIDC is not configured.
 
 // ---------------------------------------------------------------------------
 // Real OAuth2/OIDC handler implementations
@@ -245,9 +227,8 @@ pub(crate) async fn post_github_oauth_device(
             .into_response());
     };
 
-    let client = reqwest::Client::new();
     let device_response =
-        coder_auth::oauth_login::github_request_device_code(&client, github_config)
+        coder_auth::oauth_login::github_request_device_code(&state.http_client, github_config)
             .await
             .map_err(|e| {
                 tracing::error!("GitHub device code request failed: {e}");
@@ -311,21 +292,31 @@ pub(crate) async fn get_github_oauth_callback(
         cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE).unwrap_or_else(|| "/".to_owned());
 
     // Exchange the authorization code for an access token.
-    let client = reqwest::Client::new();
-    let token_response =
-        coder_auth::oauth_login::github_exchange_code(&client, github_config, &query.code)
-            .await
-            .map_err(|e| {
-                tracing::error!("GitHub code exchange failed: {e}");
-                AppError::from(StorageError::unavailable(e.to_string()))
-            })?;
+    let token_response = coder_auth::oauth_login::github_exchange_code(
+        &state.http_client,
+        github_config,
+        &query.code,
+    )
+    .await
+    .map_err(|e| {
+        tracing::error!("GitHub code exchange failed: {e}");
+        AppError::from(StorageError::unavailable(e.to_string()))
+    })?;
 
     let access_token = &token_response.access_token;
 
     // Fetch user profile and emails concurrently.
     let (gh_user, gh_emails) = tokio::try_join!(
-        coder_auth::oauth_login::github_fetch_user(&client, &github_config.api_url, access_token),
-        coder_auth::oauth_login::github_fetch_emails(&client, &github_config.api_url, access_token),
+        coder_auth::oauth_login::github_fetch_user(
+            &state.http_client,
+            &github_config.api_url,
+            access_token
+        ),
+        coder_auth::oauth_login::github_fetch_emails(
+            &state.http_client,
+            &github_config.api_url,
+            access_token
+        ),
     )
     .map_err(|e| {
         tracing::error!("GitHub API fetch failed: {e}");
@@ -333,17 +324,21 @@ pub(crate) async fn get_github_oauth_callback(
     })?;
 
     // Check organization/team membership if restrictions are configured.
+    // NOTE: The Go reference (coder/coderd/userauth.go) enforces org AND team
+    // checks sequentially — the user must pass the org check first, and then
+    // the team check only runs within matched orgs. We replicate that AND
+    // behavior here.
     if !github_config.allow_everyone
         && (!github_config.allowed_orgs.is_empty() || !github_config.allowed_teams.is_empty())
     {
         let (orgs, teams) = tokio::try_join!(
             coder_auth::oauth_login::github_fetch_orgs(
-                &client,
+                &state.http_client,
                 &github_config.api_url,
                 access_token
             ),
             coder_auth::oauth_login::github_fetch_teams(
-                &client,
+                &state.http_client,
                 &github_config.api_url,
                 access_token
             ),
@@ -368,13 +363,16 @@ pub(crate) async fn get_github_oauth_callback(
     }
 
     // Find the primary verified email.
-    let primary_email =
-        coder_auth::oauth_login::github_primary_email(&gh_emails).ok_or_else(|| {
+    let primary_email = match coder_auth::oauth_login::github_primary_email(&gh_emails) {
+        Some(email) => email,
+        None => {
             tracing::warn!("No verified email found for GitHub user {}", gh_user.login);
-            AppError::from(StorageError::unavailable(
-                "No verified email found on your GitHub account.",
-            ))
-        })?;
+            return Ok(redirect_to_login_response(
+                &uri,
+                "Your primary email must be verified on GitHub.",
+            ));
+        }
+    };
 
     let linked_id = coder_auth::oauth_login::github_linked_id(gh_user.id);
 
@@ -444,9 +442,11 @@ pub(crate) async fn get_github_oauth_callback(
     )
     .await;
 
+    let is_https = state.config.access_url.scheme() == "https";
     Ok(build_oauth_redirect_response(
         &session_token,
         &sanitize_redirect_uri(&redirect_uri),
+        is_https,
     ))
 }
 
@@ -503,13 +503,16 @@ pub(crate) async fn get_oidc_callback(
         cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE).unwrap_or_else(|| "/".to_owned());
 
     // Discover the OIDC endpoints.
-    let client = reqwest::Client::new();
-    let discovery = coder_auth::oauth_login::oidc_discover(&client, &oidc_config.issuer_url)
-        .await
-        .map_err(|e| {
-            tracing::error!("OIDC discovery failed: {e}");
-            AppError::from(StorageError::unavailable(e.to_string()))
-        })?;
+    // TODO(perf): Cache the OIDC discovery document instead of fetching it on
+    // every callback. The document rarely changes and fetching it adds latency
+    // to every login. Consider storing it in AppState with a TTL-based refresh.
+    let discovery =
+        coder_auth::oauth_login::oidc_discover(&state.http_client, &oidc_config.issuer_url)
+            .await
+            .map_err(|e| {
+                tracing::error!("OIDC discovery failed: {e}");
+                AppError::from(StorageError::unavailable(e.to_string()))
+            })?;
 
     // Build the callback redirect URI for the token exchange.
     let callback_redirect = format!(
@@ -519,7 +522,7 @@ pub(crate) async fn get_oidc_callback(
 
     // Exchange the authorization code for tokens.
     let token_response = coder_auth::oauth_login::oidc_exchange_code(
-        &client,
+        &state.http_client,
         oidc_config,
         &discovery.token_endpoint,
         &query.code,
@@ -551,12 +554,17 @@ pub(crate) async fn get_oidc_callback(
         })?;
 
     // Check email verification if required.
+    // When ignore_email_verified is false, only Some(true) passes.
+    // None (missing claim) and Some(false) are both treated as unverified.
     if !oidc_config.ignore_email_verified {
-        if let Some(false) = claims.email_verified {
-            return Ok(redirect_to_login_response(
-                &uri,
-                "Your email address has not been verified by the OIDC provider.",
-            ));
+        match claims.email_verified {
+            Some(true) => {} // verified, OK
+            _ => {
+                return Ok(redirect_to_login_response(
+                    &uri,
+                    "Your email address has not been verified by the OIDC provider.",
+                ));
+            }
         }
     }
 
@@ -590,10 +598,10 @@ pub(crate) async fn get_oidc_callback(
                 oauth_expiry: token_response
                     .expires_in
                     .map(|secs| {
-                        time::OffsetDateTime::now_utc()
+                        OffsetDateTime::now_utc()
                             + time::Duration::seconds(i64::try_from(secs).unwrap_or(3600))
                     })
-                    .unwrap_or_else(time::OffsetDateTime::now_utc),
+                    .unwrap_or_else(OffsetDateTime::now_utc),
                 claims: user_link_claims,
             };
             state
@@ -642,9 +650,11 @@ pub(crate) async fn get_oidc_callback(
     )
     .await;
 
+    let is_https = state.config.access_url.scheme() == "https";
     Ok(build_oauth_redirect_response(
         &session_token,
         &sanitize_redirect_uri(&redirect_uri),
+        is_https,
     ))
 }
 
@@ -653,46 +663,37 @@ pub(crate) async fn get_oidc_callback(
 // ---------------------------------------------------------------------------
 
 /// Finds an existing user by external linked ID or by email.
+///
+/// Uses targeted store queries instead of scanning all users (O(1) vs O(n×m)).
 async fn find_user_by_linked_id_or_email(
     state: &AppState,
     login_type: LoginType,
     linked_id: &str,
     email: &str,
 ) -> Result<Option<coder_core::UserRecord>, AppError> {
-    // First, try to find via user links across all users.
-    // We list all users and check their links. For scalability, a direct
-    // query method would be better, but we use the existing store API.
-    let (users, _count) = state
+    // First, try to find via the linked ID (most specific match).
+    if let Some(user) = state
         .store
-        .list_users(coder_core::UserListFilter::default())
+        .find_user_by_linked_id(login_type, linked_id)
         .await
-        .map_err(AppError::from)?;
-
-    for user in &users {
-        if user.deleted || user.is_system || user.status != UserStatus::Active {
-            continue;
+        .map_err(AppError::from)?
+    {
+        if !user.deleted && !user.is_system && user.status == UserStatus::Active {
+            return Ok(Some(user));
         }
-        let links = state
-            .store
-            .list_user_links(user.id)
-            .await
-            .map_err(AppError::from)?;
-        for link in &links {
-            if link.login_type == login_type && link.linked_id == *linked_id {
-                return Ok(Some(user.clone()));
-            }
-        }
+        // If the user was deleted/inactive, fall through to email lookup.
     }
 
-    // Fall back to email lookup.
-    for user in &users {
-        if user.email.eq_ignore_ascii_case(email)
-            && !user.deleted
-            && !user.is_system
-            && user.status == UserStatus::Active
-        {
-            return Ok(Some(user.clone()));
-        }
+    // Fall back to email lookup — only match users with the SAME login_type
+    // to prevent account takeover (e.g. OAuth user matching a password user
+    // by email).
+    if let Some(user) = state
+        .store
+        .find_active_user_by_email_and_login_type(email, login_type)
+        .await
+        .map_err(AppError::from)?
+    {
+        return Ok(Some(user));
     }
 
     Ok(None)
@@ -705,7 +706,7 @@ async fn create_oauth_user_and_link(
     email: &str,
     username: &str,
     name: &str,
-    avatar_url: &str,
+    _avatar_url: &str,
     login_type: LoginType,
     linked_id: &str,
     access_token: &str,
@@ -728,16 +729,28 @@ async fn create_oauth_user_and_link(
         organization_ids: org_ids,
     };
 
-    let user = state
-        .store
-        .create_user(create_input)
-        .await
-        .map_err(|e| match e {
-            coder_core::CreateUserStoreError::AlreadyExists => AppError::from(
-                StorageError::unavailable("A user with this email or username already exists."),
-            ),
-            coder_core::CreateUserStoreError::Storage(se) => AppError::from(se),
-        })?;
+    let user = match state.store.create_user(create_input).await {
+        Ok(user) => user,
+        Err(coder_core::CreateUserStoreError::AlreadyExists) => {
+            // Race condition: another concurrent OAuth callback created the same
+            // user between our lookup and this create call. Retry the lookup
+            // instead of returning a 503.
+            tracing::info!(
+                "User already exists (likely concurrent OAuth callback), retrying lookup"
+            );
+            match find_user_by_linked_id_or_email(state, login_type, linked_id, email).await? {
+                Some(user) => return Ok(user),
+                None => {
+                    return Err(AppError::from(StorageError::unavailable(
+                        "A user with this email or username already exists.",
+                    )));
+                }
+            }
+        }
+        Err(coder_core::CreateUserStoreError::Storage(se)) => {
+            return Err(AppError::from(se));
+        }
+    };
 
     // Generate and store a Git SSH key for the user.
     if let Err(e) = store_new_git_ssh_key(state, &user).await {
@@ -773,9 +786,14 @@ async fn create_oauth_user_and_link(
 }
 
 /// Builds an HTTP 303 redirect response with the session token cookie set.
-fn build_oauth_redirect_response(session_token: &str, redirect_path: &str) -> Response {
+fn build_oauth_redirect_response(
+    session_token: &str,
+    redirect_path: &str,
+    is_https: bool,
+) -> Response {
+    let secure_flag = if is_https { "; Secure" } else { "" };
     let cookie_value = format!(
-        "{}={session_token}; Path=/; HttpOnly; SameSite=Lax",
+        "{}={session_token}; Path=/; HttpOnly; SameSite=Lax{secure_flag}",
         coder_auth::SESSION_TOKEN_COOKIE
     );
     // Clear the OAuth state and redirect cookies.
