@@ -1782,34 +1782,43 @@ impl OAuth2ClientRegistrationRequest {
                 let hash = format!("{:x}", sha2::Sha256::digest(self.client_name.as_bytes()));
                 let hash_prefix = &hash[..8];
                 let max_prefix = 64 - 1 - hash_prefix.len();
-                return format!("{}-{}", &self.client_name[..max_prefix], hash_prefix);
+                let prefix: String = self
+                    .client_name
+                    .char_indices()
+                    .take_while(|&(i, _)| i < max_prefix)
+                    .map(|(_, c)| c)
+                    .collect();
+                return format!("{prefix}-{hash_prefix}");
             }
             return self.client_name.clone();
         }
         if !self.client_uri.is_empty() {
             if let Ok(uri) = url::Url::parse(&self.client_uri) {
                 if let Some(host) = uri.host_str() {
-                    let name = format!("Client ({host})");
-                    if name.len() > 64 {
-                        return name[..64].to_owned();
-                    }
-                    return name;
+                    return truncate_name_to_64(&format!("Client ({host})"));
                 }
             }
         }
         if let Some(first_uri) = self.redirect_uris.first() {
             if let Ok(uri) = url::Url::parse(first_uri) {
                 if let Some(host) = uri.host_str() {
-                    let name = format!("Client ({host})");
-                    if name.len() > 64 {
-                        return name[..64].to_owned();
-                    }
-                    return name;
+                    return truncate_name_to_64(&format!("Client ({host})"));
                 }
             }
         }
         "Dynamically Registered Client".to_owned()
     }
+}
+
+/// Truncate a name to at most 64 characters, respecting UTF-8 char boundaries.
+fn truncate_name_to_64(name: &str) -> String {
+    if name.len() <= 64 {
+        return name.to_owned();
+    }
+    name.char_indices()
+        .take_while(|&(i, _)| i < 64)
+        .map(|(_, c)| c)
+        .collect()
 }
 
 /// RFC 7591 Dynamic Client Registration Response.
