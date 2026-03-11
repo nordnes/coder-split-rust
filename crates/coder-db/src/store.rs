@@ -4859,6 +4859,12 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
+    // NOTE: The migration defines an `api_key_key_id` column on `chat_providers`
+    // for tracking which encryption key was used to encrypt the provider API key.
+    // We intentionally omit it from all queries because API-key encryption is not
+    // yet implemented. When encryption support is added, queries here must be
+    // updated to read/write `api_key_key_id`.
+
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
     async fn insert_chat_provider(
         &self,

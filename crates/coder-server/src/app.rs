@@ -485,6 +485,7 @@ pub fn build_router(
                     "/chats/model-configs/{modelConfig}",
                     patch(update_chat_model_config).delete(delete_chat_model_config),
                 )
+                // TODO: Add handler-level tests for chat CRUD, provider, and model-config routes
                 // Notifications domain
                 .route(
                     "/notifications/settings",
@@ -4417,6 +4418,11 @@ mod tests {
             Ok(config.clone())
         }
 
+        // NOTE: FakeStore performs a hard delete (HashMap::remove) while
+        // PostgresStore does a soft delete (sets deleted = true, deleted_at = now()).
+        // FakeStore also does not filter by a `deleted` flag in list queries.
+        // This divergence is acceptable for unit tests but should be kept in mind
+        // when writing integration tests that rely on soft-delete semantics.
         async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
             self.chat_model_configs
                 .lock()

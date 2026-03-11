@@ -764,7 +764,15 @@ pub(crate) async fn patch_chat_message(
         content: content_value,
     };
 
-    let message = state.store.update_chat_message_content(input).await?;
+    let message = match state.store.update_chat_message_content(input).await {
+        Ok(m) => m,
+        Err(StorageError::Unavailable { .. }) => {
+            return Ok(not_found_response(
+                "Chat message not found or not editable.",
+            ));
+        }
+        Err(e) => return Err(e.into()),
+    };
     Ok(Json(chat_message_response_from_record(message)?).into_response())
 }
 
@@ -787,6 +795,17 @@ pub(crate) async fn delete_chat_queued_message(
 
     if chat.owner_id != context.user.id {
         return Ok(not_found_response("Chat not found."));
+    }
+
+    if queued_message_id <= 0 {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid queued message ID.",
+                "Queued message ID must be a positive integer.",
+            )),
+        )
+            .into_response());
     }
 
     state
@@ -817,10 +836,17 @@ pub(crate) async fn promote_chat_queued_message(
         return Ok(not_found_response("Chat not found."));
     }
 
-    let promoted = state
+    let promoted = match state
         .store
         .promote_chat_queued_message(chat_id, queued_message_id)
-        .await?;
+        .await
+    {
+        Ok(record) => record,
+        Err(StorageError::Unavailable { .. }) => {
+            return Ok(not_found_response("Queued message not found."));
+        }
+        Err(e) => return Err(e.into()),
+    };
     Ok(Json(chat_queued_message_response_from_record(promoted)?).into_response())
 }
 
@@ -853,8 +879,18 @@ fn chat_provider_config_response_from_record(
 fn chat_model_config_response_from_record(
     record: ChatModelConfigRecord,
 ) -> ChatModelConfigResponse {
-    let model_config: Option<ChatModelCallConfig> = serde_json::from_value(record.options.clone())
-        .ok()
+    let model_config: Option<ChatModelCallConfig> =
+        match serde_json::from_value::<ChatModelCallConfig>(record.options.clone()) {
+            Ok(cfg) => Some(cfg),
+            Err(e) => {
+                tracing::warn!(
+                    config_id = %record.id,
+                    error = %e,
+                    "failed to deserialize chat model config options"
+                );
+                None
+            }
+        }
         .and_then(|cfg: ChatModelCallConfig| {
             if cfg.max_output_tokens.is_none()
                 && cfg.temperature.is_none()
@@ -956,6 +992,28 @@ pub(crate) async fn create_chat_provider(
             Json(ApiResponse::error(
                 "Invalid provider.",
                 "Provider must not be empty.",
+            )),
+        )
+            .into_response());
+    }
+
+    // Validate provider against the allowed set (matches DB CHECK constraint).
+    const ALLOWED_PROVIDERS: &[&str] = &[
+        "anthropic",
+        "azure",
+        "bedrock",
+        "google",
+        "openai",
+        "openai-compat",
+        "openrouter",
+        "vercel",
+    ];
+    if !ALLOWED_PROVIDERS.contains(&provider.as_str()) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid provider.",
+                format!("Provider must be one of: {}.", ALLOWED_PROVIDERS.join(", ")),
             )),
         )
             .into_response());
@@ -1186,6 +1244,16 @@ pub(crate) async fn create_chat_model_config(
     };
 
     let compression_threshold = request.compression_threshold.unwrap_or(80);
+    if !(0..=100).contains(&compression_threshold) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid compression threshold.",
+                "compression_threshold must be between 0 and 100.",
+            )),
+        )
+            .into_response());
+    }
 
     let options = match &request.model_config {
         Some(cfg) => {
@@ -1220,9 +1288,20 @@ pub(crate) async fn create_chat_model_config(
         created_by: Some(context.user.id),
     };
 
-    let record = state.store.insert_chat_model_config(input).await?;
+    let record = match state.store.insert_chat_model_config(input).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Recover: re-establish a default since we may have already unset them.
+            let _recovery = state.store.ensure_default_chat_model_config().await;
+            return Err(e.into());
+        }
+    };
     state.store.ensure_default_chat_model_config().await?;
 
+    // NOTE: The `record` returned by insert may have a stale `is_default`
+    // value if `ensure_default_chat_model_config` promoted this record to
+    // the default after insert. This matches the Go reference behaviour
+    // which also returns the record from the INSERT without re-fetching.
     Ok((
         StatusCode::CREATED,
         Json(chat_model_config_response_from_record(record)),
@@ -1320,6 +1399,16 @@ pub(crate) async fn update_chat_model_config(
     let compression_threshold = request
         .compression_threshold
         .unwrap_or(existing.compression_threshold);
+    if !(0..=100).contains(&compression_threshold) {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid compression threshold.",
+                "compression_threshold must be between 0 and 100.",
+            )),
+        )
+            .into_response());
+    }
 
     let options = match &request.model_config {
         Some(cfg) => {
@@ -1346,7 +1435,14 @@ pub(crate) async fn update_chat_model_config(
         updated_by: Some(context.user.id),
     };
 
-    let record = state.store.update_chat_model_config(input).await?;
+    let record = match state.store.update_chat_model_config(input).await {
+        Ok(r) => r,
+        Err(e) => {
+            // Recover: re-establish a default since we may have already unset them.
+            let _recovery = state.store.ensure_default_chat_model_config().await;
+            return Err(e.into());
+        }
+    };
     state.store.ensure_default_chat_model_config().await?;
 
     Ok(Json(chat_model_config_response_from_record(record)).into_response())
