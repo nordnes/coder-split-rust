@@ -103,6 +103,7 @@ pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod chats;
 pub(crate) mod deployment;
+pub(crate) mod derp;
 pub(crate) mod external_auth;
 pub(crate) mod files;
 pub(crate) mod health;
