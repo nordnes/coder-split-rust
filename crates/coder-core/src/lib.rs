@@ -73,8 +73,8 @@ pub use api::{
 };
 pub use build_info::BuildMetadata;
 pub use config::{
-    CorsConfig, DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, PublicDatabaseConfig,
-    PublicDeploymentConfig, ServerConfig, SshConfig,
+    CorsConfig, DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, OtelConfig,
+    PublicDatabaseConfig, PublicDeploymentConfig, ServerConfig, SshConfig,
 };
 pub use identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,

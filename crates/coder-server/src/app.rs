@@ -61,8 +61,8 @@ use crate::handlers::users::*;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
-    build_cors_layer, csp_middleware, csrf_middleware, hsts_middleware, prometheus_middleware,
-    real_ip_middleware,
+    build_cors_layer, csp_middleware, csrf_middleware, hsts_middleware,
+    otel_trace_context_middleware, prometheus_middleware, real_ip_middleware,
 };
 
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
@@ -235,7 +235,7 @@ pub fn build_router(
 ) -> Router {
     let request_id_header = HeaderName::from_static("x-request-id");
 
-    Router::new()
+    let router = Router::new()
         .route("/", get(server_root))
         .route("/healthz", get(healthz))
         .route("/latency-check", get(latency_check))
@@ -860,8 +860,22 @@ pub fn build_router(
         )
         .route("/oauth2/tokens", post(post_oauth2_token))
         // route_layer runs *after* routing so MatchedPath is populated.
-        .route_layer(middleware::from_fn(prometheus_middleware))
-        .layer(middleware::from_fn_with_state(rate_limit_state, crate::rate_limit::rate_limit_middleware))
+        .route_layer(middleware::from_fn(prometheus_middleware));
+
+    // Only add the OTel trace-context propagation middleware when OTel is
+    // enabled.  This avoids any per-request overhead (header extraction,
+    // propagator calls) in the default disabled configuration.
+    let router = if state.config.otel.enabled {
+        router.layer(middleware::from_fn(otel_trace_context_middleware))
+    } else {
+        router
+    };
+
+    router
+        .layer(middleware::from_fn_with_state(
+            rate_limit_state,
+            crate::rate_limit::rate_limit_middleware,
+        ))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(build_cors_layer(&state.config.cors))
         .layer(middleware::from_fn(csp_middleware))
@@ -7139,6 +7153,7 @@ mod tests {
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
+            otel: coder_core::config::OtelConfig::default(),
             cors: coder_core::config::CorsConfig::default(),
         })
     }
