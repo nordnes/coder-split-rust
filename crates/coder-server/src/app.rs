@@ -7638,7 +7638,7 @@ pub(crate) mod tests {
                 .licenses
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let next_id = licenses.len() as i32 + 1;
+            let next_id = licenses.iter().map(|l| l.id).max().unwrap_or(0) + 1;
             let record = LicenseRecord {
                 id: next_id,
                 uuid: Uuid::new_v4(),
