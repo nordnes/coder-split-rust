@@ -1,7 +1,7 @@
 //! Postgres-backed persistence for the Rust backend rewrite.
 #![forbid(unsafe_code)]
 
-pub mod migrations;
+pub(crate) mod migrations;
 pub mod pubsub;
 mod store;
 
