@@ -1354,15 +1354,20 @@ pub(crate) async fn get_workspace_agent_external_auth(
         .map(|l| l.authenticated && l.validate_error.is_empty())
         .unwrap_or(false);
 
-    let resp = coder_core::ExternalAuthResponse {
+    // Build the agent-facing response (WorkspaceAgentExternalAuthResponse),
+    // NOT the user-facing ExternalAuthResponse.  Agents need the access_token
+    // and credential fields to perform git operations.
+    let resp = coder_core::api::WorkspaceAgentExternalAuthResponse {
+        access_token: link
+            .as_ref()
+            .filter(|_| authenticated)
+            .map(|l| l.access_token.clone())
+            .unwrap_or_default(),
+        url: provider_config.token_url.clone(),
+        auth_type: provider_config.provider_type.clone(),
         authenticated,
-        device: provider_config.device,
-        display_name: provider_config.display_name.clone(),
-        supports_revocation: provider_config.supports_revocation,
-        user: None,
-        app_installable: false,
-        installations: Vec::new(),
-        app_install_url: String::new(),
+        username: None,
+        password: None,
     };
 
     Ok((StatusCode::OK, Json(resp)).into_response())
