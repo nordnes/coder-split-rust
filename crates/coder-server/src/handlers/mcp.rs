@@ -59,7 +59,7 @@ fn dispatch_mcp_request(
     tool_context: &ToolContext,
 ) -> JsonRpcResponse {
     match request.method.as_str() {
-        "initialize" => handle_initialize(request),
+        "initialize" => handle_initialize(state, request),
         "initialized" => {
             // Client acknowledgement — no response needed for notifications,
             // but since we're in request-response HTTP mode, return success.
@@ -79,7 +79,7 @@ fn dispatch_mcp_request(
 }
 
 /// Handles the MCP `initialize` handshake.
-fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
+fn handle_initialize(state: &AppState, request: &JsonRpcRequest) -> JsonRpcResponse {
     let result = McpInitializeResult {
         protocol_version: "2024-11-05".to_owned(),
         capabilities: McpCapabilities {
@@ -89,7 +89,7 @@ fn handle_initialize(request: &JsonRpcRequest) -> JsonRpcResponse {
         },
         server_info: McpServerInfo {
             name: "coder".to_owned(),
-            version: env!("CARGO_PKG_VERSION").to_owned(),
+            version: state.build_metadata.version.clone(),
         },
     };
 
