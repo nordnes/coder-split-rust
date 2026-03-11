@@ -36,6 +36,8 @@ pub struct ServerConfig {
     pub max_concurrent_requests: usize,
     /// Maximum number of concurrent database queries (semaphore permits).
     pub max_concurrent_db_queries: usize,
+    /// Rate-limiting configuration for the HTTP layer.
+    pub rate_limit: RateLimitConfig,
 }
 
 impl ServerConfig {
@@ -171,6 +173,33 @@ impl ServerConfig {
                 description: "Maximum number of concurrent database queries.",
             },
         ]
+    }
+}
+
+/// Rate-limiting configuration for the HTTP layer.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RateLimitConfig {
+    /// Whether rate limiting is active.
+    pub enabled: bool,
+    /// Maximum login attempts per minute per IP address.
+    pub login_per_minute: u32,
+    /// Maximum API requests per minute for authenticated users.
+    pub api_per_minute: u32,
+    /// Maximum API requests per minute for unauthenticated IPs.
+    pub unauthenticated_per_minute: u32,
+    /// Maximum audit endpoint requests per minute per user.
+    pub audit_per_minute: u32,
+}
+
+impl Default for RateLimitConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            login_per_minute: 5,
+            api_per_minute: 600,
+            unauthenticated_per_minute: 60,
+            audit_per_minute: 30,
+        }
     }
 }
 

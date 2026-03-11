@@ -228,7 +228,10 @@ struct CspViolationReport {
 }
 
 /// Builds the Axum router for the current Rust backend slice.
-pub fn build_router(state: AppState) -> Router {
+pub fn build_router(
+    state: AppState,
+    rate_limit_state: Option<Arc<crate::rate_limit::RateLimitState>>,
+) -> Router {
     let request_id_header = HeaderName::from_static("x-request-id");
 
     Router::new()
@@ -857,6 +860,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/oauth2/tokens", post(post_oauth2_token))
         // route_layer runs *after* routing so MatchedPath is populated.
         .route_layer(middleware::from_fn(prometheus_middleware))
+        .layer(middleware::from_fn_with_state(rate_limit_state, crate::rate_limit::rate_limit_middleware))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(middleware::from_fn(csp_middleware))
         .layer(middleware::from_fn(hsts_middleware))
@@ -7132,6 +7136,7 @@ mod tests {
             audit_batch_max_size: 50,
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
+            rate_limit: coder_core::config::RateLimitConfig::default(),
         })
     }
 
@@ -7322,7 +7327,7 @@ mod tests {
 
     #[tokio::test]
     async fn root_endpoint_returns_slim_build_response() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/")?).await?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -7333,7 +7338,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_root_returns_wave_message() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2")?).await?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -7347,7 +7352,7 @@ mod tests {
 
     #[tokio::test]
     async fn updatecheck_returns_current_build_metadata() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/updatecheck")?).await?;
 
         assert_eq!(response.status(), StatusCode::OK);
@@ -7366,7 +7371,7 @@ mod tests {
 
     #[tokio::test]
     async fn csp_reports_require_auth_and_return_ok() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauthorized = call(
             app.clone(),
@@ -7399,7 +7404,7 @@ mod tests {
 
     #[tokio::test]
     async fn csp_reports_reject_invalid_json() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let request = Request::builder()
             .method(Method::POST)
@@ -7420,7 +7425,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_script_returns_rendered_shell_script() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::GET, "/api/v2/init-script/linux/amd64")?,
@@ -7449,7 +7454,7 @@ mod tests {
 
     #[tokio::test]
     async fn init_script_rejects_unknown_targets() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::GET, "/api/v2/init-script/plan9/amd64")?,
@@ -7468,7 +7473,7 @@ mod tests {
     #[tokio::test]
     async fn first_user_endpoint_returns_404_and_build_version_header_when_missing()
     -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/users/first")?).await?;
 
         assert_eq!(response.status(), StatusCode::NOT_FOUND);
@@ -7484,7 +7489,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_first_user_then_login_and_fetch_me() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let user_response = call(
@@ -7508,7 +7513,7 @@ mod tests {
     #[tokio::test]
     async fn auth_scopes_and_experiments_routes_return_expected_defaults()
     -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let scopes_response =
@@ -7555,7 +7560,7 @@ mod tests {
     #[tokio::test]
     async fn external_auth_and_debug_routes_return_current_fallbacks() -> Result<(), Box<dyn Error>>
     {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let list_response = call(
@@ -7644,7 +7649,7 @@ mod tests {
             code_challenge_methods_supported: Vec::new(),
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         store
@@ -7782,7 +7787,7 @@ mod tests {
     async fn deployment_stats_reflect_seeded_workspace_and_agent_data() -> Result<(), Box<dyn Error>>
     {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let now = OffsetDateTime::now_utc();
@@ -7965,7 +7970,7 @@ mod tests {
             })
             .await?;
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -8079,7 +8084,7 @@ mod tests {
             client_secret: "client-secret".to_owned(),
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         store
@@ -8213,7 +8218,7 @@ mod tests {
             client_secret: "client-secret".to_owned(),
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let callback_response = call(
@@ -8318,7 +8323,7 @@ mod tests {
             scopes: vec!["read_api".to_owned()],
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let device_response = call(
@@ -8374,7 +8379,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_list_users_organizations_and_members() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let users_response = call(
@@ -8410,7 +8415,7 @@ mod tests {
 
     #[tokio::test]
     async fn token_api_key_lifecycle_and_logout_work() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_token_response = call(
@@ -8458,7 +8463,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_create_users_and_manage_site_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -8573,7 +8578,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_list_and_update_organization_member_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -8659,7 +8664,7 @@ mod tests {
 
     #[tokio::test]
     async fn actor_cannot_mutate_their_own_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let site_roles_response = call(
@@ -8704,7 +8709,7 @@ mod tests {
 
     #[tokio::test]
     async fn non_owner_member_is_rejected_by_rbac() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let owner_session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &owner_session_token).await?;
 
@@ -8793,7 +8798,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_get_paginated_members_and_self_login_type() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -8870,7 +8875,7 @@ mod tests {
 
     #[tokio::test]
     async fn profile_status_and_settings_flows_work() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let owner_session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &owner_session_token).await?;
 
@@ -9060,7 +9065,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_password_and_change_password_work() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let owner_session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &owner_session_token).await?;
 
@@ -9201,7 +9206,7 @@ mod tests {
     #[tokio::test]
     async fn otp_request_and_reset_work() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let owner_session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &owner_session_token).await?;
 
@@ -9301,7 +9306,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth_userauth_surfaces_return_disabled() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let github_device_response = call(
@@ -9344,7 +9349,7 @@ mod tests {
 
     #[tokio::test]
     async fn misc_routes_return_expected_stubs_and_status_codes() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -9713,7 +9718,7 @@ mod tests {
 
     #[tokio::test]
     async fn insights_daus_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // 401 – unauthenticated
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/insights/daus")?).await?;
@@ -9738,7 +9743,7 @@ mod tests {
 
     #[tokio::test]
     async fn insights_templates_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(
             app.clone(),
@@ -9769,7 +9774,7 @@ mod tests {
     #[tokio::test]
     async fn insights_templates_sections_filter_strips_unrequested_fields()
     -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Request only "report" section – interval_reports should be stripped
@@ -9814,7 +9819,7 @@ mod tests {
 
     #[tokio::test]
     async fn insights_user_activity_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(
             app.clone(),
@@ -9851,7 +9856,7 @@ mod tests {
 
     #[tokio::test]
     async fn insights_user_latency_requires_auth_and_returns_stub() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(
             app.clone(),
@@ -9882,7 +9887,7 @@ mod tests {
     #[tokio::test]
     async fn insights_user_status_counts_requires_auth_and_returns_stub()
     -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(
             app.clone(),
@@ -9923,7 +9928,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_coordinator_requires_auth_and_returns_html() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(
             app.clone(),
@@ -9950,7 +9955,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_tailnet_requires_auth_and_returns_json() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/tailnet")?).await?;
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
@@ -9972,7 +9977,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_derp_traffic_requires_auth_and_returns_json() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(
             app.clone(),
@@ -9998,7 +10003,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_expvar_requires_auth_and_returns_json() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/expvar")?).await?;
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
@@ -10037,7 +10042,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_pprof_requires_auth_and_returns_info() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/pprof")?).await?;
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
@@ -10075,7 +10080,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_websocket_rejects_non_upgrade_request() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // A plain GET (no WebSocket upgrade headers) should be rejected by
         // the WebSocketUpgrade extractor with 400 Bad Request.
@@ -10140,7 +10145,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_metrics_requires_auth_and_returns_prometheus() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/debug/metrics")?).await?;
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
@@ -10182,7 +10187,7 @@ mod tests {
 
     #[tokio::test]
     async fn derp_map_updates_requires_websocket_upgrade() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // A plain GET without WebSocket upgrade headers should be rejected
         // by the WebSocketUpgrade extractor with 400 Bad Request.
@@ -10193,7 +10198,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_regions_requires_auth_and_returns_regions() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/regions")?).await?;
         assert_eq!(unauth.status(), StatusCode::UNAUTHORIZED);
@@ -10216,7 +10221,7 @@ mod tests {
 
     #[tokio::test]
     async fn tailnet_rpc_conn_requires_auth_and_websocket() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // Without auth, plain GET should return 401 (auth checked before WS upgrade).
         let unauth = call(app.clone(), request(Method::GET, "/api/v2/tailnet")?).await?;
@@ -10313,7 +10318,7 @@ mod tests {
             .insert_agent(agent)
             .map_err(|e| format!("insert_agent failed: {e}"))?;
 
-        let app = build_router(state.clone());
+        let app = build_router(state.clone(), None);
 
         // First, verify that an unauthenticated WS upgrade request is
         // rejected with 401 -- this proves the handler body runs and the
@@ -10367,7 +10372,7 @@ mod tests {
     /// is accepted and results in 101 (not 401).
     #[tokio::test]
     async fn test_tailnet_session_auth_registers_as_client() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Authenticate with a regular session token AND include WS upgrade
@@ -10462,7 +10467,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_custom_notification_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let payload = coder_core::CustomNotificationRequest {
             content: Some(coder_core::CustomNotificationContent {
@@ -10482,7 +10487,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_custom_notification_validates_content() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Missing content field
@@ -10562,7 +10567,7 @@ mod tests {
 
     #[tokio::test]
     async fn insights_templates_returns_400_for_missing_timestamps() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Missing both start_time and end_time
@@ -10602,7 +10607,7 @@ mod tests {
     #[tokio::test]
     async fn insights_user_activity_returns_400_for_missing_timestamps()
     -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let resp = call(
@@ -10621,7 +10626,7 @@ mod tests {
     #[tokio::test]
     async fn insights_user_latency_returns_400_for_missing_timestamps() -> Result<(), Box<dyn Error>>
     {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let resp = call(
@@ -10635,7 +10640,7 @@ mod tests {
 
     #[tokio::test]
     async fn insights_daus_returns_400_for_invalid_tz_offset() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let resp = call(
@@ -10654,7 +10659,7 @@ mod tests {
     #[tokio::test]
     async fn insights_user_status_counts_returns_400_for_invalid_tz_offset()
     -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let resp = call(
@@ -10713,7 +10718,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_create_and_get() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -10786,7 +10791,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_patch_preserves_fields() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, _org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -10849,7 +10854,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, _org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -10886,7 +10891,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_versions_list() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, _org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -10915,7 +10920,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // Unauthenticated requests to template endpoints should return 401.
         let list_response = call(
@@ -10950,7 +10955,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_not_found() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let missing_id = Uuid::from_u128(999);
@@ -10998,7 +11003,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_all_templates_returns_created_template() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         // GET /templates should return a non-empty array containing the template.
@@ -11082,7 +11087,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_all_template_examples_returns_starter_templates() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // GET /templates/examples should return 200 with 17 starter templates.
@@ -11119,7 +11124,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_lifecycle_create_list_get_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a task
@@ -11200,7 +11205,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_get_by_name() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_response = call(
@@ -11243,7 +11248,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_patch_input_requires_paused() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_response = call(
@@ -11282,7 +11287,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_get_logs_empty() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_response = call(
@@ -11322,7 +11327,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_send_requires_active() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_response = call(
@@ -11363,7 +11368,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_pause_resume_requires_workspace() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_response = call(
@@ -11413,7 +11418,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_log_snapshot_roundtrip() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_response = call(
@@ -11469,7 +11474,7 @@ mod tests {
     #[tokio::test]
     async fn task_send_input_active_task() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a task
@@ -11517,7 +11522,7 @@ mod tests {
     #[tokio::test]
     async fn task_pause_with_workspace() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a task
@@ -11569,7 +11574,7 @@ mod tests {
     #[tokio::test]
     async fn task_resume_with_workspace() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a task
@@ -11621,7 +11626,7 @@ mod tests {
     #[tokio::test]
     async fn task_patch_input_when_paused() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a task
@@ -11686,7 +11691,7 @@ mod tests {
     #[tokio::test]
     async fn task_full_lifecycle_with_workspace() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // 1. Create
@@ -11806,7 +11811,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_not_found_returns_404() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let fake_id = Uuid::new_v4();
 
@@ -11837,7 +11842,7 @@ mod tests {
 
     #[tokio::test]
     async fn task_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let list_response = call(app.clone(), request(Method::GET, "/api/v2/tasks")?).await?;
         assert_eq!(list_response.status(), StatusCode::UNAUTHORIZED);
@@ -11866,7 +11871,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_lifecycle_create_list_get_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a chat
@@ -11936,7 +11941,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_post_message() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create chat first
@@ -11983,7 +11988,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_create_with_text_content() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a chat with actual text content
@@ -12057,7 +12062,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_post_message_with_text_content() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a chat first
@@ -12147,7 +12152,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_full_lifecycle_with_content() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // 1. Create chat with content
@@ -12320,7 +12325,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_not_found_returns_404() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let fake_id = Uuid::new_v4();
 
@@ -12350,7 +12355,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let list_response = call(app.clone(), request(Method::GET, "/api/v2/chats")?).await?;
         assert_eq!(list_response.status(), StatusCode::UNAUTHORIZED);
@@ -12378,7 +12383,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_file_upload_and_download() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let org_id = Uuid::new_v4();
@@ -12438,7 +12443,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_file_upload_rejects_unsupported_mime() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let org_id = Uuid::new_v4();
 
@@ -12457,7 +12462,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_file_upload_requires_organization() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let upload_request = Request::builder()
@@ -12474,7 +12479,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_file_not_found_returns_404() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let fake_id = Uuid::new_v4();
 
@@ -12493,7 +12498,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_file_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let upload_response = call(
             app.clone(),
@@ -12524,7 +12529,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_archive_and_unarchive() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a chat first
@@ -12602,7 +12607,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_archive_not_found() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let fake_id = Uuid::new_v4();
 
@@ -12632,7 +12637,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_archive_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let fake_id = Uuid::new_v4();
 
         let archive_response = call(
@@ -12657,7 +12662,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_git_watch_requires_websocket_upgrade() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a chat
@@ -12697,7 +12702,7 @@ mod tests {
 
     #[tokio::test]
     async fn chat_git_watch_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let fake_id = Uuid::new_v4();
 
         // Without WS upgrade headers the WebSocketUpgrade extractor rejects
@@ -12722,7 +12727,7 @@ mod tests {
 
     #[tokio::test]
     async fn notifications_settings_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/notifications/settings")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -12730,7 +12735,7 @@ mod tests {
 
     #[tokio::test]
     async fn notifications_settings_get_and_put() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // GET default settings
@@ -12764,7 +12769,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_system_templates_list() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12782,7 +12787,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_custom_templates_list() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12800,7 +12805,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_dispatch_methods() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12818,7 +12823,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_test_endpoint() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12832,7 +12837,7 @@ mod tests {
 
     #[tokio::test]
     async fn user_notification_preferences_get() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12850,7 +12855,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbox_notifications_list() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12864,7 +12869,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbox_notifications_invalid_uuid_returns_400() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12882,7 +12887,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbox_notifications_invalid_read_status_returns_400() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12900,7 +12905,7 @@ mod tests {
 
     #[tokio::test]
     async fn inbox_mark_all_read() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12918,7 +12923,7 @@ mod tests {
 
     #[tokio::test]
     async fn webpush_subscription_lifecycle() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create subscription
@@ -12972,7 +12977,7 @@ mod tests {
 
     #[tokio::test]
     async fn webpush_test_endpoint() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -12994,7 +12999,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_upload_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let req = Request::builder()
             .method(Method::POST)
             .uri("/api/v2/files")
@@ -13007,7 +13012,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_upload_rejects_unsupported_content_type() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let req = Request::builder()
             .method(Method::POST)
@@ -13022,7 +13027,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_upload_and_download_round_trip() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let payload = b"hello tar world".to_vec();
@@ -13063,7 +13068,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_upload_duplicate_returns_existing_id() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let payload = b"duplicate content".to_vec();
@@ -13103,7 +13108,7 @@ mod tests {
 
     #[tokio::test]
     async fn file_download_not_found() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let random_id = Uuid::new_v4();
         let req = authenticated_request(
@@ -13122,7 +13127,7 @@ mod tests {
 
     #[tokio::test]
     async fn csp_header_present_on_responses() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/")?).await?;
         let csp = response
             .headers()
@@ -13138,7 +13143,7 @@ mod tests {
 
     #[tokio::test]
     async fn hsts_header_present_when_https() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let req = Request::builder()
             .method(Method::GET)
             .uri("/")
@@ -13160,7 +13165,7 @@ mod tests {
 
     #[tokio::test]
     async fn hsts_header_absent_when_http() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/")?).await?;
         let hsts = response.headers().get("strict-transport-security");
         assert!(hsts.is_none(), "HSTS header should not be present for HTTP");
@@ -13169,7 +13174,7 @@ mod tests {
 
     #[tokio::test]
     async fn csrf_rejects_mutating_cookie_request_without_token() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         // Use a non-exempt path so the CSRF middleware actually fires.
         let req = request_with_cookies(
             Method::POST,
@@ -13183,7 +13188,7 @@ mod tests {
 
     #[tokio::test]
     async fn csrf_allows_get_with_cookies() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let req = request_with_cookies(Method::GET, "/", &[("coder_session_token", "fake")])?;
         let response = call(app, req).await?;
         // GET requests should not be blocked by CSRF middleware
@@ -13193,7 +13198,7 @@ mod tests {
 
     #[tokio::test]
     async fn csrf_allows_mutating_request_with_token() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let req = Request::builder()
             .method(Method::POST)
             .uri("/api/v2/users")
@@ -13209,7 +13214,7 @@ mod tests {
 
     #[tokio::test]
     async fn csrf_exempts_login_endpoint() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         // Login is exempt: even with a cookie and no CSRF token the
         // middleware must not return 403.
         let req = request_with_cookies(
@@ -13224,7 +13229,7 @@ mod tests {
 
     #[tokio::test]
     async fn csrf_exempts_csp_reports_endpoint() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let req = request_with_cookies(
             Method::POST,
             "/api/v2/csp/reports",
@@ -13318,7 +13323,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_returns_agent() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13346,7 +13351,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13366,7 +13371,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_unauthorized() -> Result<(), Box<dyn Error>> {
         let state = test_state(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let agent_id = Uuid::new_v4();
         let response = call(
@@ -13381,7 +13386,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_connection_returns_info() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13416,7 +13421,7 @@ mod tests {
     async fn get_workspace_agents_connection_info_returns_global_info() -> Result<(), Box<dyn Error>>
     {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let response = call(
@@ -13436,7 +13441,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_containers_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13483,7 +13488,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_containers_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13503,7 +13508,7 @@ mod tests {
     #[tokio::test]
     async fn post_recreate_devcontainer_requires_connected_agent() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13538,7 +13543,7 @@ mod tests {
     async fn post_recreate_devcontainer_connected_but_no_provider_returns_not_found()
     -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13565,7 +13570,7 @@ mod tests {
     #[tokio::test]
     async fn delete_devcontainer_requires_connected_agent() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13598,7 +13603,7 @@ mod tests {
     async fn delete_devcontainer_connected_but_no_provider_returns_not_found()
     -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13623,7 +13628,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_listening_ports_returns_empty() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13651,7 +13656,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_listening_ports_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13671,7 +13676,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_logs_returns_logs() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13714,7 +13719,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_logs_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13734,7 +13739,7 @@ mod tests {
     #[tokio::test]
     async fn deprecated_startup_logs_returns_logs() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13778,7 +13783,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_watch_metadata_returns_metadata() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13825,7 +13830,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_watch_metadata_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13859,7 +13864,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_coordinate_rejects_non_ws() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13888,7 +13893,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_coordinate_ws_upgrade() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13916,7 +13921,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_pty_rejects_non_ws() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13943,7 +13948,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_pty_ws_upgrade() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13966,7 +13971,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_containers_watch_rejects_non_ws() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -13993,7 +13998,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_containers_watch_ws_upgrade() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -14019,7 +14024,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_watch_metadata_ws_rejects_non_ws() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -14046,7 +14051,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_agent_watch_metadata_ws_upgrade() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -14110,7 +14115,7 @@ mod tests {
         let (state, store) = test_state_with_store(true)?;
         let agent_id = Uuid::new_v4();
         store.insert_agent(make_connected_agent(agent_id))?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app).await?;
 
         let url = ws_url(
@@ -14153,7 +14158,7 @@ mod tests {
                 subagent_id: None,
             });
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
         let (base_url, _handle) = spawn_test_server(app).await?;
 
@@ -14209,7 +14214,7 @@ mod tests {
         let (state, store) = test_state_with_store(true)?;
         let agent_id = Uuid::new_v4();
         store.insert_agent(make_connected_agent(agent_id))?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app).await?;
 
         let url = ws_url(
@@ -14238,7 +14243,7 @@ mod tests {
         let coordinator = state.coordinator.clone();
         let agent_id = Uuid::new_v4();
         store.insert_agent(make_connected_agent(agent_id))?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
         let (base_url, _handle) = spawn_test_server(app).await?;
 
@@ -14295,7 +14300,7 @@ mod tests {
         let (state, store) = test_state_with_store(true)?;
         let agent_id = Uuid::new_v4();
         store.insert_agent(make_connected_agent(agent_id))?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app).await?;
 
         let url = ws_url(
@@ -14358,7 +14363,7 @@ mod tests {
         });
         state.agent_provider.register_agent(agent_id, conn).await;
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
         let (base_url, _handle) = spawn_test_server(app).await?;
 
@@ -14408,7 +14413,7 @@ mod tests {
         let (state, store) = test_state_with_store(true)?;
         let agent_id = Uuid::new_v4();
         store.insert_agent(make_connected_agent(agent_id))?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app).await?;
 
         let url = ws_url(
@@ -14454,7 +14459,7 @@ mod tests {
                 display_order: 0,
             });
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
         let (base_url, _handle) = spawn_test_server(app).await?;
 
@@ -14504,7 +14509,7 @@ mod tests {
 
     #[tokio::test]
     async fn dynamic_parameters_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let version_id = Uuid::new_v4();
         let response = call(
             app,
@@ -14521,7 +14526,7 @@ mod tests {
     #[tokio::test]
     async fn dynamic_parameters_returns_ok_for_existing_version() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -14599,7 +14604,7 @@ mod tests {
     #[tokio::test]
     async fn dynamic_parameters_evaluate_returns_ok() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -14676,7 +14681,7 @@ mod tests {
 
     #[tokio::test]
     async fn matched_provisioners_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let version_id = Uuid::new_v4();
         let job_id = Uuid::new_v4();
         let response = call(
@@ -14695,7 +14700,7 @@ mod tests {
 
     #[tokio::test]
     async fn archive_template_versions_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let template_id = Uuid::new_v4();
         let response = call(
             app,
@@ -14712,7 +14717,7 @@ mod tests {
 
     #[tokio::test]
     async fn patch_active_template_version_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let template_id = Uuid::new_v4();
         let response = call(
             app,
@@ -14876,7 +14881,7 @@ mod tests {
     #[tokio::test]
     async fn agent_endpoints_reject_unauthenticated() -> Result<(), Box<dyn Error>> {
         let state = test_state(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         // All agent endpoints should return 401 without a valid token.
         // Note: /rpc requires a WebSocket upgrade and is tested separately.
@@ -14923,7 +14928,7 @@ mod tests {
                 },
             );
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let req = agent_request(
             Method::GET,
             "/api/v2/workspaceagents/me/gitsshkey",
@@ -14942,7 +14947,7 @@ mod tests {
     #[tokio::test]
     async fn agent_log_source_create() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let payload = json!({
             "display_name": "Startup Script",
@@ -14968,7 +14973,7 @@ mod tests {
     #[tokio::test]
     async fn agent_log_source_validation() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         // Empty display_name should fail validation.
         let payload = json!({
@@ -15004,7 +15009,7 @@ mod tests {
             .insert_workspace_agent_log_source(agent_id, None, "test", "")
             .await?;
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let payload = json!({
             "log_source_id": source.id.to_string(),
             "logs": [
@@ -15038,7 +15043,7 @@ mod tests {
     #[tokio::test]
     async fn agent_logs_empty_validation() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let payload = json!({
             "log_source_id": Uuid::new_v4().to_string(),
@@ -15093,7 +15098,7 @@ mod tests {
         };
         store.insert_app(app_row)?;
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let payload = json!({
             "app_slug": "my-app",
             "state": "working",
@@ -15123,7 +15128,7 @@ mod tests {
     #[tokio::test]
     async fn agent_app_status_missing_slug() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let payload = json!({
             "app_slug": "",
@@ -15145,7 +15150,7 @@ mod tests {
     #[tokio::test]
     async fn agent_app_status_unknown_slug() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let payload = json!({
             "app_slug": "nonexistent",
@@ -15167,7 +15172,7 @@ mod tests {
     #[tokio::test]
     async fn agent_external_auth_requires_id() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         // No 'id' parameter should fail.
         let req = agent_request(
@@ -15184,7 +15189,7 @@ mod tests {
     #[tokio::test]
     async fn agent_external_auth_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let req = agent_request(
             Method::GET,
@@ -15201,7 +15206,7 @@ mod tests {
     #[tokio::test]
     async fn agent_reinit_returns_sse_stream() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let req = agent_request(
             Method::GET,
@@ -15225,7 +15230,7 @@ mod tests {
     #[tokio::test]
     async fn agent_rpc_rejects_non_websocket_request() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         // A plain HTTP request (without WebSocket upgrade headers) is rejected.
         let req = agent_request(Method::GET, "/api/v2/workspaceagents/me/rpc", agent_token)?;
@@ -15238,7 +15243,7 @@ mod tests {
     #[tokio::test]
     async fn agent_gitauth_deprecated_returns_empty() -> Result<(), Box<dyn Error>> {
         let (state, _store, agent_token) = setup_agent_test_state()?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let req = agent_request(
             Method::GET,
@@ -15399,7 +15404,7 @@ mod tests {
     #[tokio::test]
     async fn connection_info_returns_derp_map_and_hostname_suffix() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -15426,7 +15431,7 @@ mod tests {
 
     #[tokio::test]
     async fn connection_info_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::GET, "/api/v2/workspaceagents/connection")?,
@@ -15440,7 +15445,7 @@ mod tests {
     async fn aws_instance_identity_valid() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let auth_token = seed_instance_identity_chain(&store, "i-abc123")?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let payload = json!({
             "document": "{\"instanceId\": \"i-abc123\"}",
@@ -15467,7 +15472,7 @@ mod tests {
     #[tokio::test]
     async fn aws_instance_identity_unknown_instance() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let payload = json!({
             "document": "{\"instanceId\": \"i-unknown\"}",
@@ -15488,7 +15493,7 @@ mod tests {
 
     #[tokio::test]
     async fn aws_instance_identity_malformed_document() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let payload = json!({
             "document": "not-json",
@@ -15511,7 +15516,7 @@ mod tests {
     async fn azure_instance_identity_valid() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let auth_token = seed_instance_identity_chain(&store, "vm-azure-001")?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let jwt = make_jwt_payload(&json!({ "vmId": "vm-azure-001" }));
         let payload = json!({ "encoding": "pkcs7", "signature": jwt });
@@ -15535,7 +15540,7 @@ mod tests {
 
     #[tokio::test]
     async fn azure_instance_identity_bad_jwt() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let payload = json!({ "encoding": "pkcs7", "signature": "not-a-jwt" });
         let response = call(
@@ -15555,7 +15560,7 @@ mod tests {
     async fn gcp_instance_identity_valid() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
         let auth_token = seed_instance_identity_chain(&store, "gcp-inst-42")?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let jwt = make_jwt_payload(&json!({
             "google": { "compute_engine": { "instance_id": "gcp-inst-42" } }
@@ -15581,7 +15586,7 @@ mod tests {
 
     #[tokio::test]
     async fn gcp_instance_identity_bad_jwt() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let payload = json!({ "json_web_token": "bad" });
         let response = call(
@@ -15631,7 +15636,7 @@ mod tests {
                 },
             );
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let payload = json!({
             "document": "{\"instanceId\": \"i-replay\"}",
             "signature": "unused"
@@ -15665,7 +15670,7 @@ mod tests {
             }
         }
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let payload = json!({
             "document": "{\"instanceId\": \"i-wrongjob\"}",
             "signature": "unused"
@@ -15722,7 +15727,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_get_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15736,7 +15741,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_build_get_returns_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let build_id = Uuid::from_u128(9999);
         let response = call(
@@ -15754,7 +15759,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_cancel_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15770,7 +15775,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_logs_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15787,7 +15792,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_build_logs_returns_empty_array() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let (build_id, _job_id) = seed_workspace_build(&store);
         let response = call(
@@ -15807,7 +15812,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_parameters_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15824,7 +15829,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_build_parameters_returns_empty_array() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let (build_id, _job_id) = seed_workspace_build(&store);
         let response = call(
@@ -15844,7 +15849,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_resources_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15861,7 +15866,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_build_resources_returns_empty_array() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let (build_id, _job_id) = seed_workspace_build(&store);
         let response = call(
@@ -15881,7 +15886,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_state_get_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15897,7 +15902,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_state_put_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15913,7 +15918,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_build_timings_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let build_id = Uuid::from_u128(1000);
         let response = call(
             app,
@@ -15930,7 +15935,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_build_timings_returns_empty_timings() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let (build_id, _job_id) = seed_workspace_build(&store);
         let response = call(
@@ -15969,7 +15974,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_org_member_workspace_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             json_request(
@@ -15985,7 +15990,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_org_member_workspace_creates_workspace() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -16018,7 +16023,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_org_member_workspace_validates_missing_fields() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -16040,7 +16045,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_org_member_available_users_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(
@@ -16055,7 +16060,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_org_member_available_users_returns_user_list() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -16085,7 +16090,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_inbox_notifications_returns_empty_list() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -16107,7 +16112,7 @@ mod tests {
     #[tokio::test]
     async fn list_inbox_notifications_returns_seeded_notification() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Discover the user id from /api/v2/users/me
@@ -16168,7 +16173,7 @@ mod tests {
     #[tokio::test]
     async fn mark_inbox_notification_as_read() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let me_response = call(
@@ -16229,7 +16234,7 @@ mod tests {
     #[tokio::test]
     async fn mark_all_inbox_notifications_as_read() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let me_response = call(
@@ -16301,7 +16306,7 @@ mod tests {
 
     #[tokio::test]
     async fn custom_notification_dispatch_returns_no_content() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -16329,7 +16334,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth2_provider_app_crud_lifecycle() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // 1. Create an OAuth2 app
@@ -16443,7 +16448,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth2_provider_app_secrets_create_and_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create an app first
@@ -16545,7 +16550,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth2_authorize_redirects_with_code() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create an OAuth2 app
@@ -16656,7 +16661,7 @@ mod tests {
 
     #[tokio::test]
     async fn authcheck_owner_can_create_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -16687,7 +16692,7 @@ mod tests {
 
     #[tokio::test]
     async fn authcheck_multiple_permissions() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -16730,7 +16735,7 @@ mod tests {
 
     #[tokio::test]
     async fn authcheck_unknown_resource_type_returns_false() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -16767,7 +16772,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_regions_returns_primary_region() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -16803,7 +16808,7 @@ mod tests {
 
     #[tokio::test]
     async fn deployment_config_returns_config_and_options() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // deployment_config does not require authentication
         let response = call(app, request(Method::GET, "/api/v2/deployment/config")?).await?;
@@ -16820,7 +16825,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_file_and_get_file_by_id() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Upload a tar file
@@ -16868,7 +16873,7 @@ mod tests {
 
     #[tokio::test]
     async fn upload_duplicate_file_returns_existing_id() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let file_data = b"duplicate test content";
@@ -16947,7 +16952,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_lifecycle_create_get_list_update_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -17065,7 +17070,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_builds_create_get_list_cancel() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -17162,7 +17167,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_build_resources_parameters_logs_timings() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -17383,7 +17388,7 @@ mod tests {
 
     #[tokio::test]
     async fn template_lifecycle_create_get_list_update_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -17511,7 +17516,7 @@ mod tests {
     #[tokio::test]
     async fn template_versions_create_get_list_archive_unarchive() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id_str = template
@@ -17630,7 +17635,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_acl_set_get_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -17737,7 +17742,7 @@ mod tests {
 
     #[tokio::test]
     async fn workspace_port_sharing_create_list_delete() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -17891,7 +17896,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_provisioner_job_happy_path() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(5000);
@@ -17912,7 +17917,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancel_provisioner_job_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let job_id = Uuid::from_u128(5000);
         let org_id = Uuid::nil();
         let response = call(
@@ -17930,7 +17935,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_provisioner_job_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let missing_job_id = Uuid::from_u128(9999);
@@ -17951,7 +17956,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_provisioner_job_cross_org() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(5001);
@@ -17975,7 +17980,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_provisioner_job_invalid_uuid() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -17995,7 +18000,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_provisioner_job_already_completed() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(5002);
@@ -18024,7 +18029,7 @@ mod tests {
     #[tokio::test]
     async fn cancel_provisioner_job_already_canceled() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(5003);
@@ -18055,7 +18060,7 @@ mod tests {
     #[tokio::test]
     async fn get_provisioner_job_logs_happy_path() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(6000);
@@ -18108,7 +18113,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_provisioner_job_logs_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let job_id = Uuid::from_u128(6000);
         let org_id = Uuid::nil();
         let response = call(
@@ -18126,7 +18131,7 @@ mod tests {
     #[tokio::test]
     async fn get_provisioner_job_logs_not_found() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let missing_job_id = Uuid::from_u128(9998);
@@ -18147,7 +18152,7 @@ mod tests {
     #[tokio::test]
     async fn get_provisioner_job_logs_cross_org() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(6001);
@@ -18170,7 +18175,7 @@ mod tests {
     #[tokio::test]
     async fn get_provisioner_job_logs_invalid_uuid() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -18190,7 +18195,7 @@ mod tests {
     #[tokio::test]
     async fn get_provisioner_job_logs_with_after_param() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(6002);
@@ -18247,7 +18252,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_tasks_returns_empty() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -18268,7 +18273,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_create_task() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9001);
@@ -18298,7 +18303,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_task() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9002);
@@ -18343,7 +18348,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_task() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9003);
@@ -18381,7 +18386,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_tasks_after_create() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9004);
@@ -18418,7 +18423,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_task_logs_empty() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9005);
@@ -18461,7 +18466,7 @@ mod tests {
     #[tokio::test]
     async fn happy_post_task_send() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9006);
@@ -18514,7 +18519,7 @@ mod tests {
     #[tokio::test]
     async fn happy_post_task_pause() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9007);
@@ -18577,7 +18582,7 @@ mod tests {
     #[tokio::test]
     async fn happy_post_task_resume() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9008);
@@ -18640,7 +18645,7 @@ mod tests {
     #[tokio::test]
     async fn happy_patch_task_input() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9009);
@@ -18693,7 +18698,7 @@ mod tests {
     #[tokio::test]
     async fn happy_post_task_log_snapshot() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let tv_id = Uuid::from_u128(9010);
@@ -18742,7 +18747,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_chats_empty() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -18759,7 +18764,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_create_chat() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -18785,7 +18790,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_chat() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -18825,7 +18830,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_chat() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -18862,7 +18867,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_chat_message() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -18905,7 +18910,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_archive_chat() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -18943,7 +18948,7 @@ mod tests {
     #[tokio::test]
     async fn happy_unarchive_chat() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -18993,7 +18998,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_upload_and_get_chat_file() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -19033,7 +19038,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_chats_after_create() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19068,7 +19073,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_chat_git_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // Plain GET without auth — should return 401 (auth is checked
         // before the WebSocketUpgrade extractor runs).
@@ -19102,7 +19107,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_chat_git_not_found_for_missing_chat() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let missing_id = Uuid::new_v4();
@@ -19128,7 +19133,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_chat_git_not_found_for_other_users_chat() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // Create user A (first user / owner) and a chat owned by user A.
         let token_a = create_and_login(&app).await?;
@@ -19218,7 +19223,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_watch_chat_git_no_longer_returns_501() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a chat to get a valid chat ID.
@@ -19281,7 +19286,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_notifications_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19305,7 +19310,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_notifications_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19329,7 +19334,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_notification_dispatch_methods() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19354,7 +19359,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_system_notification_templates() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19375,7 +19380,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_custom_notification_templates() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19395,7 +19400,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_test_notification() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19414,7 +19419,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_custom_notification() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19459,7 +19464,7 @@ mod tests {
             });
         }
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19480,7 +19485,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_inbox_notifications() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19496,7 +19501,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_notification_preferences() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19521,7 +19526,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_oauth2_provider_apps_empty() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19538,7 +19543,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_create_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19563,7 +19568,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19602,7 +19607,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19648,7 +19653,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_oauth2_provider_app() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19685,7 +19690,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_oauth2_provider_app_secrets() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19725,7 +19730,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_create_oauth2_provider_app_secret() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19769,7 +19774,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_oauth2_provider_app_secret() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19822,7 +19827,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_oauth2_provider_app_tokens() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let create_resp = call(
@@ -19863,7 +19868,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_insights_daus() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19883,7 +19888,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_insights_templates() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let start = "2025-01-01T00:00:00Z";
@@ -19924,7 +19929,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_insights_user_activity() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let start = "2025-01-01T00:00:00Z";
@@ -19946,7 +19951,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_insights_user_latency() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let start = "2025-01-01T00:00:00Z";
@@ -19968,7 +19973,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_insights_user_status_counts() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -19992,7 +19997,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_authcheck() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20027,7 +20032,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_deployment_config() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20043,7 +20048,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_deployment_ssh() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20059,7 +20064,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_deployment_stats() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20086,7 +20091,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_debug_health() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20102,7 +20107,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_health_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20122,7 +20127,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_health_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20151,7 +20156,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_deployment_config_returns_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20171,7 +20176,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_deployment_stats_returns_metrics() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20198,7 +20203,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_deployment_ssh_returns_config() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20221,7 +20226,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_update_check_returns_version() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // update_check does not require authentication
         let response = call(app, request(Method::GET, "/api/v2/updatecheck")?).await?;
@@ -20244,7 +20249,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_set_health_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // GET — default should have no dismissed healthchecks
@@ -20297,7 +20302,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_set_notification_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // GET — default should have notifier_paused=false
@@ -20389,7 +20394,7 @@ mod tests {
             });
         }
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Verify system templates
@@ -20439,7 +20444,7 @@ mod tests {
     #[tokio::test]
     async fn happy_list_notification_inbox() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let uid = owner_user_id(&store);
 
@@ -20494,7 +20499,7 @@ mod tests {
     #[tokio::test]
     async fn happy_mark_notification_read() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let uid = owner_user_id(&store);
 
@@ -20576,7 +20581,7 @@ mod tests {
             });
         }
 
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // GET — initially empty preferences
@@ -20642,7 +20647,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_debug_health_returns_status() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20665,7 +20670,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_debug_coordinator_returns_info() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -20863,7 +20868,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_returns_template_by_id() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -20898,7 +20903,7 @@ mod tests {
     #[tokio::test]
     async fn delete_template_returns_ok() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -20932,7 +20937,7 @@ mod tests {
     #[tokio::test]
     async fn patch_template_updates_fields() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -20972,7 +20977,7 @@ mod tests {
     #[tokio::test]
     async fn list_org_templates_returns_templates() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21001,7 +21006,7 @@ mod tests {
     #[tokio::test]
     async fn post_org_template_creates_template() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21050,7 +21055,7 @@ mod tests {
     #[tokio::test]
     async fn get_org_template_by_name_returns_template() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21077,7 +21082,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_daus_returns_entries() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21102,7 +21107,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_examples_returns_empty_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21128,7 +21133,7 @@ mod tests {
     #[tokio::test]
     async fn get_org_template_examples_returns_starter_list() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -21151,7 +21156,7 @@ mod tests {
     #[tokio::test]
     async fn get_all_template_examples_returns_starter_list() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -21173,7 +21178,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_returns_version() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21202,7 +21207,7 @@ mod tests {
     #[tokio::test]
     async fn list_template_versions_returns_versions() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21228,7 +21233,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_by_name_returns_version() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21253,7 +21258,7 @@ mod tests {
     #[tokio::test]
     async fn get_org_template_version_by_name_returns_version() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21278,7 +21283,7 @@ mod tests {
     #[tokio::test]
     async fn post_org_template_version_creates_version() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21309,7 +21314,7 @@ mod tests {
     #[tokio::test]
     async fn patch_template_version_updates_name() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21338,7 +21343,7 @@ mod tests {
     #[tokio::test]
     async fn archive_and_unarchive_template_version() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21374,7 +21379,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_parameters_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21435,7 +21440,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_rich_parameters_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21462,7 +21467,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_variables_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21513,7 +21518,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_resources_returns_empty() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21539,7 +21544,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_logs_returns_empty() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21565,7 +21570,7 @@ mod tests {
     #[tokio::test]
     async fn get_template_version_schema_returns_empty() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21591,7 +21596,7 @@ mod tests {
     #[tokio::test]
     async fn post_archive_template_versions_returns_archived_ids() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21623,7 +21628,7 @@ mod tests {
     #[tokio::test]
     async fn list_workspaces_returns_workspaces() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21652,7 +21657,7 @@ mod tests {
     #[tokio::test]
     async fn patch_workspace_updates_name() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21681,7 +21686,7 @@ mod tests {
     #[tokio::test]
     async fn get_user_workspace_by_name_returns_workspace() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21709,7 +21714,7 @@ mod tests {
     #[tokio::test]
     async fn post_user_workspace_creates_workspace() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21747,7 +21752,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_resolve_autostart_returns_info() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21775,7 +21780,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_timings_returns_empty_timings() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21801,7 +21806,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_returns_workspace_by_id() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21833,7 +21838,7 @@ mod tests {
     #[tokio::test]
     async fn list_workspace_builds_returns_builds() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21860,7 +21865,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_build_returns_build() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21893,7 +21898,7 @@ mod tests {
     #[tokio::test]
     async fn get_user_workspace_build_by_number_returns_build() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21919,7 +21924,7 @@ mod tests {
     #[tokio::test]
     async fn post_workspace_build_creates_new_build() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21956,7 +21961,7 @@ mod tests {
     #[tokio::test]
     async fn patch_cancel_workspace_build_cancels_build() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -21980,7 +21985,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_build_logs_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22008,7 +22013,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_build_parameters_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22035,7 +22040,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_build_resources_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22062,7 +22067,7 @@ mod tests {
     #[tokio::test]
     async fn get_workspace_build_timings_returns_timings() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22088,7 +22093,7 @@ mod tests {
     #[tokio::test]
     async fn get_and_put_workspace_build_state() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22130,7 +22135,7 @@ mod tests {
     #[tokio::test]
     async fn put_workspace_autostart_sets_schedule() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22154,7 +22159,7 @@ mod tests {
     #[tokio::test]
     async fn put_workspace_ttl_sets_ttl() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22178,7 +22183,7 @@ mod tests {
     #[tokio::test]
     async fn put_workspace_autoupdates_sets_policy() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22202,7 +22207,7 @@ mod tests {
     #[tokio::test]
     async fn put_workspace_dormant_activates_dormancy() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22229,7 +22234,7 @@ mod tests {
     #[tokio::test]
     async fn put_workspace_extend_extends_deadline() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22259,7 +22264,7 @@ mod tests {
     #[tokio::test]
     async fn put_and_delete_workspace_favorite() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22295,7 +22300,7 @@ mod tests {
     #[tokio::test]
     async fn post_workspace_usage_updates_last_used() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22318,7 +22323,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_port_share_crud() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22384,7 +22389,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_acl_get_and_patch() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22439,7 +22444,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_watch_sse_returns_initial_state() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -22472,7 +22477,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_first_user_returns_ok_after_creation() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         create_and_login(&app).await?;
 
         let response = call(app, request(Method::GET, "/api/v2/users/first")?).await?;
@@ -22487,7 +22492,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_first_user_creates_user_and_organization() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let response = call(
             app,
@@ -22516,7 +22521,7 @@ mod tests {
 
     #[tokio::test]
     async fn login_with_password_returns_session_token() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         // Create first user
         let create_response = call(
@@ -22555,7 +22560,7 @@ mod tests {
 
     #[tokio::test]
     async fn logout_invalidates_session() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let logout_response = call(
@@ -22582,7 +22587,7 @@ mod tests {
 
     #[tokio::test]
     async fn validate_password_accepts_strong_password() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let response = call(
             app,
@@ -22607,7 +22612,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_users_returns_created_users() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -22647,7 +22652,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_users_with_status_filter() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -22699,7 +22704,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_user_creates_new_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -22738,7 +22743,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_user_by_username() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -22758,7 +22763,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_user_me_returns_current_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -22775,7 +22780,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_user_removes_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -22818,7 +22823,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_user_login_type_returns_password() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -22837,7 +22842,7 @@ mod tests {
 
     #[tokio::test]
     async fn git_ssh_key_get_and_regenerate() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // First GET should generate a key
@@ -22876,7 +22881,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_user_autofill_parameters_returns_empty() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -22898,7 +22903,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_user_profile_updates_name() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -22926,7 +22931,7 @@ mod tests {
 
     #[tokio::test]
     async fn suspend_and_activate_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -22988,7 +22993,7 @@ mod tests {
 
     #[tokio::test]
     async fn appearance_settings_get_and_put() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // GET defaults
@@ -23041,7 +23046,7 @@ mod tests {
 
     #[tokio::test]
     async fn preferences_get_and_put() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // GET defaults
@@ -23085,7 +23090,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_user_password_changes_password() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -23164,7 +23169,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_user_roles_returns_role_info() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23196,7 +23201,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_user_roles_assigns_role() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -23247,7 +23252,7 @@ mod tests {
 
     #[tokio::test]
     async fn notification_preferences_get_and_put() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // GET defaults (should return empty list)
@@ -23291,7 +23296,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_convert_login_returns_bad_request_without_oauth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Attempting to convert to GitHub login should return BAD_REQUEST since
@@ -23321,7 +23326,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_session_api_key_returns_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23337,7 +23342,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_token_api_key_returns_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23362,7 +23367,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_token_api_keys_returns_created_tokens() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a token
@@ -23394,7 +23399,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_api_key_by_id_returns_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a token
@@ -23445,7 +23450,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_api_key_by_name_returns_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a named token
@@ -23484,7 +23489,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_api_key_removes_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a token
@@ -23543,7 +23548,7 @@ mod tests {
 
     #[tokio::test]
     async fn expire_api_key_marks_key_expired() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a token
@@ -23593,7 +23598,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_token_config_returns_config() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23622,7 +23627,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_organizations_returns_default_org() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23644,7 +23649,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_organization_by_name() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23669,7 +23674,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_organization_by_id() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -23694,7 +23699,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_organization_members_returns_owner() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23720,7 +23725,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_paginated_organization_members_returns_count() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23744,7 +23749,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_organization_member_returns_member() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -23771,7 +23776,7 @@ mod tests {
 
     #[tokio::test]
     async fn post_and_delete_organization_member() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -23838,7 +23843,7 @@ mod tests {
 
     #[tokio::test]
     async fn put_organization_member_roles_assigns_role() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -23889,7 +23894,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_organization_roles_returns_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23910,7 +23915,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_site_roles_returns_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23927,7 +23932,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_user_organizations_returns_orgs() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23948,7 +23953,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_user_organization_by_name_returns_org() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -23977,7 +23982,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_external_auths_returns_empty_providers() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -24028,7 +24033,7 @@ mod tests {
             client_secret: "client-secret".to_owned(),
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Extract the actual user ID from the authenticated session
@@ -24111,7 +24116,7 @@ mod tests {
             supports_revocation: false,
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Extract the actual user ID from the authenticated session
@@ -24207,7 +24212,7 @@ mod tests {
             client_id: "client-id".to_owned(),
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -24276,7 +24281,7 @@ mod tests {
             client_secret: "client-secret".to_owned(),
             ..ExternalAuthLinkProvider::default()
         }];
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let exchange_response = call(
@@ -24540,7 +24545,7 @@ mod tests {
     #[tokio::test]
     async fn archive_unarchive_template_version_toggles_flag() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -24623,7 +24628,7 @@ mod tests {
     #[tokio::test]
     async fn patch_workspace_rename_and_autostart_persist() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -24688,7 +24693,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_build_create_and_cancel_preserves_access() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -24776,7 +24781,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_extend_deadline_updates_build() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -24827,7 +24832,7 @@ mod tests {
     #[tokio::test]
     async fn workspace_dormant_activate_toggles_dormant_at() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let uid = owner_user_id(&store);
@@ -24909,7 +24914,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_build_resources_returns_list() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -24993,7 +24998,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_build_state_returns_data() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -25056,7 +25061,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_build_logs_returns_array() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -25139,7 +25144,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_build_timings_returns_data() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -25232,7 +25237,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_agent_list_returns_agents() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let (session_token, org_id, template) = create_test_template(&app).await?;
 
         let template_id = template
@@ -25323,7 +25328,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_agent_logs_returns_array() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -25382,7 +25387,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_agent_startup_logs() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -25425,7 +25430,7 @@ mod tests {
     #[tokio::test]
     async fn happy_workspace_agent_listening_ports() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
@@ -25458,7 +25463,7 @@ mod tests {
     #[tokio::test]
     async fn happy_provisioner_daemons_list() -> Result<(), Box<dyn Error>> {
         let (state, _store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
@@ -25482,7 +25487,7 @@ mod tests {
     #[tokio::test]
     async fn happy_provisioner_job_logs() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
         let job_id = Uuid::from_u128(7000);
@@ -25537,7 +25542,7 @@ mod tests {
     #[tokio::test]
     async fn happy_template_version_resources() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         // Seed a template version directly in the store.
@@ -25591,7 +25596,7 @@ mod tests {
     #[tokio::test]
     async fn happy_template_version_logs() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let token = create_and_login(&app).await?;
 
         // Seed a template version directly in the store.
@@ -25648,7 +25653,7 @@ mod tests {
     /// Helper: spin up a real TCP server backed by the test router and return
     /// the base URL together with a logged-in session token.
     async fn setup_server() -> Result<(Url, String, tokio::task::JoinHandle<()>), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let (base_url, handle) = spawn_test_server(app).await?;
         Ok((base_url, session_token, handle))
@@ -25816,7 +25821,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tailnet_ws_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let (base_url, _handle) = spawn_test_server(app).await?;
 
         // Attempt WS upgrade without any auth token — should be rejected.
@@ -25882,7 +25887,7 @@ mod tests {
     #[tokio::test]
     async fn test_tailnet_ws_tunnel_routing() -> Result<(), Box<dyn Error>> {
         let state = test_state(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         // Create first user (owner) and get their token.
         let owner_token = create_and_login(&app).await?;
@@ -25988,7 +25993,7 @@ mod tests {
     #[tokio::test]
     async fn test_tailnet_ws_disconnect_sends_lost() -> Result<(), Box<dyn Error>> {
         let state = test_state(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         let owner_token = create_and_login(&app).await?;
         let token2 = create_second_user_and_login(&app, &owner_token).await?;
@@ -26091,7 +26096,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_link_requires_auth() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/debug/owner/debug-link")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -26099,7 +26104,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_link_non_oidc_user_returns_400() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // The default created user is a Password user, not OIDC
@@ -26124,7 +26129,7 @@ mod tests {
     #[tokio::test]
     async fn debug_link_oidc_user_returns_claims() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         // Find the owner user and change their login_type to OIDC
@@ -26212,7 +26217,7 @@ mod tests {
     #[tokio::test]
     async fn debug_link_forbidden_for_non_owner() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
-        let app = build_router(state);
+        let app = build_router(state, None);
 
         // Create the first (owner) user via the normal flow
         let _owner_session = create_and_login(&app).await?;
@@ -27194,7 +27199,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_users() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27219,7 +27224,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -27257,7 +27262,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27277,7 +27282,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -27313,7 +27318,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_user_profile() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27341,7 +27346,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_appearance() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27357,7 +27362,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_user_appearance() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27388,7 +27393,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_preferences() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27408,7 +27413,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_user_preferences() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27435,7 +27440,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_user_password() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27457,7 +27462,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_login_type() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27476,7 +27481,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27499,7 +27504,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_user_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -27551,7 +27556,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_git_ssh_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27570,7 +27575,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_user_git_ssh_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27589,7 +27594,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_organizations() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27608,7 +27613,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_organization() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27632,7 +27637,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_organization_members() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27653,7 +27658,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_organization_member() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27673,7 +27678,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_organization_member() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -27725,7 +27730,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_organization_member() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -27763,7 +27768,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_organization_member_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -27815,7 +27820,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_organization_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27839,7 +27844,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_site_roles() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27856,7 +27861,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_user_organizations() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27877,7 +27882,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_organization_by_name() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27900,7 +27905,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_external_auths() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27925,7 +27930,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_enabled_experiments() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27942,7 +27947,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_available_experiments() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27958,7 +27963,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_create_session_api_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27974,7 +27979,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_create_token_api_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -27999,7 +28004,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_token_api_keys() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let _create = call(
@@ -28031,7 +28036,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_token_config() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -28054,7 +28059,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_delete_api_key() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Create a token
@@ -28104,7 +28109,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_audit_logs() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -28124,7 +28129,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_generate_test_audit_log() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -28143,7 +28148,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_post_validate_user_password() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
 
         let response = call(
             app,
@@ -28164,7 +28169,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_list_paginated_organization_members() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -28190,7 +28195,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_get_user_autofill_parameters() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         let template_id = Uuid::new_v4();
@@ -28212,7 +28217,7 @@ mod tests {
 
     #[tokio::test]
     async fn happy_put_suspend_and_activate_user() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let organization_id = first_organization_id(&app, &session_token).await?;
 
@@ -28276,7 +28281,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_deployment_stats_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/deployment/stats")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -28284,7 +28289,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_debug_health_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/debug/health")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -28292,7 +28297,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_health_settings_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/debug/health/settings")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -28300,7 +28305,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_list_users_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/users")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -28308,7 +28313,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_insights_daus_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/insights/daus")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -28316,7 +28321,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_debug_coordinator_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/debug/coordinator")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -28324,7 +28329,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_notifications_settings_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/notifications/settings")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
@@ -28333,7 +28338,7 @@ mod tests {
     #[tokio::test]
     async fn unauthenticated_system_notification_templates_returns_401()
     -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::GET, "/api/v2/notifications/templates/system")?,
@@ -28345,7 +28350,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_delete_external_auth_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::DELETE, "/api/v2/external-auth/github")?,
@@ -28357,7 +28362,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_put_user_profile_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             json_request(
@@ -28373,7 +28378,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_put_user_appearance_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             json_request(
@@ -28389,7 +28394,7 @@ mod tests {
 
     #[tokio::test]
     async fn unauthenticated_put_user_password_returns_401() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             json_request(
@@ -28408,7 +28413,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_access_deployment_stats() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
             app,
@@ -28421,7 +28426,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_access_list_users() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
             app,
@@ -28434,7 +28439,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_access_debug_health() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
             app,
@@ -28450,7 +28455,7 @@ mod tests {
 
     #[tokio::test]
     async fn owner_can_access_notifications_settings() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
             app,
@@ -28471,7 +28476,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_init_script_returns_error_for_unknown_os_arch() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::GET, "/api/v2/init-script/badOS/badArch")?,
@@ -28495,7 +28500,7 @@ mod tests {
 
     #[tokio::test]
     async fn debug_health_rejects_invalid_format() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
             app,
@@ -28527,7 +28532,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_github_oauth_device_returns_error_response() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::GET, "/api/v2/users/oauth2/github/device")?,
@@ -28548,7 +28553,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_github_oauth_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             request(Method::GET, "/api/v2/users/oauth2/github/callback")?,
@@ -28569,7 +28574,7 @@ mod tests {
 
     #[tokio::test]
     async fn disabled_oidc_callback_returns_error_response() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/users/oidc/callback")?).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await?;
@@ -28586,7 +28591,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth2_authorize_rejects_invalid_response_type() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
             app,
@@ -28612,7 +28617,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth2_authorize_rejects_invalid_client_id() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let response = call(
             app,
@@ -28638,7 +28643,7 @@ mod tests {
 
     #[tokio::test]
     async fn oauth2_token_rejects_unsupported_grant_type() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?);
+        let app = build_router(test_state(true)?, None);
         let response = call(
             app,
             {

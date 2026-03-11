@@ -1744,7 +1744,48 @@ fn to_public_link(link: ExternalAuthLinkRecord) -> ExternalAuthLink {
     }
 }
 
+/// Returns `true` when the error represents a transient HTTP failure that
+/// should be retried (429, 5xx, or connection-level errors).
+///
+/// Both `bearer_get_once` and `post_form_once` already classify errors so
+/// that only transient failures (5xx, 429, connection/timeout) are wrapped
+/// as `Internal`, while client errors (4xx except 429) become `BadRequest`.
+/// Therefore every `Internal` variant is safe to retry.
+fn is_retryable_external_auth_error(error: &ExternalAuthServiceError) -> bool {
+    matches!(error, ExternalAuthServiceError::Internal(_))
+}
+
+/// Retry strategy used for external auth provider HTTP calls.
+fn external_auth_retry_strategy() -> coder_core::retry::RetryStrategy {
+    coder_core::retry::RetryStrategy::ExponentialBackoff {
+        initial_delay: Duration::from_secs(1),
+        max_attempts: 3,
+        max_delay: Duration::from_secs(10),
+    }
+}
+
 async fn bearer_get(
+    http_client: &reqwest::Client,
+    url: &str,
+    access_token: &str,
+) -> Result<Value, ExternalAuthServiceError> {
+    let url_owned = url.to_owned();
+    let token_owned = access_token.to_owned();
+
+    coder_core::retry::retry_with_strategy(
+        external_auth_retry_strategy(),
+        is_retryable_external_auth_error,
+        || {
+            let u = url_owned.clone();
+            let t = token_owned.clone();
+            let client = http_client.clone();
+            async move { bearer_get_once(&client, &u, &t).await }
+        },
+    )
+    .await
+}
+
+async fn bearer_get_once(
     http_client: &reqwest::Client,
     url: &str,
     access_token: &str,
@@ -1777,10 +1818,14 @@ async fn bearer_get(
         ));
     }
     if !status.is_success() {
-        return Err(ExternalAuthServiceError::Internal(format!(
-            "status {}: body: {body}",
-            status.as_u16()
-        )));
+        let detail = format!("status {}: body: {body}", status.as_u16());
+        // Classify 4xx (except 429) as BadRequest (non-retryable), matching
+        // the same logic in `post_form_once`.  Only 5xx, 429, and connection
+        // errors should be retried.
+        if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(ExternalAuthServiceError::BadRequest(detail));
+        }
+        return Err(ExternalAuthServiceError::Internal(detail));
     }
 
     parse_response_body(content_type.as_deref(), &body)
@@ -1792,18 +1837,40 @@ async fn post_form(
     fields: &[(&str, String)],
     bearer_token: Option<&str>,
 ) -> Result<Value, ExternalAuthServiceError> {
-    let form = fields
+    let url_owned = url.to_owned();
+    let fields_owned: Vec<(String, String)> = fields
         .iter()
         .filter(|(_, value)| !value.is_empty())
         .map(|(key, value)| ((*key).to_owned(), value.clone()))
-        .collect::<Vec<_>>();
+        .collect();
+    let token_owned = bearer_token.map(str::to_owned);
 
+    coder_core::retry::retry_with_strategy(
+        external_auth_retry_strategy(),
+        is_retryable_external_auth_error,
+        || {
+            let u = url_owned.clone();
+            let f = fields_owned.clone();
+            let t = token_owned.clone();
+            let client = http_client.clone();
+            async move { post_form_once(&client, &u, &f, t.as_deref()).await }
+        },
+    )
+    .await
+}
+
+async fn post_form_once(
+    http_client: &reqwest::Client,
+    url: &str,
+    form: &[(String, String)],
+    bearer_token: Option<&str>,
+) -> Result<Value, ExternalAuthServiceError> {
     let mut request = http_client.post(url).header("Accept", "application/json");
     if let Some(token) = bearer_token.filter(|value| !value.is_empty()) {
         request = request.bearer_auth(token);
     }
     let response = request
-        .form(&form)
+        .form(form)
         .send()
         .await
         .map_err(|error| ExternalAuthServiceError::Internal(error.to_string()))?;
@@ -1828,7 +1895,13 @@ async fn post_form(
                 format!("status {}: body: {body}", status.as_u16())
             }
         });
-        return Err(ExternalAuthServiceError::BadRequest(detail));
+        // Classify 4xx (except 429) as BadRequest (non-retryable) and
+        // everything else (5xx, 429) as Internal so the retry wrapper can
+        // re-attempt the request on transient failures.
+        if status.is_client_error() && status != reqwest::StatusCode::TOO_MANY_REQUESTS {
+            return Err(ExternalAuthServiceError::BadRequest(detail));
+        }
+        return Err(ExternalAuthServiceError::Internal(detail));
     }
 
     Ok(parsed)
