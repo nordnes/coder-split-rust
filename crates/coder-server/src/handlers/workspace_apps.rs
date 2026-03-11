@@ -1018,9 +1018,11 @@ impl IntoResponse for WorkspaceAppError {
 /// 5. Proxies the request to the workspace agent
 pub(crate) async fn workspace_apps_proxy_path(
     State(state): State<AppState>,
+    method: axum::http::Method,
     headers: HeaderMap,
     Path(params): Path<PathAppParams>,
     OriginalUri(original_uri): OriginalUri,
+    body: axum::body::Body,
 ) -> Result<Response, WorkspaceAppError> {
     let server = build_workspace_app_server(&state);
 
@@ -1078,6 +1080,9 @@ pub(crate) async fn workspace_apps_proxy_path(
         &server,
         &auth_context,
         &app_request,
+        method,
+        &headers,
+        body,
         app_path,
         original_uri.query().unwrap_or(""),
     )
@@ -1222,8 +1227,11 @@ pub(crate) async fn subdomain_app_middleware(
         Err(e) => return e.into_response(),
     };
 
-    let app_path = request.uri().path();
-    let app_query = request.uri().query().unwrap_or("");
+    let app_path = request.uri().path().to_owned();
+    let app_query = request.uri().query().unwrap_or("").to_owned();
+    let method = request.method().clone();
+    let req_headers = request.headers().clone();
+    let body = request.into_body();
 
     // Proxy the request.
     match proxy_workspace_app(
@@ -1231,8 +1239,11 @@ pub(crate) async fn subdomain_app_middleware(
         &server,
         &auth_context,
         &app_request,
-        app_path,
-        app_query,
+        method,
+        &req_headers,
+        body,
+        &app_path,
+        &app_query,
     )
     .await
     {
@@ -1345,6 +1356,9 @@ async fn proxy_workspace_app(
     _server: &WorkspaceAppServer,
     auth_context: &AppAuthContext,
     app_request: &AppRequest,
+    method: axum::http::Method,
+    original_headers: &HeaderMap,
+    body: axum::body::Body,
     app_path: &str,
     app_query: &str,
 ) -> Result<Response, WorkspaceAppError> {
@@ -1385,17 +1399,45 @@ async fn proxy_workspace_app(
         target_url.set_query(Some(app_query));
     }
 
-    // Build the outbound request.
-    let mut proxy_request = state
+    // Build the outbound request using the original HTTP method.
+    let reqwest_method = reqwest::Method::from_bytes(method.as_str().as_bytes())
+        .map_err(|e| WorkspaceAppError::Internal(format!("invalid HTTP method: {e}")))?;
+
+    let mut proxy_request_builder = state
         .http_client
-        .get(target_url.as_str())
+        .request(reqwest_method, target_url.as_str());
+
+    // Forward original headers, stripping Coder cookies.
+    for (key, value) in original_headers {
+        let header_name = key.as_str();
+        // Skip hop-by-hop headers and host (will be set by reqwest).
+        if header_name == "host" || header_name == "connection" || header_name == "te" {
+            continue;
+        }
+        if header_name == "cookie" {
+            // Strip Coder-specific cookies from the cookie header.
+            let cleaned = strip_coder_cookies(value.to_str().unwrap_or(""));
+            if !cleaned.is_empty() {
+                if let Ok(val) = HeaderValue::from_str(&cleaned) {
+                    proxy_request_builder = proxy_request_builder.header(key.clone(), val);
+                }
+            }
+            continue;
+        }
+        proxy_request_builder = proxy_request_builder.header(key.clone(), value.clone());
+    }
+
+    // Forward the request body.
+    let body_bytes = axum::body::to_bytes(body, 64 * 1024 * 1024)
+        .await
+        .map_err(|e| WorkspaceAppError::ProxyError(format!("failed to read request body: {e}")))?;
+    if !body_bytes.is_empty() {
+        proxy_request_builder = proxy_request_builder.body(body_bytes);
+    }
+
+    let proxy_request = proxy_request_builder
         .build()
         .map_err(|e| WorkspaceAppError::ProxyError(e.to_string()))?;
-
-    // Strip Coder cookies from the forwarded request.
-    // (In production, we'd copy all headers from the original request,
-    //  stripping only Coder-specific cookies.)
-    let _ = proxy_request.headers_mut();
 
     // Execute the proxy request.
     let response = state
