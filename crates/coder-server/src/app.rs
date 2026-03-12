@@ -7496,7 +7496,10 @@ pub(crate) mod tests {
                 .users
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(ids.iter().filter_map(|id| users.get(id).cloned()).collect())
+            Ok(ids
+                .iter()
+                .filter_map(|id| users.get(id).filter(|u| !u.deleted).cloned())
+                .collect())
         }
 
         // -----------------------------------------------------------------
