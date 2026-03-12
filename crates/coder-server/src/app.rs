@@ -257,7 +257,7 @@ pub fn build_router(
         .route("/metrics", get(get_prometheus_metrics))
         // Workspace app path-based proxying.
         .route(
-            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/*rest",
+            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/{*rest}",
             axum::routing::any(workspace_apps_proxy_path),
         )
         .route("/mcp/http", post(mcp_http_handler))
@@ -1405,7 +1405,7 @@ pub(crate) mod tests {
     }
 
     #[derive(Debug)]
-    struct FakeStore {
+    pub(crate) struct FakeStore {
         health_ok: bool,
         users: Mutex<HashMap<Uuid, UserRecord>>,
         organizations: Mutex<HashMap<Uuid, OrganizationRecord>>,
@@ -1586,7 +1586,7 @@ pub(crate) mod tests {
         }
 
         /// Inserts a workspace agent into the fake store for testing.
-        fn insert_agent(&self, agent: WorkspaceAgentRow) -> Result<(), StorageError> {
+        pub(crate) fn insert_agent(&self, agent: WorkspaceAgentRow) -> Result<(), StorageError> {
             self.workspace_agents
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
@@ -7689,7 +7689,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn test_state_with_store(
+    pub(crate) fn test_state_with_store(
         health_ok: bool,
     ) -> Result<(AppState, Arc<FakeStore>), Box<dyn Error>> {
         use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
