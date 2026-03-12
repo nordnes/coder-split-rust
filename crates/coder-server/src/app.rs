@@ -1346,8 +1346,8 @@ pub(crate) mod tests {
         DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, DerpNodeConfig,
         DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser,
         FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
-        HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput,
-        InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
+        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
         InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
         InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord,
         LogFormat, LoginType, LoginWithPasswordRequest, NotificationMessageRecord,
@@ -1501,7 +1501,10 @@ pub(crate) mod tests {
         user_deletions: Mutex<Vec<UserDeletedRecord>>,
         user_status_changes: Mutex<Vec<UserStatusChangeRecord>>,
         // Licenses
-        licenses: Mutex<Vec<LicenseRecord>>,
+        licenses: Mutex<HashMap<i32, LicenseRecord>>,
+        license_next_id: Mutex<i32>,
+        // VAPID keys
+        vapid_keys: Mutex<Option<coder_core::api::VapidKeyPair>>,
     }
 
     impl FakeStore {
@@ -1586,7 +1589,9 @@ pub(crate) mod tests {
                 group_members: Mutex::new(Vec::new()),
                 user_deletions: Mutex::new(Vec::new()),
                 user_status_changes: Mutex::new(Vec::new()),
-                licenses: Mutex::new(Vec::new()),
+                licenses: Mutex::new(HashMap::new()),
+                license_next_id: Mutex::new(1),
+                vapid_keys: Mutex::new(None),
             }
         }
 
@@ -4906,6 +4911,54 @@ pub(crate) mod tests {
                 .is_some())
         }
 
+        async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError> {
+            let mut subs = self
+                .webpush_subscriptions
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            subs.retain(|_, v| !ids.contains(&v.id));
+            Ok(())
+        }
+
+        async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError> {
+            self.webpush_subscriptions
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .clear();
+            Ok(())
+        }
+
+        async fn get_webpush_vapid_keys(
+            &self,
+        ) -> Result<Option<coder_core::api::VapidKeyPair>, StorageError> {
+            let keys = self
+                .vapid_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .clone();
+            // Mirror PostgresStore behavior: return None if either key is empty
+            match keys {
+                Some(ref kp) if !kp.public_key.is_empty() && !kp.private_key.is_empty() => Ok(keys),
+                _ => Ok(None),
+            }
+        }
+
+        async fn upsert_webpush_vapid_keys(
+            &self,
+            public_key: &str,
+            private_key: &str,
+        ) -> Result<(), StorageError> {
+            *self
+                .vapid_keys
+                .lock()
+                .map_err(|error: std::sync::PoisonError<_>| {
+                    StorageError::unavailable(error.to_string())
+                })? = Some(coder_core::api::VapidKeyPair {
+                public_key: public_key.to_owned(),
+                private_key: private_key.to_owned(),
+            });
+            Ok(())
+        }
         // ----- Template Store Methods -----
 
         async fn list_templates(
@@ -5500,6 +5553,13 @@ pub(crate) mod tests {
                         .find(|f| f.hash == hash && f.created_by == creator_id)
                         .cloned()
                 })
+        }
+
+        async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+            self.files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|mut files| files.remove(&file_id).is_some())
         }
 
         async fn archive_unused_template_versions(
@@ -7642,16 +7702,14 @@ pub(crate) mod tests {
             Ok(max + 1)
         }
 
-        // -----------------------------------------------------------------
-        // License Domain
-        // -----------------------------------------------------------------
-
         async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError> {
             let licenses = self
                 .licenses
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(licenses.clone())
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let mut result: Vec<LicenseRecord> = licenses.values().cloned().collect();
+            result.sort_by_key(|l| l.id);
+            Ok(result)
         }
 
         async fn insert_license(
@@ -7662,27 +7720,31 @@ pub(crate) mod tests {
             let mut licenses = self
                 .licenses
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let next_id = licenses.iter().map(|l| l.id).max().unwrap_or(0) + 1;
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let mut next_id = self
+                .license_next_id
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let id = *next_id;
+            *next_id += 1;
             let record = LicenseRecord {
-                id: next_id,
+                id,
                 uuid: Uuid::new_v4(),
                 uploaded_at: OffsetDateTime::now_utc(),
                 jwt: jwt.to_owned(),
                 claims: claims.clone(),
             };
-            licenses.push(record.clone());
+            licenses.insert(id, record.clone());
             Ok(record)
         }
 
         async fn delete_license(&self, id: i32) -> Result<bool, StorageError> {
-            let mut licenses = self
+            Ok(self
                 .licenses
                 .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let len_before = licenses.len();
-            licenses.retain(|l| l.id != id);
-            Ok(licenses.len() < len_before)
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .remove(&id)
+                .is_some())
         }
     }
 
@@ -32139,6 +32201,422 @@ pub(crate) mod tests {
         let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/entitlements")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+    // -----------------------------------------------------------------------
+    // Direct store tests: file operations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_insert_and_get_file_by_id() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: file_id,
+            hash: "abc123hash".to_owned(),
+            created_by: creator_id,
+            mimetype: "application/x-tar".to_owned(),
+            data: b"file content bytes".to_vec(),
+        };
+        let result = store.insert_file(input).await?;
+        assert_eq!(result.id, file_id);
+
+        let fetched = store.get_file_by_id(file_id).await?;
+        assert!(fetched.is_some(), "file should be found by id");
+        let file = fetched.ok_or("expected file")?;
+        assert_eq!(file.id, file_id);
+        assert_eq!(file.hash, "abc123hash");
+        assert_eq!(file.created_by, creator_id);
+        assert_eq!(file.mimetype, "application/x-tar");
+        assert_eq!(file.data, b"file content bytes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_get_file_by_id_not_found() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let result = store.get_file_by_id(Uuid::new_v4()).await?;
+        assert!(result.is_none(), "non-existent file should return None");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_get_file_by_hash_and_creator() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: file_id,
+            hash: "hashvalue".to_owned(),
+            created_by: creator_id,
+            mimetype: "text/plain".to_owned(),
+            data: b"hello world".to_vec(),
+        };
+        store.insert_file(input).await?;
+
+        let found = store
+            .get_file_by_hash_and_creator("hashvalue", creator_id)
+            .await?;
+        assert!(found.is_some(), "file should be found by hash+creator");
+        let file = found.ok_or("expected file")?;
+        assert_eq!(file.id, file_id);
+        assert_eq!(file.hash, "hashvalue");
+
+        // Different creator should not match
+        let not_found = store
+            .get_file_by_hash_and_creator("hashvalue", Uuid::new_v4())
+            .await?;
+        assert!(
+            not_found.is_none(),
+            "wrong creator should not find the file"
+        );
+
+        // Different hash should not match
+        let not_found = store
+            .get_file_by_hash_and_creator("otherhash", creator_id)
+            .await?;
+        assert!(not_found.is_none(), "wrong hash should not find the file");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_insert_duplicate_file_returns_existing() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let first_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: first_id,
+            hash: "duphash".to_owned(),
+            created_by: creator_id,
+            mimetype: "application/octet-stream".to_owned(),
+            data: b"dup data".to_vec(),
+        };
+        let first_result = store.insert_file(input).await?;
+        assert_eq!(first_result.id, first_id);
+
+        // Insert duplicate with same hash + creator should return existing id
+        let second_input = InsertFileInput {
+            id: Uuid::new_v4(),
+            hash: "duphash".to_owned(),
+            created_by: creator_id,
+            mimetype: "application/octet-stream".to_owned(),
+            data: b"dup data".to_vec(),
+        };
+        let second_result = store.insert_file(second_input).await?;
+        assert_eq!(
+            second_result.id, first_id,
+            "duplicate insert should return the original file id"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_delete_file() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: file_id,
+            hash: "deletehash".to_owned(),
+            created_by: creator_id,
+            mimetype: "text/plain".to_owned(),
+            data: b"to be deleted".to_vec(),
+        };
+        store.insert_file(input).await?;
+
+        // File should exist
+        let exists = store.get_file_by_id(file_id).await?;
+        assert!(exists.is_some(), "file should exist before deletion");
+
+        // Delete should return true
+        let deleted = store.delete_file(file_id).await?;
+        assert!(deleted, "delete_file should return true for existing file");
+
+        // File should no longer exist
+        let gone = store.get_file_by_id(file_id).await?;
+        assert!(gone.is_none(), "file should not exist after deletion");
+
+        // Deleting again should return false
+        let deleted_again = store.delete_file(file_id).await?;
+        assert!(
+            !deleted_again,
+            "delete_file should return false for non-existent file"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_delete_file_nonexistent() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let result = store.delete_file(Uuid::new_v4()).await?;
+        assert!(
+            !result,
+            "delete_file should return false for non-existent file"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct store tests: audit log operations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_insert_and_list_audit_logs() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let input = PersistAuditLogInput {
+            id: Uuid::new_v4(),
+            request_id: Some(Uuid::new_v4()),
+            time: OffsetDateTime::now_utc(),
+            ip: "127.0.0.1".to_owned(),
+            user_agent: "test-agent/1.0".to_owned(),
+            resource_type: "workspace".to_owned(),
+            resource_id: Some(Uuid::new_v4()),
+            resource_target: "my-workspace".to_owned(),
+            resource_icon: String::new(),
+            action: "create".to_owned(),
+            diff: serde_json::Value::Object(serde_json::Map::new()),
+            status_code: 201,
+            additional_fields: serde_json::Value::Object(serde_json::Map::new()),
+            description: "Created a workspace".to_owned(),
+            resource_link: String::new(),
+            is_deleted: false,
+            organization_id: Some(Uuid::new_v4()),
+            user_id: Some(Uuid::new_v4()),
+        };
+        store.insert_audit_log(input).await?;
+
+        let filter = AuditLogListFilter {
+            search: String::new(),
+            limit: 10,
+            offset: 0,
+        };
+        let response = store.list_audit_logs(filter).await?;
+        assert!(response.count >= 1, "should have at least one audit log");
+        assert!(
+            !response.audit_logs.is_empty(),
+            "audit_logs should not be empty"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_list_audit_logs_empty() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let filter = AuditLogListFilter {
+            search: String::new(),
+            limit: 10,
+            offset: 0,
+        };
+        let response = store.list_audit_logs(filter).await?;
+        assert_eq!(response.count, 0, "empty store should have zero audit logs");
+        assert!(response.audit_logs.is_empty(), "audit_logs should be empty");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct store tests: chat file operations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_insert_and_find_chat_file() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let owner_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+
+        let input = InsertChatFileInput {
+            owner_id,
+            organization_id: org_id,
+            name: "readme.md".to_owned(),
+            mimetype: "text/markdown".to_owned(),
+            data: b"# Hello".to_vec(),
+        };
+        let record = store.insert_chat_file(input).await?;
+        assert_eq!(record.name, "readme.md");
+        assert_eq!(record.mimetype, "text/markdown");
+        assert_eq!(record.owner_id, owner_id);
+
+        let found = store.find_chat_file_by_id(record.id).await?;
+        assert!(found.is_some(), "chat file should be found by id");
+        let chat_file = found.ok_or("expected chat file")?;
+        assert_eq!(chat_file.id, record.id);
+        assert_eq!(chat_file.name, "readme.md");
+        assert_eq!(chat_file.data, b"# Hello");
+
+        // Non-existent ID should not find any chat file
+        let not_found = store.find_chat_file_by_id(Uuid::new_v4()).await?;
+        assert!(
+            not_found.is_none(),
+            "non-existent id should not find the chat file"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_find_chat_file_not_found() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let result = store.find_chat_file_by_id(Uuid::new_v4()).await?;
+        assert!(
+            result.is_none(),
+            "non-existent chat file should return None"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Enterprise store method tests (licenses, VAPID keys, webpush bulk delete)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn license_crud_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        // Initially empty
+        let licenses = store.list_licenses().await?;
+        assert!(licenses.is_empty(), "expected no licenses initially");
+
+        // Insert a license
+        let claims = json!({"license_expires": 1893456000, "features": {"audit_log": true}});
+        let record = store.insert_license("test.jwt.token", &claims).await?;
+        assert_eq!(record.jwt, "test.jwt.token");
+        assert_eq!(record.claims, claims);
+
+        // List should return it
+        let licenses = store.list_licenses().await?;
+        assert_eq!(licenses.len(), 1);
+        assert_eq!(licenses[0].id, record.id);
+
+        // Insert another license
+        let claims2 = json!({"license_expires": 1893456000, "features": {"ha": true}});
+        let record2 = store.insert_license("test2.jwt.token", &claims2).await?;
+        let licenses = store.list_licenses().await?;
+        assert_eq!(licenses.len(), 2);
+
+        // Delete the first license
+        let deleted = store.delete_license(record.id).await?;
+        assert!(deleted, "should have deleted a license");
+        let licenses = store.list_licenses().await?;
+        assert_eq!(licenses.len(), 1);
+        assert_eq!(licenses[0].id, record2.id);
+
+        // Delete non-existent license
+        let deleted = store.delete_license(999).await?;
+        assert!(!deleted, "should not have deleted anything");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vapid_keys_crud_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        // Initially no keys
+        let keys = store.get_webpush_vapid_keys().await?;
+        assert!(keys.is_none(), "expected no VAPID keys initially");
+
+        // Upsert keys
+        store
+            .upsert_webpush_vapid_keys("public_key_123", "private_key_456")
+            .await?;
+
+        let keys = store.get_webpush_vapid_keys().await?;
+        let keys = keys.ok_or("expected VAPID keys to be present")?;
+        assert_eq!(keys.public_key, "public_key_123");
+        assert_eq!(keys.private_key, "private_key_456");
+
+        // Upsert again to update
+        store
+            .upsert_webpush_vapid_keys("new_public", "new_private")
+            .await?;
+        let keys = store
+            .get_webpush_vapid_keys()
+            .await?
+            .ok_or("expected VAPID keys")?;
+        assert_eq!(keys.public_key, "new_public");
+        assert_eq!(keys.private_key, "new_private");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_bulk_delete_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let user_id = Uuid::new_v4();
+        let endpoint1 = "https://push.example.com/sub1";
+        let endpoint2 = "https://push.example.com/sub2";
+        let endpoint3 = "https://push.example.com/sub3";
+
+        // Insert subscriptions (returns () so we fetch IDs after)
+        store
+            .insert_webpush_subscription(user_id, endpoint1, "p256dh1", "auth1")
+            .await?;
+        store
+            .insert_webpush_subscription(user_id, endpoint2, "p256dh2", "auth2")
+            .await?;
+        store
+            .insert_webpush_subscription(user_id, endpoint3, "p256dh3", "auth3")
+            .await?;
+
+        // Fetch all subscriptions to get their IDs
+        let subs = store.get_webpush_subscriptions_by_user_id(user_id).await?;
+        assert_eq!(subs.len(), 3);
+
+        // Find IDs by endpoint
+        let id1 = subs
+            .iter()
+            .find(|s| s.endpoint == endpoint1)
+            .map(|s| s.id)
+            .ok_or("subscription for endpoint1 not found")?;
+        let id2 = subs
+            .iter()
+            .find(|s| s.endpoint == endpoint2)
+            .map(|s| s.id)
+            .ok_or("subscription for endpoint2 not found")?;
+        let id3 = subs
+            .iter()
+            .find(|s| s.endpoint == endpoint3)
+            .map(|s| s.id)
+            .ok_or("subscription for endpoint3 not found")?;
+
+        // Delete specific subscriptions by ID
+        store.delete_webpush_subscriptions(&[id1, id3]).await?;
+        let remaining = store.get_webpush_subscriptions_by_user_id(user_id).await?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, id2);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_delete_all_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let user_id = Uuid::new_v4();
+
+        // Insert subscriptions
+        store
+            .insert_webpush_subscription(user_id, "https://push.example.com/a", "p256dh", "auth")
+            .await?;
+        store
+            .insert_webpush_subscription(user_id, "https://push.example.com/b", "p256dh", "auth")
+            .await?;
+
+        // Delete all
+        store.delete_all_webpush_subscriptions().await?;
+        let remaining = store.get_webpush_subscriptions_by_user_id(user_id).await?;
+        assert!(remaining.is_empty(), "all subscriptions should be deleted");
+
         Ok(())
     }
 
