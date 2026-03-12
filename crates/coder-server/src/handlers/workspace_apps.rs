@@ -1802,6 +1802,10 @@ pub(crate) fn validate_signed_app_token(
 
 /// Simple percent-decoding for query parameter values.
 ///
+/// Uses `application/x-www-form-urlencoded` semantics where `+` is decoded
+/// as a space character. This is intentional for query string values but
+/// would be incorrect for path segments where `+` is literal.
+///
 /// JWT tokens only contain base64url characters (`A-Z`, `a-z`, `0-9`, `-`,
 /// `_`, `.`) which are not percent-encoded, so this handles the common case
 /// of `%2B` (+), `%2F` (/), `%3D` (=) from standard base64.
@@ -1935,12 +1939,9 @@ async fn proxy_websocket(
         }
     }
 
-    // Clone the URL for the spawned task.
-    let ws_url_clone = ws_url.clone();
-
     let response = ws.on_upgrade(move |client_socket| async move {
-        // Connect to the upstream WebSocket.
-        let upstream_result = tokio_tungstenite::connect_async(ws_url_clone.as_str()).await;
+        // Connect to the upstream WebSocket using the request with forwarded headers.
+        let upstream_result = tokio_tungstenite::connect_async(ws_request).await;
 
         let (upstream_socket, _response) = match upstream_result {
             Ok(pair) => pair,
@@ -1955,7 +1956,7 @@ async fn proxy_websocket(
         let (mut upstream_sink, mut upstream_stream) = upstream_socket.split();
 
         // Client → upstream task.
-        let client_to_upstream = tokio::spawn(async move {
+        let mut client_to_upstream = tokio::spawn(async move {
             while let Some(msg) = client_stream.next().await {
                 match msg {
                     Ok(Message::Text(text)) => {
@@ -1988,7 +1989,7 @@ async fn proxy_websocket(
         });
 
         // Upstream → client task.
-        let upstream_to_client = tokio::spawn(async move {
+        let mut upstream_to_client = tokio::spawn(async move {
             while let Some(msg) = upstream_stream.next().await {
                 match msg {
                     Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
@@ -2014,10 +2015,15 @@ async fn proxy_websocket(
             let _ = client_sink.close().await;
         });
 
-        // Wait for either direction to finish.
-        let _ = tokio::select! {
-            r = client_to_upstream => r,
-            r = upstream_to_client => r,
+        // Wait for either direction to finish, then abort the other to prevent
+        // task leaks.
+        tokio::select! {
+            _ = &mut client_to_upstream => {
+                upstream_to_client.abort();
+            },
+            _ = &mut upstream_to_client => {
+                client_to_upstream.abort();
+            },
         };
     });
 
@@ -2054,6 +2060,11 @@ pub(crate) async fn workspace_port_forward(
     body: axum::body::Body,
 ) -> Result<Response, WorkspaceAppError> {
     let server = build_workspace_app_server(&state);
+
+    // Check if path apps are disabled (port forwarding uses path-based URLs).
+    if server.disable_path_apps {
+        return Err(WorkspaceAppError::PathAppsDisabled);
+    }
 
     // Reject @me.
     if params.user == "me" {
