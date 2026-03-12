@@ -57,7 +57,7 @@ pub(crate) async fn update_check(State(state): State<AppState>) -> Json<UpdateCh
     })
 }
 
-/// GET /api/v2/deployment/init/:os/:arch — render a platform-specific agent init script.
+/// GET /api/v2/init-script/{os}/{arch} — render a platform-specific agent init script.
 pub(crate) async fn get_init_script(
     State(state): State<AppState>,
     Path((os, arch)): Path<(String, String)>,
@@ -522,7 +522,7 @@ pub(crate) async fn debug_tailnet(
 /// tracks per-client send/receive byte counters.  In Go this calls
 /// `options.DERPServer.ServeDebugTraffic`.  The Rust backend does not yet
 /// include a DERP relay, so we return 501.
-/// GET /api/v2/debug/derp-traffic — dump DERP relay traffic statistics as HTML.
+/// GET /api/v2/debug/derp/traffic — dump DERP relay traffic statistics as JSON.
 pub(crate) async fn debug_derp_traffic(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -546,7 +546,7 @@ pub(crate) async fn debug_derp_traffic(
 /// cmdline, and (when available) DERP metrics.  The Rust equivalent reads
 /// process stats from `/proc/self` (Linux) or returns basic runtime info
 /// on other platforms.
-/// GET /debug/expvar — export runtime variables as JSON (memory stats, etc.).
+/// GET /api/v2/debug/expvar — export runtime variables as JSON (memory stats, etc.).
 pub(crate) async fn debug_expvar(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -620,7 +620,7 @@ pub(crate) fn parse_proc_kb(val: &str) -> Option<u64> {
 /// `pprof-rs` crate.  For heap profiling use jemalloc with
 /// `MALLOC_CONF="prof:true"`.  For async-task dumps use `tokio-console`.
 /// Each sub-route returns informational JSON about Rust alternatives.
-/// GET /debug/pprof — placeholder for Go-style pprof-compatible profiling data.
+/// GET /api/v2/debug/pprof — placeholder for Go-style pprof-compatible profiling data.
 pub(crate) async fn debug_pprof(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
@@ -747,7 +747,7 @@ pub(crate) async fn websocket_echo(mut socket: WebSocket) {
 /// so we emit a small set of process-level gauges in Prometheus exposition
 /// format.  Once a registry is wired into `AppState`, this handler should
 /// delegate to it.
-/// GET /debug/metrics — return Prometheus-format metrics.
+/// GET /api/v2/debug/metrics — return Prometheus-format metrics.
 pub(crate) async fn debug_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,

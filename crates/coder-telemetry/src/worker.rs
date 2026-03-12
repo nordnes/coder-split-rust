@@ -221,7 +221,8 @@ async fn flush_batch(
         return;
     }
 
-    let events: Vec<TelemetryEvent> = std::mem::take(buffer);
+    let mut events = Vec::with_capacity(buffer.capacity());
+    std::mem::swap(buffer, &mut events);
     let count = events.len() as u64;
 
     let snapshot = TelemetrySnapshot {

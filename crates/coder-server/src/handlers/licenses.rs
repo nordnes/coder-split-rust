@@ -4,7 +4,6 @@ use base64::Engine as _;
 
 use super::*;
 use coder_core::api::{AddLicenseRequest, LicenseResponse};
-#[allow(unused_imports)] // Scaffolded for enterprise feature guard.
 use coder_license::{EntitlementSet, FeatureName};
 
 /// Converts a [`coder_core::LicenseRecord`] into a [`LicenseResponse`],
