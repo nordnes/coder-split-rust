@@ -549,8 +549,8 @@ pub async fn fetch_jwks(
 fn key_algorithm_to_algorithm(
     ka: jsonwebtoken::jwk::KeyAlgorithm,
 ) -> Option<jsonwebtoken::Algorithm> {
-    use jsonwebtoken::jwk::KeyAlgorithm;
     use jsonwebtoken::Algorithm;
+    use jsonwebtoken::jwk::KeyAlgorithm;
 
     match ka {
         KeyAlgorithm::HS256 => Some(Algorithm::HS256),
@@ -568,6 +568,42 @@ fn key_algorithm_to_algorithm(
         // Key-management algorithms (RSA1_5, RSA-OAEP, RSA-OAEP-256) are
         // not valid for JWT signing.
         _ => None,
+    }
+}
+
+/// Returns `true` when `alg` is compatible with the JWK's key type.
+///
+/// This prevents algorithm-confusion attacks when the JWK does not declare
+/// its own `alg` and we must fall back to the JWT header's algorithm.
+fn is_algorithm_compatible_with_jwk(
+    alg: jsonwebtoken::Algorithm,
+    jwk: &jsonwebtoken::jwk::Jwk,
+) -> bool {
+    use jsonwebtoken::Algorithm;
+    use jsonwebtoken::jwk::AlgorithmParameters;
+
+    match (&alg, &jwk.algorithm) {
+        // Symmetric HMAC algorithms with octet (shared secret) keys
+        (
+            Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512,
+            AlgorithmParameters::OctetKey(_),
+        ) => true,
+        // RSA (including PSS) algorithms with RSA keys
+        (
+            Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512,
+            AlgorithmParameters::RSA(_),
+        ) => true,
+        // ECDSA algorithms with EC keys
+        (Algorithm::ES256 | Algorithm::ES384, AlgorithmParameters::EllipticCurve(_)) => true,
+        // EdDSA with OKP keys
+        (Algorithm::EdDSA, AlgorithmParameters::OctetKeyPair(_)) => true,
+        // Anything else is considered incompatible.
+        _ => false,
     }
 }
 
@@ -592,19 +628,27 @@ pub fn decode_id_token_claims(
     let kid = header.kid.as_deref();
 
     // Find a matching key in the JWKS.  Prefer matching by `kid`; fall back
-    // to the first key whose `alg` matches the header (some providers omit
-    // `kid` when they only publish a single key).
+    // to the first key when no `kid` is present, but only if the JWKS
+    // contains exactly one key (ambiguous otherwise).
     let jwk = if let Some(kid_value) = kid {
         jwks.find(kid_value).ok_or_else(|| {
             OAuthLoginError::InvalidIdToken(format!(
                 "no JWK found with kid={kid_value:?} in provider JWKS"
             ))
         })?
+    } else if jwks.keys.len() == 1 {
+        // Single key in the set – safe to use without `kid`.
+        &jwks.keys[0]
+    } else if jwks.keys.is_empty() {
+        return Err(OAuthLoginError::InvalidIdToken(
+            "JWKS contains no keys".to_owned(),
+        ));
     } else {
-        // No kid in the header – use the first key in the set.
-        jwks.keys.first().ok_or_else(|| {
-            OAuthLoginError::InvalidIdToken("JWKS contains no keys".to_owned())
-        })?
+        return Err(OAuthLoginError::InvalidIdToken(format!(
+            "JWT header has no `kid` but JWKS contains {} keys; \
+             cannot determine which key to use",
+            jwks.keys.len()
+        )));
     };
 
     let decoding_key = jsonwebtoken::DecodingKey::from_jwk(jwk).map_err(|e| {
@@ -614,14 +658,21 @@ pub fn decode_id_token_claims(
     // Determine the verification algorithm.  Prefer the JWK's declared
     // algorithm (`alg` field) over the JWT header's `alg`, because the
     // header is attacker-controlled.  Fall back to the header only when
-    // the JWK does not declare an algorithm.
+    // the JWK does not declare an algorithm, and even then only if the
+    // header algorithm is compatible with the selected JWK's key type.
     let alg = match jwk.common.key_algorithm {
         Some(ka) => key_algorithm_to_algorithm(ka).ok_or_else(|| {
-            OAuthLoginError::InvalidIdToken(format!(
-                "JWK declares unsupported algorithm: {ka:?}"
-            ))
+            OAuthLoginError::InvalidIdToken(format!("JWK declares unsupported algorithm: {ka:?}"))
         })?,
-        None => header.alg,
+        None => {
+            let header_alg = header.alg;
+            if !is_algorithm_compatible_with_jwk(header_alg, jwk) {
+                return Err(OAuthLoginError::InvalidIdToken(format!(
+                    "header algorithm {header_alg:?} is incompatible with JWK key type"
+                )));
+            }
+            header_alg
+        }
     };
 
     // Build validation: check issuer, audience, and expiry.
@@ -635,10 +686,8 @@ pub fn decode_id_token_claims(
     validation.set_audience(&[&config.client_id]);
     validation.validate_exp = true;
 
-    let token_data =
-        jsonwebtoken::decode::<OidcClaims>(id_token, &decoding_key, &validation).map_err(
-            |e| OAuthLoginError::InvalidIdToken(format!("JWT verification failed: {e}")),
-        )?;
+    let token_data = jsonwebtoken::decode::<OidcClaims>(id_token, &decoding_key, &validation)
+        .map_err(|e| OAuthLoginError::InvalidIdToken(format!("JWT verification failed: {e}")))?;
 
     Ok(token_data.claims)
 }

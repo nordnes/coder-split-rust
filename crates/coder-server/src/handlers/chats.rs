@@ -1046,7 +1046,31 @@ pub(crate) async fn watch_chat_git(
                     matched_agent_id = Some(info.agent_id);
                     break;
                 }
-                _ => continue,
+                Ok(_) => continue,
+                Err(err) => {
+                    tracing::error!(
+                        error = ?err,
+                        agent_id = ?info.agent_id,
+                        workspace_id = ?workspace_id,
+                        "failed to look up workspace by agent id during git watch"
+                    );
+                    let err_msg = serde_json::json!({
+                        "type": "error",
+                        "message": "Internal server error while checking connected agents."
+                    });
+                    let _ = socket
+                        .send(Message::Text(
+                            serde_json::to_string(&err_msg).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    let _ = socket
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 4500,
+                            reason: "internal server error".into(),
+                        })))
+                        .await;
+                    return;
+                }
             }
         }
 

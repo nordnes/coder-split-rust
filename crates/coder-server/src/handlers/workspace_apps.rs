@@ -1496,15 +1496,14 @@ async fn resolve_app_url(
         })?
         .ok_or_else(|| WorkspaceAppError::NotFound("workspace agent not found".into()))?;
 
-    // Determine the agent's reachable address.  The agent advertises its
-    // address when it connects; fall back to the agent name if the address
-    // column is empty (the tailnet coordinator will resolve it).
+    // Use the agent's name as a tailnet DNS label.  The tailnet
+    // coordinator resolves this to the agent's actual address, so we
+    // never construct URLs pointing at the server's own loopback.
     let agent_host = if agent.name.is_empty() {
         return Err(WorkspaceAppError::Internal(
-            "workspace agent has no reachable address".into(),
+            "workspace agent has no name configured".into(),
         ));
     } else {
-        // Use the agent name as a DNS label routed through the tailnet.
         &agent.name
     };
 
@@ -1527,9 +1526,7 @@ async fn resolve_app_url(
         .store
         .find_workspace_app_by_agent_and_slug(agent_id, slug)
         .await
-        .map_err(|e| {
-            WorkspaceAppError::Internal(format!("failed to look up workspace app: {e}"))
-        })?
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up workspace app: {e}")))?
         .ok_or_else(|| {
             WorkspaceAppError::NotFound(format!("application {slug:?} not found for agent"))
         })?;
@@ -1550,6 +1547,11 @@ async fn resolve_app_url(
 ///
 /// Tries to parse `agent_name_or_id` as a UUID first; otherwise looks up the
 /// workspace by name and finds its agent.
+///
+/// **Limitation**: Name-based agent resolution is not yet implemented.
+/// When `agent_name_or_id` is not a valid UUID, this function validates
+/// that the workspace exists but returns `NotFound` because there is no
+/// store method to look up agents by name within a workspace yet.
 async fn resolve_workspace_agent_id(
     state: &AppState,
     request: &AppRequest,
@@ -1559,31 +1561,30 @@ async fn resolve_workspace_agent_id(
         return Ok(id);
     }
 
-    // Otherwise we need to look up the workspace and find its agent by name.
-    // For now, try parsing workspace_name_or_id as a UUID.
-    let workspace_id: Uuid = request
-        .workspace_name_or_id
-        .parse()
-        .map_err(|_| {
-            WorkspaceAppError::NotFound(format!(
-                "workspace {:?} not found (name-based lookup requires the workspace store)",
-                request.workspace_name_or_id
-            ))
-        })?;
+    // Name-based agent lookup requires the workspace ID first.
+    let workspace_id: Uuid = request.workspace_name_or_id.parse().map_err(|_| {
+        WorkspaceAppError::NotFound(format!(
+            "workspace {:?} not found (name-based lookup not yet supported)",
+            request.workspace_name_or_id
+        ))
+    })?;
 
-    // Look up the workspace to verify it exists.  We have a workspace ID
-    // (parsed above), so use `find_workspace_by_id` — not the agent-based
-    // lookup which expects an *agent* UUID.
-    let _workspace = state
+    // Verify the workspace exists before returning the agent-not-found error.
+    let workspace = state
         .store
         .find_workspace_by_id(workspace_id, None)
         .await
-        .map_err(|e| {
-            WorkspaceAppError::Internal(format!("failed to look up workspace: {e}"))
-        })?;
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up workspace: {e}")))?;
+
+    if workspace.is_none() {
+        return Err(WorkspaceAppError::NotFound(format!(
+            "workspace {workspace_id} not found"
+        )));
+    }
 
     Err(WorkspaceAppError::NotFound(format!(
-        "could not resolve agent {:?} for workspace {:?}",
+        "name-based agent resolution is not yet implemented; \
+         agent {:?} for workspace {:?} could not be resolved",
         request.agent_name_or_id, request.workspace_name_or_id
     )))
 }
