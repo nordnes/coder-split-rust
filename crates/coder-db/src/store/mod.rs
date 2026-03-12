@@ -5704,18 +5704,18 @@ mod tests {
             None => return Ok(()),
         };
 
-        // Insert a provider
+        // Insert a provider (provider must be from the DB CHECK allowlist)
         let provider = store
             .insert_chat_provider(coder_core::InsertChatProviderInput {
-                provider: format!("openai-{}", uniq()),
-                display_name: "OpenAI Test".to_string(),
-                api_key: "sk-test-key-1234".to_string(),
+                provider: "openai".to_string(),
+                display_name: format!("OpenAI Test {}", uniq()),
+                api_key: "test-fake-api-key-1234".to_string(),
                 base_url: "https://api.openai.com/v1".to_string(),
                 enabled: true,
                 created_by: None,
             })
             .await?;
-        assert_eq!(provider.display_name, "OpenAI Test");
+        assert!(provider.display_name.starts_with("OpenAI Test"));
         assert!(provider.enabled);
 
         // List providers — should contain the one we just created
@@ -5730,7 +5730,7 @@ mod tests {
             .update_chat_provider(coder_core::UpdateChatProviderInput {
                 id: provider.id,
                 display_name: "OpenAI Updated".to_string(),
-                api_key: "sk-updated-key".to_string(),
+                api_key: "test-fake-updated-key".to_string(),
                 base_url: "https://api.openai.com/v2".to_string(),
                 enabled: false,
             })
@@ -5766,7 +5766,7 @@ mod tests {
             .update_chat_provider(coder_core::UpdateChatProviderInput {
                 id: Uuid::new_v4(),
                 display_name: "Ghost".to_string(),
-                api_key: "key".to_string(),
+                api_key: "test-fake-key".to_string(),
                 base_url: "https://example.com".to_string(),
                 enabled: true,
             })
@@ -5788,21 +5788,21 @@ mod tests {
             None => return Ok(()),
         };
 
-        // Insert a model config
+        // Insert a model config (compression_threshold must be 0..=100 per DB CHECK)
         let config = store
             .insert_chat_model_config(coder_core::InsertChatModelConfigInput {
-                provider: format!("openai-{}", uniq()),
-                model: "gpt-4".to_string(),
+                provider: "openai".to_string(),
+                model: format!("gpt-4-{}", uniq()),
                 display_name: "GPT-4 Test".to_string(),
                 enabled: true,
                 is_default: false,
                 context_limit: 128000,
-                compression_threshold: 80000,
+                compression_threshold: 80,
                 options: json!({"temperature": 0.7}),
                 created_by: None,
             })
             .await?;
-        assert_eq!(config.model, "gpt-4");
+        assert!(config.model.starts_with("gpt-4-"));
         assert_eq!(config.display_name, "GPT-4 Test");
         assert!(config.enabled);
         assert!(!config.is_default);
@@ -5832,7 +5832,7 @@ mod tests {
                 enabled: false,
                 is_default: false,
                 context_limit: 256000,
-                compression_threshold: 120000,
+                compression_threshold: 50,
                 options: json!({"temperature": 0.5}),
                 updated_by: None,
             })
@@ -5871,18 +5871,22 @@ mod tests {
             None => return Ok(()),
         };
 
-        let provider_name = format!("ensure-default-{}", uniq());
+        // Clear any existing defaults so this test is deterministic
+        store.unset_default_chat_model_configs().await?;
+
+        let model_a = format!("model-a-{}", uniq());
+        let model_b = format!("model-b-{}", uniq());
 
         // Insert two enabled configs, neither is default
         let c1 = store
             .insert_chat_model_config(coder_core::InsertChatModelConfigInput {
-                provider: provider_name.clone(),
-                model: "model-a".to_string(),
+                provider: "openai".to_string(),
+                model: model_a,
                 display_name: "Model A".to_string(),
                 enabled: true,
                 is_default: false,
                 context_limit: 4096,
-                compression_threshold: 2048,
+                compression_threshold: 50,
                 options: json!({}),
                 created_by: None,
             })
@@ -5890,13 +5894,13 @@ mod tests {
 
         let _c2 = store
             .insert_chat_model_config(coder_core::InsertChatModelConfigInput {
-                provider: provider_name.clone(),
-                model: "model-b".to_string(),
+                provider: "openai".to_string(),
+                model: model_b,
                 display_name: "Model B".to_string(),
                 enabled: true,
                 is_default: false,
                 context_limit: 8192,
-                compression_threshold: 4096,
+                compression_threshold: 60,
                 options: json!({}),
                 created_by: None,
             })
@@ -5904,46 +5908,31 @@ mod tests {
 
         // Neither is default yet
         let before = store.list_chat_model_configs(false).await?;
-        let our_configs: Vec<_> = before
-            .iter()
-            .filter(|c| c.provider == provider_name)
-            .collect();
         assert!(
-            !our_configs.iter().any(|c| c.is_default),
-            "no config should be default yet"
+            !before.iter().any(|c| c.is_default),
+            "no config should be default after unset"
         );
 
         // ensure_default should promote the earliest created enabled config
         store.ensure_default_chat_model_config().await?;
 
         let after = store.list_chat_model_configs(false).await?;
-        let our_configs_after: Vec<_> = after
-            .iter()
-            .filter(|c| c.provider == provider_name)
-            .collect();
 
-        // At least one of our configs should now be default (the earliest one)
-        // Note: ensure_default only promotes if there is NO existing default.
-        // If another test left a default in the DB, this won't change anything.
-        // We check that either a global default exists or c1 became default.
-        let any_default = after.iter().any(|c| c.is_default && c.enabled);
+        // c1 (the earliest created enabled config) should now be default
+        let c1_after = after
+            .iter()
+            .find(|c| c.id == c1.id)
+            .unwrap_or_else(|| panic!("c1 should still exist after ensure_default"));
         assert!(
-            any_default,
-            "after ensure_default, at least one enabled config should be default"
+            c1_after.is_default,
+            "c1 (the earliest created enabled config) should be promoted to default"
         );
 
-        // If c1 became default, verify it's the right one
-        if let Some(c1_after) = our_configs_after.iter().find(|c| c.id == c1.id) {
-            if c1_after.is_default {
-                // c1 was the earliest, so this is correct
-                assert!(
-                    !our_configs_after
-                        .iter()
-                        .any(|c| c.id != c1.id && c.is_default),
-                    "only the earliest config should be promoted to default"
-                );
-            }
-        }
+        // No other config should be default
+        assert!(
+            !after.iter().any(|c| c.id != c1.id && c.is_default),
+            "only the earliest created enabled config should be default"
+        );
 
         // Cleanup: unset defaults so we don't pollute other tests
         store.unset_default_chat_model_configs().await?;
@@ -5963,13 +5952,13 @@ mod tests {
         let result = store
             .update_chat_model_config(coder_core::UpdateChatModelConfigInput {
                 id: Uuid::new_v4(),
-                provider: "ghost".to_string(),
+                provider: "openai".to_string(),
                 model: "ghost-model".to_string(),
                 display_name: "Ghost".to_string(),
                 enabled: true,
                 is_default: false,
                 context_limit: 1000,
-                compression_threshold: 500,
+                compression_threshold: 50,
                 options: json!({}),
                 updated_by: None,
             })
