@@ -4450,7 +4450,7 @@ pub(crate) mod tests {
 
         async fn insert_chat_file(
             &self,
-            input: coder_core::InsertChatFileInput,
+            input: InsertChatFileInput,
         ) -> Result<coder_core::ChatFileRecord, StorageError> {
             let now = OffsetDateTime::now_utc();
             let id = Uuid::new_v4();
@@ -33610,9 +33610,9 @@ pub(crate) mod tests {
             resource_target: "my-workspace".to_owned(),
             resource_icon: String::new(),
             action: "create".to_owned(),
-            diff: serde_json::Value::Object(serde_json::Map::new()),
+            diff: Value::Object(serde_json::Map::new()),
             status_code: 201,
-            additional_fields: serde_json::Value::Object(serde_json::Map::new()),
+            additional_fields: Value::Object(serde_json::Map::new()),
             description: "Created a workspace".to_owned(),
             resource_link: String::new(),
             is_deleted: false,
@@ -33911,7 +33911,7 @@ pub(crate) mod tests {
             .get("chat")
             .and_then(|c| c.get("id"))
             .and_then(Value::as_str)
-            .expect("chat.id should be present");
+            .ok_or("chat.id should be present")?;
         assert!(!chat_id.is_empty());
 
         // List chats — should contain the one we just created.
@@ -33922,7 +33922,7 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(list_resp.status(), StatusCode::OK);
         let list_body = response_json(list_resp).await?;
-        let chats = list_body.as_array().expect("should be an array");
+        let chats = list_body.as_array().ok_or("should be an array")?;
         assert_eq!(chats.len(), 1);
         assert_eq!(chats[0].get("id").and_then(Value::as_str), Some(chat_id));
         Ok(())
@@ -33962,7 +33962,7 @@ pub(crate) mod tests {
             .get("chat")
             .and_then(|c| c.get("id"))
             .and_then(Value::as_str)
-            .expect("chat.id should be present");
+            .ok_or("chat.id should be present")?;
 
         // GET the chat.
         let get_resp = call(
@@ -34031,7 +34031,7 @@ pub(crate) mod tests {
             .get("chat")
             .and_then(|c| c.get("id"))
             .and_then(Value::as_str)
-            .expect("chat.id should be present");
+            .ok_or("chat.id should be present")?;
 
         // Delete (archive) the chat.
         let del_resp = call(
@@ -34049,7 +34049,7 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(list_resp.status(), StatusCode::OK);
         let list_body = response_json(list_resp).await?;
-        let chats = list_body.as_array().expect("should be an array");
+        let chats = list_body.as_array().ok_or("should be an array")?;
         assert_eq!(
             chats.len(),
             0,
@@ -34092,7 +34092,7 @@ pub(crate) mod tests {
             .get("chat")
             .and_then(|c| c.get("id"))
             .and_then(Value::as_str)
-            .expect("chat.id should be present");
+            .ok_or("chat.id should be present")?;
 
         // Post a follow-up message.
         let msg_resp = call(

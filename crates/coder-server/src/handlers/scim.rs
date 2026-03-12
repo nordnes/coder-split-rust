@@ -987,7 +987,7 @@ mod tests {
     #[test]
     fn test_scim_verify_auth_empty_key() {
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Bearer some-key".parse().unwrap());
+        headers.insert("Authorization", HeaderValue::from_static("Bearer some-key"));
         assert!(!scim_verify_auth(&headers, ""));
     }
 
@@ -1000,28 +1000,28 @@ mod tests {
     #[test]
     fn test_scim_verify_auth_valid() {
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Bearer test-key".parse().unwrap());
+        headers.insert("Authorization", HeaderValue::from_static("Bearer test-key"));
         assert!(scim_verify_auth(&headers, "test-key"));
     }
 
     #[test]
     fn test_scim_verify_auth_wrong_token() {
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "Bearer wrong-key".parse().unwrap());
+        headers.insert("Authorization", HeaderValue::from_static("Bearer wrong-key"));
         assert!(!scim_verify_auth(&headers, "test-key"));
     }
 
     #[test]
     fn test_scim_verify_auth_case_insensitive_prefix() {
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "BEARER test-key".parse().unwrap());
+        headers.insert("Authorization", HeaderValue::from_static("BEARER test-key"));
         assert!(scim_verify_auth(&headers, "test-key"));
     }
 
     #[test]
     fn test_scim_verify_auth_no_prefix() {
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", "test-key".parse().unwrap());
+        headers.insert("Authorization", HeaderValue::from_static("test-key"));
         assert!(scim_verify_auth(&headers, "test-key"));
     }
 }

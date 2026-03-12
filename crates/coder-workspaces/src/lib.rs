@@ -1440,7 +1440,7 @@ pub trait LifecycleStore: Send + Sync + 'static {
 }
 
 #[async_trait]
-impl<T: AppStore + 'static> LifecycleStore for T {
+impl LifecycleStore for dyn AppStore {
     async fn get_workspaces_eligible_for_transition(
         &self,
         now: OffsetDateTime,
@@ -1474,6 +1474,44 @@ impl<T: AppStore + 'static> LifecycleStore for T {
         input: coder_core::ports::CreateWorkspaceBuildInput,
     ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
         AppStore::insert_workspace_build(self, input).await
+    }
+}
+
+#[async_trait]
+impl<T: LifecycleStore + ?Sized> LifecycleStore for Arc<T> {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        (**self).get_workspaces_eligible_for_transition(now).await
+    }
+
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
+        (**self).find_latest_workspace_build(workspace_id).await
+    }
+
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self).find_workspace_by_id(workspace_id).await
+    }
+
+    async fn create_provisioner_job(
+        &self,
+        input: coder_core::CreateProvisionerJobInput,
+    ) -> Result<coder_core::template::ProvisionerJobRecord, StorageError> {
+        (**self).create_provisioner_job(input).await
+    }
+
+    async fn insert_workspace_build(
+        &self,
+        input: coder_core::ports::CreateWorkspaceBuildInput,
+    ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
+        (**self).insert_workspace_build(input).await
     }
 }
 
@@ -1888,6 +1926,26 @@ mod tests {
             _ids: &[uuid::Uuid],
         ) -> Result<Vec<coder_core::identity::UserRecord>, StorageError> {
             Ok(Vec::new())
+        }
+
+        async fn upsert_provisioner_job_stats(
+            &self,
+            _input: &coder_core::ports::ProvisionerJobStatsInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn list_provisioner_daemons_for_health(
+            &self,
+        ) -> Result<Vec<coder_core::ports::ProvisionerDaemonHealthRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn upsert_provisioner_daemon_for_health(
+            &self,
+            _input: &coder_core::ports::ProvisionerDaemonHealthInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
         }
     }
 
@@ -3174,11 +3232,12 @@ mod tests {
 
     // ── Activity Bump Worker tests ──────────────────────────
 
+    type DeadlineUpdate = (uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>);
+
     /// Mock store for ActivityBumpStore tests.
     struct MockActivityBumpStore {
         workspaces: Vec<WorkspaceTransitionRow>,
-        updated_deadlines:
-            std::sync::Mutex<Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)>>,
+        updated_deadlines: std::sync::Mutex<Vec<DeadlineUpdate>>,
         fail_transition: AtomicBool,
     }
 
@@ -3196,9 +3255,7 @@ mod tests {
             self
         }
 
-        fn deadline_updates(
-            &self,
-        ) -> Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)> {
+        fn deadline_updates(&self) -> Vec<DeadlineUpdate> {
             self.updated_deadlines
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())

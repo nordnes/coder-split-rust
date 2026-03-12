@@ -265,8 +265,8 @@ fn strip_paired_delimiter(input: &str, delim: &str) -> String {
 
             // For single-char delimiters, require a word boundary before the
             // opening delimiter: either start-of-string or preceding whitespace.
-            if single_char {
-                if open > 0 {
+            if single_char
+                && open > 0 {
                     let prev = s.as_bytes()[open - 1];
                     if !prev.is_ascii_whitespace() {
                         // Not at a word boundary – skip this occurrence.
@@ -274,7 +274,6 @@ fn strip_paired_delimiter(input: &str, delim: &str) -> String {
                         continue;
                     }
                 }
-            }
 
             if let Some(close_offset) = s[after_open..].find(delim) {
                 if close_offset > 0 {

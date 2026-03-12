@@ -1217,7 +1217,7 @@ mod tests {
             _user_id: Uuid,
             _secret_prefix: &[u8],
             _hashed_secret: &[u8],
-            _expires_at: time::OffsetDateTime,
+            _expires_at: OffsetDateTime,
             _resource_uri: &str,
             _code_challenge: &str,
             _code_challenge_method: &str,

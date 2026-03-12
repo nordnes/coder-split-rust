@@ -1015,6 +1015,20 @@ mod tests {
         ) -> Result<Vec<UserRecord>, StorageError> {
             Ok(Vec::new())
         }
+
+        async fn upsert_provisioner_job_stats(
+            &self,
+            _input: &coder_core::ports::ProvisionerJobStatsInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn upsert_provisioner_daemon_for_health(
+            &self,
+            _input: &coder_core::ports::ProvisionerDaemonHealthInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
     }
 
     fn test_config() -> ServerConfig {
@@ -1082,6 +1096,7 @@ mod tests {
             docs_url: String::new(),
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
+            worker: coder_core::config::WorkerConfig::default(),
         }
     }
 
