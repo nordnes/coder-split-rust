@@ -12,7 +12,7 @@ use coder_core::api::{
     UserActivityInsightsReport, UserActivityInsightsResponse, UserLatency,
     UserLatencyInsightsReport, UserLatencyInsightsResponse, UserStatusChangeCount,
 };
-use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
+use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord, WorkspaceTransitionRow};
 use coder_core::provisioner::{
     LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord,
     ProvisionerJobTimingRecord as ProvisionerTimingRecord,
@@ -1919,6 +1919,57 @@ struct StoredPortShareRow {
     port: i32,
     share_level: String,
     protocol: String,
+}
+
+#[derive(Debug, FromRow)]
+struct StoredWorkspaceTransitionRow {
+    id: Uuid,
+    name: String,
+    owner_id: Uuid,
+    template_id: Uuid,
+    autostart_schedule: Option<String>,
+    ttl: Option<i64>,
+    last_used_at: OffsetDateTime,
+    dormant_at: Option<OffsetDateTime>,
+    deleting_at: Option<OffsetDateTime>,
+    deleted: bool,
+    build_transition: String,
+    build_deadline: Option<OffsetDateTime>,
+    job_status: String,
+    job_completed_at: Option<OffsetDateTime>,
+    template_allow_user_autostart: bool,
+    template_default_ttl: i64,
+    template_failure_ttl: i64,
+    template_time_til_dormant: i64,
+    template_time_til_dormant_autodelete: i64,
+    owner_status: String,
+}
+
+fn workspace_transition_row_from_stored(
+    row: StoredWorkspaceTransitionRow,
+) -> WorkspaceTransitionRow {
+    WorkspaceTransitionRow {
+        id: row.id,
+        name: row.name,
+        owner_id: row.owner_id,
+        template_id: row.template_id,
+        autostart_schedule: row.autostart_schedule,
+        ttl_ns: row.ttl,
+        last_used_at: row.last_used_at,
+        dormant_at: row.dormant_at,
+        deleting_at: row.deleting_at,
+        deleted: row.deleted,
+        build_transition: row.build_transition,
+        build_deadline: row.build_deadline,
+        job_status: row.job_status,
+        job_completed_at: row.job_completed_at,
+        template_allow_user_autostart: row.template_allow_user_autostart,
+        template_default_ttl: row.template_default_ttl,
+        template_failure_ttl: row.template_failure_ttl,
+        template_time_til_dormant: row.template_time_til_dormant,
+        template_time_til_dormant_autodelete: row.template_time_til_dormant_autodelete,
+        owner_status: row.owner_status,
+    }
 }
 
 // ---------------------------------------------------------------------------
