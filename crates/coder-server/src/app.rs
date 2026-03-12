@@ -7451,6 +7451,9 @@ pub(crate) mod tests {
                         template_time_til_dormant: template.time_til_dormant,
                         template_time_til_dormant_autodelete: template.time_til_dormant_autodelete,
                         owner_status,
+                        build_id: build.id,
+                        max_deadline: build.max_deadline,
+                        activity_bump_ns: template.activity_bump,
                     });
                 }
             }
@@ -7775,6 +7778,50 @@ pub(crate) mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .remove(&(name.to_lowercase(), organization_id))
                 .is_some())
+        }
+
+        // -----------------------------------------------------------------
+        // Batch Workspace Build Parameters
+        // -----------------------------------------------------------------
+
+        async fn batch_insert_workspace_build_parameters(
+            &self,
+            params: Vec<WorkspaceBuildParameterRecord>,
+        ) -> Result<(), StorageError> {
+            let mut build_params = self
+                .workspace_build_parameters
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for p in params {
+                build_params
+                    .entry(p.workspace_build_id)
+                    .or_default()
+                    .push(p);
+            }
+            Ok(())
+        }
+
+        // -----------------------------------------------------------------
+        // Batch Workspace Last Used At
+        // -----------------------------------------------------------------
+
+        async fn batch_update_workspace_last_used_at(
+            &self,
+            ids: &[Uuid],
+            last_used_at: OffsetDateTime,
+        ) -> Result<u64, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut count: u64 = 0;
+            for id in ids {
+                if let Some(ws) = workspaces.get_mut(id) {
+                    ws.last_used_at = last_used_at;
+                    count += 1;
+                }
+            }
+            Ok(count)
         }
 
         // -----------------------------------------------------------------

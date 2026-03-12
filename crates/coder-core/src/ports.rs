@@ -2821,24 +2821,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn batch_insert_workspace_build_parameters(
         &self,
         params: Vec<WorkspaceBuildParameterRecord>,
-    ) -> Result<(), StorageError> {
-        let _ = params;
-        Err(StorageError::unavailable(
-            "batch workspace build parameter inserts are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Updates `last_used_at` for multiple workspaces in a single UPDATE statement.
     async fn batch_update_workspace_last_used_at(
         &self,
         ids: &[Uuid],
         last_used_at: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
-        let _ = (ids, last_used_at);
-        Err(StorageError::unavailable(
-            "batch workspace last_used_at updates are not implemented",
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     /// Looks up multiple users by their IDs in a single query.
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
@@ -2872,12 +2862,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn upsert_workspace_stats_workspace(
         &self,
         input: &WorkspaceStatsWorkspaceInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Upserts one provisioner job into the deployment-stats foundation tables.
     async fn upsert_provisioner_job_stats(
@@ -2894,43 +2879,24 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn upsert_workspace_build_stats(
         &self,
         input: &WorkspaceBuildStatsInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace build stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Inserts one raw agent-stat sample into the deployment-stats foundation tables.
     async fn insert_workspace_agent_stat(
         &self,
         input: &WorkspaceAgentStatInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace agent stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists persisted workspace proxies for deployment health checks.
     async fn list_workspace_proxies_for_health(
         &self,
-    ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "workspace proxy health is not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError>;
 
     /// Upserts one workspace proxy for deployment health checks.
     async fn upsert_workspace_proxy_for_health(
         &self,
         input: &WorkspaceProxyHealthInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace proxy health is not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists persisted provisioner daemons for deployment health checks.
     async fn list_provisioner_daemons_for_health(
@@ -3478,78 +3444,43 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn find_workspace_agent_by_id(
         &self,
         agent_id: Uuid,
-    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable(
-            "workspace agents are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError>;
 
     /// Looks up a workspace agent by auth token.
     async fn find_workspace_agent_by_auth_token(
         &self,
         auth_token: Uuid,
-    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
-        let _ = auth_token;
-        Err(StorageError::unavailable(
-            "workspace agents are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError>;
 
     /// Looks up a workspace agent by instance identity.
     async fn find_workspace_agent_by_instance_id(
         &self,
         instance_id: &str,
-    ) -> Result<Option<WorkspaceAgentRow>, StorageError> {
-        let _ = instance_id;
-        Err(StorageError::unavailable(
-            "workspace agents are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceAgentRow>, StorageError>;
 
     /// Lists workspace agents for a given resource.
     async fn list_workspace_agents_by_resource_ids(
         &self,
         resource_ids: &[Uuid],
-    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
-        let _ = resource_ids;
-        Err(StorageError::unavailable(
-            "workspace agents are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError>;
 
     /// Lists workspace apps for a given agent.
     async fn list_workspace_apps_by_agent_id(
         &self,
         agent_id: Uuid,
-    ) -> Result<Vec<WorkspaceAppRow>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable(
-            "workspace apps are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAppRow>, StorageError>;
 
     /// Lists workspace agent scripts for a given agent.
     async fn list_workspace_agent_scripts(
         &self,
         agent_id: Uuid,
-    ) -> Result<Vec<WorkspaceAgentScriptRow>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable(
-            "workspace agent scripts are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentScriptRow>, StorageError>;
 
     /// Lists workspace agent log sources for a given agent.
     async fn list_workspace_agent_log_sources(
         &self,
         agent_id: Uuid,
-    ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable(
-            "workspace agent log sources are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentLogSourceRow>, StorageError>;
 
     /// Lists workspace agent logs for a given agent.
     async fn list_workspace_agent_logs(
@@ -3557,12 +3488,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         agent_id: Uuid,
         after_id: i64,
         limit: i64,
-    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
-        let _ = (agent_id, after_id, limit);
-        Err(StorageError::unavailable(
-            "workspace agent logs are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError>;
 
     /// Inserts workspace agent logs.
     async fn insert_workspace_agent_logs(
@@ -3570,34 +3496,19 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         agent_id: Uuid,
         log_source_id: Uuid,
         logs: &[InsertAgentLogInput],
-    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError> {
-        let _ = (agent_id, log_source_id, logs);
-        Err(StorageError::unavailable(
-            "workspace agent logs are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError>;
 
     /// Lists workspace agent metadata for a given agent.
     async fn list_workspace_agent_metadata(
         &self,
         agent_id: Uuid,
-    ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable(
-            "workspace agent metadata are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError>;
 
     /// Lists devcontainers for a given agent.
     async fn list_workspace_agent_devcontainers(
         &self,
         agent_id: Uuid,
-    ) -> Result<Vec<WorkspaceAgentDevcontainerRow>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable(
-            "workspace agent devcontainers are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentDevcontainerRow>, StorageError>;
 
     /// Creates a workspace agent log source.
     async fn insert_workspace_agent_log_source(
@@ -3606,55 +3517,32 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         id: Option<Uuid>,
         display_name: &str,
         icon: &str,
-    ) -> Result<WorkspaceAgentLogSourceRow, StorageError> {
-        let _ = (agent_id, id, display_name, icon);
-        Err(StorageError::unavailable(
-            "workspace agent log sources are not implemented",
-        ))
-    }
+    ) -> Result<WorkspaceAgentLogSourceRow, StorageError>;
 
     /// Finds a workspace by agent ID (looks up resource → build → workspace).
     async fn find_workspace_by_agent_id(
         &self,
         agent_id: Uuid,
-    ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Lists workspace app statuses for a given agent.
     async fn list_workspace_app_statuses_by_agent_id(
         &self,
         agent_id: Uuid,
-    ) -> Result<Vec<WorkspaceAppStatusRow>, StorageError> {
-        let _ = agent_id;
-        Err(StorageError::unavailable(
-            "workspace app statuses are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAppStatusRow>, StorageError>;
 
     /// Inserts a workspace app status.
     async fn insert_workspace_app_status(
         &self,
         input: &InsertWorkspaceAppStatusInput,
-    ) -> Result<WorkspaceAppStatusRow, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace app statuses are not implemented",
-        ))
-    }
+    ) -> Result<WorkspaceAppStatusRow, StorageError>;
 
     /// Finds a workspace app by agent ID and slug.
     async fn find_workspace_app_by_agent_and_slug(
         &self,
         agent_id: Uuid,
         slug: &str,
-    ) -> Result<Option<WorkspaceAppRow>, StorageError> {
-        let _ = (agent_id, slug);
-        Err(StorageError::unavailable(
-            "workspace apps are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceAppRow>, StorageError>;
 
     // -----------------------------------------------------------------------
     // Workspace domain methods
@@ -3664,20 +3552,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn list_workspaces(
         &self,
         filter: WorkspaceListFilter,
-    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<(Vec<WorkspaceRecord>, i64), StorageError>;
 
     /// Looks up a workspace by stable identifier.
     async fn find_workspace_by_id(
         &self,
         workspace_id: Uuid,
         viewer_id: Option<Uuid>,
-    ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (workspace_id, viewer_id);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Looks up a workspace by owner and name.
     async fn find_workspace_by_owner_and_name(
@@ -3685,19 +3567,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         owner_id: Uuid,
         name: &str,
         viewer_id: Option<Uuid>,
-    ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (owner_id, name, viewer_id);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Creates a new workspace.
     async fn insert_workspace(
         &self,
         input: CreateWorkspaceInput,
-    ) -> Result<WorkspaceRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<WorkspaceRecord, StorageError>;
 
     /// Updates a workspace name.
     async fn update_workspace_name(
@@ -3705,30 +3581,21 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         workspace_id: Uuid,
         name: &str,
         viewer_id: Option<Uuid>,
-    ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (workspace_id, name, viewer_id);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Updates a workspace autostart schedule.
     async fn update_workspace_autostart(
         &self,
         workspace_id: Uuid,
         schedule: Option<&str>,
-    ) -> Result<bool, StorageError> {
-        let _ = (workspace_id, schedule);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Updates a workspace TTL.
     async fn update_workspace_ttl(
         &self,
         workspace_id: Uuid,
         ttl_ns: Option<i64>,
-    ) -> Result<bool, StorageError> {
-        let _ = (workspace_id, ttl_ns);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Updates workspace dormancy.
     async fn update_workspace_dormant_at(
@@ -3736,30 +3603,21 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         workspace_id: Uuid,
         dormant_at: Option<OffsetDateTime>,
         viewer_id: Option<Uuid>,
-    ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (workspace_id, dormant_at, viewer_id);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Updates workspace automatic updates.
     async fn update_workspace_automatic_updates(
         &self,
         workspace_id: Uuid,
         automatic_updates: &str,
-    ) -> Result<bool, StorageError> {
-        let _ = (workspace_id, automatic_updates);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Updates workspace last used time.
     async fn update_workspace_last_used_at(
         &self,
         workspace_id: Uuid,
         last_used_at: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        let _ = (workspace_id, last_used_at);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Sets workspace favorite status.
     async fn favorite_workspace(
@@ -3767,16 +3625,10 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         workspace_id: Uuid,
         user_id: Uuid,
         favorite: bool,
-    ) -> Result<bool, StorageError> {
-        let _ = (workspace_id, user_id, favorite);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Soft-deletes a workspace.
-    async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError> {
-        let _ = workspace_id;
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    async fn soft_delete_workspace(&self, workspace_id: Uuid) -> Result<bool, StorageError>;
 
     /// Returns workspaces that are candidates for an autobuild transition.
     ///
@@ -3785,12 +3637,8 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// workspace's next transition without extra queries.
     async fn get_workspaces_eligible_for_transition(
         &self,
-        _now: OffsetDateTime,
-    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
-        Err(StorageError::unavailable(
-            "autobuild transition query is not implemented",
-        ))
-    }
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError>;
 
     /// Atomically sets `dormant_at` and recomputes `deleting_at` for a workspace.
     ///
@@ -3801,10 +3649,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         workspace_id: Uuid,
         dormant_at: Option<OffsetDateTime>,
-    ) -> Result<Option<WorkspaceRecord>, StorageError> {
-        let _ = (workspace_id, dormant_at);
-        Err(StorageError::unavailable("workspaces are not implemented"))
-    }
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
 
     /// Creates a new group.
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError>;
@@ -3838,32 +3683,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn get_workspace_acl(
         &self,
         workspace_id: Uuid,
-    ) -> Result<WorkspaceACLRecord, StorageError> {
-        let _ = workspace_id;
-        Err(StorageError::unavailable(
-            "workspace ACL is not implemented",
-        ))
-    }
+    ) -> Result<WorkspaceACLRecord, StorageError>;
 
     /// Updates workspace ACL entries.
     async fn update_workspace_acl(
         &self,
         workspace_id: Uuid,
         input: &UpdateWorkspaceACLInput,
-    ) -> Result<(), StorageError> {
-        let _ = (workspace_id, input);
-        Err(StorageError::unavailable(
-            "workspace ACL is not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Clears all workspace ACL entries.
-    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError> {
-        let _ = workspace_id;
-        Err(StorageError::unavailable(
-            "workspace ACL is not implemented",
-        ))
-    }
+    async fn delete_workspace_acl(&self, workspace_id: Uuid) -> Result<(), StorageError>;
 
     /// Lists workspace builds for a workspace.
     async fn list_workspace_builds(
@@ -3871,57 +3701,32 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         workspace_id: Uuid,
         limit: u32,
         offset: u32,
-    ) -> Result<Vec<WorkspaceBuildRecord>, StorageError> {
-        let _ = (workspace_id, limit, offset);
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceBuildRecord>, StorageError>;
 
     /// Returns the latest build for a workspace.
     async fn find_latest_workspace_build(
         &self,
         workspace_id: Uuid,
-    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
-        let _ = workspace_id;
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError>;
 
     /// Looks up a workspace build by stable identifier.
     async fn find_workspace_build_by_id(
         &self,
         build_id: Uuid,
-    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
-        let _ = build_id;
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError>;
 
     /// Looks up a workspace build by workspace and build number.
     async fn find_workspace_build_by_number(
         &self,
         workspace_id: Uuid,
         build_number: i64,
-    ) -> Result<Option<WorkspaceBuildRecord>, StorageError> {
-        let _ = (workspace_id, build_number);
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceBuildRecord>, StorageError>;
 
     /// Creates a new workspace build.
     async fn insert_workspace_build(
         &self,
         input: CreateWorkspaceBuildInput,
-    ) -> Result<WorkspaceBuildRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    ) -> Result<WorkspaceBuildRecord, StorageError>;
 
     /// Updates the build deadline.
     async fn update_workspace_build_deadline(
@@ -3929,55 +3734,30 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         build_id: Uuid,
         deadline: Option<OffsetDateTime>,
         max_deadline: Option<OffsetDateTime>,
-    ) -> Result<bool, StorageError> {
-        let _ = (build_id, deadline, max_deadline);
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Updates the provisioner state blob for a build.
     async fn update_workspace_build_provisioner_state(
         &self,
         build_id: Uuid,
         state: &[u8],
-    ) -> Result<bool, StorageError> {
-        let _ = (build_id, state);
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Returns the next build number for a workspace.
-    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError> {
-        let _ = workspace_id;
-        Err(StorageError::unavailable(
-            "workspace builds are not implemented",
-        ))
-    }
+    async fn next_workspace_build_number(&self, workspace_id: Uuid) -> Result<i64, StorageError>;
 
     /// Lists build parameters for a workspace build.
     async fn list_workspace_build_parameters(
         &self,
         build_id: Uuid,
-    ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError> {
-        let _ = build_id;
-        Err(StorageError::unavailable(
-            "workspace build parameters are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceBuildParameterRecord>, StorageError>;
 
     /// Inserts build parameters.
     async fn insert_workspace_build_parameters(
         &self,
         build_id: Uuid,
         params: &[(String, String)],
-    ) -> Result<(), StorageError> {
-        let _ = (build_id, params);
-        Err(StorageError::unavailable(
-            "workspace build parameters are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists provisioner job logs.
     async fn list_provisioner_job_logs(
@@ -4006,63 +3786,37 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn find_workspace_resource_by_id(
         &self,
         resource_id: Uuid,
-    ) -> Result<Option<WorkspaceResourceRecord>, StorageError> {
-        let _ = resource_id;
-        Err(StorageError::unavailable(
-            "workspace resources are not implemented",
-        ))
-    }
+    ) -> Result<Option<WorkspaceResourceRecord>, StorageError>;
 
     /// Lists workspace agent script timings for a build.
     async fn list_workspace_agent_script_timings_by_build_id(
         &self,
         build_id: Uuid,
-    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError> {
-        let _ = build_id;
-        Err(StorageError::unavailable(
-            "workspace agent script timings are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceAgentScriptTimingRow>, StorageError>;
 
     /// Lists workspace resources for a job.
     async fn list_workspace_resources_by_job(
         &self,
         job_id: Uuid,
-    ) -> Result<Vec<WorkspaceResourceRecord>, StorageError> {
-        let _ = job_id;
-        Err(StorageError::unavailable(
-            "workspace resources are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceResourceRecord>, StorageError>;
 
     /// Lists metadata for a set of workspace resources.
     async fn list_workspace_resource_metadata(
         &self,
         resource_ids: &[Uuid],
-    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError> {
-        let _ = resource_ids;
-        Err(StorageError::unavailable(
-            "workspace resource metadata is not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceResourceMetadataRecord>, StorageError>;
 
     /// Lists port shares for a workspace.
     async fn list_workspace_port_shares(
         &self,
         workspace_id: Uuid,
-    ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError> {
-        let _ = workspace_id;
-        Err(StorageError::unavailable("port shares are not implemented"))
-    }
+    ) -> Result<Vec<WorkspaceAgentPortShareRecord>, StorageError>;
 
     /// Upserts a port share.
     async fn upsert_workspace_port_share(
         &self,
         input: UpsertPortShareInput,
-    ) -> Result<WorkspaceAgentPortShareRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("port shares are not implemented"))
-    }
+    ) -> Result<WorkspaceAgentPortShareRecord, StorageError>;
 
     /// Finds a port share.
     async fn find_workspace_port_share(
@@ -4070,10 +3824,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         workspace_id: Uuid,
         agent_name: &str,
         port: i32,
-    ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError> {
-        let _ = (workspace_id, agent_name, port);
-        Err(StorageError::unavailable("port shares are not implemented"))
-    }
+    ) -> Result<Option<WorkspaceAgentPortShareRecord>, StorageError>;
 
     /// Deletes a port share.
     async fn delete_workspace_port_share(
@@ -4081,10 +3832,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         workspace_id: Uuid,
         agent_name: &str,
         port: i32,
-    ) -> Result<bool, StorageError> {
-        let _ = (workspace_id, agent_name, port);
-        Err(StorageError::unavailable("port shares are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     // ----- Template Store Methods -----
 
