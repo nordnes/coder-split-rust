@@ -10,7 +10,7 @@ use coder_core::api::{
     TemplateAppUsage, TemplateAppsType, TemplateInsightsIntervalReport, TemplateInsightsReport,
     TemplateInsightsResponse, TemplateParameterUsage, TemplateParameterValue, UserActivity,
     UserActivityInsightsReport, UserActivityInsightsResponse, UserLatency,
-    UserLatencyInsightsReport, UserLatencyInsightsResponse, UserStatusChangeCount,
+    UserLatencyInsightsReport, UserLatencyInsightsResponse, UserStatusChangeCount, VapidKeyPair,
 };
 use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord, WorkspaceTransitionRow};
 use coder_core::provisioner::{
@@ -41,28 +41,28 @@ use coder_core::{
     InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertChatModelConfigInput,
     InsertChatProviderInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
     InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-    InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LoginType,
-    MinimalOrganization, MinimalUser, NotificationMessageRecord, NotificationMessageStatus,
-    NotificationMethod, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
-    OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrganizationMemberListFilter,
-    OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
-    ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
-    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType,
-    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
-    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateChatMessageContentInput,
-    UpdateChatModelConfigInput, UpdateChatProviderInput, UpdateOAuth2ProviderAppInput,
-    UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
-    UpsertProvisionerDaemonInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
-    UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
-    UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
-    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
-    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
-    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
-    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
-    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
-    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
+    InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord,
+    LoginType, MinimalOrganization, MinimalUser, NotificationMessageRecord,
+    NotificationMessageStatus, NotificationMethod, OAuth2ProviderAppCodeRecord,
+    OAuth2ProviderAppRecord, OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord,
+    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
+    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
+    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
+    ProvisionerStore, ProvisionerType, SessionCountDeploymentStatsResponse, SlimRoleRecord,
+    StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus, TokenConfigRecord,
+    UpdateChatMessageContentInput, UpdateChatModelConfigInput, UpdateChatProviderInput,
+    UpdateOAuth2ProviderAppInput, UpsertCustomRoleInput, UpsertExternalAuthLinkInput,
+    UpsertPortShareInput, UpsertProvisionerDaemonInput, UpsertUserLinkInput, UserAppearanceRecord,
+    UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
+    UserRecord, UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord,
+    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
+    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
+    WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput,
+    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
+    WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
+    WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
     WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
@@ -776,6 +776,20 @@ struct StoredFileRow {
     created_at: OffsetDateTime,
     mimetype: String,
     data: Vec<u8>,
+}
+
+// ---------------------------------------------------------------------------
+// License domain row types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, FromRow)]
+struct StoredLicenseRow {
+    id: i32,
+    uuid: Uuid,
+    uploaded_at: OffsetDateTime,
+    jwt: String,
+    #[allow(dead_code)]
+    exp: OffsetDateTime,
 }
 
 // ---------------------------------------------------------------------------
@@ -2091,6 +2105,27 @@ fn escape_like(input: &str) -> String {
 
 fn storage_error(error: sqlx::Error) -> StorageError {
     StorageError::unavailable(error.to_string())
+}
+
+/// Decodes JWT claims from the payload (middle) segment of a JWT string.
+/// Returns an empty JSON object if decoding fails.
+fn decode_jwt_claims(jwt: &str) -> Value {
+    let parts: Vec<&str> = jwt.split('.').collect();
+    if parts.len() < 2 {
+        return Value::Object(serde_json::Map::new());
+    }
+    let payload = parts[1];
+    // JWT uses base64url encoding without padding (RFC 7515), but some
+    // libraries emit trailing '=' padding. Strip it before decoding.
+    use base64::Engine;
+    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    let trimmed = payload.trim_end_matches('=');
+    match engine.decode(trimmed) {
+        Ok(bytes) => {
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
+        }
+        Err(_) => Value::Object(serde_json::Map::new()),
+    }
 }
 
 /// Like [`storage_error`] but maps [`sqlx::Error::RowNotFound`] to
