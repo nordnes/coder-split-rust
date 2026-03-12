@@ -589,7 +589,7 @@ fn collect_rust_routes_from_content(
 
 fn collect_block(lines: &[&str], start: usize) -> (String, usize) {
     let mut block = String::new();
-    let mut paren_balance = 0i32;
+    let mut paren_balance: isize = 0;
     let mut index = start;
 
     while index < lines.len() {
@@ -598,11 +598,8 @@ fn collect_block(lines: &[&str], start: usize) -> (String, usize) {
             block.push('\n');
         }
         block.push_str(line);
-        #[allow(clippy::cast_possible_truncation)]
-        {
-            paren_balance += line.chars().filter(|character| *character == '(').count() as i32;
-            paren_balance -= line.chars().filter(|character| *character == ')').count() as i32;
-        }
+        paren_balance += line.chars().filter(|character| *character == '(').count() as isize;
+        paren_balance -= line.chars().filter(|character| *character == ')').count() as isize;
         index += 1;
 
         if paren_balance <= 0 {

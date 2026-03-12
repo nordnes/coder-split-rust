@@ -10,7 +10,7 @@ pub(crate) struct TokenListQuery {
     include_expired: bool,
 }
 
-/// GET /api/v2/apikey-scopes — list available API key scopes.
+/// GET /api/v2/auth/scopes — list available API key scopes.
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     Json(ExternalApiKeyScopes {
         external: PUBLIC_API_KEY_SCOPES
@@ -20,7 +20,7 @@ pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     })
 }
 
-/// GET /api/v2/auth-methods — return the supported authentication methods.
+/// GET /api/v2/users/authmethods — return the supported authentication methods.
 pub(crate) async fn auth_methods() -> Json<AuthMethods> {
     Json(supported_auth_methods())
 }
@@ -899,7 +899,7 @@ fn build_oauth_redirect_response(
     response
 }
 
-/// GET /api/v2/debug/user-link — return the external auth link for a user (debug only).
+/// GET /api/v2/debug/{user}/debug-link — return the external auth link for a user (debug only).
 pub(crate) async fn get_user_debug_link(
     State(state): State<AppState>,
     headers: HeaderMap,
