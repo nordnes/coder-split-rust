@@ -4929,11 +4929,16 @@ pub(crate) mod tests {
         async fn get_webpush_vapid_keys(
             &self,
         ) -> Result<Option<coder_core::api::VapidKeyPair>, StorageError> {
-            Ok(self
+            let keys = self
                 .vapid_keys
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?
-                .clone())
+                .clone();
+            // Mirror PostgresStore behavior: return None if either key is empty
+            match keys {
+                Some(ref kp) if !kp.public_key.is_empty() && !kp.private_key.is_empty() => Ok(keys),
+                _ => Ok(None),
+            }
         }
 
         async fn upsert_webpush_vapid_keys(
@@ -32050,7 +32055,7 @@ pub(crate) mod tests {
             .await?;
 
         let keys = store.get_webpush_vapid_keys().await?;
-        let keys = keys.expect("expected VAPID keys to be present");
+        let keys = keys.ok_or("expected VAPID keys to be present")?;
         assert_eq!(keys.public_key, "public_key_123");
         assert_eq!(keys.private_key, "private_key_456");
 
@@ -32061,7 +32066,7 @@ pub(crate) mod tests {
         let keys = store
             .get_webpush_vapid_keys()
             .await?
-            .expect("expected VAPID keys");
+            .ok_or("expected VAPID keys")?;
         assert_eq!(keys.public_key, "new_public");
         assert_eq!(keys.private_key, "new_private");
 
@@ -32097,17 +32102,17 @@ pub(crate) mod tests {
             .iter()
             .find(|s| s.endpoint == endpoint1)
             .map(|s| s.id)
-            .unwrap();
+            .ok_or("subscription for endpoint1 not found")?;
         let id2 = subs
             .iter()
             .find(|s| s.endpoint == endpoint2)
             .map(|s| s.id)
-            .unwrap();
+            .ok_or("subscription for endpoint2 not found")?;
         let id3 = subs
             .iter()
             .find(|s| s.endpoint == endpoint3)
             .map(|s| s.id)
-            .unwrap();
+            .ok_or("subscription for endpoint3 not found")?;
 
         // Delete specific subscriptions by ID
         store.delete_webpush_subscriptions(&[id1, id3]).await?;
