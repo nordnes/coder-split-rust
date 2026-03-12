@@ -295,6 +295,9 @@ pub fn build_router(
                 .route("/debug/pprof/profile", get(debug_pprof))
                 .route("/debug/pprof/symbol", get(debug_pprof))
                 .route("/debug/pprof/trace", get(debug_pprof))
+                .route("/debug/pprof/heap", get(debug_pprof))
+                .route("/debug/pprof/tasks", get(debug_pprof))
+                .route("/debug/pprof/allocs", get(debug_pprof))
                 .route("/debug/ws", get(debug_websocket))
                 .route("/debug/metrics", get(debug_metrics))
                 .route("/insights/daus", get(insights_daus))
@@ -11043,7 +11046,9 @@ pub(crate) mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
 
         // Test pprof sub-routes (cmdline, profile, symbol, trace)
-        for sub in &["cmdline", "profile", "symbol", "trace"] {
+        for sub in &[
+            "cmdline", "profile", "symbol", "trace", "heap", "tasks", "allocs",
+        ] {
             let sub_resp = call(
                 app.clone(),
                 authenticated_request(

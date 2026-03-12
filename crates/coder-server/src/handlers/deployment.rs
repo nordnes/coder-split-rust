@@ -612,15 +612,24 @@ pub(crate) fn parse_proc_kb(val: &str) -> Option<u64> {
         .and_then(|s| s.parse::<u64>().ok())
 }
 
-/// GET /api/v2/debug/pprof (and sub-routes cmdline, profile, symbol, trace)
+/// GET /api/v2/debug/pprof (and sub-routes cmdline, profile, symbol, trace, heap, tasks, allocs)
 ///
 /// Go exposes `net/http/pprof` handlers that produce CPU/memory/goroutine
-/// profiles in the pprof protobuf format.  There is no direct Rust
-/// equivalent.  For CPU profiling consider `perf`, `flamegraph`, or the
-/// `pprof-rs` crate.  For heap profiling use jemalloc with
-/// `MALLOC_CONF="prof:true"`.  For async-task dumps use `tokio-console`.
-/// Each sub-route returns informational JSON about Rust alternatives.
-/// GET /api/v2/debug/pprof — placeholder for Go-style pprof-compatible profiling data.
+/// profiles in the pprof protobuf format.  The Rust equivalents use
+/// `/proc/self` for memory stats and OS-level thread/task counts.
+///
+/// Routes (all prefixed with `/api/v2`):
+/// - `/api/v2/debug/pprof/`        — index listing all available profiles
+/// - `/api/v2/debug/pprof/heap`    — heap memory profile from /proc/self/status
+/// - `/api/v2/debug/pprof/tasks`   — OS thread and kernel task counts
+/// - `/api/v2/debug/pprof/allocs`  — allocation statistics from /proc/self
+/// - `/api/v2/debug/pprof/cmdline` — process command line
+/// - `/api/v2/debug/pprof/profile` — CPU profiling guidance
+/// - `/api/v2/debug/pprof/symbol`  — symbol lookup guidance
+/// - `/api/v2/debug/pprof/trace`   — execution tracing guidance
+///
+/// All routes require an authenticated actor with `can_view_operational_data`
+/// permissions (deployment owners and auditors).
 pub(crate) async fn debug_pprof(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
@@ -643,6 +652,9 @@ pub(crate) async fn debug_pprof(
                 "cmdline": cmdline,
             })
         }
+        "/api/v2/debug/pprof/heap" => build_heap_profile(),
+        "/api/v2/debug/pprof/tasks" => build_tasks_profile(),
+        "/api/v2/debug/pprof/allocs" => build_allocs_profile(),
         "/api/v2/debug/pprof/profile" => {
             json!({
                 "message": "Go-style CPU profiling is not available in Rust.",
@@ -670,20 +682,217 @@ pub(crate) async fn debug_pprof(
             })
         }
         _ => {
-            // /api/v2/debug/pprof — summary index page
+            // /api/v2/debug/pprof — summary index page listing all profiles
             json!({
                 "message": "Rust profiling debug index",
-                "note": "Go pprof is not available in Rust. The following endpoints provide guidance on Rust alternatives.",
-                "endpoints": {
-                    "/api/v2/debug/pprof/cmdline": "Returns the process command line arguments.",
-                    "/api/v2/debug/pprof/profile": "Guidance on CPU profiling alternatives (cargo flamegraph, perf).",
-                    "/api/v2/debug/pprof/symbol": "Symbol lookup is not supported; use addr2line.",
-                    "/api/v2/debug/pprof/trace": "Guidance on tracing alternatives (tokio-console, tracing crate)."
+                "note": "Go pprof is not available in Rust. The following endpoints provide Rust-native profiling data and guidance on alternatives.",
+                "profiles": {
+                    "/api/v2/debug/pprof/heap": "Heap memory profile — RSS, VmSize, and memory map stats from /proc/self.",
+                    "/api/v2/debug/pprof/tasks": "OS thread and kernel task counts (Rust equivalent of goroutine dump).",
+                    "/api/v2/debug/pprof/allocs": "Allocation statistics — VmRSS, VmSize, VmData, VmStk from /proc/self/status.",
+                    "/api/v2/debug/pprof/cmdline": "Process command line arguments.",
+                    "/api/v2/debug/pprof/profile": "CPU profiling guidance (cargo flamegraph, perf).",
+                    "/api/v2/debug/pprof/symbol": "Symbol lookup guidance (addr2line, rustfilt).",
+                    "/api/v2/debug/pprof/trace": "Execution tracing guidance (tokio-console, tracing crate)."
                 }
             })
         }
     };
     Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+/// Build heap memory profile from `/proc/self/status` and `/proc/self/statm`.
+///
+/// Returns RSS, VmSize, VmPeak, VmData, heap details, and memory maps info.
+/// This is the Rust equivalent of Go's `heap` pprof profile.
+fn build_heap_profile() -> Value {
+    let mut heap = serde_json::Map::new();
+
+    // Read all memory stats from /proc/self/status in a single pass
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+        for line in contents.lines() {
+            if let Some(val) = line.strip_prefix("VmRSS:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("rss_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmSize:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_size_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmPeak:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_peak_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmData:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_data_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmStk:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_stk_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmLib:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_lib_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmSwap:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_swap_bytes".to_string(), json!(kb * 1024));
+                }
+            }
+        }
+    }
+
+    // Process-level statm for page-granularity info
+    if let Some(statm) = read_proc_statm() {
+        heap.insert("statm_size_pages".to_string(), json!(statm.size));
+        heap.insert("statm_resident_pages".to_string(), json!(statm.resident));
+        heap.insert("statm_shared_pages".to_string(), json!(statm.shared));
+        heap.insert("statm_text_pages".to_string(), json!(statm.text));
+        heap.insert("statm_data_pages".to_string(), json!(statm.data));
+    }
+
+    json!({
+        "profile_type": "heap",
+        "description": "Heap memory profile from /proc/self. For detailed heap profiling, use jemalloc with MALLOC_CONF=\"prof:true\".",
+        "memory": Value::Object(heap),
+        "alternatives": [
+            "jemalloc profiling: MALLOC_CONF=\"prof:true,prof_prefix:jeprof\" for heap dumps",
+            "valgrind --tool=massif for heap profiling",
+            "heaptrack for allocation tracking"
+        ]
+    })
+}
+
+/// Build active task/thread metrics — a lightweight view similar in spirit to Go's goroutine dump.
+///
+/// Collects OS-level metrics from `/proc/self/status` and `/proc/self/task`
+/// to report thread and kernel task counts for the current process.
+/// Does not currently use Tokio runtime metrics, even when built with `tokio_unstable`.
+fn build_tasks_profile() -> Value {
+    let mut tasks = serde_json::Map::new();
+
+    // Read thread count from /proc/self/status
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+        for line in contents.lines() {
+            if let Some(val) = line.strip_prefix("Threads:") {
+                if let Ok(count) = val.trim().parse::<u64>() {
+                    tasks.insert("os_thread_count".to_string(), json!(count));
+                }
+            }
+        }
+    }
+
+    // Read /proc/self/task to count active kernel tasks
+    if let Ok(entries) = std::fs::read_dir("/proc/self/task") {
+        let task_count = entries.filter_map(Result::ok).count();
+        tasks.insert("kernel_task_count".to_string(), json!(task_count));
+    }
+
+    // Provide PID for external tooling
+    tasks.insert("pid".to_string(), json!(std::process::id()));
+
+    json!({
+        "profile_type": "tasks",
+        "description": "Active task/thread metrics. For detailed async task inspection, use tokio-console.",
+        "tasks": Value::Object(tasks),
+        "alternatives": [
+            "tokio-console -- real-time async task inspector (connect via gRPC)",
+            "tokio::runtime::RuntimeMetrics -- requires tokio_unstable cfg flag",
+            "/proc/<pid>/task/ -- list kernel-level threads for the process"
+        ]
+    })
+}
+
+/// Build allocation statistics from `/proc/self/status`.
+///
+/// This is the Rust equivalent of Go's `allocs` pprof profile.
+fn build_allocs_profile() -> Value {
+    let mut allocs = serde_json::Map::new();
+
+    // Read all memory-related fields from /proc/self/status
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+        for line in contents.lines() {
+            let fields = [
+                ("VmRSS:", "vm_rss_bytes"),
+                ("VmSize:", "vm_size_bytes"),
+                ("VmPeak:", "vm_peak_bytes"),
+                ("VmHWM:", "vm_hwm_bytes"),
+                ("VmData:", "vm_data_bytes"),
+                ("VmStk:", "vm_stk_bytes"),
+                ("VmLib:", "vm_lib_bytes"),
+                ("VmPTE:", "vm_pte_bytes"),
+                ("VmSwap:", "vm_swap_bytes"),
+                ("RssAnon:", "rss_anon_bytes"),
+                ("RssFile:", "rss_file_bytes"),
+                ("RssShmem:", "rss_shmem_bytes"),
+            ];
+            for (prefix, key) in fields {
+                if let Some(val) = line.strip_prefix(prefix) {
+                    if let Some(kb) = parse_proc_kb(val) {
+                        allocs.insert(key.to_string(), json!(kb * 1024));
+                    }
+                }
+            }
+        }
+    }
+
+    // Read /proc/self/io for IO allocation stats if available
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/io") {
+        for line in contents.lines() {
+            let io_fields = [
+                ("rchar:", "io_read_bytes"),
+                ("wchar:", "io_write_bytes"),
+                ("read_bytes:", "io_disk_read_bytes"),
+                ("write_bytes:", "io_disk_write_bytes"),
+            ];
+            for (prefix, key) in io_fields {
+                if let Some(val) = line.strip_prefix(prefix) {
+                    if let Ok(bytes) = val.trim().parse::<u64>() {
+                        allocs.insert(key.to_string(), json!(bytes));
+                    }
+                }
+            }
+        }
+    }
+
+    json!({
+        "profile_type": "allocs",
+        "description": "Allocation statistics from /proc/self. For per-allocation tracking, use jemalloc profiling or DHAT.",
+        "allocations": Value::Object(allocs),
+        "alternatives": [
+            "jemalloc: MALLOC_CONF=\"prof:true\" for allocation profiling",
+            "DHAT (valgrind --tool=dhat) for detailed allocation tracking",
+            "bytehound for Rust-specific allocation profiling"
+        ]
+    })
+}
+
+/// Page-level memory statistics from `/proc/self/statm`.
+pub(crate) struct ProcStatm {
+    size: u64,
+    resident: u64,
+    shared: u64,
+    text: u64,
+    data: u64,
+}
+
+/// Read page-level memory statistics from `/proc/self/statm`.
+/// Returns `None` on non-Linux or read failure.
+pub(crate) fn read_proc_statm() -> Option<ProcStatm> {
+    let contents = std::fs::read_to_string("/proc/self/statm").ok()?;
+    let mut parts = contents.split_whitespace();
+    Some(ProcStatm {
+        size: parts.next()?.parse().ok()?,
+        resident: parts.next()?.parse().ok()?,
+        shared: parts.next()?.parse().ok()?,
+        text: parts.next()?.parse().ok()?,
+        // Skip lib field (always 0 on modern Linux)
+        data: {
+            let _ = parts.next();
+            parts.next()?.parse().ok()?
+        },
+    })
 }
 
 /// GET /api/v2/debug/ws — WebSocket echo server used as a health check.

@@ -40,16 +40,26 @@ pub(crate) async fn debug_health(
         Some("text") => Ok((
             StatusCode::OK,
             format!(
-                "time: {}\nhealthy: {}\nderp: {}\naccess_url: {}\nwebsocket: {}\ndatabase: {}\n",
+                "time: {}\nhealthy: {}\nseverity: {}\nderp: {}\naccess_url: {}\nwebsocket: {}\ndatabase: {}\nworkspace_proxy: {}\nprovisioner_daemons_severity: {}\ncoder_version: {}\n",
                 report
                     .time
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_default(),
                 report.healthy,
+                serde_json::to_value(&report.severity)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
                 report.derp.healthy,
                 report.access_url.healthy,
                 report.websocket.healthy,
                 report.database.healthy,
+                report.workspace_proxy.healthy,
+                serde_json::to_value(&report.provisioner_daemons.base.severity)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                report.coder_version,
             ),
         )
             .into_response()),
