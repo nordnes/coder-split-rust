@@ -1560,63 +1560,34 @@ pub trait IdentityStore: Send + Sync {
     /// Lists registered OAuth2 provider apps.
     async fn list_oauth2_provider_apps(
         &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
         &self,
         input: &CreateOAuth2ProviderAppInput,
-    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppRecord, StorageError>;
 
     /// Looks up an OAuth2 provider app by identifier.
     async fn find_oauth2_provider_app_by_id(
         &self,
         app_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Updates an OAuth2 provider app.
     async fn update_oauth2_provider_app(
         &self,
         input: &UpdateOAuth2ProviderAppInput,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Deletes an OAuth2 provider app.
-    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists secrets for an OAuth2 provider app.
     async fn list_oauth2_provider_app_secrets(
         &self,
         app_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Creates a secret for an OAuth2 provider app.
     async fn create_oauth2_provider_app_secret(
@@ -1625,56 +1596,31 @@ pub trait IdentityStore: Send + Sync {
         secret_prefix: &[u8],
         hashed_secret: &[u8],
         display_secret: &str,
-    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
-        let _ = (app_id, secret_prefix, hashed_secret, display_secret);
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError>;
 
     /// Finds an OAuth2 provider app secret by secret prefix.
     async fn find_oauth2_provider_app_secret_by_prefix(
         &self,
         secret_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = secret_prefix;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Updates the last-used timestamp for an OAuth2 provider app secret.
     async fn update_oauth2_provider_app_secret_last_used(
         &self,
         secret_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Deletes a secret for an OAuth2 provider app.
     async fn delete_oauth2_provider_app_secret(
         &self,
         secret_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Finds an OAuth2 provider app secret by identifier.
     async fn find_oauth2_provider_app_secret_by_id(
         &self,
         secret_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Creates an authorization code for the OAuth2 flow.
     async fn create_oauth2_provider_app_code(
@@ -1689,141 +1635,70 @@ pub trait IdentityStore: Send + Sync {
         code_challenge_method: &str,
         state_hash: Option<&str>,
         redirect_uri: Option<&str>,
-    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
-        let _ = (
-            app_id,
-            user_id,
-            secret_prefix,
-            hashed_secret,
-            expires_at,
-            resource_uri,
-            code_challenge,
-            code_challenge_method,
-            state_hash,
-            redirect_uri,
-        );
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError>;
 
     /// Finds an authorization code by identifier.
     async fn find_oauth2_provider_app_code_by_id(
         &self,
         code_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
-        let _ = code_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError>;
 
     /// Finds an authorization code by secret prefix.
     async fn find_oauth2_provider_app_code_by_prefix(
         &self,
         secret_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
-        let _ = secret_prefix;
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError>;
 
     /// Deletes an authorization code.
-    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
-        let _ = code_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError>;
 
     /// Deletes all authorization codes for a given app and user.
     async fn delete_oauth2_provider_app_codes_by_app_and_user(
         &self,
         app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<u64, StorageError> {
-        let _ = (app_id, user_id);
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     /// Creates an OAuth2 provider app token.
     async fn create_oauth2_provider_app_token(
         &self,
         input: &CreateOAuth2ProviderAppTokenInput,
-    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError>;
 
     /// Finds an OAuth2 token by hash prefix.
     async fn find_oauth2_provider_app_token_by_prefix(
         &self,
         hash_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = hash_prefix;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Finds an OAuth2 token by API key identifier.
     async fn find_oauth2_provider_app_token_by_api_key_id(
         &self,
         api_key_id: &str,
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = api_key_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Finds an OAuth2 token by refresh hash.
     async fn find_oauth2_provider_app_token_by_refresh_hash(
         &self,
         refresh_hash: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = refresh_hash;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Deletes an OAuth2 provider app token.
-    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
-        let _ = token_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists all OAuth2 tokens for a given user and app.
     async fn list_oauth2_provider_app_tokens_by_app_and_user(
         &self,
         app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = (app_id, user_id);
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Deletes all OAuth2 tokens for a given user and app.
     async fn delete_oauth2_provider_app_tokens_by_app_and_user(
         &self,
         app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<u64, StorageError> {
-        let _ = (app_id, user_id);
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     // ----- Notifications -----
 
@@ -4565,63 +4440,34 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Lists registered OAuth2 provider apps.
     async fn list_oauth2_provider_apps(
         &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
         &self,
         input: &CreateOAuth2ProviderAppInput,
-    ) -> Result<OAuth2ProviderAppRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppRecord, StorageError>;
 
     /// Looks up an OAuth2 provider app by identifier.
     async fn find_oauth2_provider_app_by_id(
         &self,
         app_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Updates an OAuth2 provider app.
     async fn update_oauth2_provider_app(
         &self,
         input: &UpdateOAuth2ProviderAppInput,
-    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Deletes an OAuth2 provider app.
-    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider apps are not implemented",
-        ))
-    }
+    async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists secrets for an OAuth2 provider app.
     async fn list_oauth2_provider_app_secrets(
         &self,
         app_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = app_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Vec<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Creates a secret for an OAuth2 provider app.
     async fn create_oauth2_provider_app_secret(
@@ -4630,56 +4476,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         secret_prefix: &[u8],
         hashed_secret: &[u8],
         display_secret: &str,
-    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError> {
-        let _ = (app_id, secret_prefix, hashed_secret, display_secret);
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppSecretRecord, StorageError>;
 
     /// Finds an OAuth2 provider app secret by secret prefix.
     async fn find_oauth2_provider_app_secret_by_prefix(
         &self,
         secret_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = secret_prefix;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Updates the last-used timestamp for an OAuth2 provider app secret.
     async fn update_oauth2_provider_app_secret_last_used(
         &self,
         secret_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Deletes a secret for an OAuth2 provider app.
     async fn delete_oauth2_provider_app_secret(
         &self,
         secret_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Finds an OAuth2 provider app secret by identifier.
     async fn find_oauth2_provider_app_secret_by_id(
         &self,
         secret_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError> {
-        let _ = secret_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app secrets are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppSecretRecord>, StorageError>;
 
     /// Creates an authorization code for the OAuth2 flow.
     async fn create_oauth2_provider_app_code(
@@ -4694,141 +4515,70 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         code_challenge_method: &str,
         state_hash: Option<&str>,
         redirect_uri: Option<&str>,
-    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError> {
-        let _ = (
-            app_id,
-            user_id,
-            secret_prefix,
-            hashed_secret,
-            expires_at,
-            resource_uri,
-            code_challenge,
-            code_challenge_method,
-            state_hash,
-            redirect_uri,
-        );
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppCodeRecord, StorageError>;
 
     /// Finds an authorization code by identifier.
     async fn find_oauth2_provider_app_code_by_id(
         &self,
         code_id: Uuid,
-    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
-        let _ = code_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError>;
 
     /// Finds an authorization code by secret prefix.
     async fn find_oauth2_provider_app_code_by_prefix(
         &self,
         secret_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError> {
-        let _ = secret_prefix;
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppCodeRecord>, StorageError>;
 
     /// Deletes an authorization code.
-    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError> {
-        let _ = code_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    async fn delete_oauth2_provider_app_code(&self, code_id: Uuid) -> Result<bool, StorageError>;
 
     /// Deletes all authorization codes for a given app and user.
     async fn delete_oauth2_provider_app_codes_by_app_and_user(
         &self,
         app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<u64, StorageError> {
-        let _ = (app_id, user_id);
-        Err(StorageError::unavailable(
-            "oauth2 provider app codes are not implemented",
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     /// Creates an OAuth2 provider app token.
     async fn create_oauth2_provider_app_token(
         &self,
         input: &CreateOAuth2ProviderAppTokenInput,
-    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<OAuth2ProviderAppTokenRecord, StorageError>;
 
     /// Finds an OAuth2 token by hash prefix.
     async fn find_oauth2_provider_app_token_by_prefix(
         &self,
         hash_prefix: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = hash_prefix;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Finds an OAuth2 token by API key identifier.
     async fn find_oauth2_provider_app_token_by_api_key_id(
         &self,
         api_key_id: &str,
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = api_key_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Finds an OAuth2 token by refresh hash.
     async fn find_oauth2_provider_app_token_by_refresh_hash(
         &self,
         refresh_hash: &[u8],
-    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = refresh_hash;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Option<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Deletes an OAuth2 provider app token.
-    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError> {
-        let _ = token_id;
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    async fn delete_oauth2_provider_app_token(&self, token_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists all OAuth2 tokens for a given user and app.
     async fn list_oauth2_provider_app_tokens_by_app_and_user(
         &self,
         app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError> {
-        let _ = (app_id, user_id);
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<Vec<OAuth2ProviderAppTokenRecord>, StorageError>;
 
     /// Deletes all OAuth2 tokens for a given user and app.
     async fn delete_oauth2_provider_app_tokens_by_app_and_user(
         &self,
         app_id: Uuid,
         user_id: Uuid,
-    ) -> Result<u64, StorageError> {
-        let _ = (app_id, user_id);
-        Err(StorageError::unavailable(
-            "oauth2 provider app tokens are not implemented",
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     // ----- Notification message dispatch -----
 
