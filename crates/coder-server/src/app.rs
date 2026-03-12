@@ -32311,7 +32311,10 @@ pub(crate) mod tests {
             .get("strict-transport-security")
             .and_then(|v| v.to_str().ok())
             .map(String::from);
-        assert!(hsts.is_some(), "HSTS header should be present when configured");
+        assert!(
+            hsts.is_some(),
+            "HSTS header should be present when configured"
+        );
         let hsts_val = hsts.unwrap_or_default();
         assert!(
             hsts_val.contains("max-age=31536000"),

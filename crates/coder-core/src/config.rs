@@ -698,25 +698,9 @@ impl ServerConfig {
                 default: Some(""),
                 description: "Comma-separated additional Content-Security-Policy directives.",
             },
-            // -- Security Headers --
-            ConfigOption {
-                name: "x-content-type-options",
-                env: "CODER_X_CONTENT_TYPE_OPTIONS",
-                default: Some("nosniff"),
-                description: "Value for the X-Content-Type-Options response header.",
-            },
-            ConfigOption {
-                name: "x-frame-options",
-                env: "CODER_X_FRAME_OPTIONS",
-                default: Some("DENY"),
-                description: "Value for the X-Frame-Options response header. Empty to omit.",
-            },
-            ConfigOption {
-                name: "referrer-policy",
-                env: "CODER_REFERRER_POLICY",
-                default: Some("no-referrer"),
-                description: "Value for the Referrer-Policy response header. Empty to omit.",
-            },
+            // NOTE: Security header values (X-Content-Type-Options, X-Frame-Options,
+            // Referrer-Policy) use sensible defaults from SecurityHeadersConfig::default().
+            // CLI/env-var overrides will be wired in a follow-up PR.
         ]
     }
 }
@@ -794,7 +778,6 @@ impl Default for OtelConfig {
     }
 }
 
-/// CORS (Cross-Origin Resource Sharing) configuration.
 /// Security headers configuration for the HTTP layer.
 ///
 /// Controls `X-Content-Type-Options`, `X-Frame-Options`, and

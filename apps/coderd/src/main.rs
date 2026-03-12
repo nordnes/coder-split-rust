@@ -34,9 +34,8 @@ use coder_core::{
     StorageError,
     config::{
         DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig, LoggingConfig,
-        NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig,
-        SecurityHeadersConfig, SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig,
-        WorkspaceConfig,
+        NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SecurityHeadersConfig,
+        SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig, WorkspaceConfig,
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};

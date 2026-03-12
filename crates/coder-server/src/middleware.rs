@@ -119,13 +119,10 @@ pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
 /// `/.well-known/oauth-*` paths.  This layer allows all origins with no
 /// credentials, extended headers for MCP protocol, and a 24-hour preflight
 /// cache.
+#[allow(dead_code)] // Staged rollout: will be wired to OAuth2/MCP/.well-known routes.
 pub(crate) fn build_permissive_cors_layer() -> CorsLayer {
-    let allow_methods = AllowMethods::list([
-        Method::GET,
-        Method::POST,
-        Method::DELETE,
-        Method::OPTIONS,
-    ]);
+    let allow_methods =
+        AllowMethods::list([Method::GET, Method::POST, Method::DELETE, Method::OPTIONS]);
 
     let allow_headers = AllowHeaders::list([
         HeaderName::from_static("content-type"),
@@ -201,15 +198,14 @@ pub(crate) struct CspConfig {
 impl CspConfig {
     /// Build a CSP header value from configuration.
     ///
-    /// `host` is the request `Host` header used to allow WebSocket
-    /// connections in older WebKit browsers.  When building a static
-    /// config (no per-request host), pass an empty string.
+    /// `telemetry_enabled` controls whether `https://coder.com` is added to
+    /// `connect-src`.  `additional_directives` are appended verbatim.
     pub(crate) fn new(telemetry_enabled: bool, additional_directives: &[String]) -> Self {
         let mut csp = String::with_capacity(512);
 
         // default-src
         csp.push_str("default-src 'self'; ");
-        // connect-src — allow self; telemetry; ws/wss added per-request
+        // connect-src — allow self; telemetry
         let mut connect = String::from("'self'");
         if telemetry_enabled {
             connect.push_str(" https://coder.com");
@@ -313,9 +309,7 @@ impl HstsConfig {
     /// and builds the header value once.
     pub(crate) fn new(max_age_secs: u64, options: &[String]) -> Self {
         if max_age_secs == 0 {
-            return Self {
-                header_value: None,
-            };
+            return Self { header_value: None };
         }
 
         let mut header = format!("max-age={max_age_secs}");
@@ -356,9 +350,10 @@ pub(crate) async fn hsts_middleware(request: axum::extract::Request, next: Next)
 
     if let Some(hsts) = hsts {
         if let Some(ref value) = hsts.header_value {
-            response
-                .headers_mut()
-                .insert(HeaderName::from_static("strict-transport-security"), value.clone());
+            response.headers_mut().insert(
+                HeaderName::from_static("strict-transport-security"),
+                value.clone(),
+            );
         }
     }
 
@@ -387,31 +382,69 @@ pub(crate) async fn security_headers_middleware(
 
     if let Some(config) = config {
         if !config.x_content_type_options.is_empty() {
-            if let Ok(val) = HeaderValue::from_str(&config.x_content_type_options) {
-                response
-                    .headers_mut()
-                    .insert(HeaderName::from_static("x-content-type-options"), val);
+            match HeaderValue::from_str(&config.x_content_type_options) {
+                Ok(val) => {
+                    response
+                        .headers_mut()
+                        .insert(HeaderName::from_static("x-content-type-options"), val);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        header = "x-content-type-options",
+                        value = %config.x_content_type_options,
+                        error = %err,
+                        "invalid security header value; header omitted",
+                    );
+                }
             }
         }
         if !config.x_frame_options.is_empty() {
-            if let Ok(val) = HeaderValue::from_str(&config.x_frame_options) {
-                response
-                    .headers_mut()
-                    .insert(HeaderName::from_static("x-frame-options"), val);
+            match HeaderValue::from_str(&config.x_frame_options) {
+                Ok(val) => {
+                    response
+                        .headers_mut()
+                        .insert(HeaderName::from_static("x-frame-options"), val);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        header = "x-frame-options",
+                        value = %config.x_frame_options,
+                        error = %err,
+                        "invalid security header value; header omitted",
+                    );
+                }
             }
         }
         if !config.referrer_policy.is_empty() {
-            if let Ok(val) = HeaderValue::from_str(&config.referrer_policy) {
-                response
-                    .headers_mut()
-                    .insert(HeaderName::from_static("referrer-policy"), val);
+            match HeaderValue::from_str(&config.referrer_policy) {
+                Ok(val) => {
+                    response
+                        .headers_mut()
+                        .insert(HeaderName::from_static("referrer-policy"), val);
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        header = "referrer-policy",
+                        value = %config.referrer_policy,
+                        error = %err,
+                        "invalid security header value; header omitted",
+                    );
+                }
             }
         }
     } else {
-        // Fallback defaults matching Go's X-Content-Type-Options: nosniff.
+        // Fallback defaults when no SecurityHeadersConfig extension is present.
         response.headers_mut().insert(
             HeaderName::from_static("x-content-type-options"),
             HeaderValue::from_static("nosniff"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("x-frame-options"),
+            HeaderValue::from_static("DENY"),
+        );
+        response.headers_mut().insert(
+            HeaderName::from_static("referrer-policy"),
+            HeaderValue::from_static("no-referrer"),
         );
     }
 
