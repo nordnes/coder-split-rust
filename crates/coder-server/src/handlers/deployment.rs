@@ -616,19 +616,20 @@ pub(crate) fn parse_proc_kb(val: &str) -> Option<u64> {
 ///
 /// Go exposes `net/http/pprof` handlers that produce CPU/memory/goroutine
 /// profiles in the pprof protobuf format.  The Rust equivalents use
-/// `/proc/self` for memory stats and tokio runtime metrics for task info.
+/// `/proc/self` for memory stats and OS-level thread/task counts.
 ///
-/// Routes:
-/// - `/debug/pprof/`       — index listing all available profiles
-/// - `/debug/pprof/heap`   — heap memory profile from /proc/self/status
-/// - `/debug/pprof/tasks`  — active tokio task metrics (goroutine equivalent)
-/// - `/debug/pprof/allocs` — allocation statistics from /proc/self
-/// - `/debug/pprof/cmdline` — process command line
-/// - `/debug/pprof/profile` — CPU profiling guidance
-/// - `/debug/pprof/symbol`  — symbol lookup guidance
-/// - `/debug/pprof/trace`   — execution tracing guidance
+/// Routes (all prefixed with `/api/v2`):
+/// - `/api/v2/debug/pprof/`        — index listing all available profiles
+/// - `/api/v2/debug/pprof/heap`    — heap memory profile from /proc/self/status
+/// - `/api/v2/debug/pprof/tasks`   — OS thread and kernel task counts
+/// - `/api/v2/debug/pprof/allocs`  — allocation statistics from /proc/self
+/// - `/api/v2/debug/pprof/cmdline` — process command line
+/// - `/api/v2/debug/pprof/profile` — CPU profiling guidance
+/// - `/api/v2/debug/pprof/symbol`  — symbol lookup guidance
+/// - `/api/v2/debug/pprof/trace`   — execution tracing guidance
 ///
-/// All routes are gated behind admin authentication.
+/// All routes require an authenticated actor with `can_view_operational_data`
+/// permissions (deployment owners and auditors).
 pub(crate) async fn debug_pprof(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
@@ -687,7 +688,7 @@ pub(crate) async fn debug_pprof(
                 "note": "Go pprof is not available in Rust. The following endpoints provide Rust-native profiling data and guidance on alternatives.",
                 "profiles": {
                     "/api/v2/debug/pprof/heap": "Heap memory profile — RSS, VmSize, and memory map stats from /proc/self.",
-                    "/api/v2/debug/pprof/tasks": "Active tokio tasks — runtime task metrics (Rust equivalent of goroutine dump).",
+                    "/api/v2/debug/pprof/tasks": "OS thread and kernel task counts (Rust equivalent of goroutine dump).",
                     "/api/v2/debug/pprof/allocs": "Allocation statistics — VmRSS, VmSize, VmData, VmStk from /proc/self/status.",
                     "/api/v2/debug/pprof/cmdline": "Process command line arguments.",
                     "/api/v2/debug/pprof/profile": "CPU profiling guidance (cargo flamegraph, perf).",
@@ -705,33 +706,41 @@ pub(crate) async fn debug_pprof(
 /// Returns RSS, VmSize, VmPeak, VmData, heap details, and memory maps info.
 /// This is the Rust equivalent of Go's `heap` pprof profile.
 fn build_heap_profile() -> Value {
-    let memstats = read_proc_memstats();
     let mut heap = serde_json::Map::new();
 
-    // Basic memory stats from /proc/self/status
-    if let Some(rss) = memstats.rss_bytes {
-        heap.insert("rss_bytes".to_string(), json!(rss));
-    }
-    if let Some(vm_size) = memstats.vm_size_bytes {
-        heap.insert("vm_size_bytes".to_string(), json!(vm_size));
-    }
-
-    // Extended memory stats from /proc/self/status
-    let extended = read_proc_extended_memstats();
-    if let Some(vm_peak) = extended.vm_peak_bytes {
-        heap.insert("vm_peak_bytes".to_string(), json!(vm_peak));
-    }
-    if let Some(vm_data) = extended.vm_data_bytes {
-        heap.insert("vm_data_bytes".to_string(), json!(vm_data));
-    }
-    if let Some(vm_stk) = extended.vm_stk_bytes {
-        heap.insert("vm_stk_bytes".to_string(), json!(vm_stk));
-    }
-    if let Some(vm_lib) = extended.vm_lib_bytes {
-        heap.insert("vm_lib_bytes".to_string(), json!(vm_lib));
-    }
-    if let Some(vm_swap) = extended.vm_swap_bytes {
-        heap.insert("vm_swap_bytes".to_string(), json!(vm_swap));
+    // Read all memory stats from /proc/self/status in a single pass
+    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
+        for line in contents.lines() {
+            if let Some(val) = line.strip_prefix("VmRSS:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("rss_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmSize:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_size_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmPeak:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_peak_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmData:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_data_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmStk:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_stk_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmLib:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_lib_bytes".to_string(), json!(kb * 1024));
+                }
+            } else if let Some(val) = line.strip_prefix("VmSwap:") {
+                if let Some(kb) = parse_proc_kb(val) {
+                    heap.insert("vm_swap_bytes".to_string(), json!(kb * 1024));
+                }
+            }
+        }
     }
 
     // Process-level statm for page-granularity info
@@ -755,11 +764,11 @@ fn build_heap_profile() -> Value {
     })
 }
 
-/// Build active tokio task metrics — Rust equivalent of Go's goroutine dump.
+/// Build active task/thread metrics — a lightweight view similar in spirit to Go's goroutine dump.
 ///
-/// Uses `tokio::runtime::Handle::current()` to read runtime-level metrics
-/// when the `tokio_unstable` cfg flag is available, otherwise returns
-/// process-level thread info.
+/// Collects OS-level metrics from `/proc/self/status` and `/proc/self/task`
+/// to report thread and kernel task counts for the current process.
+/// Does not currently use Tokio runtime metrics, even when built with `tokio_unstable`.
 fn build_tasks_profile() -> Value {
     let mut tasks = serde_json::Map::new();
 
@@ -776,7 +785,7 @@ fn build_tasks_profile() -> Value {
 
     // Read /proc/self/task to count active kernel tasks
     if let Ok(entries) = std::fs::read_dir("/proc/self/task") {
-        let task_count = entries.count();
+        let task_count = entries.filter_map(Result::ok).count();
         tasks.insert("kernel_task_count".to_string(), json!(task_count));
     }
 
@@ -857,42 +866,6 @@ fn build_allocs_profile() -> Value {
             "bytehound for Rust-specific allocation profiling"
         ]
     })
-}
-
-/// Extended memory statistics from `/proc/self/status` beyond basic RSS/VmSize.
-pub(crate) struct ExtendedProcMemstats {
-    vm_peak_bytes: Option<u64>,
-    vm_data_bytes: Option<u64>,
-    vm_stk_bytes: Option<u64>,
-    vm_lib_bytes: Option<u64>,
-    vm_swap_bytes: Option<u64>,
-}
-
-/// Read extended memory statistics from `/proc/self/status`.
-pub(crate) fn read_proc_extended_memstats() -> ExtendedProcMemstats {
-    let mut stats = ExtendedProcMemstats {
-        vm_peak_bytes: None,
-        vm_data_bytes: None,
-        vm_stk_bytes: None,
-        vm_lib_bytes: None,
-        vm_swap_bytes: None,
-    };
-    if let Ok(contents) = std::fs::read_to_string("/proc/self/status") {
-        for line in contents.lines() {
-            if let Some(val) = line.strip_prefix("VmPeak:") {
-                stats.vm_peak_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
-            } else if let Some(val) = line.strip_prefix("VmData:") {
-                stats.vm_data_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
-            } else if let Some(val) = line.strip_prefix("VmStk:") {
-                stats.vm_stk_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
-            } else if let Some(val) = line.strip_prefix("VmLib:") {
-                stats.vm_lib_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
-            } else if let Some(val) = line.strip_prefix("VmSwap:") {
-                stats.vm_swap_bytes = parse_proc_kb(val).map(|kb| kb * 1024);
-            }
-        }
-    }
-    stats
 }
 
 /// Page-level memory statistics from `/proc/self/statm`.
