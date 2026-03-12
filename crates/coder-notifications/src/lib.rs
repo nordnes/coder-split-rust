@@ -972,7 +972,10 @@ mod tests {
                 NotificationMessageStatus::TemporaryFailure,
                 r#""temporary_failure""#,
             ),
-            (NotificationMessageStatus::PermanentFailure, r#""permanent_failure""#),
+            (
+                NotificationMessageStatus::PermanentFailure,
+                r#""permanent_failure""#,
+            ),
             (NotificationMessageStatus::Unknown, r#""unknown""#),
             (NotificationMessageStatus::Inhibited, r#""inhibited""#),
         ];

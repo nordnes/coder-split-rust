@@ -525,9 +525,7 @@ pub(crate) async fn get_oidc_callback(
             let guard = cache.lock().await;
             if let Some(ref cached) = *guard {
                 let now = std::time::Instant::now();
-                if cached.issuer_url == issuer_key
-                    && now.duration_since(cached.fetched_at) < TTL
-                {
+                if cached.issuer_url == issuer_key && now.duration_since(cached.fetched_at) < TTL {
                     Some(cached.doc.clone())
                 } else {
                     None
@@ -541,15 +539,13 @@ pub(crate) async fn get_oidc_callback(
             doc
         } else {
             // Fetch without holding the lock so concurrent requests are not blocked.
-            let doc = coder_auth::oauth_login::oidc_discover(
-                &state.http_client,
-                &oidc_config.issuer_url,
-            )
-            .await
-            .map_err(|e| {
-                tracing::error!("OIDC discovery failed: {e}");
-                AppError::from(StorageError::unavailable(e.to_string()))
-            })?;
+            let doc =
+                coder_auth::oauth_login::oidc_discover(&state.http_client, &oidc_config.issuer_url)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("OIDC discovery failed: {e}");
+                        AppError::from(StorageError::unavailable(e.to_string()))
+                    })?;
 
             // Re-acquire the lock and store the fresh document.
             let mut guard = cache.lock().await;

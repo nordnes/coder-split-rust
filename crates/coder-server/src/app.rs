@@ -31974,10 +31974,7 @@ pub(crate) mod tests {
         let list_body = response_json(list_resp).await?;
         let chats = list_body.as_array().expect("should be an array");
         assert_eq!(chats.len(), 1);
-        assert_eq!(
-            chats[0].get("id").and_then(Value::as_str),
-            Some(chat_id)
-        );
+        assert_eq!(chats[0].get("id").and_then(Value::as_str), Some(chat_id));
         Ok(())
     }
 
@@ -32020,11 +32017,7 @@ pub(crate) mod tests {
         // GET the chat.
         let get_resp = call(
             app.clone(),
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/chats/{chat_id}"),
-                &token,
-            )?,
+            authenticated_request(Method::GET, &format!("/api/v2/chats/{chat_id}"), &token)?,
         )
         .await?;
         assert_eq!(get_resp.status(), StatusCode::OK);
@@ -32047,11 +32040,7 @@ pub(crate) mod tests {
         let fake_id = Uuid::new_v4();
         let resp = call(
             app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/chats/{fake_id}"),
-                &token,
-            )?,
+            authenticated_request(Method::GET, &format!("/api/v2/chats/{fake_id}"), &token)?,
         )
         .await?;
         assert_eq!(resp.status(), StatusCode::NOT_FOUND);
@@ -32097,11 +32086,7 @@ pub(crate) mod tests {
         // Delete (archive) the chat.
         let del_resp = call(
             app.clone(),
-            authenticated_request(
-                Method::DELETE,
-                &format!("/api/v2/chats/{chat_id}"),
-                &token,
-            )?,
+            authenticated_request(Method::DELETE, &format!("/api/v2/chats/{chat_id}"), &token)?,
         )
         .await?;
         assert_eq!(del_resp.status(), StatusCode::OK);
@@ -32115,7 +32100,11 @@ pub(crate) mod tests {
         assert_eq!(list_resp.status(), StatusCode::OK);
         let list_body = response_json(list_resp).await?;
         let chats = list_body.as_array().expect("should be an array");
-        assert_eq!(chats.len(), 0, "archived chat should not appear in default list");
+        assert_eq!(
+            chats.len(),
+            0,
+            "archived chat should not appear in default list"
+        );
         Ok(())
     }
 
