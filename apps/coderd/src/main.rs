@@ -35,13 +35,13 @@ use coder_core::{
     config::{
         DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig, LoggingConfig,
         NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SessionLifetimeConfig,
-        TelemetryConfig, TlsConfig, WorkspaceConfig,
+        TelemetryConfig, TlsConfig, WorkerConfig, WorkspaceConfig,
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
-use coder_workspaces::AutobuildExecutor;
+use coder_workspaces::{ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
@@ -568,6 +568,27 @@ struct ServerArgs {
     #[arg(long, env = "CODER_ADDITIONAL_CSP_POLICY", default_value = "")]
     additional_csp_policy: String,
 
+    // ----- Worker Intervals -----
+    /// Poll interval in seconds for the notification dispatch worker.
+    #[arg(
+        long,
+        env = "CODER_NOTIFICATION_DISPATCH_INTERVAL",
+        default_value_t = 10
+    )]
+    notification_dispatch_interval_secs: u64,
+
+    /// Poll interval in seconds for the activity bump worker.
+    #[arg(long, env = "CODER_ACTIVITY_BUMP_INTERVAL", default_value_t = 10)]
+    activity_bump_interval_secs: u64,
+
+    /// Poll interval in seconds for the dormancy checker worker.
+    #[arg(long, env = "CODER_DORMANCY_CHECK_INTERVAL", default_value_t = 60)]
+    dormancy_check_interval_secs: u64,
+
+    /// Flush interval in seconds for the telemetry batching worker.
+    #[arg(long, env = "CODER_TELEMETRY_FLUSH_INTERVAL", default_value_t = 1800)]
+    telemetry_flush_interval_secs: u64,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -785,9 +806,30 @@ async fn run() -> Result<(), MainError> {
     // implementations have not been added.  Once those DB methods exist,
     // instantiate a `Webpusher<Arc<dyn AppStore>>` here and add it as a
     // field on `AppState` so HTTP handlers can send push notifications.
-    let notification_service =
-        NotificationDispatchService::new(store.clone(), NotificationConfig::default())
-            .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
+    let notification_cancel = CancellationToken::new();
+    let notification_service = NotificationDispatchService::new(
+        store.clone(),
+        NotificationConfig::default(),
+        config.worker.notification_dispatch_interval_secs,
+        notification_cancel.clone(),
+    )
+    .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
+
+    // Start the activity bump background worker.
+    let activity_bump_cancel = CancellationToken::new();
+    let activity_bump_worker = ActivityBumpWorker::start(
+        store.clone(),
+        config.worker.activity_bump_interval_secs,
+        activity_bump_cancel.clone(),
+    );
+
+    // Start the dormancy checker background worker.
+    let dormancy_cancel = CancellationToken::new();
+    let dormancy_worker = DormancyCheckerWorker::start(
+        store.clone(),
+        config.worker.dormancy_check_interval_secs,
+        dormancy_cancel.clone(),
+    );
 
     // Start the autobuild lifecycle executor (workspace auto-start/stop).
     let autobuild_cancel = CancellationToken::new();
@@ -863,9 +905,22 @@ async fn run() -> Result<(), MainError> {
         state.close_deployment_stats();
     });
 
-    // 4. Drop the notification dispatch service so its background loop stops.
+    // 4. Cancel the notification dispatch service background loop.
     coordinator.register("notifications", async move {
+        notification_cancel.cancel();
         drop(notification_service);
+    });
+
+    // 4b. Cancel the activity bump background worker.
+    coordinator.register("activity_bump", async move {
+        activity_bump_cancel.cancel();
+        drop(activity_bump_worker);
+    });
+
+    // 4c. Cancel the dormancy checker background worker.
+    coordinator.register("dormancy_checker", async move {
+        dormancy_cancel.cancel();
+        drop(dormancy_worker);
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight
@@ -1065,6 +1120,12 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         },
         workspace: WorkspaceConfig {
             default_quiet_hours_schedule: args.default_quiet_hours_schedule,
+        },
+        worker: WorkerConfig {
+            notification_dispatch_interval_secs: args.notification_dispatch_interval_secs,
+            activity_bump_interval_secs: args.activity_bump_interval_secs,
+            dormancy_check_interval_secs: args.dormancy_check_interval_secs,
+            telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,
