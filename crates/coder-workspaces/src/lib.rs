@@ -1097,7 +1097,7 @@ async fn activity_bump_once<S: ActivityBumpStore>(
         let new_deadline = now + bump_duration;
         // Clamp to max_deadline so we never exceed the template policy.
         let new_deadline = match ws.max_deadline {
-            Some(max) if new_deadline > max => max,
+            Some(max) if max != OffsetDateTime::UNIX_EPOCH && new_deadline > max => max,
             _ => new_deadline,
         };
         // Only update if the new deadline actually extends the current one;
