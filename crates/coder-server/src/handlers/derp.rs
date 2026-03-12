@@ -33,7 +33,11 @@ use futures_util::SinkExt;
 const DERP_SUBPROTOCOL: &str = "derp";
 
 /// Maximum duration to wait for a single WebSocket send or receive.
-const WS_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+///
+/// This MUST be longer than `KEEP_ALIVE_INTERVAL` so that idle but
+/// legitimate clients are not disconnected before a keep-alive arrives.
+/// The Go reference uses 120 s for the read deadline.
+const WS_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// Keep-alive interval for DERP relay connections.
 const KEEP_ALIVE_INTERVAL: std::time::Duration =
