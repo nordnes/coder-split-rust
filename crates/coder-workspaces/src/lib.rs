@@ -1021,6 +1021,16 @@ impl ActivityBumpWorker {
     pub fn close(&self) {
         self.cancel.cancel();
     }
+
+    /// Cancels the worker and awaits the background task to completion,
+    /// ensuring in-flight DB queries finish before the pool is closed.
+    pub async fn join(self: Arc<Self>) {
+        self.cancel.cancel();
+        // Try to unwrap the Arc; if other references exist, just cancel.
+        if let Ok(this) = Arc::try_unwrap(self) {
+            let _result = this._task.await;
+        }
+    }
 }
 
 /// Core loop: periodically find workspaces needing a deadline bump and
@@ -1077,8 +1087,19 @@ async fn activity_bump_once<S: ActivityBumpStore>(
         if ws.last_used_at < activity_threshold {
             continue;
         }
+        // Only bump if the workspace already has a deadline set (no auto-stop
+        // configured means deadline is None — we must not create one).
+        let current_deadline = match ws.build_deadline {
+            Some(d) => d,
+            None => continue,
+        };
         // Extend the deadline from now.
         let new_deadline = now + bump_duration;
+        // Only update if the new deadline actually extends the current one;
+        // otherwise we would shorten the remaining time (Go guard equivalent).
+        if new_deadline <= current_deadline {
+            continue;
+        }
         if store
             .update_workspace_build_deadline(
                 ws.build_id,
@@ -1173,6 +1194,16 @@ impl DormancyCheckerWorker {
     /// Signals the worker to stop.
     pub fn close(&self) {
         self.cancel.cancel();
+    }
+
+    /// Cancels the worker and awaits the background task to completion,
+    /// ensuring in-flight DB queries finish before the pool is closed.
+    pub async fn join(self: Arc<Self>) {
+        self.cancel.cancel();
+        // Try to unwrap the Arc; if other references exist, just cancel.
+        if let Ok(this) = Arc::try_unwrap(self) {
+            let _result = this._task.await;
+        }
     }
 }
 
@@ -2650,6 +2681,8 @@ mod tests {
         ws.activity_bump_ns = one_hour_ns;
         ws.last_used_at = now - time::Duration::minutes(5); // active 5 min ago
         ws.job_completed_at = Some(now - time::Duration::hours(1));
+        // Set a deadline in the near future so the bump actually extends it.
+        ws.build_deadline = Some(now + time::Duration::minutes(10));
 
         let store = MockActivityBumpStore::new(vec![ws.clone()]);
         let result = activity_bump_once(&store, now).await;

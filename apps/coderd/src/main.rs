@@ -914,16 +914,16 @@ async fn run() -> Result<(), MainError> {
         drop(notification_service);
     });
 
-    // 4b. Cancel the activity bump background worker.
+    // 4b. Cancel the activity bump background worker and await completion
+    //     so in-flight DB queries finish before the pool is closed.
     coordinator.register("activity_bump", async move {
-        activity_bump_cancel.cancel();
-        drop(activity_bump_worker);
+        activity_bump_worker.join().await;
     });
 
-    // 4c. Cancel the dormancy checker background worker.
+    // 4c. Cancel the dormancy checker background worker and await completion
+    //     so in-flight DB queries finish before the pool is closed.
     coordinator.register("dormancy_checker", async move {
-        dormancy_cancel.cancel();
-        drop(dormancy_worker);
+        dormancy_worker.join().await;
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight
