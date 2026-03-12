@@ -2171,6 +2171,14 @@ pub trait OperationalStore: Send + Sync {
         let _ = (hash, creator_id);
         Err(StorageError::unavailable("file storage is not implemented"))
     }
+
+    /// Deletes a file by stable identifier.
+    ///
+    /// Returns `true` when a row was actually removed.
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+        let _ = file_id;
+        Err(StorageError::unavailable("file storage is not implemented"))
+    }
 }
 
 /// Narrow storage contract for insights and analytics queries.
@@ -3136,6 +3144,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         creator_id: Uuid,
     ) -> Result<Option<FileRecord>, StorageError> {
         let _ = (hash, creator_id);
+        Err(StorageError::unavailable("file storage is not implemented"))
+    }
+
+    /// Deletes a file by stable identifier.
+    ///
+    /// Returns `true` when a row was actually removed.
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+        let _ = file_id;
         Err(StorageError::unavailable("file storage is not implemented"))
     }
 
@@ -7082,6 +7098,10 @@ where
     ) -> Result<Option<FileRecord>, StorageError> {
         AppStore::get_file_by_hash_and_creator(self, hash, creator_id).await
     }
+
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+        AppStore::delete_file(self, file_id).await
+    }
 }
 
 #[async_trait]
@@ -7203,6 +7223,10 @@ where
         (**self)
             .get_file_by_hash_and_creator(hash, creator_id)
             .await
+    }
+
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+        (**self).delete_file(file_id).await
     }
 }
 

@@ -1333,9 +1333,9 @@ pub(crate) mod tests {
     use coder_core::{
         AcquireProvisionerJobInput, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord,
         AppStore, AuditLog, AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
-        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatInputPart,
-        ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
-        CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
+        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatFileRecord,
+        ChatInputPart, ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord,
+        ChatStatus, CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
         CreateFirstUserRequest, CreateFirstUserStoreError, CreateGroupInput,
         CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
@@ -1345,8 +1345,8 @@ pub(crate) mod tests {
         DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, DerpNodeConfig,
         DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser,
         FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
-        HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput,
-        InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
+        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
         InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
         InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LogFormat,
         LoginType, LoginWithPasswordRequest, NotificationMessageRecord, NotificationMessageStatus,
@@ -5495,6 +5495,13 @@ pub(crate) mod tests {
                         .find(|f| f.hash == hash && f.created_by == creator_id)
                         .cloned()
                 })
+        }
+
+        async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+            self.files
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|mut files| files.remove(&file_id).is_some())
         }
 
         async fn archive_unused_template_versions(
@@ -31893,6 +31900,275 @@ pub(crate) mod tests {
         assert!(
             body.get("deployment_id").is_some(),
             "response should include 'deployment_id' field"
+        );
+        Ok(())
+    }
+    // -----------------------------------------------------------------------
+    // Direct store tests: file operations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_insert_and_get_file_by_id() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: file_id,
+            hash: "abc123hash".to_owned(),
+            created_by: creator_id,
+            mimetype: "application/x-tar".to_owned(),
+            data: b"file content bytes".to_vec(),
+        };
+        let result = store.insert_file(input).await?;
+        assert_eq!(result.id, file_id);
+
+        let fetched = store.get_file_by_id(file_id).await?;
+        assert!(fetched.is_some(), "file should be found by id");
+        let file = fetched.ok_or("expected file")?;
+        assert_eq!(file.id, file_id);
+        assert_eq!(file.hash, "abc123hash");
+        assert_eq!(file.created_by, creator_id);
+        assert_eq!(file.mimetype, "application/x-tar");
+        assert_eq!(file.data, b"file content bytes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_get_file_by_id_not_found() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let result = store.get_file_by_id(Uuid::new_v4()).await?;
+        assert!(result.is_none(), "non-existent file should return None");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_get_file_by_hash_and_creator() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: file_id,
+            hash: "hashvalue".to_owned(),
+            created_by: creator_id,
+            mimetype: "text/plain".to_owned(),
+            data: b"hello world".to_vec(),
+        };
+        store.insert_file(input).await?;
+
+        let found = store
+            .get_file_by_hash_and_creator("hashvalue", creator_id)
+            .await?;
+        assert!(found.is_some(), "file should be found by hash+creator");
+        let file = found.ok_or("expected file")?;
+        assert_eq!(file.id, file_id);
+        assert_eq!(file.hash, "hashvalue");
+
+        // Different creator should not match
+        let not_found = store
+            .get_file_by_hash_and_creator("hashvalue", Uuid::new_v4())
+            .await?;
+        assert!(
+            not_found.is_none(),
+            "wrong creator should not find the file"
+        );
+
+        // Different hash should not match
+        let not_found = store
+            .get_file_by_hash_and_creator("otherhash", creator_id)
+            .await?;
+        assert!(not_found.is_none(), "wrong hash should not find the file");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_insert_duplicate_file_returns_existing() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let first_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: first_id,
+            hash: "duphash".to_owned(),
+            created_by: creator_id,
+            mimetype: "application/octet-stream".to_owned(),
+            data: b"dup data".to_vec(),
+        };
+        let first_result = store.insert_file(input).await?;
+        assert_eq!(first_result.id, first_id);
+
+        // Insert duplicate with same hash + creator should return existing id
+        let second_input = InsertFileInput {
+            id: Uuid::new_v4(),
+            hash: "duphash".to_owned(),
+            created_by: creator_id,
+            mimetype: "application/octet-stream".to_owned(),
+            data: b"dup data".to_vec(),
+        };
+        let second_result = store.insert_file(second_input).await?;
+        assert_eq!(
+            second_result.id, first_id,
+            "duplicate insert should return the original file id"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_delete_file() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let creator_id = Uuid::new_v4();
+        let file_id = Uuid::new_v4();
+
+        let input = InsertFileInput {
+            id: file_id,
+            hash: "deletehash".to_owned(),
+            created_by: creator_id,
+            mimetype: "text/plain".to_owned(),
+            data: b"to be deleted".to_vec(),
+        };
+        store.insert_file(input).await?;
+
+        // File should exist
+        let exists = store.get_file_by_id(file_id).await?;
+        assert!(exists.is_some(), "file should exist before deletion");
+
+        // Delete should return true
+        let deleted = store.delete_file(file_id).await?;
+        assert!(deleted, "delete_file should return true for existing file");
+
+        // File should no longer exist
+        let gone = store.get_file_by_id(file_id).await?;
+        assert!(gone.is_none(), "file should not exist after deletion");
+
+        // Deleting again should return false
+        let deleted_again = store.delete_file(file_id).await?;
+        assert!(
+            !deleted_again,
+            "delete_file should return false for non-existent file"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_delete_file_nonexistent() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let result = store.delete_file(Uuid::new_v4()).await?;
+        assert!(
+            !result,
+            "delete_file should return false for non-existent file"
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct store tests: audit log operations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_insert_and_list_audit_logs() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let input = PersistAuditLogInput {
+            id: Uuid::new_v4(),
+            request_id: Some(Uuid::new_v4()),
+            time: OffsetDateTime::now_utc(),
+            ip: "127.0.0.1".to_owned(),
+            user_agent: "test-agent/1.0".to_owned(),
+            resource_type: "workspace".to_owned(),
+            resource_id: Some(Uuid::new_v4()),
+            resource_target: "my-workspace".to_owned(),
+            resource_icon: String::new(),
+            action: "create".to_owned(),
+            diff: serde_json::Value::Object(serde_json::Map::new()),
+            status_code: 201,
+            additional_fields: serde_json::Value::Object(serde_json::Map::new()),
+            description: "Created a workspace".to_owned(),
+            resource_link: String::new(),
+            is_deleted: false,
+            organization_id: Some(Uuid::new_v4()),
+            user_id: Some(Uuid::new_v4()),
+        };
+        store.insert_audit_log(input).await?;
+
+        let filter = AuditLogListFilter {
+            search: String::new(),
+            limit: 10,
+            offset: 0,
+        };
+        let response = store.list_audit_logs(filter).await?;
+        assert!(response.count >= 1, "should have at least one audit log");
+        assert!(
+            !response.audit_logs.is_empty(),
+            "audit_logs should not be empty"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_list_audit_logs_empty() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let filter = AuditLogListFilter {
+            search: String::new(),
+            limit: 10,
+            offset: 0,
+        };
+        let response = store.list_audit_logs(filter).await?;
+        assert_eq!(response.count, 0, "empty store should have zero audit logs");
+        assert!(response.audit_logs.is_empty(), "audit_logs should be empty");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct store tests: chat file operations
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_insert_and_find_chat_file() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let owner_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+
+        let input = InsertChatFileInput {
+            owner_id,
+            organization_id: org_id,
+            name: "readme.md".to_owned(),
+            mimetype: "text/markdown".to_owned(),
+            data: b"# Hello".to_vec(),
+        };
+        let record = store.insert_chat_file(input).await?;
+        assert_eq!(record.name, "readme.md");
+        assert_eq!(record.mimetype, "text/markdown");
+        assert_eq!(record.owner_id, owner_id);
+
+        let found = store.find_chat_file_by_id(record.id).await?;
+        assert!(found.is_some(), "chat file should be found by id");
+        let chat_file = found.ok_or("expected chat file")?;
+        assert_eq!(chat_file.id, record.id);
+        assert_eq!(chat_file.name, "readme.md");
+        assert_eq!(chat_file.data, b"# Hello");
+
+        // Different owner should not find the chat file
+        let not_found = store.find_chat_file_by_id(Uuid::new_v4()).await?;
+        assert!(
+            not_found.is_none(),
+            "non-existent id should not find the chat file"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_find_chat_file_not_found() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let result = store.find_chat_file_by_id(Uuid::new_v4()).await?;
+        assert!(
+            result.is_none(),
+            "non-existent chat file should return None"
         );
         Ok(())
     }
