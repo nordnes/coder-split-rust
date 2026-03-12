@@ -46,6 +46,7 @@ const APP_LOGOUT_HOSTNAME: &str = "coder-logout";
 // appurl — Application URL parsing
 // ---------------------------------------------------------------------------
 
+#[allow(unreachable_pub)] // Items are re-exported at pub(crate) via the module.
 pub(crate) mod appurl {
     //! URL parsing for workspace app subdomains and paths.
     //!
@@ -694,7 +695,7 @@ pub(crate) struct AppRequest {
 impl AppRequest {
     /// Normalizes the request by splitting `workspace_and_agent` into
     /// separate fields and ensuring `base_path` has a trailing slash.
-    pub fn normalize(mut self) -> Self {
+    pub(crate) fn normalize(mut self) -> Self {
         if !self.workspace_and_agent.is_empty() {
             let parts: Vec<&str> = self.workspace_and_agent.splitn(2, '.').collect();
             self.workspace_name_or_id = parts[0].to_owned();
@@ -712,7 +713,7 @@ impl AppRequest {
     /// Validates the request fields.
     ///
     /// Must be called after [`normalize`](Self::normalize).
-    pub fn check(&self) -> Result<(), AppRequestError> {
+    pub(crate) fn check(&self) -> Result<(), AppRequestError> {
         match self.access_method {
             AccessMethod::Path | AccessMethod::Subdomain | AccessMethod::Terminal => {}
         }
@@ -817,7 +818,7 @@ impl AppCookies {
     ///
     /// The subdomain cookie name includes a hash of the hostname so that
     /// different workspace proxies don't collide.
-    pub fn new(hostname: &str) -> Self {
+    pub(crate) fn new(hostname: &str) -> Self {
         Self {
             path_app_session_token: PATH_APP_SESSION_TOKEN_COOKIE.to_owned(),
             subdomain_app_session_token: subdomain_app_session_token_cookie(hostname),
@@ -825,7 +826,7 @@ impl AppCookies {
     }
 
     /// Returns the appropriate cookie name for the given access method.
-    pub fn cookie_name_for_access_method(&self, method: &AccessMethod) -> &str {
+    pub(crate) fn cookie_name_for_access_method(&self, method: &AccessMethod) -> &str {
         match method {
             AccessMethod::Subdomain => &self.subdomain_app_session_token,
             // Path and terminal use the same domain:
@@ -839,7 +840,7 @@ impl AppCookies {
     /// Priority:
     /// 1. Access-method-specific cookie
     /// 2. Standard Coder token extraction (session header, cookie, bearer)
-    pub fn token_from_request(&self, headers: &HeaderMap, method: &AccessMethod) -> Option<String> {
+    pub(crate) fn token_from_request(&self, headers: &HeaderMap, method: &AccessMethod) -> Option<String> {
         let cookie_name = self.cookie_name_for_access_method(method);
 
         // Check method-specific cookie first.
@@ -930,7 +931,7 @@ impl WorkspaceAppServer {
     ///
     /// If `hostname` is non-empty, compiles it into a regex for subdomain
     /// matching.
-    pub fn new(
+    pub(crate) fn new(
         dashboard_url: url::Url,
         access_url: url::Url,
         hostname: String,

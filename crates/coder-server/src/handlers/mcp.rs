@@ -29,7 +29,7 @@ pub(crate) async fn mcp_http_handler(
         Ok(req) => req,
         Err(e) => {
             let error_response = JsonRpcResponse::error(
-                serde_json::Value::Null,
+                Value::Null,
                 JsonRpcError::from_code(
                     JsonRpcErrorCode::ParseError,
                     format!("Invalid JSON-RPC request: {e}"),

@@ -341,7 +341,7 @@ mod tests {
         let json = r#"{"jsonrpc":"2.0","method":"initialized"}"#;
         let req: JsonRpcRequest = serde_json::from_str(json)?;
         assert_eq!(req.method, "initialized");
-        assert_eq!(req.id, serde_json::Value::Null);
+        assert_eq!(req.id, Value::Null);
         Ok(())
     }
 
