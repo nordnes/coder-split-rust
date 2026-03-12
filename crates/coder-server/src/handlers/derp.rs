@@ -247,8 +247,10 @@ async fn receive_client_info(
     match recv_result {
         Ok(Some(Ok(Message::Binary(data)))) => {
             if let Ok((frame, _)) = derp::parse_frame(&data) {
-                if frame.frame_type == FrameType::ClientInfo {
-                    return NodeKey::from_slice(&frame.payload);
+                if frame.frame_type == FrameType::ClientInfo
+                    && frame.payload.len() >= derp::NODE_KEY_LEN
+                {
+                    return NodeKey::from_slice(&frame.payload[..derp::NODE_KEY_LEN]);
                 }
             }
             None
