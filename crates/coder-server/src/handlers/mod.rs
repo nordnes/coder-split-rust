@@ -205,12 +205,13 @@ pub(crate) fn strip_markdown(md: &str) -> String {
         // Strip inline code (`code`).
         s = s.replace('`', "");
 
-        // Strip bold and italic markers (**, __, *, _).
+        // Strip paired bold/italic markers while preserving standalone
+        // underscores and asterisks (e.g. snake_case identifiers, globs).
         // Order matters: strip double before single.
-        s = s.replace("**", "");
-        s = s.replace("__", "");
-        s = s.replace('*', "");
-        s = s.replace('_', "");
+        s = strip_paired_delimiter(&s, "**");
+        s = strip_paired_delimiter(&s, "__");
+        s = strip_paired_delimiter(&s, "*");
+        s = strip_paired_delimiter(&s, "_");
 
         // Strip simple HTML tags (<tag> and </tag>).
         while let Some(start) = s.find('<') {
@@ -233,6 +234,38 @@ pub(crate) fn strip_markdown(md: &str) -> String {
     }
 
     out
+}
+
+/// Strips paired Markdown emphasis delimiters (e.g. `**`, `__`, `*`, `_`)
+/// while preserving standalone occurrences (e.g. underscores in `snake_case`).
+///
+/// A delimiter is considered "paired" when it appears twice in the string with
+/// non-empty content between the pair.  Only the outermost pair is removed per
+/// iteration; the function loops until no more pairs are found.
+fn strip_paired_delimiter(input: &str, delim: &str) -> String {
+    let mut s = input.to_string();
+    loop {
+        if let Some(open) = s.find(delim) {
+            let after_open = open + delim.len();
+            if after_open < s.len() {
+                if let Some(close_offset) = s[after_open..].find(delim) {
+                    if close_offset > 0 {
+                        let close = after_open + close_offset;
+                        // Remove closing delimiter first (higher index) then opening.
+                        s = format!(
+                            "{}{}{}",
+                            &s[..open],
+                            &s[after_open..close],
+                            &s[close + delim.len()..]
+                        );
+                        continue;
+                    }
+                }
+            }
+        }
+        break;
+    }
+    s
 }
 
 pub(crate) mod agents;

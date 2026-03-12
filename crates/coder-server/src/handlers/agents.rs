@@ -1345,12 +1345,22 @@ pub(crate) async fn get_workspace_agent_external_auth(
 
     // Long-poll loop: when query.listen is true, Go's
     // `workspaceAgentsExternalAuth` keeps polling until the token becomes
-    // available or the request is cancelled.  We mirror that by polling at a
-    // short interval until the link is authenticated.
+    // available or the request is cancelled (r.Context().Done()).
+    //
+    // We mirror that by polling at a short interval until the link is
+    // authenticated, the deadline elapses, or the client disconnects.
+    //
+    // Cancellation: every `.await` inside this loop is a cancellation
+    // point.  When a client disconnects, Hyper drops the handler future at
+    // the nearest `.await`, stopping the loop and preventing further DB
+    // queries.  The `tokio::select!` below makes this intent explicit —
+    // if additional cancellation signals (e.g. a shutdown token) are added
+    // later, they slot into the `select!` naturally.
     const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
     const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-    let deadline = tokio::time::Instant::now() + POLL_TIMEOUT;
+    let deadline = tokio::time::sleep(POLL_TIMEOUT);
+    tokio::pin!(deadline);
 
     loop {
         // Check whether the workspace owner has linked this external auth provider.
@@ -1368,40 +1378,78 @@ pub(crate) async fn get_workspace_agent_external_auth(
             })
             .unwrap_or(false);
 
-        // If not listening, or already authenticated, or we've exceeded the
-        // deadline, return the current state immediately.
-        if !query.listen || authenticated || tokio::time::Instant::now() >= deadline {
-            let resp = coder_core::api::WorkspaceAgentExternalAuthResponse {
-                access_token: link
-                    .as_ref()
-                    .filter(|_| authenticated)
-                    .map(|l| l.access_token.clone())
-                    .unwrap_or_default(),
-                url: if authenticated {
-                    String::new()
-                } else {
-                    state
-                        .config
-                        .access_url
-                        .join(&format!("external-auth/{}", query.id))
-                        .map_err(|e| AppError::InternalError {
-                            message: "Failed to construct external auth redirect URL.".into(),
-                            detail: e.to_string(),
-                        })?
-                        .to_string()
-                },
-                auth_type: provider_config.provider_type.clone(),
-                authenticated,
-                username: None,
-                password: None,
-            };
-
-            return Ok((StatusCode::OK, Json(resp)).into_response());
+        // If not listening or already authenticated, return immediately.
+        if !query.listen || authenticated {
+            return Ok((
+                StatusCode::OK,
+                Json(build_agent_external_auth_response(
+                    &state,
+                    &query,
+                    &provider_config,
+                    link.as_ref(),
+                    authenticated,
+                )?),
+            )
+                .into_response());
         }
 
-        // Wait before polling again.
-        tokio::time::sleep(POLL_INTERVAL).await;
+        // Wait for the poll interval, or stop if the deadline elapses.
+        // Each branch is a cancellation point: if the client disconnects
+        // the handler future is dropped here.
+        tokio::select! {
+            _ = tokio::time::sleep(POLL_INTERVAL) => {
+                // Continue to next poll iteration.
+            }
+            _ = &mut deadline => {
+                // Timeout reached – return whatever state we have.
+                return Ok((
+                    StatusCode::OK,
+                    Json(build_agent_external_auth_response(
+                        &state,
+                        &query,
+                        &provider_config,
+                        link.as_ref(),
+                        authenticated,
+                    )?),
+                )
+                    .into_response());
+            }
+        }
     }
+}
+
+/// Builds the agent-facing external auth response (shared by immediate-return
+/// and deadline-expiry paths in the long-poll handler).
+fn build_agent_external_auth_response(
+    state: &AppState,
+    query: &AgentExternalAuthQuery,
+    provider_config: &coder_core::api::ExternalAuthLinkProvider,
+    link: Option<&coder_core::ExternalAuthLinkRecord>,
+    authenticated: bool,
+) -> Result<coder_core::api::WorkspaceAgentExternalAuthResponse, AppError> {
+    Ok(coder_core::api::WorkspaceAgentExternalAuthResponse {
+        access_token: link
+            .filter(|_| authenticated)
+            .map(|l| l.access_token.clone())
+            .unwrap_or_default(),
+        url: if authenticated {
+            String::new()
+        } else {
+            state
+                .config
+                .access_url
+                .join(&format!("external-auth/{}", query.id))
+                .map_err(|e| AppError::InternalError {
+                    message: "Failed to construct external auth redirect URL.".into(),
+                    detail: e.to_string(),
+                })?
+                .to_string()
+        },
+        auth_type: provider_config.provider_type.clone(),
+        authenticated,
+        username: None,
+        password: None,
+    })
 }
 
 /// POST /api/v2/workspaceagents/me/log-source — create agent log source.

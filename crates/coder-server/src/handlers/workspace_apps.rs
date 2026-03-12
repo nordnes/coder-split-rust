@@ -1571,10 +1571,12 @@ async fn resolve_workspace_agent_id(
             ))
         })?;
 
-    // Look up the workspace to verify it exists.
+    // Look up the workspace to verify it exists.  We have a workspace ID
+    // (parsed above), so use `find_workspace_by_id` — not the agent-based
+    // lookup which expects an *agent* UUID.
     let _workspace = state
         .store
-        .find_workspace_by_agent_id(workspace_id)
+        .find_workspace_by_id(workspace_id, None)
         .await
         .map_err(|e| {
             WorkspaceAppError::Internal(format!("failed to look up workspace: {e}"))
