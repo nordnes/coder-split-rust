@@ -31072,6 +31072,30 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
+    async fn post_license_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/licenses",
+                &serde_json::json!({ "license": "fake" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_license_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::DELETE, "/api/v2/licenses/1")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
     async fn post_license_rejects_empty_body() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
