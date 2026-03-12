@@ -698,9 +698,149 @@ impl ServerConfig {
                 default: Some(""),
                 description: "Comma-separated additional Content-Security-Policy directives.",
             },
-            // NOTE: Security header values (X-Content-Type-Options, X-Frame-Options,
-            // Referrer-Policy) use sensible defaults from SecurityHeadersConfig::default().
-            // CLI/env-var overrides will be wired in a follow-up PR.
+            // -- Security Headers --
+            ConfigOption {
+                name: "x-content-type-options",
+                env: "CODER_X_CONTENT_TYPE_OPTIONS",
+                default: Some("nosniff"),
+                description: "Value for the X-Content-Type-Options response header.",
+            },
+            ConfigOption {
+                name: "x-frame-options",
+                env: "CODER_X_FRAME_OPTIONS",
+                default: Some("DENY"),
+                description: "Value for the X-Frame-Options response header.",
+            },
+            ConfigOption {
+                name: "referrer-policy",
+                env: "CODER_REFERRER_POLICY",
+                default: Some("no-referrer"),
+                description: "Value for the Referrer-Policy response header.",
+            },
+            // -- GitHub OAuth2 --
+            ConfigOption {
+                name: "github-client-id",
+                env: "CODER_GITHUB_CLIENT_ID",
+                default: Some(""),
+                description: "GitHub OAuth2 client ID.",
+            },
+            ConfigOption {
+                name: "github-client-secret",
+                env: "CODER_GITHUB_CLIENT_SECRET",
+                default: Some(""),
+                description: "GitHub OAuth2 client secret.",
+            },
+            ConfigOption {
+                name: "github-allow-signups",
+                env: "CODER_GITHUB_ALLOW_SIGNUPS",
+                default: Some("false"),
+                description: "Allow new user signups via GitHub OAuth.",
+            },
+            ConfigOption {
+                name: "github-allow-everyone",
+                env: "CODER_GITHUB_ALLOW_EVERYONE",
+                default: Some("false"),
+                description: "Allow all GitHub users (skip org/team checks).",
+            },
+            ConfigOption {
+                name: "github-allowed-orgs",
+                env: "CODER_GITHUB_ALLOWED_ORGS",
+                default: Some(""),
+                description: "Comma-separated list of allowed GitHub organization logins.",
+            },
+            ConfigOption {
+                name: "github-allowed-teams",
+                env: "CODER_GITHUB_ALLOWED_TEAMS",
+                default: Some(""),
+                description: "Comma-separated list of allowed GitHub team slugs (org/team format).",
+            },
+            ConfigOption {
+                name: "github-api-url",
+                env: "CODER_GITHUB_API_URL",
+                default: Some("https://api.github.com"),
+                description: "GitHub API base URL.",
+            },
+            // -- OIDC --
+            ConfigOption {
+                name: "oidc-issuer-url",
+                env: "CODER_OIDC_ISSUER_URL",
+                default: Some(""),
+                description: "OIDC issuer URL (used for discovery).",
+            },
+            ConfigOption {
+                name: "oidc-client-id",
+                env: "CODER_OIDC_CLIENT_ID",
+                default: Some(""),
+                description: "OIDC client ID.",
+            },
+            ConfigOption {
+                name: "oidc-client-secret",
+                env: "CODER_OIDC_CLIENT_SECRET",
+                default: Some(""),
+                description: "OIDC client secret.",
+            },
+            ConfigOption {
+                name: "oidc-scopes",
+                env: "CODER_OIDC_SCOPES",
+                default: Some("openid,profile,email"),
+                description: "Comma-separated OIDC scopes to request.",
+            },
+            ConfigOption {
+                name: "oidc-allow-signups",
+                env: "CODER_OIDC_ALLOW_SIGNUPS",
+                default: Some("true"),
+                description: "Allow new user signups via OIDC.",
+            },
+            ConfigOption {
+                name: "oidc-email-domain",
+                env: "CODER_OIDC_EMAIL_DOMAIN",
+                default: Some(""),
+                description: "Comma-separated list of allowed email domains for OIDC.",
+            },
+            ConfigOption {
+                name: "oidc-username-field",
+                env: "CODER_OIDC_USERNAME_FIELD",
+                default: Some("preferred_username"),
+                description: "OIDC claim field to use as username.",
+            },
+            ConfigOption {
+                name: "oidc-email-field",
+                env: "CODER_OIDC_EMAIL_FIELD",
+                default: Some("email"),
+                description: "OIDC claim field to use as email.",
+            },
+            ConfigOption {
+                name: "oidc-name-field",
+                env: "CODER_OIDC_NAME_FIELD",
+                default: Some("name"),
+                description: "OIDC claim field to use as display name.",
+            },
+            ConfigOption {
+                name: "oidc-ignore-email-verified",
+                env: "CODER_OIDC_IGNORE_EMAIL_VERIFIED",
+                default: Some("false"),
+                description: "Ignore the email_verified claim from the OIDC provider.",
+            },
+            // -- Rate Limiting (additional) --
+            ConfigOption {
+                name: "rate-limit-login-per-minute",
+                env: "CODER_RATE_LIMIT_LOGIN_PER_MINUTE",
+                default: Some("5"),
+                description: "Maximum login attempts per minute per IP address.",
+            },
+            ConfigOption {
+                name: "rate-limit-unauthenticated-per-minute",
+                env: "CODER_RATE_LIMIT_UNAUTHENTICATED_PER_MINUTE",
+                default: Some("60"),
+                description: "Maximum API requests per minute for unauthenticated IPs.",
+            },
+            // -- Worker Intervals (additional) --
+            ConfigOption {
+                name: "lifecycle-check-interval",
+                env: "CODER_LIFECYCLE_CHECK_INTERVAL",
+                default: Some("30"),
+                description: "Poll interval in seconds for the lifecycle scheduler (autostart/autostop).",
+            },
         ]
     }
 }
