@@ -1,29 +1,43 @@
 -- Enums for the notifications domain.
+-- Wrapped in DO blocks for idempotency (enum_types migration may have
+-- already created these types).
 
-CREATE TYPE notification_message_status AS ENUM (
-    'pending',
-    'leased',
-    'sent',
-    'permanent_failure',
-    'temporary_failure'
-);
+DO $$ BEGIN
+    CREATE TYPE notification_message_status AS ENUM (
+        'pending',
+        'leased',
+        'sent',
+        'permanent_failure',
+        'temporary_failure'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE notification_method AS ENUM (
-    'smtp',
-    'webhook',
-    'inbox'
-);
+DO $$ BEGIN
+    CREATE TYPE notification_method AS ENUM (
+        'smtp',
+        'webhook',
+        'inbox'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE notification_template_kind AS ENUM (
-    'system',
-    'custom'
-);
+DO $$ BEGIN
+    CREATE TYPE notification_template_kind AS ENUM (
+        'system',
+        'custom'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
-CREATE TYPE inbox_notification_read_status AS ENUM (
-    'all',
-    'unread',
-    'read'
-);
+DO $$ BEGIN
+    CREATE TYPE inbox_notification_read_status AS ENUM (
+        'all',
+        'unread',
+        'read'
+    );
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;
 
 -- notification_templates: Templates from which to create notification messages.
 CREATE TABLE notification_templates (

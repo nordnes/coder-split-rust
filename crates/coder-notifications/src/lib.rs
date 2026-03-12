@@ -21,14 +21,13 @@
 
 use std::sync::{Arc, Weak};
 
-use tokio_util::sync::CancellationToken;
-
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use coder_core::AppStore;
 use coder_core::IdentityStore;
 use coder_core::api::{WebpushMessage, WebpushSubscription};
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
+use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use web_push::{
@@ -39,7 +38,6 @@ use web_push::{
 /// Current milestone for the notifications crate.
 pub const STATUS: &str = "active";
 
-const DISPATCH_POLL_SECS: u64 = 10;
 const DISPATCH_BATCH_SIZE: u32 = 50;
 const MAX_DISPATCH_ATTEMPTS: u32 = 3;
 
@@ -75,6 +73,7 @@ pub struct NotificationDispatchService<S> {
     store: S,
     config: NotificationConfig,
     http_client: reqwest::Client,
+    poll_interval_secs: u64,
 }
 
 impl<S> NotificationDispatchService<S>
@@ -87,9 +86,13 @@ where
     /// for the background task.  During shutdown, cancel the
     /// [`CancellationToken`] **and** await the handle to ensure in-flight
     /// dispatch cycles finish their DB writes before the pool is closed.
+    ///
+    /// The `poll_interval_secs` parameter controls how often the dispatch loop
+    /// polls for pending messages.
     pub fn new(
         store: S,
         config: NotificationConfig,
+        poll_interval_secs: u64,
         cancel: CancellationToken,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), reqwest::Error> {
         let http_client = reqwest::Client::builder()
@@ -100,6 +103,7 @@ where
             store,
             config,
             http_client,
+            poll_interval_secs,
         });
         let handle = Self::spawn_dispatch_loop(&service, cancel);
         Ok((service, handle))
@@ -148,7 +152,7 @@ where
                 // If this was the last allowed attempt, mark as permanent
                 // failure so the message is no longer eligible for retry.
                 if message.attempt_count + 1 >= MAX_DISPATCH_ATTEMPTS as i32 {
-                    NotificationMessageStatus::Failed
+                    NotificationMessageStatus::PermanentFailure
                 } else {
                     NotificationMessageStatus::TemporaryFailure
                 }
@@ -248,8 +252,9 @@ where
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(service);
+        let poll_secs = service.poll_interval_secs;
         tokio::spawn(async move {
-            run_dispatch_loop(weak, cancel).await;
+            run_dispatch_loop(weak, poll_secs, cancel).await;
         })
     }
 }
@@ -267,11 +272,12 @@ pub enum NotificationDispatchError {
 
 async fn run_dispatch_loop<S>(
     service: Weak<NotificationDispatchService<S>>,
+    poll_secs: u64,
     cancel: CancellationToken,
 ) where
     S: IdentityStore + Clone + Send + Sync + 'static,
 {
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(DISPATCH_POLL_SECS));
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(poll_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
@@ -669,10 +675,12 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use coder_core::identity::{
-        CreateUserStoreError, InsertOrganizationMemberError, NotificationMessageRecord,
+        CreateGroupInput, CreateUserStoreError, CustomRoleRecord, GroupMemberRecord, GroupRecord,
+        InsertOrganizationMemberError, LoginType, NotificationMessageRecord,
         NotificationMessageStatus, NotificationMethod, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, UserAppearanceRecord, UserListFilter,
-        UserPreferenceRecord, UserRecord, UserStatus,
+        OrganizationMemberRecord, OrganizationRecord, UpsertCustomRoleInput, UpsertUserLinkInput,
+        UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter,
+        UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
     };
     use coder_core::{CreateUserInput, IdentityStore, StorageError};
     use std::sync::Mutex;
@@ -908,6 +916,184 @@ mod tests {
             Ok(None)
         }
 
+        // ----- User identity supplements (stubs for test mock) -----
+
+        async fn find_user_by_linked_id(
+            &self,
+            _login_type: LoginType,
+            _linked_id: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn find_active_user_by_email_and_login_type(
+            &self,
+            _email: &str,
+            _login_type: LoginType,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn list_user_links(
+            &self,
+            _user_id: Uuid,
+        ) -> Result<Vec<UserLinkRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn upsert_user_link(
+            &self,
+            _user_id: Uuid,
+            _input: &UpsertUserLinkInput,
+        ) -> Result<UserLinkRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_user_link(
+            &self,
+            _user_id: Uuid,
+            _login_type: LoginType,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn get_user_config(
+            &self,
+            _user_id: Uuid,
+            _key: &str,
+        ) -> Result<Option<UserConfigRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn upsert_user_config(
+            &self,
+            _user_id: Uuid,
+            _key: &str,
+            _value: &str,
+        ) -> Result<UserConfigRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_user_config(
+            &self,
+            _user_id: Uuid,
+            _key: &str,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn insert_user_deleted(
+            &self,
+            _user_id: Uuid,
+            _deleted_by: Option<Uuid>,
+            _reason: &str,
+        ) -> Result<UserDeletedRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn insert_user_status_change(
+            &self,
+            _user_id: Uuid,
+            _old_status: UserStatus,
+            _new_status: UserStatus,
+            _changed_by: Option<Uuid>,
+            _reason: &str,
+        ) -> Result<UserStatusChangeRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn list_user_status_changes(
+            &self,
+            _user_id: Uuid,
+        ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn list_custom_roles(
+            &self,
+            _organization_id: Option<Uuid>,
+        ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn upsert_custom_role(
+            &self,
+            _input: &UpsertCustomRoleInput,
+        ) -> Result<CustomRoleRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_custom_role(
+            &self,
+            _name: &str,
+            _organization_id: Option<Uuid>,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn list_groups(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<GroupRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn create_group(
+            &self,
+            _input: &CreateGroupInput,
+        ) -> Result<GroupRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_group_by_id(
+            &self,
+            _group_id: Uuid,
+        ) -> Result<Option<GroupRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn delete_group(&self, _group_id: Uuid) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn list_group_members(
+            &self,
+            _group_id: Uuid,
+        ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn insert_group_member(
+            &self,
+            _group_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<(), StorageError> {
+            self.maybe_err()?;
+            Ok(())
+        }
+
+        async fn delete_group_member(
+            &self,
+            _group_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
         // ----- Notification overrides -----
 
         async fn acquire_pending_notification_messages(
@@ -946,6 +1132,20 @@ mod tests {
     }
 
     // ── Helpers ──────────────────────────────────────────────
+
+    /// Test helper: creates a `NotificationDispatchService` with an immediately-
+    /// cancelled token and a long poll interval so the background loop exits
+    /// right away and tests can call `dispatch_once` directly.
+    fn make_service(
+        store: MockStore,
+        config: NotificationConfig,
+    ) -> Arc<NotificationDispatchService<MockStore>> {
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let (service, _handle) = NotificationDispatchService::new(store, config, 3600, cancel)
+            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        service
+    }
 
     fn make_message(method: NotificationMethod, targets_json: &str) -> NotificationMessageRecord {
         let now = OffsetDateTime::now_utc();
@@ -994,7 +1194,12 @@ mod tests {
                 NotificationMessageStatus::TemporaryFailure,
                 r#""temporary_failure""#,
             ),
-            (NotificationMessageStatus::Failed, r#""permanent_failure""#),
+            (
+                NotificationMessageStatus::PermanentFailure,
+                r#""permanent_failure""#,
+            ),
+            (NotificationMessageStatus::Unknown, r#""unknown""#),
+            (NotificationMessageStatus::Inhibited, r#""inhibited""#),
         ];
         for (variant, expected_json) in &variants {
             let serialized = serde_json::to_string(variant)
@@ -1060,9 +1265,7 @@ mod tests {
             smtp_from: "noreply@example.com".to_owned(),
             webhook_timeout_secs: 15,
         };
-        let (service, _handle) =
-            NotificationDispatchService::new(store, config.clone(), CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store, config.clone());
         assert_eq!(service.config().smtp_host, "mail.example.com");
         assert_eq!(service.config().smtp_port, 465);
         assert_eq!(service.config().smtp_from, "noreply@example.com");
@@ -1075,9 +1278,7 @@ mod tests {
     async fn dispatch_once_with_no_pending_messages() {
         let store = MockStore::new();
         let config = NotificationConfig::default();
-        let (service, _handle) =
-            NotificationDispatchService::new(store, config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store, config);
         let count = service
             .dispatch_once()
             .await
@@ -1091,9 +1292,7 @@ mod tests {
     async fn dispatch_once_propagates_storage_error() {
         let store = MockStore::new().with_error("database is down");
         let config = NotificationConfig::default();
-        let (service, _handle) =
-            NotificationDispatchService::new(store, config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store, config);
         let result = service.dispatch_once().await;
         assert!(result.is_err());
         assert!(
@@ -1111,9 +1310,7 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let (service, _handle) =
-            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store.clone(), config);
 
         let count = service
             .dispatch_once()
@@ -1140,9 +1337,7 @@ mod tests {
         let store = MockStore::new().with_pending(vec![msg]);
         // Default config has empty smtp_host → email dispatch fails.
         let config = NotificationConfig::default();
-        let (service, _handle) =
-            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store.clone(), config);
 
         let count = service
             .dispatch_once()
@@ -1178,9 +1373,7 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let (service, _handle) =
-            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store.clone(), config);
 
         let count = service
             .dispatch_once()
@@ -1195,7 +1388,7 @@ mod tests {
             .clone();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].0, msg_id);
-        assert_eq!(updates[0].1, NotificationMessageStatus::Failed);
+        assert_eq!(updates[0].1, NotificationMessageStatus::PermanentFailure);
     }
 
     // ── 12. Webhook without endpoint URL records failure ────
@@ -1207,9 +1400,7 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let (service, _handle) =
-            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store.clone(), config);
 
         let count = service
             .dispatch_once()
@@ -1244,9 +1435,7 @@ mod tests {
         let id2 = msg2.id;
         let store = MockStore::new().with_pending(vec![msg1, msg2]);
         let config = NotificationConfig::default();
-        let (service, _handle) =
-            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store.clone(), config);
 
         let count = service
             .dispatch_once()
@@ -1283,9 +1472,7 @@ mod tests {
             smtp_from: "sender@custom.com".to_owned(),
             webhook_timeout_secs: 5,
         };
-        let (service, _handle) =
-            NotificationDispatchService::new(store, config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store, config);
         assert_eq!(service.config().smtp_host, "custom.smtp.example.com");
         assert_eq!(service.config().smtp_port, 2525);
         assert_eq!(service.config().smtp_from, "sender@custom.com");
@@ -1330,7 +1517,7 @@ mod tests {
         );
         assert_ne!(
             NotificationMessageStatus::Leased,
-            NotificationMessageStatus::Failed
+            NotificationMessageStatus::PermanentFailure
         );
     }
 
@@ -1349,9 +1536,7 @@ mod tests {
             webhook_timeout_secs: 1,
             ..NotificationConfig::default()
         };
-        let (service, _handle) =
-            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
-                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let service = make_service(store.clone(), config);
 
         let count = service
             .dispatch_once()

@@ -35,13 +35,13 @@ use coder_core::{
     config::{
         DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig, LoggingConfig,
         NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SessionLifetimeConfig,
-        TelemetryConfig, TlsConfig, WorkspaceConfig,
+        TelemetryConfig, TlsConfig, WorkerConfig, WorkspaceConfig,
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
-use coder_workspaces::AutobuildExecutor;
+use coder_workspaces::{ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
@@ -568,6 +568,43 @@ struct ServerArgs {
     #[arg(long, env = "CODER_ADDITIONAL_CSP_POLICY", default_value = "")]
     additional_csp_policy: String,
 
+    // ----- Worker Intervals -----
+    /// Poll interval in seconds for the notification dispatch worker.
+    #[arg(
+        long,
+        env = "CODER_NOTIFICATION_DISPATCH_INTERVAL",
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    notification_dispatch_interval_secs: u64,
+
+    /// Poll interval in seconds for the activity bump worker.
+    #[arg(
+        long,
+        env = "CODER_ACTIVITY_BUMP_INTERVAL",
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    activity_bump_interval_secs: u64,
+
+    /// Poll interval in seconds for the dormancy checker worker.
+    #[arg(
+        long,
+        env = "CODER_DORMANCY_CHECK_INTERVAL",
+        default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    dormancy_check_interval_secs: u64,
+
+    /// Flush interval in seconds for the telemetry batching worker.
+    #[arg(
+        long,
+        env = "CODER_TELEMETRY_FLUSH_INTERVAL",
+        default_value_t = 1800,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    telemetry_flush_interval_secs: u64,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -762,9 +799,12 @@ async fn run() -> Result<(), MainError> {
     let derp_tracker = DerpTrafficTracker::new();
     // Start the telemetry background worker.
     let telemetry_config = coder_telemetry::TelemetryConfig {
-        enabled: config.telemetry_enabled,
+        enabled: config.telemetry.enabled,
         deployment_id: deployment_metadata.deployment_id,
         version: BuildMetadata::default().version.clone(),
+        flush_interval: std::time::Duration::from_secs(
+            config.worker.telemetry_flush_interval_secs,
+        ),
         ..coder_telemetry::TelemetryConfig::default()
     };
     let (mut telemetry_worker, telemetry_reporter) =
@@ -789,9 +829,26 @@ async fn run() -> Result<(), MainError> {
     let (notification_service, notification_handle) = NotificationDispatchService::new(
         store.clone(),
         NotificationConfig::default(),
+        config.worker.notification_dispatch_interval_secs,
         notification_cancel.clone(),
     )
     .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
+
+    // Start the activity bump background worker.
+    let activity_bump_cancel = CancellationToken::new();
+    let activity_bump_worker = ActivityBumpWorker::start(
+        store.clone(),
+        config.worker.activity_bump_interval_secs,
+        activity_bump_cancel.clone(),
+    );
+
+    // Start the dormancy checker background worker.
+    let dormancy_cancel = CancellationToken::new();
+    let dormancy_worker = DormancyCheckerWorker::start(
+        store.clone(),
+        config.worker.dormancy_check_interval_secs,
+        dormancy_cancel.clone(),
+    );
 
     // Start the autobuild lifecycle executor (workspace auto-start/stop).
     let autobuild_cancel = CancellationToken::new();
@@ -876,6 +933,18 @@ async fn run() -> Result<(), MainError> {
         if let Err(e) = notification_handle.await {
             warn!(error = %e, "notification dispatch task panicked during shutdown");
         }
+    });
+
+    // 4b. Cancel the activity bump background worker and await completion
+    //     so in-flight DB queries finish before the pool is closed.
+    coordinator.register("activity_bump", async move {
+        activity_bump_worker.join().await;
+    });
+
+    // 4c. Cancel the dormancy checker background worker and await completion
+    //     so in-flight DB queries finish before the pool is closed.
+    coordinator.register("dormancy_checker", async move {
+        dormancy_worker.join().await;
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight
@@ -1075,6 +1144,12 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         },
         workspace: WorkspaceConfig {
             default_quiet_hours_schedule: args.default_quiet_hours_schedule,
+        },
+        worker: WorkerConfig {
+            notification_dispatch_interval_secs: args.notification_dispatch_interval_secs,
+            activity_bump_interval_secs: args.activity_bump_interval_secs,
+            dormancy_check_interval_secs: args.dormancy_check_interval_secs,
+            telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,

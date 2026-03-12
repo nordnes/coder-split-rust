@@ -545,6 +545,7 @@ dependencies = [
  "coder-core",
  "coder-rbac",
  "http 1.4.0",
+ "jsonwebtoken",
  "metrics",
  "rand 0.8.5",
  "reqwest",
@@ -604,6 +605,7 @@ name = "coder-db"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "coder-core",
  "coder-identity",
  "metrics",
@@ -625,6 +627,33 @@ dependencies = [
  "coder-rbac",
  "thiserror 2.0.18",
  "time",
+ "uuid",
+]
+
+[[package]]
+name = "coder-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "coder-audit",
+ "coder-auth",
+ "coder-connectivity",
+ "coder-core",
+ "coder-db",
+ "coder-identity",
+ "coder-server",
+ "coder-telemetry",
+ "coder-workspaces",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
  "uuid",
 ]
 
@@ -738,6 +767,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
+ "regex",
  "reqwest",
  "serde",
  "serde_json",

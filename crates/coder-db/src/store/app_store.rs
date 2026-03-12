@@ -3452,6 +3452,17 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM files WHERE id = $1")
+            .bind(file_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_external_auth_links(
         &self,
         user_id: Uuid,
@@ -4632,6 +4643,82 @@ impl AppStore for PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM webpush_subscriptions WHERE id = ANY($1)")
+            .bind(ids)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError> {
+        sqlx::query("TRUNCATE TABLE webpush_subscriptions")
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_webpush_vapid_keys(&self) -> Result<Option<VapidKeyPair>, StorageError> {
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM site_configs WHERE key IN ('webpush_vapid_public_key', 'webpush_vapid_private_key')",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let mut public_key = None;
+        let mut private_key = None;
+        for (key, value) in &rows {
+            match key.as_str() {
+                "webpush_vapid_public_key" => public_key = Some(value.clone()),
+                "webpush_vapid_private_key" => private_key = Some(value.clone()),
+                _ => {}
+            }
+        }
+
+        match (public_key, private_key) {
+            (Some(public_key), Some(private_key))
+                if !public_key.is_empty() && !private_key.is_empty() =>
+            {
+                Ok(Some(VapidKeyPair {
+                    public_key,
+                    private_key,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    #[instrument(skip(self, public_key, private_key), err(level = tracing::Level::WARN))]
+    async fn upsert_webpush_vapid_keys(
+        &self,
+        public_key: &str,
+        private_key: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES
+                 ('webpush_vapid_public_key', $1),
+                 ('webpush_vapid_private_key', $2)
+             ON CONFLICT (key)
+             DO UPDATE SET value = EXCLUDED.value WHERE site_configs.key = EXCLUDED.key",
+        )
+        .bind(public_key)
+        .bind(private_key)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Notification message dispatch
     // -----------------------------------------------------------------------
@@ -4689,7 +4776,9 @@ impl AppStore for PostgresStore {
             NotificationMessageStatus::Leased => "leased",
             NotificationMessageStatus::Sent => "sent",
             NotificationMessageStatus::TemporaryFailure => "temporary_failure",
-            NotificationMessageStatus::Failed => "permanent_failure",
+            NotificationMessageStatus::PermanentFailure => "permanent_failure",
+            NotificationMessageStatus::Unknown => "unknown",
+            NotificationMessageStatus::Inhibited => "inhibited",
         };
 
         let result = sqlx::query(
@@ -5637,6 +5726,178 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "WITH updated AS (
+                UPDATE workspaces
+                SET
+                    dormant_at = $2,
+                    last_used_at = CASE WHEN $2::timestamptz IS NULL THEN
+                        now()
+                    ELSE
+                        last_used_at
+                    END,
+                    deleting_at = CASE WHEN $2::timestamptz IS NULL OR templates.time_til_dormant_autodelete = 0 THEN
+                        NULL
+                    ELSE
+                        $2::timestamptz + (INTERVAL '1 millisecond' * (templates.time_til_dormant_autodelete / 1000000))
+                    END,
+                    updated_at = NOW()
+                FROM
+                    templates
+                WHERE
+                    workspaces.id = $1
+                    AND workspaces.deleted = false
+                    AND templates.id = workspaces.template_id
+                    AND owner_id != 'c42fdf75-3097-471c-8c33-fb52454d81c0'::UUID
+                RETURNING workspaces.*
+             )
+             SELECT u.id, u.created_at, u.updated_at, u.deleted, u.owner_id,
+                    u.organization_id, u.template_id, u.name, u.autostart_schedule,
+                    u.ttl, u.last_used_at, u.dormant_at, u.deleting_at,
+                    u.automatic_updates,
+                    false AS favorite,
+                    u.next_start_at
+             FROM updated u",
+        )
+        .bind(workspace_id)
+        .bind(dormant_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceTransitionRow>(
+            "SELECT
+                workspaces.id,
+                workspaces.name,
+                workspaces.owner_id,
+                workspaces.template_id,
+                workspaces.autostart_schedule,
+                workspaces.ttl,
+                workspaces.last_used_at,
+                workspaces.dormant_at,
+                workspaces.deleting_at,
+                workspaces.deleted,
+                workspace_builds.transition AS build_transition,
+                workspace_builds.deadline AS build_deadline,
+                provisioner_jobs.job_status::text AS job_status,
+                provisioner_jobs.completed_at AS job_completed_at,
+                templates.allow_user_autostart AS template_allow_user_autostart,
+                templates.default_ttl AS template_default_ttl,
+                templates.failure_ttl AS template_failure_ttl,
+                templates.time_til_dormant AS template_time_til_dormant,
+                templates.time_til_dormant_autodelete AS template_time_til_dormant_autodelete,
+                users.status::text AS owner_status
+             FROM workspaces
+             LEFT JOIN workspace_builds
+                ON workspace_builds.workspace_id = workspaces.id
+             INNER JOIN provisioner_jobs
+                ON workspace_builds.job_id = provisioner_jobs.id
+             INNER JOIN templates
+                ON workspaces.template_id = templates.id
+             INNER JOIN users
+                ON workspaces.owner_id = users.id
+             WHERE
+                workspace_builds.build_number = (
+                    SELECT MAX(build_number)
+                    FROM workspace_builds
+                    WHERE workspace_builds.workspace_id = workspaces.id
+                )
+                AND (
+                    -- Autostop: build started, deadline passed or owner suspended
+                    (
+                        provisioner_jobs.job_status != 'failed'::provisioner_job_status
+                        AND workspaces.dormant_at IS NULL
+                        AND workspace_builds.transition = 'start'::workspace_transition
+                        AND (
+                            users.status = 'suspended'::user_status
+                            OR (
+                                workspace_builds.deadline != '0001-01-01 00:00:00+00'::timestamptz
+                                AND workspace_builds.deadline < $1::timestamptz
+                            )
+                        )
+                    )
+                    OR
+                    -- Autostart: build stopped, schedule ready
+                    (
+                        users.status = 'active'::user_status
+                        AND provisioner_jobs.job_status != 'failed'::provisioner_job_status
+                        AND workspace_builds.transition = 'stop'::workspace_transition
+                        AND workspaces.dormant_at IS NULL
+                        AND workspaces.autostart_schedule IS NOT NULL
+                        AND (
+                            workspaces.next_start_at IS NULL
+                            OR workspaces.next_start_at <= $1::timestamptz
+                        )
+                    )
+                    OR
+                    -- Dormant stop: unused longer than time_til_dormant
+                    (
+                        workspaces.dormant_at IS NULL
+                        AND templates.time_til_dormant > 0
+                        AND ($1::timestamptz) - workspaces.last_used_at > (INTERVAL '1 millisecond' * (templates.time_til_dormant / 1000000))
+                    )
+                    OR
+                    -- Deletion: dormant and past deleting_at
+                    (
+                        workspaces.dormant_at IS NOT NULL
+                        AND workspaces.deleting_at IS NOT NULL
+                        AND workspaces.deleting_at < $1::timestamptz
+                        AND templates.time_til_dormant_autodelete > 0
+                        AND CASE
+                            WHEN (
+                                workspace_builds.transition = 'delete'::workspace_transition
+                                AND provisioner_jobs.job_status = 'failed'::provisioner_job_status
+                            ) THEN (
+                                (
+                                    provisioner_jobs.canceled_at IS NOT NULL
+                                    OR provisioner_jobs.completed_at IS NOT NULL
+                                ) AND (
+                                    ($1::timestamptz) - (CASE
+                                        WHEN provisioner_jobs.canceled_at IS NOT NULL THEN provisioner_jobs.canceled_at
+                                        ELSE provisioner_jobs.completed_at
+                                    END) > INTERVAL '24 hours'
+                                )
+                            )
+                            ELSE true
+                        END
+                    )
+                    OR
+                    -- Failed stop: failure_ttl exceeded
+                    (
+                        templates.failure_ttl > 0
+                        AND workspace_builds.transition = 'start'::workspace_transition
+                        AND provisioner_jobs.job_status = 'failed'::provisioner_job_status
+                        AND provisioner_jobs.completed_at IS NOT NULL
+                        AND ($1::timestamptz) - provisioner_jobs.completed_at > (INTERVAL '1 millisecond' * (templates.failure_ttl / 1000000))
+                    )
+                )
+                AND workspaces.deleted = false
+                AND workspaces.owner_id != 'c42fdf75-3097-471c-8c33-fb52454d81c0'::UUID",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_transition_row_from_stored)
+            .collect())
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -7653,5 +7914,82 @@ impl AppStore for PostgresStore {
             .map_err(storage_error)?
         };
         Ok(row.map(template_version_record_from_row))
+    }
+
+    // -----------------------------------------------------------------------
+    // Licenses
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredLicenseRow>(
+            "SELECT id, uuid, uploaded_at, jwt, exp FROM licenses ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let claims = decode_jwt_claims(&r.jwt);
+                LicenseRecord {
+                    id: r.id,
+                    uuid: r.uuid,
+                    uploaded_at: r.uploaded_at,
+                    jwt: r.jwt,
+                    claims,
+                }
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, jwt, claims), err(level = tracing::Level::WARN))]
+    async fn insert_license(
+        &self,
+        jwt: &str,
+        claims: &Value,
+    ) -> Result<LicenseRecord, StorageError> {
+        let exp = claims
+            .get("license_expires")
+            .and_then(|v| v.as_i64())
+            .or_else(|| claims.get("exp").and_then(|v| v.as_i64()))
+            .ok_or_else(|| {
+                StorageError::invalid_data(
+                    "license claims must contain 'license_expires' or 'exp' field",
+                )
+            })?;
+        let exp_dt = OffsetDateTime::from_unix_timestamp(exp)
+            .map_err(|e| StorageError::invalid_data(format!("invalid expiry timestamp: {e}")))?;
+
+        let row = sqlx::query_as::<_, StoredLicenseRow>(
+            "INSERT INTO licenses (uploaded_at, jwt, exp, uuid)
+             VALUES (NOW(), $1, $2, gen_random_uuid())
+             RETURNING id, uuid, uploaded_at, jwt, exp",
+        )
+        .bind(jwt)
+        .bind(exp_dt)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(LicenseRecord {
+            id: row.id,
+            uuid: row.uuid,
+            uploaded_at: row.uploaded_at,
+            jwt: row.jwt,
+            claims: claims.clone(),
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_license(&self, id: i32) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM licenses WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
     }
 }

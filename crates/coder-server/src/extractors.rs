@@ -29,6 +29,7 @@ use crate::error::AppError;
 ///
 /// Replaces the repeated `authenticate_request` + `None`-check boilerplate in
 /// every handler that needs an authenticated user.
+#[allow(dead_code)] // Scaffolded extractor for handler migration.
 pub(crate) struct Auth(pub AuthenticatedRequest);
 
 impl FromRequestParts<AppState> for Auth {
@@ -54,6 +55,7 @@ impl FromRequestParts<AppState> for Auth {
 ///
 /// Use this for routes that support both authenticated and unauthenticated
 /// access (e.g. public endpoints that personalise output for logged-in users).
+#[allow(dead_code)] // Scaffolded extractor for handlers with optional auth.
 pub(crate) struct OptionalAuth(pub Option<AuthenticatedRequest>);
 
 impl FromRequestParts<AppState> for OptionalAuth {
@@ -78,6 +80,7 @@ impl FromRequestParts<AppState> for OptionalAuth {
 ///
 /// Agents authenticate using the same `Coder-Session-Token` header, but their
 /// token is a UUID stored in `workspace_agents.auth_token`.
+#[allow(dead_code)] // Scaffolded extractor for workspace-agent routes.
 pub(crate) struct AgentAuth(pub WorkspaceAgentRow);
 
 impl FromRequestParts<AppState> for AgentAuth {
@@ -101,6 +104,7 @@ impl FromRequestParts<AppState> for AgentAuth {
 
 /// Reproduce the agent-authentication logic from the original
 /// `authenticate_agent_request` helper so it can be used inside extractors.
+#[allow(dead_code)] // Used by AgentAuth extractor.
 async fn authenticate_agent_from_parts(
     parts: &Parts,
     state: &AppState,
@@ -129,6 +133,7 @@ async fn authenticate_agent_from_parts(
         .map_err(AppError::from)
 }
 
+#[allow(dead_code)] // Used by Auth and AgentAuth extractors.
 fn unauthorized_response(message: impl Into<String>) -> Response {
     (
         StatusCode::UNAUTHORIZED,

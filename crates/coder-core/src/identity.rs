@@ -916,27 +916,11 @@ pub enum NotificationMethod {
 
 /// Status of a queued notification message.
 ///
-/// TODO: This enum duplicates `coder_core::enums::NotificationMessageStatus` (the
-/// sqlx-mapped version which also includes `Unknown` and `Inhibited` variants and
-/// uses `PermanentFailure` instead of `Failed`).  The store layer manually maps
-/// between DB strings and this enum rather than using the sqlx::Type derivation.
-/// Consider consolidating into a single enum to avoid divergence.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
-#[serde(rename_all = "snake_case")]
-pub enum NotificationMessageStatus {
-    /// Waiting to be dispatched.
-    Pending,
-    /// Leased by a dispatch worker (being sent).
-    Leased,
-    /// Successfully dispatched.
-    Sent,
-    /// Dispatch temporarily failed (eligible for retry).
-    #[serde(rename = "temporary_failure")]
-    TemporaryFailure,
-    /// Dispatch permanently failed.
-    #[serde(rename = "permanent_failure")]
-    Failed,
-}
+/// Re-exported from [`crate::enums::NotificationMessageStatus`] which is the
+/// single canonical definition.  It carries `sqlx::Type` and serde derives and
+/// includes the full set of variants from the PostgreSQL enum
+/// (`Unknown`, `Inhibited`, `PermanentFailure`, etc.).
+pub use crate::enums::NotificationMessageStatus;
 
 /// A queued notification message.
 #[derive(Clone, Debug, PartialEq, Eq)]

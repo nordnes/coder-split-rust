@@ -928,6 +928,363 @@ pub fn evaluate_dormancy(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Activity Bump Worker
+// ---------------------------------------------------------------------------
+
+/// Trait for the store operations needed by the activity bump worker.
+#[async_trait]
+pub trait ActivityBumpStore: Send + Sync + 'static {
+    /// Returns workspaces eligible for transition (used to find active ones).
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError>;
+
+    /// Updates the build deadline for a workspace build.
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: uuid::Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+impl<T: AppStore + 'static> ActivityBumpStore for T {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        AppStore::get_workspaces_eligible_for_transition(self, now).await
+    }
+
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: uuid::Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_workspace_build_deadline(self, build_id, deadline, max_deadline).await
+    }
+}
+
+/// Background worker that periodically bumps workspace deadlines based on
+/// recent user activity.
+///
+/// The Go equivalent watches for activity events and extends the workspace
+/// auto-stop deadline so active users don't get their workspace stopped
+/// mid-session.  This Rust implementation polls periodically and extends
+/// deadlines for workspaces whose `last_used_at` is recent.
+pub struct ActivityBumpWorker {
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl ActivityBumpWorker {
+    /// Starts the activity bump background worker.
+    pub fn start<S: ActivityBumpStore>(
+        store: S,
+        interval_secs: u64,
+        cancel: CancellationToken,
+    ) -> Arc<Self> {
+        let cancel_clone = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_activity_bump_loop(store, interval_secs, cancel_clone).await;
+        });
+        info!(
+            interval_secs,
+            "activity bump worker started"
+        );
+        Arc::new(Self {
+            cancel,
+            task,
+        })
+    }
+
+    /// Signals the worker to stop.
+    pub fn close(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Cancels the worker and awaits the background task to completion,
+    /// ensuring in-flight DB queries finish before the pool is closed.
+    pub async fn join(self: Arc<Self>) {
+        self.cancel.cancel();
+        // Try to unwrap the Arc; if other references exist, just cancel.
+        if let Ok(this) = Arc::try_unwrap(self) {
+            let _result = this.task.await;
+        }
+    }
+}
+
+/// Core loop: periodically find workspaces needing a deadline bump and
+/// extend their auto-stop deadline.
+async fn run_activity_bump_loop<S: ActivityBumpStore>(
+    store: S,
+    interval_secs: u64,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("activity bump worker cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
+
+        let now = OffsetDateTime::now_utc();
+        match activity_bump_once(&store, now).await {
+            Ok(0) => {} // nothing to bump
+            Ok(n) => info!(bumped = n, "activity bump cycle completed"),
+            Err(error) => warn!(error = %error, "activity bump cycle failed"),
+        }
+    }
+}
+
+/// Single tick of the activity bump worker.
+///
+/// Finds running workspaces with recent activity and extends their deadline
+/// by the template's `activity_bump` duration.
+async fn activity_bump_once<S: ActivityBumpStore>(
+    store: &S,
+    now: OffsetDateTime,
+) -> Result<usize, StorageError> {
+    let workspaces = store.get_workspaces_eligible_for_transition(now).await?;
+    let mut bumped = 0usize;
+
+    for ws in &workspaces {
+        // Only bump running workspaces (last build transition == "start").
+        if ws.build_transition != "start" {
+            continue;
+        }
+        // Skip workspaces whose latest build did not succeed.
+        if ws.job_status != "succeeded" {
+            continue;
+        }
+        // Skip if the template has no activity bump configured.
+        if ws.activity_bump_ns <= 0 {
+            continue;
+        }
+        // Only bump if the workspace was used recently (within the bump interval).
+        let bump_duration = time::Duration::nanoseconds(ws.activity_bump_ns);
+        let activity_threshold = now - bump_duration;
+        if ws.last_used_at < activity_threshold {
+            continue;
+        }
+        // Only bump if the workspace already has a deadline set (no auto-stop
+        // configured means deadline is None — we must not create one).
+        let current_deadline = match ws.build_deadline {
+            Some(d) if d != OffsetDateTime::UNIX_EPOCH => d,
+            _ => continue,
+        };
+        // Extend the deadline from now.
+        let new_deadline = now + bump_duration;
+        // Clamp to max_deadline so we never exceed the template policy.
+        let new_deadline = match ws.max_deadline {
+            Some(max) if max != OffsetDateTime::UNIX_EPOCH && new_deadline > max => max,
+            _ => new_deadline,
+        };
+        // Only update if the new deadline actually extends the current one;
+        // otherwise we would shorten the remaining time (Go guard equivalent).
+        if new_deadline <= current_deadline {
+            continue;
+        }
+        match store
+            .update_workspace_build_deadline(
+                ws.build_id,
+                Some(new_deadline),
+                ws.max_deadline,
+            )
+            .await
+        {
+            Ok(true) => {
+                debug!(
+                    workspace_id = %ws.id,
+                    workspace_name = %ws.name,
+                    new_deadline = %new_deadline,
+                    "bumped workspace deadline"
+                );
+                bumped += 1;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    workspace_id = %ws.id,
+                    error = %error,
+                    "activity bump: failed to update workspace deadline"
+                );
+            }
+        }
+    }
+    Ok(bumped)
+}
+
+// ---------------------------------------------------------------------------
+// Dormancy Checker Worker
+// ---------------------------------------------------------------------------
+
+/// Trait for the store operations needed by the dormancy checker worker.
+#[async_trait]
+pub trait DormancyCheckerStore: Send + Sync + 'static {
+    /// Returns workspaces eligible for transition.
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError>;
+
+    /// Sets `dormant_at` and recomputes `deleting_at` for a workspace.
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: uuid::Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
+}
+
+#[async_trait]
+impl<T: AppStore + 'static> DormancyCheckerStore for T {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        AppStore::get_workspaces_eligible_for_transition(self, now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: uuid::Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::update_workspace_dormant_deleting_at(self, workspace_id, dormant_at).await
+    }
+}
+
+/// Background worker that periodically checks for workspaces eligible for
+/// dormancy.
+///
+/// Mirrors the Go `dormancy` package.  Each tick it queries for workspaces
+/// that have been inactive longer than their template's dormancy threshold
+/// and marks them as dormant.
+pub struct DormancyCheckerWorker {
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl DormancyCheckerWorker {
+    /// Starts the dormancy checker background worker.
+    pub fn start<S: DormancyCheckerStore>(
+        store: S,
+        interval_secs: u64,
+        cancel: CancellationToken,
+    ) -> Arc<Self> {
+        let cancel_clone = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_dormancy_check_loop(store, interval_secs, cancel_clone).await;
+        });
+        info!(
+            interval_secs,
+            "dormancy checker worker started"
+        );
+        Arc::new(Self {
+            cancel,
+            task,
+        })
+    }
+
+    /// Signals the worker to stop.
+    pub fn close(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Cancels the worker and awaits the background task to completion,
+    /// ensuring in-flight DB queries finish before the pool is closed.
+    pub async fn join(self: Arc<Self>) {
+        self.cancel.cancel();
+        // Try to unwrap the Arc; if other references exist, just cancel.
+        if let Ok(this) = Arc::try_unwrap(self) {
+            let _result = this.task.await;
+        }
+    }
+}
+
+/// Core loop: periodically check for dormant-eligible workspaces.
+async fn run_dormancy_check_loop<S: DormancyCheckerStore>(
+    store: S,
+    interval_secs: u64,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("dormancy checker worker cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
+
+        let now = OffsetDateTime::now_utc();
+        match dormancy_check_once(&store, now).await {
+            Ok(0) => {} // nothing to mark dormant
+            Ok(n) => info!(marked_dormant = n, "dormancy check cycle completed"),
+            Err(error) => warn!(error = %error, "dormancy check cycle failed"),
+        }
+    }
+}
+
+/// Single tick of the dormancy checker.
+///
+/// Finds workspaces eligible for the dormancy transition and marks them.
+async fn dormancy_check_once<S: DormancyCheckerStore>(
+    store: &S,
+    now: OffsetDateTime,
+) -> Result<usize, StorageError> {
+    let workspaces = store.get_workspaces_eligible_for_transition(now).await?;
+    let mut marked = 0usize;
+
+    for ws in &workspaces {
+        // Only process workspaces that are eligible for dormancy but not
+        // already marked dormant.
+        if ws.dormant_at.is_some() {
+            continue;
+        }
+        if !is_eligible_for_dormant_stop(ws, now) {
+            continue;
+        }
+        match store
+            .update_workspace_dormant_deleting_at(ws.id, Some(now))
+            .await
+        {
+            Ok(Some(_)) => {
+                info!(
+                    workspace_id = %ws.id,
+                    workspace_name = %ws.name,
+                    last_used_at = %ws.last_used_at,
+                    "dormancy checker: marked workspace dormant"
+                );
+                marked += 1;
+            }
+            Ok(None) => {
+                // Workspace was deleted or not found — skip.
+            }
+            Err(error) => {
+                warn!(
+                    workspace_id = %ws.id,
+                    error = %error,
+                    "dormancy checker: failed to mark workspace dormant"
+                );
+            }
+        }
+    }
+    Ok(marked)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -974,6 +1331,13 @@ mod tests {
                 return Err(StorageError::unavailable("mock store failure"));
             }
             Ok(self.stats.lock().await.clone())
+        }
+
+        async fn find_users_by_ids(
+            &self,
+            _ids: &[uuid::Uuid],
+        ) -> Result<Vec<coder_core::identity::UserRecord>, StorageError> {
+            Ok(Vec::new())
         }
     }
 
@@ -1486,6 +1850,9 @@ mod tests {
             template_time_til_dormant: 0,
             template_time_til_dormant_autodelete: 0,
             owner_status: "active".to_owned(),
+            build_id: uuid::Uuid::new_v4(),
+            max_deadline: None,
+            activity_bump_ns: 0,
         }
     }
 
@@ -2253,5 +2620,295 @@ mod tests {
                 "should have next occurrence for TZ={tz}"
             );
         }
+    }
+
+    // ── Activity Bump Worker tests ──────────────────────────
+
+    /// Mock store for ActivityBumpStore tests.
+    struct MockActivityBumpStore {
+        workspaces: Vec<WorkspaceTransitionRow>,
+        updated_deadlines: std::sync::Mutex<Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)>>,
+        fail_transition: AtomicBool,
+    }
+
+    impl MockActivityBumpStore {
+        fn new(workspaces: Vec<WorkspaceTransitionRow>) -> Self {
+            Self {
+                workspaces,
+                updated_deadlines: std::sync::Mutex::new(Vec::new()),
+                fail_transition: AtomicBool::new(false),
+            }
+        }
+
+        fn with_failure(mut self) -> Self {
+            self.fail_transition = AtomicBool::new(true);
+            self
+        }
+
+        fn deadline_updates(&self) -> Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)> {
+            self.updated_deadlines.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+    }
+
+    #[async_trait]
+    impl ActivityBumpStore for MockActivityBumpStore {
+        async fn get_workspaces_eligible_for_transition(
+            &self,
+            _now: OffsetDateTime,
+        ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+            if self.fail_transition.load(Ordering::Relaxed) {
+                return Err(StorageError::unavailable("mock failure"));
+            }
+            Ok(self.workspaces.clone())
+        }
+
+        async fn update_workspace_build_deadline(
+            &self,
+            build_id: uuid::Uuid,
+            deadline: Option<OffsetDateTime>,
+            max_deadline: Option<OffsetDateTime>,
+        ) -> Result<bool, StorageError> {
+            if let Ok(mut updates) = self.updated_deadlines.lock() {
+                updates.push((build_id, deadline, max_deadline));
+            }
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn activity_bump_once_bumps_recently_active_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let one_hour_ns: i64 = 3_600_000_000_000; // 1 hour in nanoseconds
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.activity_bump_ns = one_hour_ns;
+        ws.last_used_at = now - time::Duration::minutes(5); // active 5 min ago
+        ws.job_completed_at = Some(now - time::Duration::hours(1));
+        // Set a deadline in the near future so the bump actually extends it.
+        ws.build_deadline = Some(now + time::Duration::minutes(10));
+
+        let store = MockActivityBumpStore::new(vec![ws.clone()]);
+        let result = activity_bump_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(0), 1);
+
+        let updates = store.deadline_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, ws.build_id);
+    }
+
+    #[tokio::test]
+    async fn activity_bump_once_skips_inactive_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let one_hour_ns: i64 = 3_600_000_000_000;
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.activity_bump_ns = one_hour_ns;
+        ws.last_used_at = now - time::Duration::hours(2); // inactive for 2 hours
+
+        let store = MockActivityBumpStore::new(vec![ws]);
+        let result = activity_bump_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
+        assert!(store.deadline_updates().is_empty());
+    }
+
+    #[tokio::test]
+    async fn activity_bump_once_skips_stopped_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let one_hour_ns: i64 = 3_600_000_000_000;
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.activity_bump_ns = one_hour_ns;
+        ws.last_used_at = now - time::Duration::minutes(1);
+
+        let store = MockActivityBumpStore::new(vec![ws]);
+        let result = activity_bump_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
+    }
+
+    #[tokio::test]
+    async fn activity_bump_once_skips_no_activity_bump_configured() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.activity_bump_ns = 0; // no activity bump configured
+        ws.last_used_at = now - time::Duration::minutes(1);
+
+        let store = MockActivityBumpStore::new(vec![ws]);
+        let result = activity_bump_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
+    }
+
+    #[tokio::test]
+    async fn activity_bump_once_handles_store_error() {
+        let now = OffsetDateTime::now_utc();
+        let store = MockActivityBumpStore::new(vec![]).with_failure();
+        let result = activity_bump_once(&store, now).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn activity_bump_once_empty_workspace_list() {
+        let now = OffsetDateTime::now_utc();
+        let store = MockActivityBumpStore::new(vec![]);
+        let result = activity_bump_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
+    }
+
+    // ── Dormancy Checker Worker tests ──────────────────────────
+
+    /// Mock store for DormancyCheckerStore tests.
+    struct MockDormancyCheckerStore {
+        workspaces: Vec<WorkspaceTransitionRow>,
+        dormant_updates: std::sync::Mutex<Vec<(uuid::Uuid, Option<OffsetDateTime>)>>,
+        fail_transition: AtomicBool,
+    }
+
+    impl MockDormancyCheckerStore {
+        fn new(workspaces: Vec<WorkspaceTransitionRow>) -> Self {
+            Self {
+                workspaces,
+                dormant_updates: std::sync::Mutex::new(Vec::new()),
+                fail_transition: AtomicBool::new(false),
+            }
+        }
+
+        fn with_failure(mut self) -> Self {
+            self.fail_transition = AtomicBool::new(true);
+            self
+        }
+
+        fn dormancy_updates(&self) -> Vec<(uuid::Uuid, Option<OffsetDateTime>)> {
+            self.dormant_updates.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        }
+    }
+
+    #[async_trait]
+    impl DormancyCheckerStore for MockDormancyCheckerStore {
+        async fn get_workspaces_eligible_for_transition(
+            &self,
+            _now: OffsetDateTime,
+        ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+            if self.fail_transition.load(Ordering::Relaxed) {
+                return Err(StorageError::unavailable("mock failure"));
+            }
+            Ok(self.workspaces.clone())
+        }
+
+        async fn update_workspace_dormant_deleting_at(
+            &self,
+            workspace_id: uuid::Uuid,
+            dormant_at: Option<OffsetDateTime>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            if let Ok(mut updates) = self.dormant_updates.lock() {
+                updates.push((workspace_id, dormant_at));
+            }
+            Ok(Some(WorkspaceRecord {
+                id: workspace_id,
+                name: "test".to_owned(),
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                owner_id: uuid::Uuid::new_v4(),
+                organization_id: uuid::Uuid::new_v4(),
+                template_id: uuid::Uuid::new_v4(),
+                deleted: false,
+                autostart_schedule: None,
+                ttl_ns: None,
+                last_used_at: OffsetDateTime::now_utc(),
+                dormant_at,
+                deleting_at: None,
+                automatic_updates: "never".to_owned(),
+                favorite: false,
+                next_start_at: None,
+            }))
+        }
+    }
+
+    #[tokio::test]
+    async fn dormancy_check_once_marks_idle_workspace_dormant() {
+        let now = OffsetDateTime::now_utc();
+        let dormancy_ns: i64 = 7 * 24 * 3_600_000_000_000; // 7 days in ns
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.dormant_at = None;
+        ws.template_time_til_dormant = dormancy_ns;
+        ws.last_used_at = now - time::Duration::days(10); // idle for 10 days
+        ws.job_status = "succeeded".to_owned();
+
+        let store = MockDormancyCheckerStore::new(vec![ws.clone()]);
+        let result = dormancy_check_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(0), 1);
+
+        let updates = store.dormancy_updates();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, ws.id);
+        assert!(updates[0].1.is_some());
+    }
+
+    #[tokio::test]
+    async fn dormancy_check_once_skips_already_dormant_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let dormancy_ns: i64 = 7 * 24 * 3_600_000_000_000;
+        let mut ws = make_transition_row();
+        ws.dormant_at = Some(now - time::Duration::days(1)); // already dormant
+        ws.template_time_til_dormant = dormancy_ns;
+        ws.last_used_at = now - time::Duration::days(10);
+
+        let store = MockDormancyCheckerStore::new(vec![ws]);
+        let result = dormancy_check_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
+        assert!(store.dormancy_updates().is_empty());
+    }
+
+    #[tokio::test]
+    async fn dormancy_check_once_skips_recently_active_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let dormancy_ns: i64 = 7 * 24 * 3_600_000_000_000;
+        let mut ws = make_transition_row();
+        ws.dormant_at = None;
+        ws.template_time_til_dormant = dormancy_ns;
+        ws.last_used_at = now - time::Duration::hours(1); // active recently
+
+        let store = MockDormancyCheckerStore::new(vec![ws]);
+        let result = dormancy_check_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
+    }
+
+    #[tokio::test]
+    async fn dormancy_check_once_handles_store_error() {
+        let now = OffsetDateTime::now_utc();
+        let store = MockDormancyCheckerStore::new(vec![]).with_failure();
+        let result = dormancy_check_once(&store, now).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dormancy_check_once_empty_workspace_list() {
+        let now = OffsetDateTime::now_utc();
+        let store = MockDormancyCheckerStore::new(vec![]);
+        let result = dormancy_check_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
+    }
+
+    #[tokio::test]
+    async fn dormancy_check_once_skips_no_dormancy_configured() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.dormant_at = None;
+        ws.template_time_til_dormant = 0; // no dormancy threshold
+        ws.last_used_at = now - time::Duration::days(100);
+
+        let store = MockDormancyCheckerStore::new(vec![ws]);
+        let result = dormancy_check_once(&store, now).await;
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap_or(1), 0);
     }
 }

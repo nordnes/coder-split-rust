@@ -10,6 +10,7 @@ pub(crate) struct TokenListQuery {
     include_expired: bool,
 }
 
+/// GET /api/v2/apikey-scopes — list available API key scopes.
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     Json(ExternalApiKeyScopes {
         external: PUBLIC_API_KEY_SCOPES
@@ -19,10 +20,12 @@ pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     })
 }
 
+/// GET /api/v2/auth-methods — return the supported authentication methods.
 pub(crate) async fn auth_methods() -> Json<AuthMethods> {
     Json(supported_auth_methods())
 }
 
+/// GET /api/v2/users/first — check whether the initial admin user has been created.
 pub(crate) async fn get_first_user(State(state): State<AppState>) -> Result<Response, AppError> {
     let exists = state.auth.first_user_exists().await?;
     let body = if exists {
@@ -44,6 +47,7 @@ pub(crate) async fn get_first_user(State(state): State<AppState>) -> Result<Resp
         .into_response())
 }
 
+/// POST /api/v2/users/first — create the initial admin user and organization.
 pub(crate) async fn post_first_user(
     State(state): State<AppState>,
     payload: Result<Json<CreateFirstUserRequest>, JsonRejection>,
@@ -78,6 +82,7 @@ pub(crate) async fn post_first_user(
     }
 }
 
+/// POST /api/v2/users/login — authenticate with email and password.
 pub(crate) async fn login_with_password(
     State(state): State<AppState>,
     payload: Result<Json<LoginWithPasswordRequest>, JsonRejection>,
@@ -104,6 +109,7 @@ pub(crate) async fn login_with_password(
     Ok((StatusCode::CREATED, Json(outcome.response)).into_response())
 }
 
+/// POST /api/v2/users/logout — invalidate the current session.
 pub(crate) async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -125,6 +131,7 @@ pub(crate) async fn logout(
     Ok((StatusCode::OK, Json(ApiResponse::ok("Logged out!"))).into_response())
 }
 
+/// POST /api/v2/users/validate-password — check password strength without creating a user.
 pub(crate) async fn post_validate_user_password(
     State(state): State<AppState>,
     payload: Result<Json<ValidateUserPasswordRequest>, JsonRejection>,
@@ -141,6 +148,7 @@ pub(crate) async fn post_validate_user_password(
         .into_response()
 }
 
+/// POST /api/v2/users/otp/request — send a one-time passcode for password reset.
 pub(crate) async fn post_request_one_time_passcode(
     State(state): State<AppState>,
     payload: Result<Json<RequestOneTimePasscodeRequest>, JsonRejection>,
@@ -157,6 +165,7 @@ pub(crate) async fn post_request_one_time_passcode(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// POST /api/v2/users/otp/change-password — reset password using a one-time passcode.
 pub(crate) async fn post_change_password_with_one_time_passcode(
     State(state): State<AppState>,
     payload: Result<Json<ChangePasswordWithOneTimePasscodeRequest>, JsonRejection>,
@@ -188,6 +197,7 @@ pub(crate) async fn post_change_password_with_one_time_passcode(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// GET /api/v2/externalauth/github/device — error response when GitHub OAuth is not configured.
 pub(crate) async fn get_github_oauth_device_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -502,17 +512,61 @@ pub(crate) async fn get_oidc_callback(
     let redirect_uri =
         cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE).unwrap_or_else(|| "/".to_owned());
 
-    // Discover the OIDC endpoints.
-    // TODO(perf): Cache the OIDC discovery document instead of fetching it on
-    // every callback. The document rarely changes and fetching it adds latency
-    // to every login. Consider storing it in AppState with a TTL-based refresh.
-    let discovery =
-        coder_auth::oauth_login::oidc_discover(&state.http_client, &oidc_config.issuer_url)
-            .await
-            .map_err(|e| {
-                tracing::error!("OIDC discovery failed: {e}");
-                AppError::from(StorageError::unavailable(e.to_string()))
-            })?;
+    // Discover the OIDC endpoints.  Uses a process-wide cache with a 5-minute
+    // TTL so we avoid fetching the rarely-changing discovery document on every
+    // single login callback.  The cache is keyed on the issuer URL so that a
+    // config change does not serve a stale document from a different provider.
+    //
+    // The mutex is NOT held across the HTTP fetch to avoid serializing all
+    // concurrent logins behind a single outbound request.  Instead we use a
+    // check-release-fetch-recheck pattern.
+    let discovery = {
+        use std::sync::OnceLock;
+        use tokio::sync::Mutex;
+
+        static CACHE: OnceLock<Mutex<Option<OidcDiscoveryCacheEntry>>> = OnceLock::new();
+        const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+        let issuer_key = oidc_config.issuer_url.as_str().to_owned();
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+
+        // First check: read the cache while holding the lock briefly.
+        let cached_hit = {
+            let guard = cache.lock().await;
+            if let Some(ref cached) = *guard {
+                let now = std::time::Instant::now();
+                if cached.issuer_url == issuer_key && now.duration_since(cached.fetched_at) < TTL {
+                    Some(cached.doc.clone())
+                } else {
+                    None
+                }
+            } else {
+                None
+            }
+        }; // lock released here
+
+        if let Some(doc) = cached_hit {
+            doc
+        } else {
+            // Fetch without holding the lock so concurrent requests are not blocked.
+            let doc =
+                coder_auth::oauth_login::oidc_discover(&state.http_client, &oidc_config.issuer_url)
+                    .await
+                    .map_err(|e| {
+                        tracing::error!("OIDC discovery failed: {e}");
+                        AppError::from(StorageError::unavailable(e.to_string()))
+                    })?;
+
+            // Re-acquire the lock and store the fresh document.
+            let mut guard = cache.lock().await;
+            *guard = Some(OidcDiscoveryCacheEntry {
+                doc: doc.clone(),
+                fetched_at: std::time::Instant::now(),
+                issuer_url: issuer_key,
+            });
+            doc
+        }
+    };
 
     // Build the callback redirect URI for the token exchange.
     let callback_redirect = format!(
@@ -534,15 +588,24 @@ pub(crate) async fn get_oidc_callback(
         AppError::from(StorageError::unavailable(e.to_string()))
     })?;
 
-    // Decode and validate the ID token claims.
-    let claims = coder_auth::oauth_login::decode_id_token_claims(&token_response.id_token)
+    // Fetch the JWKS for cryptographic verification of the ID token.
+    let jwks = coder_auth::oauth_login::fetch_jwks(&state.http_client, &discovery.jwks_uri)
+        .await
         .map_err(|e| {
-            tracing::error!("OIDC ID token decode failed: {e}");
+            tracing::error!("JWKS fetch failed: {e}");
             AppError::from(StorageError::unavailable(e.to_string()))
         })?;
 
-    coder_auth::oauth_login::validate_oidc_claims(&claims, oidc_config).map_err(|e| {
-        tracing::error!("OIDC claims validation failed: {e}");
+    // Decode AND cryptographically verify the ID token claims using the
+    // provider's JWKS.  This replaces the previous insecure base64-only
+    // decode and also validates issuer, audience, and expiry.
+    let claims = coder_auth::oauth_login::decode_id_token_claims(
+        &token_response.id_token,
+        &jwks,
+        oidc_config,
+    )
+    .map_err(|e| {
+        tracing::error!("OIDC ID token verification failed: {e}");
         AppError::from(StorageError::unavailable(e.to_string()))
     })?;
 
@@ -656,6 +719,13 @@ pub(crate) async fn get_oidc_callback(
         &sanitize_redirect_uri(&redirect_uri),
         is_https,
     ))
+}
+
+/// Cache entry for the OIDC discovery document, keyed on issuer URL.
+struct OidcDiscoveryCacheEntry {
+    doc: coder_auth::oauth_login::OidcDiscovery,
+    fetched_at: std::time::Instant,
+    issuer_url: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -792,7 +862,7 @@ async fn create_oauth_user_and_link(
     Ok(user)
 }
 
-/// Builds an HTTP 303 redirect response with the session token cookie set.
+/// Build an HTTP 303 redirect response that sets the session cookie after OAuth login.
 fn build_oauth_redirect_response(
     session_token: &str,
     redirect_path: &str,
@@ -829,6 +899,7 @@ fn build_oauth_redirect_response(
     response
 }
 
+/// GET /api/v2/debug/user-link — return the external auth link for a user (debug only).
 pub(crate) async fn get_user_debug_link(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -863,6 +934,7 @@ pub(crate) async fn get_user_debug_link(
     Ok((StatusCode::OK, Json(claims)).into_response())
 }
 
+/// POST /api/v2/users/me/convert-login — convert a user's login method (e.g. password to OIDC).
 pub(crate) async fn post_convert_login(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -887,6 +959,7 @@ pub(crate) async fn post_convert_login(
     Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
 }
 
+/// Create a session-scoped API key for the authenticated user.
 pub(crate) async fn create_session_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -936,6 +1009,7 @@ pub(crate) async fn create_session_api_key(
     Ok((StatusCode::CREATED, Json(result.response)).into_response())
 }
 
+/// POST /api/v2/users/:user/keys/tokens — create a long-lived token API key.
 pub(crate) async fn create_token_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -990,6 +1064,7 @@ pub(crate) async fn create_token_api_key(
     Ok((StatusCode::CREATED, Json(result.response)).into_response())
 }
 
+/// GET /api/v2/users/:user/keys/tokens — list token API keys for a user.
 pub(crate) async fn list_token_api_keys(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -1017,6 +1092,7 @@ pub(crate) async fn list_token_api_keys(
     Ok((StatusCode::OK, Json(keys)).into_response())
 }
 
+/// GET /api/v2/users/:user/keys/:key — return a single API key by ID.
 pub(crate) async fn get_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
@@ -1037,6 +1113,7 @@ pub(crate) async fn get_api_key(
     Ok((StatusCode::OK, Json(key)).into_response())
 }
 
+/// GET /api/v2/users/:user/keys/tokens/:name — return a token API key by name.
 pub(crate) async fn get_api_key_by_name(
     State(state): State<AppState>,
     Path((user, keyname)): Path<(String, String)>,
@@ -1057,6 +1134,7 @@ pub(crate) async fn get_api_key_by_name(
     Ok((StatusCode::OK, Json(key)).into_response())
 }
 
+/// DELETE /api/v2/users/:user/keys/:key — permanently delete an API key.
 pub(crate) async fn delete_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
@@ -1106,6 +1184,7 @@ pub(crate) async fn delete_api_key(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// PUT /api/v2/users/:user/keys/:key/expire — mark an API key as expired.
 pub(crate) async fn expire_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
@@ -1155,6 +1234,7 @@ pub(crate) async fn expire_api_key(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// GET /api/v2/users/:user/keys/tokens/tokenconfig — return token creation configuration.
 pub(crate) async fn get_token_config(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -1174,6 +1254,7 @@ pub(crate) async fn get_token_config(
     Ok((StatusCode::OK, Json(config)).into_response())
 }
 
+/// POST /api/v2/authcheck — verify whether the caller is authorized for a given RBAC action.
 pub(crate) async fn post_authcheck(
     State(state): State<AppState>,
     headers: HeaderMap,
