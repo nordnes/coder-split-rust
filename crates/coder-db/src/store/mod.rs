@@ -2064,10 +2064,12 @@ fn decode_jwt_claims(jwt: &str) -> Value {
         return Value::Object(serde_json::Map::new());
     }
     let payload = parts[1];
-    // JWT uses base64url encoding without padding.
+    // JWT uses base64url encoding without padding (RFC 7515), but some
+    // libraries emit trailing '=' padding. Strip it before decoding.
     use base64::Engine;
     let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    match engine.decode(payload) {
+    let trimmed = payload.trim_end_matches('=');
+    match engine.decode(trimmed) {
         Ok(bytes) => {
             serde_json::from_slice(&bytes).unwrap_or_else(|_| Value::Object(serde_json::Map::new()))
         }
