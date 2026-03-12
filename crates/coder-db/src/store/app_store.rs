@@ -4655,22 +4655,27 @@ impl AppStore for PostgresStore {
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_webpush_vapid_keys(&self) -> Result<Option<VapidKeyPair>, StorageError> {
-        let public_key: Option<String> = sqlx::query_scalar(
-            "SELECT value FROM site_configs WHERE key = 'webpush_vapid_public_key'",
+        let rows: Vec<(String, String)> = sqlx::query_as(
+            "SELECT key, value FROM site_configs WHERE key IN ('webpush_vapid_public_key', 'webpush_vapid_private_key')",
         )
-        .fetch_optional(&self.pool)
+        .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;
 
-        let private_key: Option<String> = sqlx::query_scalar(
-            "SELECT value FROM site_configs WHERE key = 'webpush_vapid_private_key'",
-        )
-        .fetch_optional(&self.pool)
-        .await
-        .map_err(storage_error)?;
+        let mut public_key = None;
+        let mut private_key = None;
+        for (key, value) in &rows {
+            match key.as_str() {
+                "webpush_vapid_public_key" => public_key = Some(value.clone()),
+                "webpush_vapid_private_key" => private_key = Some(value.clone()),
+                _ => {}
+            }
+        }
 
         match (public_key, private_key) {
-            (Some(public_key), Some(private_key)) if !public_key.is_empty() && !private_key.is_empty() => {
+            (Some(public_key), Some(private_key))
+                if !public_key.is_empty() && !private_key.is_empty() =>
+            {
                 Ok(Some(VapidKeyPair {
                     public_key,
                     private_key,
