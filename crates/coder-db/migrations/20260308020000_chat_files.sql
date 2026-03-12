@@ -1,4 +1,4 @@
-CREATE TABLE chat_files (
+CREATE TABLE IF NOT EXISTS chat_files (
     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     owner_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
     organization_id UUID NOT NULL REFERENCES organizations(id) ON DELETE CASCADE,
@@ -8,5 +8,5 @@ CREATE TABLE chat_files (
     data BYTEA NOT NULL
 );
 
-CREATE INDEX idx_chat_files_owner ON chat_files(owner_id);
-CREATE INDEX idx_chat_files_org ON chat_files(organization_id);
+CREATE INDEX IF NOT EXISTS idx_chat_files_owner ON chat_files(owner_id);
+CREATE INDEX IF NOT EXISTS idx_chat_files_org ON chat_files(organization_id);

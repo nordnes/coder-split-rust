@@ -1,0 +1,36 @@
+[package]
+name = "coder-integration-tests"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+
+[dev-dependencies]
+async-trait.workspace = true
+axum.workspace = true
+coder-audit = { path = "../coder-audit" }
+coder-auth = { path = "../coder-auth" }
+coder-connectivity = { path = "../coder-connectivity" }
+coder-core = { path = "../coder-core" }
+coder-db = { path = "../coder-db" }
+coder-identity = { path = "../coder-identity" }
+coder-server = { path = "../coder-server" }
+coder-telemetry = { path = "../coder-telemetry" }
+coder-workspaces = { path = "../coder-workspaces" }
+http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sqlx.workspace = true
+time.workspace = true
+tokio.workspace = true
+tower.workspace = true
+tracing.workspace = true
+url.workspace = true
+uuid.workspace = true
