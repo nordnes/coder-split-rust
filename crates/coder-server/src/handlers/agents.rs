@@ -1086,8 +1086,12 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
     let initial_payload = serde_json::to_string(&initial_metadata).unwrap_or_default();
 
     tokio::spawn(async move {
-        // Send initial snapshot.
-        let sse = format!("data: {initial_payload}\n\n");
+        // Send initial snapshot (multiline-safe per SSE spec).
+        let sse = initial_payload
+            .lines()
+            .map(|line| format!("data: {line}\n"))
+            .collect::<String>()
+            + "\n";
         if tx.send(sse).await.is_err() {
             return;
         }
@@ -1099,7 +1103,11 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
                     match msg {
                         Ok(bytes) => {
                             let data = String::from_utf8_lossy(&bytes);
-                            let sse = format!("data: {data}\n\n");
+                            let sse = data
+                                .lines()
+                                .map(|line| format!("data: {line}\n"))
+                                .collect::<String>()
+                                + "\n";
                             if tx.send(sse).await.is_err() {
                                 break;
                             }
