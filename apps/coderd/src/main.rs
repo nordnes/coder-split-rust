@@ -785,9 +785,13 @@ async fn run() -> Result<(), MainError> {
     // implementations have not been added.  Once those DB methods exist,
     // instantiate a `Webpusher<Arc<dyn AppStore>>` here and add it as a
     // field on `AppState` so HTTP handlers can send push notifications.
-    let (notification_service, notification_handle) =
-        NotificationDispatchService::new(store.clone(), NotificationConfig::default())
-            .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
+    let notification_cancel = CancellationToken::new();
+    let (notification_service, notification_handle) = NotificationDispatchService::new(
+        store.clone(),
+        NotificationConfig::default(),
+        notification_cancel.clone(),
+    )
+    .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
 
     // Start the autobuild lifecycle executor (workspace auto-start/stop).
     let autobuild_cancel = CancellationToken::new();
@@ -863,11 +867,11 @@ async fn run() -> Result<(), MainError> {
         state.close_deployment_stats();
     });
 
-    // 4. Drop the notification dispatch service so the background loop's
-    //    `Weak::upgrade` fails on the next tick, then await the task handle
-    //    to ensure any in-flight dispatch cycle finishes its DB writes
-    //    before the pool is closed in a later step.
+    // 4. Cancel the notification dispatch loop and wait for in-flight
+    //    dispatch cycles to finish their DB writes before the pool is
+    //    closed in a later step.  Mirrors the autobuild executor pattern.
     coordinator.register("notifications", async move {
+        notification_cancel.cancel();
         drop(notification_service);
         if let Err(e) = notification_handle.await {
             warn!(error = %e, "notification dispatch task panicked during shutdown");

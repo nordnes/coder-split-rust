@@ -21,6 +21,8 @@
 
 use std::sync::{Arc, Weak};
 
+use tokio_util::sync::CancellationToken;
+
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use coder_core::AppStore;
@@ -81,13 +83,14 @@ where
 {
     /// Creates the dispatch service and starts the background poll loop.
     ///
-    /// Returns both the shared service handle and a [`tokio::task::JoinHandle`]
-    /// for the background task.  During shutdown, drop the `Arc` first (so the
-    /// internal `Weak::upgrade` fails on the next loop tick), then `await` the
-    /// handle to ensure the task has finished before closing the database pool.
+    /// Returns the shared service handle and a [`tokio::task::JoinHandle`]
+    /// for the background task.  During shutdown, cancel the
+    /// [`CancellationToken`] **and** await the handle to ensure in-flight
+    /// dispatch cycles finish their DB writes before the pool is closed.
     pub fn new(
         store: S,
         config: NotificationConfig,
+        cancel: CancellationToken,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), reqwest::Error> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(config.webhook_timeout_secs))
@@ -98,7 +101,7 @@ where
             config,
             http_client,
         });
-        let handle = Self::spawn_dispatch_loop(&service);
+        let handle = Self::spawn_dispatch_loop(&service, cancel);
         Ok((service, handle))
     }
 
@@ -240,10 +243,13 @@ where
         Ok(())
     }
 
-    fn spawn_dispatch_loop(service: &Arc<Self>) -> tokio::task::JoinHandle<()> {
+    fn spawn_dispatch_loop(
+        service: &Arc<Self>,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(service);
         tokio::spawn(async move {
-            run_dispatch_loop(weak).await;
+            run_dispatch_loop(weak, cancel).await;
         })
     }
 }
@@ -259,15 +265,23 @@ pub enum NotificationDispatchError {
     Transport(String),
 }
 
-async fn run_dispatch_loop<S>(service: Weak<NotificationDispatchService<S>>)
-where
+async fn run_dispatch_loop<S>(
+    service: Weak<NotificationDispatchService<S>>,
+    cancel: CancellationToken,
+) where
     S: IdentityStore + Clone + Send + Sync + 'static,
 {
     let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(DISPATCH_POLL_SECS));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
-        interval.tick().await;
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("notification dispatch loop cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
         let Some(service) = service.upgrade() else {
             return;
         };
@@ -1046,8 +1060,9 @@ mod tests {
             smtp_from: "noreply@example.com".to_owned(),
             webhook_timeout_secs: 15,
         };
-        let (service, _handle) = NotificationDispatchService::new(store, config.clone())
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store, config.clone(), CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         assert_eq!(service.config().smtp_host, "mail.example.com");
         assert_eq!(service.config().smtp_port, 465);
         assert_eq!(service.config().smtp_from, "noreply@example.com");
@@ -1060,8 +1075,9 @@ mod tests {
     async fn dispatch_once_with_no_pending_messages() {
         let store = MockStore::new();
         let config = NotificationConfig::default();
-        let (service, _handle) = NotificationDispatchService::new(store, config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store, config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         let count = service
             .dispatch_once()
             .await
@@ -1075,8 +1091,9 @@ mod tests {
     async fn dispatch_once_propagates_storage_error() {
         let store = MockStore::new().with_error("database is down");
         let config = NotificationConfig::default();
-        let (service, _handle) = NotificationDispatchService::new(store, config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store, config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         let result = service.dispatch_once().await;
         assert!(result.is_err());
         assert!(
@@ -1094,8 +1111,9 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
             .dispatch_once()
@@ -1122,8 +1140,9 @@ mod tests {
         let store = MockStore::new().with_pending(vec![msg]);
         // Default config has empty smtp_host → email dispatch fails.
         let config = NotificationConfig::default();
-        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
             .dispatch_once()
@@ -1159,8 +1178,9 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
             .dispatch_once()
@@ -1187,8 +1207,9 @@ mod tests {
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
         let config = NotificationConfig::default();
-        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
             .dispatch_once()
@@ -1223,8 +1244,9 @@ mod tests {
         let id2 = msg2.id;
         let store = MockStore::new().with_pending(vec![msg1, msg2]);
         let config = NotificationConfig::default();
-        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
             .dispatch_once()
@@ -1261,8 +1283,9 @@ mod tests {
             smtp_from: "sender@custom.com".to_owned(),
             webhook_timeout_secs: 5,
         };
-        let (service, _handle) = NotificationDispatchService::new(store, config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store, config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
         assert_eq!(service.config().smtp_host, "custom.smtp.example.com");
         assert_eq!(service.config().smtp_port, 2525);
         assert_eq!(service.config().smtp_from, "sender@custom.com");
@@ -1326,8 +1349,9 @@ mod tests {
             webhook_timeout_secs: 1,
             ..NotificationConfig::default()
         };
-        let (service, _handle) = NotificationDispatchService::new(store.clone(), config)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        let (service, _handle) =
+            NotificationDispatchService::new(store.clone(), config, CancellationToken::new())
+                .unwrap_or_else(|e| panic!("failed to create service: {e}"));
 
         let count = service
             .dispatch_once()
