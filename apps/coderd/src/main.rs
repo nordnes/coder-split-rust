@@ -571,6 +571,19 @@ struct ServerArgs {
     #[arg(long, env = "CODER_ADDITIONAL_CSP_POLICY", default_value = "")]
     additional_csp_policy: String,
 
+    // ----- Security Headers -----
+    /// Value for the X-Content-Type-Options response header.
+    #[arg(long, env = "CODER_X_CONTENT_TYPE_OPTIONS", default_value = "nosniff")]
+    x_content_type_options: String,
+
+    /// Value for the X-Frame-Options response header.
+    #[arg(long, env = "CODER_X_FRAME_OPTIONS", default_value = "DENY")]
+    x_frame_options: String,
+
+    /// Value for the Referrer-Policy response header.
+    #[arg(long, env = "CODER_REFERRER_POLICY", default_value = "no-referrer")]
+    referrer_policy: String,
+
     // ----- Worker Intervals -----
     /// Poll interval in seconds for the notification dispatch worker.
     #[arg(
@@ -1193,7 +1206,11 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         web_terminal_renderer: args.web_terminal_renderer,
         allow_workspace_renames: args.allow_workspace_renames,
         additional_csp_policy: split_csv(&args.additional_csp_policy),
-        security_headers: SecurityHeadersConfig::default(),
+        security_headers: SecurityHeadersConfig {
+            x_content_type_options: args.x_content_type_options,
+            x_frame_options: args.x_frame_options,
+            referrer_policy: args.referrer_policy,
+        },
         disable_workspace_sharing: args.disable_workspace_sharing,
         docs_url: args.docs_url,
         scim_api_key: args.scim_api_key,
