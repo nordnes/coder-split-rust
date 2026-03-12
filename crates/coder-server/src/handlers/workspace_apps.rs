@@ -1650,6 +1650,11 @@ async fn resolve_workspace_agent_id(
                 return Ok(agent.id);
             }
         }
+        if agents.is_empty() {
+            return Err(WorkspaceAppError::NotFound(
+                "no agents found for workspace".into(),
+            ));
+        }
         return Err(WorkspaceAppError::NotFound(
             "workspace has multiple agents; specify an agent name".into(),
         ));
@@ -1682,14 +1687,19 @@ fn build_workspace_app_server(state: &AppState) -> WorkspaceAppServer {
 
     // Try to build with the configured hostname pattern.
     // If the pattern is invalid or empty, fall back to subdomain-disabled mode.
-    match WorkspaceAppServer::new(access_url.clone(), access_url.clone(), hostname, false) {
+    match WorkspaceAppServer::new(
+        access_url.clone(),
+        access_url.clone(),
+        hostname,
+        state.config.disable_path_apps,
+    ) {
         Ok(server) => server,
         Err(_) => WorkspaceAppServer {
             dashboard_url: access_url.clone(),
             access_url,
             hostname: String::new(),
             hostname_regex: None,
-            disable_path_apps: false,
+            disable_path_apps: state.config.disable_path_apps,
             cookies: AppCookies::new(""),
         },
     }
@@ -1932,7 +1942,11 @@ async fn proxy_websocket(
     // Forward select headers to upstream.
     for (key, value) in original_headers {
         let name = key.as_str();
-        if name == "host" || name == "connection" || name == "upgrade" {
+        if name == "host"
+            || name == "connection"
+            || name == "upgrade"
+            || name.starts_with("sec-websocket-")
+        {
             continue;
         }
         if name == "cookie" {
