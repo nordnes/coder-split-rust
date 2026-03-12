@@ -114,6 +114,7 @@ mod tests {
             oidc: None,
             otel: coder_core::config::OtelConfig::default(),
             cors: coder_core::config::CorsConfig::default(),
+            security_headers: coder_core::config::SecurityHeadersConfig::default(),
             provisioner: coder_core::config::ProvisionerConfig::default(),
             session_lifetime: coder_core::config::SessionLifetimeConfig::default(),
             dangerous: coder_core::config::DangerousConfig::default(),

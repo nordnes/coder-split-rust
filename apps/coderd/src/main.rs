@@ -34,8 +34,8 @@ use coder_core::{
     StorageError,
     config::{
         DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig, LoggingConfig,
-        NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SessionLifetimeConfig,
-        TelemetryConfig, TlsConfig, WorkerConfig, WorkspaceConfig,
+        NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SecurityHeadersConfig,
+        SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig, WorkspaceConfig,
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
@@ -1165,6 +1165,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         web_terminal_renderer: args.web_terminal_renderer,
         allow_workspace_renames: args.allow_workspace_renames,
         additional_csp_policy: split_csv(&args.additional_csp_policy),
+        security_headers: SecurityHeadersConfig::default(),
         disable_workspace_sharing: args.disable_workspace_sharing,
         docs_url: args.docs_url,
         scim_api_key: args.scim_api_key,
