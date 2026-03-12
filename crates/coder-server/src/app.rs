@@ -7275,7 +7275,7 @@ pub(crate) mod tests {
 
             // Compute deleting_at from template settings.
             ws.deleting_at = match dormant_at {
-                Some(d) if time_til_dormant_autodelete > 0 => {
+                Some(d) if time_til_dormant_autodelete != 0 => {
                     // time_til_dormant_autodelete is in nanoseconds; convert to
                     // a Duration of whole milliseconds (matching the Go SQL).
                     let ms = time_til_dormant_autodelete / 1_000_000;
