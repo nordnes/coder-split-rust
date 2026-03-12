@@ -7333,7 +7333,7 @@ pub(crate) mod tests {
                                 let finish = job.canceled_at.or(job.completed_at);
                                 match finish {
                                     Some(t) => {
-                                        (now - t).whole_hours() > 24
+                                        (now - t) > time::Duration::hours(24)
                                     }
                                     None => false,
                                 }
