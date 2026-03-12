@@ -3135,52 +3135,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // -----------------------------------------------------------------------
 
     /// Inserts a new task.
-    async fn insert_task(&self, input: InsertTaskInput) -> Result<TaskRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    async fn insert_task(&self, input: InsertTaskInput) -> Result<TaskRecord, StorageError>;
 
     /// Fetches a task by ID.
-    async fn find_task_by_id(&self, id: Uuid) -> Result<Option<TaskRecord>, StorageError> {
-        let _ = id;
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    async fn find_task_by_id(&self, id: Uuid) -> Result<Option<TaskRecord>, StorageError>;
 
     /// Fetches a task by owner ID and name.
     async fn find_task_by_owner_and_name(
         &self,
         owner_id: Uuid,
         name: &str,
-    ) -> Result<Option<TaskRecord>, StorageError> {
-        let _ = (owner_id, name);
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    ) -> Result<Option<TaskRecord>, StorageError>;
 
     /// Lists tasks matching the supplied filter.
-    async fn list_tasks(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    async fn list_tasks(&self, filter: TaskListFilter) -> Result<Vec<TaskRecord>, StorageError>;
 
     /// Soft-deletes a task by ID.
-    async fn delete_task(
-        &self,
-        id: Uuid,
-        deleted_at: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        let _ = (id, deleted_at);
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    async fn delete_task(&self, id: Uuid, deleted_at: OffsetDateTime)
+    -> Result<bool, StorageError>;
 
     /// Updates a task's prompt.
     async fn update_task_prompt(
         &self,
         id: Uuid,
         prompt: &str,
-    ) -> Result<Option<TaskRecord>, StorageError> {
-        let _ = (id, prompt);
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    ) -> Result<Option<TaskRecord>, StorageError>;
 
     /// Upserts a task log snapshot.
     async fn upsert_task_snapshot(
@@ -3188,96 +3167,63 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         task_id: Uuid,
         log_snapshot: &Value,
         log_snapshot_created_at: OffsetDateTime,
-    ) -> Result<(), StorageError> {
-        let _ = (task_id, log_snapshot, log_snapshot_created_at);
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Fetches the task log snapshot.
     async fn find_task_snapshot(
         &self,
         task_id: Uuid,
-    ) -> Result<Option<TaskSnapshotRecord>, StorageError> {
-        let _ = task_id;
-        Err(StorageError::unavailable("tasks are not implemented"))
-    }
+    ) -> Result<Option<TaskSnapshotRecord>, StorageError>;
 
     // -----------------------------------------------------------------------
     // Chats
     // -----------------------------------------------------------------------
 
     /// Inserts a new chat.
-    async fn insert_chat(&self, input: InsertChatInput) -> Result<ChatRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    async fn insert_chat(&self, input: InsertChatInput) -> Result<ChatRecord, StorageError>;
 
     /// Fetches a chat by ID.
-    async fn find_chat_by_id(&self, id: Uuid) -> Result<Option<ChatRecord>, StorageError> {
-        let _ = id;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    async fn find_chat_by_id(&self, id: Uuid) -> Result<Option<ChatRecord>, StorageError>;
 
     /// Lists chats by owner ID.
     async fn list_chats_by_owner(
         &self,
         owner_id: Uuid,
         archived: Option<bool>,
-    ) -> Result<Vec<ChatRecord>, StorageError> {
-        let _ = (owner_id, archived);
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<Vec<ChatRecord>, StorageError>;
 
     /// Archives a chat by ID (sets archived = true for the chat and all chats
     /// sharing the same root).
-    async fn archive_chat(&self, id: Uuid) -> Result<(), StorageError> {
-        let _ = id;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    async fn archive_chat(&self, id: Uuid) -> Result<(), StorageError>;
 
     /// Fetches chat messages by chat ID.
     async fn list_chat_messages(
         &self,
         chat_id: Uuid,
         after_id: i64,
-    ) -> Result<Vec<ChatMessageRecord>, StorageError> {
-        let _ = (chat_id, after_id);
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<Vec<ChatMessageRecord>, StorageError>;
 
     /// Inserts a chat message.
     async fn insert_chat_message(
         &self,
         input: InsertChatMessageInput,
-    ) -> Result<ChatMessageRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<ChatMessageRecord, StorageError>;
 
     /// Lists queued messages for a chat.
     async fn list_chat_queued_messages(
         &self,
         chat_id: Uuid,
-    ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError> {
-        let _ = chat_id;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<Vec<ChatQueuedMessageRecord>, StorageError>;
 
     /// Unarchives a chat by ID (sets archived = false for the single chat).
-    async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError> {
-        let _ = id;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    async fn unarchive_chat(&self, id: Uuid) -> Result<(), StorageError>;
 
     /// Updates the status of a chat (e.g. to "waiting" on interrupt).
     async fn update_chat_status(
         &self,
         id: Uuid,
         status: ChatStatus,
-    ) -> Result<ChatRecord, StorageError> {
-        let _ = (id, status);
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<ChatRecord, StorageError>;
 
     /// Fetches the diff status for a chat.
     ///
@@ -3288,10 +3234,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn get_chat_diff_status(
         &self,
         chat_id: Uuid,
-    ) -> Result<Option<crate::api::ChatDiffStatusResponse>, StorageError> {
-        let _ = chat_id;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<Option<crate::api::ChatDiffStatusResponse>, StorageError>;
 
     /// Fetches the diff contents for a chat.
     ///
@@ -3301,10 +3244,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn get_chat_diff_contents(
         &self,
         chat_id: Uuid,
-    ) -> Result<crate::api::ChatDiffContentsResponse, StorageError> {
-        let _ = chat_id;
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<crate::api::ChatDiffContentsResponse, StorageError>;
 
     /// Lists enabled chat model providers.
     ///
@@ -3313,85 +3253,49 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// external LLM services — there is no single storage record.
     async fn get_enabled_chat_providers(
         &self,
-    ) -> Result<Vec<crate::api::ChatModelProvider>, StorageError> {
-        Err(StorageError::unavailable("chats are not implemented"))
-    }
+    ) -> Result<Vec<crate::api::ChatModelProvider>, StorageError>;
 
     /// Updates the content of an existing chat message.
     async fn update_chat_message_content(
         &self,
         input: UpdateChatMessageContentInput,
-    ) -> Result<ChatMessageRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "chat message editing is not implemented",
-        ))
-    }
+    ) -> Result<ChatMessageRecord, StorageError>;
 
     /// Deletes a queued message.
     async fn delete_chat_queued_message(
         &self,
         chat_id: Uuid,
         queued_message_id: i64,
-    ) -> Result<(), StorageError> {
-        let _ = (chat_id, queued_message_id);
-        Err(StorageError::unavailable(
-            "chat queue operations are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Promotes a queued message (moves it to the front of the queue).
     async fn promote_chat_queued_message(
         &self,
         chat_id: Uuid,
         queued_message_id: i64,
-    ) -> Result<ChatQueuedMessageRecord, StorageError> {
-        let _ = (chat_id, queued_message_id);
-        Err(StorageError::unavailable(
-            "chat queue operations are not implemented",
-        ))
-    }
+    ) -> Result<ChatQueuedMessageRecord, StorageError>;
 
     // -----------------------------------------------------------------------
     // Chat Providers
     // -----------------------------------------------------------------------
 
     /// Lists all chat provider configurations.
-    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "chat providers are not implemented",
-        ))
-    }
+    async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError>;
 
     /// Creates a new chat provider configuration.
     async fn insert_chat_provider(
         &self,
         input: InsertChatProviderInput,
-    ) -> Result<ChatProviderRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "chat providers are not implemented",
-        ))
-    }
+    ) -> Result<ChatProviderRecord, StorageError>;
 
     /// Updates an existing chat provider configuration.
     async fn update_chat_provider(
         &self,
         input: UpdateChatProviderInput,
-    ) -> Result<ChatProviderRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "chat providers are not implemented",
-        ))
-    }
+    ) -> Result<ChatProviderRecord, StorageError>;
 
     /// Deletes a chat provider configuration.
-    async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError> {
-        let _ = provider_id;
-        Err(StorageError::unavailable(
-            "chat providers are not implemented",
-        ))
-    }
+    async fn delete_chat_provider(&self, provider_id: Uuid) -> Result<(), StorageError>;
 
     // -----------------------------------------------------------------------
     // Chat Model Configs
@@ -3401,56 +3305,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn list_chat_model_configs(
         &self,
         enabled_only: bool,
-    ) -> Result<Vec<ChatModelConfigRecord>, StorageError> {
-        let _ = enabled_only;
-        Err(StorageError::unavailable(
-            "chat model configs are not implemented",
-        ))
-    }
+    ) -> Result<Vec<ChatModelConfigRecord>, StorageError>;
 
     /// Creates a new chat model config.
     async fn insert_chat_model_config(
         &self,
         input: InsertChatModelConfigInput,
-    ) -> Result<ChatModelConfigRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "chat model configs are not implemented",
-        ))
-    }
+    ) -> Result<ChatModelConfigRecord, StorageError>;
 
     /// Updates an existing chat model config.
     async fn update_chat_model_config(
         &self,
         input: UpdateChatModelConfigInput,
-    ) -> Result<ChatModelConfigRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "chat model configs are not implemented",
-        ))
-    }
+    ) -> Result<ChatModelConfigRecord, StorageError>;
 
     /// Deletes a chat model config (soft-delete).
-    async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError> {
-        let _ = config_id;
-        Err(StorageError::unavailable(
-            "chat model configs are not implemented",
-        ))
-    }
+    async fn delete_chat_model_config(&self, config_id: Uuid) -> Result<(), StorageError>;
 
     /// Ensures at least one default chat model config exists.
-    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError> {
-        Err(StorageError::unavailable(
-            "chat model configs are not implemented",
-        ))
-    }
+    async fn ensure_default_chat_model_config(&self) -> Result<(), StorageError>;
 
     /// Unsets all default chat model configs.
-    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError> {
-        Err(StorageError::unavailable(
-            "chat model configs are not implemented",
-        ))
-    }
+    async fn unset_default_chat_model_configs(&self) -> Result<(), StorageError>;
     // -----------------------------------------------------------------------
     // Chat Files
     // -----------------------------------------------------------------------
@@ -3459,16 +3335,10 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn insert_chat_file(
         &self,
         input: InsertChatFileInput,
-    ) -> Result<ChatFileRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("chat files are not implemented"))
-    }
+    ) -> Result<ChatFileRecord, StorageError>;
 
     /// Fetches a chat file by ID.
-    async fn find_chat_file_by_id(&self, id: Uuid) -> Result<Option<ChatFileRecord>, StorageError> {
-        let _ = id;
-        Err(StorageError::unavailable("chat files are not implemented"))
-    }
+    async fn find_chat_file_by_id(&self, id: Uuid) -> Result<Option<ChatFileRecord>, StorageError>;
 
     // -----------------------------------------------------------------------
     // Workspace Agent storage methods

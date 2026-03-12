@@ -4098,6 +4098,64 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_chat_status(
+        &self,
+        id: Uuid,
+        status: ChatStatus,
+    ) -> Result<ChatRecord, StorageError> {
+        let row: StoredChatRow = sqlx::query_as(
+            "UPDATE chats SET status = $2::chat_status, updated_at = now()
+             WHERE id = $1
+             RETURNING id, owner_id, workspace_id, title, status::text, last_error, parent_chat_id, root_chat_id, last_model_config_id, archived, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(status.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error_or_not_found)?;
+
+        chat_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_chat_diff_status(
+        &self,
+        _chat_id: Uuid,
+    ) -> Result<Option<coder_core::api::ChatDiffStatusResponse>, StorageError> {
+        // Diff status is fetched from an external service, not stored in
+        // the database. Return `None` so the handler falls back to the
+        // default empty response.
+        Ok(None)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_chat_diff_contents(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<coder_core::api::ChatDiffContentsResponse, StorageError> {
+        // Diff contents are resolved from an external git provider, not
+        // stored locally. Return a default empty response.
+        Ok(coder_core::api::ChatDiffContentsResponse {
+            chat_id,
+            provider: None,
+            remote_origin: None,
+            branch: None,
+            pull_request_url: None,
+            diff: String::new(),
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_enabled_chat_providers(
+        &self,
+    ) -> Result<Vec<coder_core::api::ChatModelProvider>, StorageError> {
+        // Model provider discovery is performed at the handler layer by
+        // querying external LLM APIs. The store has no backing table for
+        // aggregated provider availability so we return an empty list.
+        Ok(Vec::new())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
         let rows: Vec<StoredChatProviderRow> = sqlx::query_as(
             "SELECT id, provider, display_name, api_key, base_url, enabled, created_at, updated_at
