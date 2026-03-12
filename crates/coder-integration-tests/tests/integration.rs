@@ -488,6 +488,7 @@ async fn migrations_apply_cleanly() -> Result<(), Box<dyn Error>> {
         status.applied_count > 0,
         "expected at least one migration to be applied"
     );
+    db.cleanup().await;
     Ok(())
 }
 
@@ -544,6 +545,7 @@ async fn first_user_registration() -> Result<(), Box<dyn Error>> {
     .await?;
     assert_eq!(dup.status(), StatusCode::CONFLICT);
 
+    h.cleanup().await;
     Ok(())
 }
 
@@ -555,6 +557,7 @@ async fn login_returns_session_token() -> Result<(), Box<dyn Error>> {
     let h = TestHarness::new().await?;
     let token = create_first_user_and_login(&h.router).await?;
     assert!(!token.is_empty(), "session token should not be empty");
+    h.cleanup().await;
     Ok(())
 }
 
@@ -579,6 +582,7 @@ async fn login_wrong_password_returns_unauthorized() -> Result<(), Box<dyn Error
     )
     .await?;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    h.cleanup().await;
     Ok(())
 }
 
@@ -603,6 +607,7 @@ async fn get_current_user_with_session_token() -> Result<(), Box<dyn Error>> {
         body.get("email").and_then(Value::as_str),
         Some("owner@example.com")
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -619,6 +624,7 @@ async fn unauthenticated_request_returns_401() -> Result<(), Box<dyn Error>> {
     )
     .await?;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    h.cleanup().await;
     Ok(())
 }
 
@@ -651,6 +657,7 @@ async fn default_organization_exists() -> Result<(), Box<dyn Error>> {
             .unwrap_or(false),
         "expected the organization to be the default"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -690,6 +697,7 @@ async fn create_additional_user() -> Result<(), Box<dyn Error>> {
         body.get("username").and_then(Value::as_str),
         Some("developer")
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -729,6 +737,7 @@ async fn list_users_returns_created_users() -> Result<(), Box<dyn Error>> {
         "expected at least 2 users, got {}",
         users.len()
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -772,6 +781,7 @@ async fn update_user_profile() -> Result<(), Box<dyn Error>> {
         me_body.get("name").and_then(Value::as_str),
         Some("Updated Owner")
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -857,6 +867,7 @@ async fn api_key_create_use_delete() -> Result<(), Box<dyn Error>> {
             .any(|t| t.get("token_name").and_then(Value::as_str) == Some("test-token")),
         "deleted token should not appear in list"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -895,6 +906,7 @@ async fn logout_invalidates_session() -> Result<(), Box<dyn Error>> {
     )
     .await?;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    h.cleanup().await;
     Ok(())
 }
 
@@ -920,6 +932,7 @@ async fn build_info_with_real_store() -> Result<(), Box<dyn Error>> {
         body.get("external_url").and_then(Value::as_str).is_some(),
         "buildinfo should include external_url"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -969,6 +982,7 @@ async fn audit_log_generation_and_listing() -> Result<(), Box<dyn Error>> {
     // We should have at least the test-generated entry plus any login/register
     // events from first user creation.
     assert!(!logs.is_empty(), "expected at least one audit log entry");
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1018,6 +1032,7 @@ async fn rbac_non_owner_cannot_create_users() -> Result<(), Box<dyn Error>> {
         "expected 403 or 401 for non-owner user creation, got {}",
         resp.status()
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1051,6 +1066,7 @@ async fn organization_membership_listed() -> Result<(), Box<dyn Error>> {
         !members.is_empty(),
         "owner should be a member of the default org"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1063,6 +1079,7 @@ async fn healthz_with_real_database() -> Result<(), Box<dyn Error>> {
 
     let resp = call(h.router.clone(), plain_request(Method::GET, "/healthz")?).await?;
     assert_eq!(resp.status(), StatusCode::OK);
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1085,6 +1102,7 @@ async fn deployment_config_returns_ok() -> Result<(), Box<dyn Error>> {
         body.get("config").is_some(),
         "deployment config should include config object"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1107,6 +1125,7 @@ async fn ssh_config_returns_hostname_info() -> Result<(), Box<dyn Error>> {
         body.get("hostname_prefix").is_some() || body.get("hostname_suffix").is_some(),
         "ssh config should include hostname fields"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1164,6 +1183,7 @@ async fn template_create_and_list() -> Result<(), Box<dyn Error>> {
     )
     .await?;
     assert_eq!(resp.status(), StatusCode::OK);
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1220,6 +1240,7 @@ async fn user_appearance_settings_roundtrip() -> Result<(), Box<dyn Error>> {
             Some("dark")
         );
     }
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1242,6 +1263,7 @@ async fn git_ssh_key_operations() -> Result<(), Box<dyn Error>> {
         body.get("public_key").and_then(Value::as_str).is_some(),
         "expected a public_key in git ssh key response"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1296,6 +1318,7 @@ async fn full_auth_lifecycle() -> Result<(), Box<dyn Error>> {
     .await?;
     assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
 
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1331,6 +1354,7 @@ async fn concurrent_user_creation() -> Result<(), Box<dyn Error>> {
         5,
         "expected 5 unique user IDs from batch creation"
     );
+    h.cleanup().await;
     Ok(())
 }
 
@@ -1353,5 +1377,6 @@ async fn deployment_stats_returns_ok() -> Result<(), Box<dyn Error>> {
         body.get("session_count").is_some() || body.get("workspaces").is_some(),
         "deployment stats should contain session or workspace data"
     );
+    h.cleanup().await;
     Ok(())
 }
