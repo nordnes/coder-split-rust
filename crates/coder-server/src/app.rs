@@ -1680,6 +1680,7 @@ pub(crate) mod tests {
                 .push(resource);
             Ok(())
         }
+
         /// Sets the status of a task in the fake store (for testing state transitions).
         fn set_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<(), StorageError> {
             let mut tasks = self
