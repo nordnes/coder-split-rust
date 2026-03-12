@@ -545,6 +545,7 @@ dependencies = [
  "coder-core",
  "coder-rbac",
  "http 1.4.0",
+ "jsonwebtoken",
  "metrics",
  "rand 0.8.5",
  "reqwest",

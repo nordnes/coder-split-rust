@@ -102,6 +102,216 @@ use time::OffsetDateTime;
 use tracing::debug;
 use uuid::Uuid;
 
+/// Strips Markdown formatting from a string, returning plain text.
+///
+/// This is a lightweight implementation that handles the most common Markdown
+/// constructs (headings, bold/italic, links, images, inline code, fenced code
+/// blocks, blockquotes, list markers, horizontal rules, and HTML tags).
+/// It matches the Go reference behaviour of `coderd/richparameters.go:stripMarkdown`.
+pub(crate) fn strip_markdown(md: &str) -> String {
+    let mut out = String::with_capacity(md.len());
+    let mut in_fenced_block = false;
+
+    for line in md.lines() {
+        let trimmed = line.trim();
+
+        // Toggle fenced code blocks (``` or ~~~).
+        if trimmed.starts_with("```") || trimmed.starts_with("~~~") {
+            in_fenced_block = !in_fenced_block;
+            continue;
+        }
+        if in_fenced_block {
+            // Keep code block content as-is.
+            if !out.is_empty() {
+                out.push('\n');
+            }
+            out.push_str(line);
+            continue;
+        }
+
+        // Skip horizontal rules (---, ***, ___).
+        if trimmed.len() >= 3
+            && (trimmed.chars().all(|c| c == '-' || c == ' ')
+                || trimmed.chars().all(|c| c == '*' || c == ' ')
+                || trimmed.chars().all(|c| c == '_' || c == ' '))
+            && trimmed.chars().filter(|c| !c.is_whitespace()).count() >= 3
+        {
+            continue;
+        }
+
+        let mut s = line.to_string();
+
+        // Strip heading markers (# … ######).
+        if let Some(rest) = s.strip_prefix("######") {
+            s = rest.trim().to_string();
+        } else if let Some(rest) = s.strip_prefix("#####") {
+            s = rest.trim().to_string();
+        } else if let Some(rest) = s.strip_prefix("####") {
+            s = rest.trim().to_string();
+        } else if let Some(rest) = s.strip_prefix("###") {
+            s = rest.trim().to_string();
+        } else if let Some(rest) = s.strip_prefix("##") {
+            s = rest.trim().to_string();
+        } else if let Some(rest) = s.strip_prefix('#') {
+            s = rest.trim().to_string();
+        }
+
+        // Strip blockquote markers.
+        while s.starts_with("> ") || s.starts_with('>') {
+            s = s.trim_start_matches('>').trim_start().to_string();
+        }
+
+        // Strip unordered list markers (- , * , + ).
+        if let Some(rest) = s.strip_prefix("- ") {
+            s = rest.to_string();
+        } else if let Some(rest) = s.strip_prefix("* ") {
+            s = rest.to_string();
+        } else if let Some(rest) = s.strip_prefix("+ ") {
+            s = rest.to_string();
+        }
+
+        // Strip images: ![alt](url) -> alt
+        while let Some(start) = s.find("![") {
+            if let Some(alt_end) = s[start + 2..].find("](") {
+                let alt_end = start + 2 + alt_end;
+                if let Some(url_end) = s[alt_end + 2..].find(')') {
+                    let url_end = alt_end + 2 + url_end;
+                    let alt = s[start + 2..alt_end].to_string();
+                    s = format!("{}{}{}", &s[..start], alt, &s[url_end + 1..]);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Strip links: [text](url) -> text
+        while let Some(start) = s.find('[') {
+            if let Some(text_end) = s[start + 1..].find("](") {
+                let text_end = start + 1 + text_end;
+                if let Some(url_end) = s[text_end + 2..].find(')') {
+                    let url_end = text_end + 2 + url_end;
+                    let text = s[start + 1..text_end].to_string();
+                    s = format!("{}{}{}", &s[..start], text, &s[url_end + 1..]);
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Strip inline code (`code`).
+        s = s.replace('`', "");
+
+        // Strip paired bold/italic markers while preserving standalone
+        // underscores and asterisks (e.g. snake_case identifiers, globs).
+        // Order matters: strip double before single.
+        s = strip_paired_delimiter(&s, "**");
+        s = strip_paired_delimiter(&s, "__");
+        s = strip_paired_delimiter(&s, "*");
+        s = strip_paired_delimiter(&s, "_");
+
+        // Strip simple HTML tags (<tag> and </tag>).
+        while let Some(start) = s.find('<') {
+            if let Some(end) = s[start..].find('>') {
+                s = format!("{}{}", &s[..start], &s[start + end + 1..]);
+            } else {
+                break;
+            }
+        }
+
+        let trimmed_s = s.trim();
+        if trimmed_s.is_empty() {
+            continue;
+        }
+
+        if !out.is_empty() {
+            out.push('\n');
+        }
+        out.push_str(trimmed_s);
+    }
+
+    out
+}
+
+/// Strips paired Markdown emphasis delimiters (e.g. `**`, `__`, `*`, `_`)
+/// while preserving standalone occurrences (e.g. underscores in `snake_case`
+/// or asterisks in glob patterns like `*.txt`).
+///
+/// For single-character delimiters (`*`, `_`), a pair is only stripped when the
+/// opening delimiter is at a word boundary (preceded by whitespace or at the
+/// start of the string) and the closing delimiter is also at a word boundary
+/// (followed by whitespace, punctuation, or end of string).  This matches how
+/// CommonMark handles emphasis.
+///
+/// For multi-character delimiters (`**`, `__`), the boundary check is skipped
+/// because these are almost exclusively used for emphasis in practice.
+fn strip_paired_delimiter(input: &str, delim: &str) -> String {
+    let mut s = input.to_string();
+    let single_char = delim.len() == 1;
+    let mut search_from = 0;
+    loop {
+        if search_from >= s.len() {
+            break;
+        }
+        if let Some(rel) = s[search_from..].find(delim) {
+            let open = search_from + rel;
+            let after_open = open + delim.len();
+            if after_open >= s.len() {
+                break;
+            }
+
+            // For single-char delimiters, require a word boundary before the
+            // opening delimiter: either start-of-string or preceding whitespace.
+            if single_char {
+                if open > 0 {
+                    let prev = s.as_bytes()[open - 1];
+                    if !prev.is_ascii_whitespace() {
+                        // Not at a word boundary – skip this occurrence.
+                        search_from = after_open;
+                        continue;
+                    }
+                }
+            }
+
+            if let Some(close_offset) = s[after_open..].find(delim) {
+                if close_offset > 0 {
+                    let close = after_open + close_offset;
+                    let after_close = close + delim.len();
+
+                    // For single-char delimiters, require a word boundary after
+                    // the closing delimiter: end-of-string, whitespace, or
+                    // common punctuation.
+                    if single_char && after_close < s.len() {
+                        let next = s.as_bytes()[after_close];
+                        if !next.is_ascii_whitespace()
+                            && !matches!(next, b'.' | b',' | b';' | b':' | b'!' | b'?')
+                        {
+                            search_from = after_open;
+                            continue;
+                        }
+                    }
+
+                    // Remove the pair.
+                    s = format!(
+                        "{}{}{}",
+                        &s[..open],
+                        &s[after_open..close],
+                        &s[after_close..]
+                    );
+                    // Don't advance search_from – there may be nested pairs
+                    // starting at the same position.
+                    continue;
+                }
+            }
+        }
+        break;
+    }
+    s
+}
+
 pub(crate) mod agents;
 pub(crate) mod audit;
 pub(crate) mod auth;

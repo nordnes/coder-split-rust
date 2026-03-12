@@ -514,25 +514,189 @@ pub async fn oidc_exchange_code(
         .map_err(|e| OAuthLoginError::CodeExchangeFailed(e.to_string()))
 }
 
-/// Decodes an OIDC ID token's payload (WITHOUT cryptographic signature verification).
+/// Fetches the JWKS (JSON Web Key Set) from the provider's JWKS endpoint.
+#[tracing::instrument(skip_all)]
+pub async fn fetch_jwks(
+    client: &reqwest::Client,
+    jwks_uri: &str,
+) -> Result<jsonwebtoken::jwk::JwkSet, OAuthLoginError> {
+    let response = client
+        .get(jwks_uri)
+        .timeout(HTTP_TIMEOUT)
+        .send()
+        .await
+        .map_err(|e| OAuthLoginError::Http(format!("JWKS fetch failed: {e}")))?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response
+            .text()
+            .await
+            .unwrap_or_else(|_| "unknown".to_owned());
+        return Err(OAuthLoginError::Http(format!(
+            "JWKS endpoint returned {status}: {body}"
+        )));
+    }
+    response
+        .json::<jsonwebtoken::jwk::JwkSet>()
+        .await
+        .map_err(|e| OAuthLoginError::Http(format!("JWKS parse error: {e}")))
+}
+
+/// Converts a [`jsonwebtoken::jwk::KeyAlgorithm`] to a
+/// [`jsonwebtoken::Algorithm`].  Returns `None` for key-management-only
+/// algorithms (RSA1_5, RSA-OAEP, RSA-OAEP-256) that are not used for
+/// JWT signing.
+fn key_algorithm_to_algorithm(
+    ka: jsonwebtoken::jwk::KeyAlgorithm,
+) -> Option<jsonwebtoken::Algorithm> {
+    use jsonwebtoken::Algorithm;
+    use jsonwebtoken::jwk::KeyAlgorithm;
+
+    match ka {
+        KeyAlgorithm::HS256 => Some(Algorithm::HS256),
+        KeyAlgorithm::HS384 => Some(Algorithm::HS384),
+        KeyAlgorithm::HS512 => Some(Algorithm::HS512),
+        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
+        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
+        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
+        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
+        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
+        KeyAlgorithm::ES256 => Some(Algorithm::ES256),
+        KeyAlgorithm::ES384 => Some(Algorithm::ES384),
+        KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
+        // Key-management algorithms (RSA1_5, RSA-OAEP, RSA-OAEP-256) are
+        // not valid for JWT signing.
+        _ => None,
+    }
+}
+
+/// Returns `true` when `alg` is compatible with the JWK's key type.
 ///
-/// // TODO(security): This function base64-decodes the JWT payload WITHOUT verifying
-/// // the cryptographic signature against the provider's JWKS. The claims returned
-/// // here are NOT authenticated and could have been tampered with. A proper
-/// // implementation must:
-/// //   1. Fetch the JWKS from `discovery.jwks_uri`
-/// //   2. Cache the JWKS (with periodic refresh)
-/// //   3. Verify the JWT signature using the `jsonwebtoken` crate
-/// //   4. Only then trust the decoded claims
-/// // Until this is implemented, the token is partially validated by checking
-/// // issuer, audience, and expiry in `validate_oidc_claims`, but a malicious
-/// // actor could forge tokens if they control the network path.
-pub fn decode_id_token_claims(id_token: &str) -> Result<OidcClaims, OAuthLoginError> {
-    tracing::warn!(
-        "OIDC ID token signature is NOT cryptographically verified — \
-         claims are decoded but not authenticated. \
-         See TODO(security) in decode_id_token_claims."
-    );
+/// This prevents algorithm-confusion attacks when the JWK does not declare
+/// its own `alg` and we must fall back to the JWT header's algorithm.
+fn is_algorithm_compatible_with_jwk(
+    alg: jsonwebtoken::Algorithm,
+    jwk: &jsonwebtoken::jwk::Jwk,
+) -> bool {
+    use jsonwebtoken::Algorithm;
+    use jsonwebtoken::jwk::AlgorithmParameters;
+
+    match (&alg, &jwk.algorithm) {
+        // Symmetric HMAC algorithms with octet (shared secret) keys
+        (
+            Algorithm::HS256 | Algorithm::HS384 | Algorithm::HS512,
+            AlgorithmParameters::OctetKey(_),
+        ) => true,
+        // RSA (including PSS) algorithms with RSA keys
+        (
+            Algorithm::RS256
+            | Algorithm::RS384
+            | Algorithm::RS512
+            | Algorithm::PS256
+            | Algorithm::PS384
+            | Algorithm::PS512,
+            AlgorithmParameters::RSA(_),
+        ) => true,
+        // ECDSA algorithms with EC keys
+        (Algorithm::ES256 | Algorithm::ES384, AlgorithmParameters::EllipticCurve(_)) => true,
+        // EdDSA with OKP keys
+        (Algorithm::EdDSA, AlgorithmParameters::OctetKeyPair(_)) => true,
+        // Anything else is considered incompatible.
+        _ => false,
+    }
+}
+
+/// Decodes and cryptographically verifies an OIDC ID token using the
+/// provider's JWKS.
+///
+/// The token's signature is verified against the provided JWKS key set.
+/// The `iss` (issuer) and `aud` (audience) claims are validated as part of
+/// the JWT verification. Expiry (`exp`) is also checked by the
+/// `jsonwebtoken` crate.
+pub fn decode_id_token_claims(
+    id_token: &str,
+    jwks: &jsonwebtoken::jwk::JwkSet,
+    config: &OidcConfig,
+) -> Result<OidcClaims, OAuthLoginError> {
+    // Decode the JWT header to find the key ID (`kid`) so we can select the
+    // correct key from the JWKS.
+    let header = jsonwebtoken::decode_header(id_token).map_err(|e| {
+        OAuthLoginError::InvalidIdToken(format!("failed to decode JWT header: {e}"))
+    })?;
+
+    let kid = header.kid.as_deref();
+
+    // Find a matching key in the JWKS.  Prefer matching by `kid`; fall back
+    // to the first key when no `kid` is present, but only if the JWKS
+    // contains exactly one key (ambiguous otherwise).
+    let jwk = if let Some(kid_value) = kid {
+        jwks.find(kid_value).ok_or_else(|| {
+            OAuthLoginError::InvalidIdToken(format!(
+                "no JWK found with kid={kid_value:?} in provider JWKS"
+            ))
+        })?
+    } else if jwks.keys.len() == 1 {
+        // Single key in the set – safe to use without `kid`.
+        &jwks.keys[0]
+    } else if jwks.keys.is_empty() {
+        return Err(OAuthLoginError::InvalidIdToken(
+            "JWKS contains no keys".to_owned(),
+        ));
+    } else {
+        return Err(OAuthLoginError::InvalidIdToken(format!(
+            "JWT header has no `kid` but JWKS contains {} keys; \
+             cannot determine which key to use",
+            jwks.keys.len()
+        )));
+    };
+
+    let decoding_key = jsonwebtoken::DecodingKey::from_jwk(jwk).map_err(|e| {
+        OAuthLoginError::InvalidIdToken(format!("failed to build decoding key from JWK: {e}"))
+    })?;
+
+    // Determine the verification algorithm.  Prefer the JWK's declared
+    // algorithm (`alg` field) over the JWT header's `alg`, because the
+    // header is attacker-controlled.  Fall back to the header only when
+    // the JWK does not declare an algorithm, and even then only if the
+    // header algorithm is compatible with the selected JWK's key type.
+    let alg = match jwk.common.key_algorithm {
+        Some(ka) => key_algorithm_to_algorithm(ka).ok_or_else(|| {
+            OAuthLoginError::InvalidIdToken(format!("JWK declares unsupported algorithm: {ka:?}"))
+        })?,
+        None => {
+            let header_alg = header.alg;
+            if !is_algorithm_compatible_with_jwk(header_alg, jwk) {
+                return Err(OAuthLoginError::InvalidIdToken(format!(
+                    "header algorithm {header_alg:?} is incompatible with JWK key type"
+                )));
+            }
+            header_alg
+        }
+    };
+
+    // Build validation: check issuer, audience, and expiry.
+    let mut validation = jsonwebtoken::Validation::new(alg);
+    let issuer = config.issuer_url.as_str().trim_end_matches('/');
+    // Also accept the issuer with a trailing slash so providers that include
+    // one in their `iss` claim are not rejected (the old validate_oidc_claims
+    // trimmed both sides; jsonwebtoken does exact matching).
+    let issuer_slashed = format!("{issuer}/");
+    validation.set_issuer(&[issuer, &issuer_slashed]);
+    validation.set_audience(&[&config.client_id]);
+    validation.validate_exp = true;
+
+    let token_data = jsonwebtoken::decode::<OidcClaims>(id_token, &decoding_key, &validation)
+        .map_err(|e| OAuthLoginError::InvalidIdToken(format!("JWT verification failed: {e}")))?;
+
+    Ok(token_data.claims)
+}
+
+/// Decodes an OIDC ID token's payload WITHOUT cryptographic signature
+/// verification.  This is only intended for use in tests or when the
+/// caller has already established trust through other means.
+#[cfg(test)]
+pub fn decode_id_token_claims_insecure(id_token: &str) -> Result<OidcClaims, OAuthLoginError> {
     let parts: Vec<&str> = id_token.split('.').collect();
     if parts.len() != 3 {
         return Err(OAuthLoginError::InvalidIdToken(
@@ -881,7 +1045,7 @@ mod tests {
     }
 
     #[test]
-    fn test_decode_id_token_claims() {
+    fn test_decode_id_token_claims_insecure() {
         use base64::Engine;
         let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
             .encode(r#"{"alg":"RS256","typ":"JWT"}"#);
@@ -890,15 +1054,15 @@ mod tests {
         );
         let token = format!("{header}.{payload}.fake-sig");
 
-        let claims = decode_id_token_claims(&token).unwrap();
+        let claims = decode_id_token_claims_insecure(&token).unwrap();
         assert_eq!(claims.sub, "user123");
         assert_eq!(claims.email.as_deref(), Some("test@example.com"));
         assert_eq!(claims.name.as_deref(), Some("Test User"));
     }
 
     #[test]
-    fn test_decode_id_token_claims_invalid() {
-        let result = decode_id_token_claims("not.a.valid-base64!!!");
+    fn test_decode_id_token_claims_insecure_invalid() {
+        let result = decode_id_token_claims_insecure("not.a.valid-base64!!!");
         assert!(result.is_err());
     }
 

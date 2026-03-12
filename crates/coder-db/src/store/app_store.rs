@@ -4776,7 +4776,9 @@ impl AppStore for PostgresStore {
             NotificationMessageStatus::Leased => "leased",
             NotificationMessageStatus::Sent => "sent",
             NotificationMessageStatus::TemporaryFailure => "temporary_failure",
-            NotificationMessageStatus::Failed => "permanent_failure",
+            NotificationMessageStatus::PermanentFailure => "permanent_failure",
+            NotificationMessageStatus::Unknown => "unknown",
+            NotificationMessageStatus::Inhibited => "inhibited",
         };
 
         let result = sqlx::query(

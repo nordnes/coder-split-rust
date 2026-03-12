@@ -1843,7 +1843,9 @@ fn notification_message_from_row(
         "leased" => NotificationMessageStatus::Leased,
         "sent" => NotificationMessageStatus::Sent,
         "temporary_failure" => NotificationMessageStatus::TemporaryFailure,
-        "permanent_failure" => NotificationMessageStatus::Failed,
+        "permanent_failure" => NotificationMessageStatus::PermanentFailure,
+        "unknown" => NotificationMessageStatus::Unknown,
+        "inhibited" => NotificationMessageStatus::Inhibited,
         other => {
             return Err(StorageError::invalid_data(format!(
                 "unknown notification message status: {other}"

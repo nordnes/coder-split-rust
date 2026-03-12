@@ -1009,31 +1009,20 @@ pub(crate) async fn watch_chat_git(
     };
 
     let agent_provider = state.agent_provider.clone();
+    let store = state.store.clone();
 
     // Upgrade to WebSocket.  All pre-upgrade validation has passed.
     Ok(ws.on_upgrade(move |mut socket| async move {
-        // Attempt to locate a connected agent for this workspace.
+        // The Go reference calls `GetWorkspaceAgentsInLatestBuildByWorkspaceID`
+        // to find agents, then dials the first one via the tailnet coordinator
+        // (`agentProvider.AgentConn`) and proxies the `WatchGit` RPC
+        // bidirectionally over the WebSocket.
         //
-        // The Go reference calls
-        //   `GetWorkspaceAgentsInLatestBuildByWorkspaceID`
-        // and then dials the first agent via the tailnet coordinator
-        // (`agentProvider.AgentConn`).  The Rust store does not yet
-        // implement that query, and `AgentProvider` does not expose a
-        // `WatchGit` RPC.  As a best-effort step we check whether
-        // *any* agent is registered in the provider.
-        //
-        // TODO(agent-rpc): Once the store exposes
-        //   `find_workspace_agents_by_workspace_id` and `AgentConnection`
-        //   gains a `watch_git` method, replace this stub with a real
-        //   bidirectional proxy identical to `tailnet_rpc_conn`.
-
-        // For now we cannot resolve workspace_id -> agent_id because the
-        // store query is unimplemented.  Fall through to the error path.
-        let _workspace_id = workspace_id;
-
+        // We check the connected agents via `AgentProvider::debug_info()` and
+        // cross-reference each one against the store's `find_workspace_by_agent_id`
+        // to confirm the agent belongs to the target workspace.
         let connected = agent_provider.debug_info().await;
         if connected.is_empty() {
-            // No agents connected at all -- inform the client.
             let err_msg = serde_json::json!({
                 "type": "error",
                 "message": "No workspace agents are currently connected. Git watching requires a running agent."
@@ -1052,22 +1041,107 @@ pub(crate) async fn watch_chat_git(
             return;
         }
 
-        // Agent(s) exist but we cannot dial them for git watching yet.
-        let err_msg = serde_json::json!({
-            "type": "error",
-            "message": "Agent git watch RPC is not yet implemented. The workspace has connected agents but the server cannot proxy git changes yet."
-        });
-        let _ = socket
-            .send(Message::Text(
-                serde_json::to_string(&err_msg).unwrap_or_default().into(),
-            ))
-            .await;
-        let _ = socket
-            .send(Message::Close(Some(CloseFrame {
-                code: 4001,
-                reason: "agent git watch not implemented".into(),
-            })))
-            .await;
+        // Find a connected agent that belongs to the target workspace by
+        // checking each connected agent against the store.  This prevents
+        // accidentally routing to an agent from an unrelated workspace.
+        let mut matched_agent_id = None;
+        for info in &connected {
+            match store.find_workspace_by_agent_id(info.agent_id).await {
+                Ok(Some(ws)) if ws.id == workspace_id => {
+                    matched_agent_id = Some(info.agent_id);
+                    break;
+                }
+                Ok(_) => continue,
+                Err(err) => {
+                    tracing::error!(
+                        error = ?err,
+                        agent_id = ?info.agent_id,
+                        workspace_id = ?workspace_id,
+                        "failed to look up workspace by agent id during git watch"
+                    );
+                    let err_msg = serde_json::json!({
+                        "type": "error",
+                        "message": "Internal server error while checking connected agents."
+                    });
+                    let _ = socket
+                        .send(Message::Text(
+                            serde_json::to_string(&err_msg).unwrap_or_default().into(),
+                        ))
+                        .await;
+                    let _ = socket
+                        .send(Message::Close(Some(CloseFrame {
+                            code: 4500,
+                            reason: "internal server error".into(),
+                        })))
+                        .await;
+                    return;
+                }
+            }
+        }
+
+        let Some(agent_id) = matched_agent_id else {
+            let err_msg = serde_json::json!({
+                "type": "error",
+                "message": "No connected agent found for this workspace."
+            });
+            let _ = socket
+                .send(Message::Text(
+                    serde_json::to_string(&err_msg).unwrap_or_default().into(),
+                ))
+                .await;
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 4002,
+                    reason: "no matching agent for workspace".into(),
+                })))
+                .await;
+            return;
+        };
+
+        match agent_provider.get_agent_connection(agent_id).await {
+            Some(_agent_conn) => {
+                // `AgentConnection` does not yet expose a `watch_git` RPC.
+                // Close the socket with a descriptive code so clients know
+                // the feature is partially implemented.
+                let err_msg = serde_json::json!({
+                    "type": "error",
+                    "message": "Agent git watch RPC is not yet available on this connection."
+                });
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::to_string(&err_msg).unwrap_or_default().into(),
+                    ))
+                    .await;
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 4001,
+                        reason: "watch_git RPC not available".into(),
+                    })))
+                    .await;
+            }
+            None => {
+                tracing::warn!(
+                    agent_id = %agent_id,
+                    workspace_id = %workspace_id,
+                    "watch_git: agent listed in debug_info but connection not found"
+                );
+                let err_msg = serde_json::json!({
+                    "type": "error",
+                    "message": "Workspace agent connection is no longer available."
+                });
+                let _ = socket
+                    .send(Message::Text(
+                        serde_json::to_string(&err_msg).unwrap_or_default().into(),
+                    ))
+                    .await;
+                let _ = socket
+                    .send(Message::Close(Some(CloseFrame {
+                        code: 4002,
+                        reason: "agent connection lost".into(),
+                    })))
+                    .await;
+            }
+        }
     }))
 }
 
