@@ -1433,6 +1433,7 @@ pub(crate) mod tests {
         chat_message_next_id: Mutex<i64>,
         chat_files: Mutex<HashMap<Uuid, coder_core::ChatFileRecord>>,
         chat_queued_messages: Mutex<Vec<ChatQueuedMessageRecord>>,
+        #[allow(dead_code)] // Scaffolded for chat queue message insertion.
         chat_queued_message_next_id: Mutex<i64>,
         chat_providers: Mutex<HashMap<Uuid, coder_core::ChatProviderRecord>>,
         chat_model_configs: Mutex<HashMap<Uuid, coder_core::ChatModelConfigRecord>>,

@@ -3612,14 +3612,14 @@ mod tests {
     fn test_parse_response_body_empty() {
         let result = parse_response_body(None, "");
         assert!(result.is_ok());
-        assert_eq!(result.unwrap_or_else(|_| json!(null)), json!({}));
+        assert_eq!(result.unwrap_or(json!(null)), json!({}));
     }
 
     #[test]
     fn test_parse_response_body_json() {
         let result = parse_response_body(Some("application/json"), r#"{"key":"value"}"#);
         assert!(result.is_ok());
-        let parsed = result.unwrap_or_else(|_| json!(null));
+        let parsed = result.unwrap_or(json!(null));
         assert_eq!(parsed["key"], "value");
     }
 
@@ -3630,7 +3630,7 @@ mod tests {
             "access_token=abc123&token_type=bearer",
         );
         assert!(result.is_ok());
-        let parsed = result.unwrap_or_else(|_| json!(null));
+        let parsed = result.unwrap_or(json!(null));
         assert_eq!(parsed["access_token"], "abc123");
         assert_eq!(parsed["token_type"], "bearer");
     }

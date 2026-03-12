@@ -11,6 +11,7 @@ pub(crate) struct UsersQuery {
     offset: Option<u32>,
 }
 
+/// GET /api/v2/users — list users with optional filtering and pagination.
 pub(crate) async fn list_users(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -63,6 +64,7 @@ pub(crate) async fn list_users(
         .into_response())
 }
 
+/// POST /api/v2/users — create a new user account.
 pub(crate) async fn post_user(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -109,6 +111,7 @@ pub(crate) async fn post_user(
     Ok((StatusCode::CREATED, Json(UserResponse::from(user))).into_response())
 }
 
+/// GET /api/v2/users/:user/login-type — return the user's authentication method.
 pub(crate) async fn get_user_login_type(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -129,6 +132,7 @@ pub(crate) async fn get_user_login_type(
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
+/// GET /api/v2/users/:user/gitsshkey — return the user's Git SSH public key.
 pub(crate) async fn get_user_git_ssh_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -169,6 +173,7 @@ pub(crate) async fn get_user_git_ssh_key(
         .into_response())
 }
 
+/// PUT /api/v2/users/:user/gitsshkey — regenerate and return a new Git SSH key.
 pub(crate) async fn put_user_git_ssh_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -282,6 +287,7 @@ pub(crate) async fn get_user_autofill_parameters(
     Ok(Json(Vec::<UserParameter>::new()).into_response())
 }
 
+/// PUT /api/v2/users/:user/profile — update a user's display name and username.
 pub(crate) async fn put_user_profile(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -381,6 +387,7 @@ pub(crate) async fn put_user_status(
     Ok((StatusCode::OK, Json(UserResponse::from(updated_user))).into_response())
 }
 
+/// GET /api/v2/users/:user/appearance — return the user's UI appearance settings.
 pub(crate) async fn get_user_appearance(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -407,6 +414,7 @@ pub(crate) async fn get_user_appearance(
         .into_response())
 }
 
+/// PUT /api/v2/users/:user/appearance — update the user's UI appearance settings.
 pub(crate) async fn put_user_appearance(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -450,6 +458,7 @@ pub(crate) async fn put_user_appearance(
         .into_response())
 }
 
+/// GET /api/v2/users/:user/preferences — return the user's notification preferences.
 pub(crate) async fn get_user_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -475,6 +484,7 @@ pub(crate) async fn get_user_preferences(
         .into_response())
 }
 
+/// PUT /api/v2/users/:user/preferences — update the user's notification preferences.
 pub(crate) async fn put_user_preferences(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -517,6 +527,7 @@ pub(crate) async fn put_user_preferences(
         .into_response())
 }
 
+/// PUT /api/v2/users/:user/password — change the user's password.
 pub(crate) async fn put_user_password(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -553,6 +564,7 @@ pub(crate) async fn put_user_password(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// GET /api/v2/users/:user — return a single user by ID or username.
 pub(crate) async fn get_user(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -671,6 +683,7 @@ pub(crate) async fn put_user_roles(
     Ok((StatusCode::OK, Json(UserResponse::from(updated_user))).into_response())
 }
 
+/// GET /api/v2/users/:user/organizations — list organizations the user belongs to.
 pub(crate) async fn list_user_organizations(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -724,6 +737,7 @@ pub(crate) async fn get_user_organization_by_name(
         .into_response())
 }
 
+/// DELETE /api/v2/users/:user — permanently delete a user account.
 pub(crate) async fn delete_user(
     State(state): State<AppState>,
     Path(user): Path<String>,

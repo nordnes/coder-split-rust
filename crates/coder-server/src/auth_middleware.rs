@@ -41,11 +41,13 @@ pub(crate) struct AuthenticatedContext {
     /// The authenticated user.
     pub user: AuthenticatedUser,
     /// Derived RBAC actor.
+    #[allow(dead_code)] // Used by scope enforcement and RBAC checks (wired incrementally).
     pub actor: Actor,
     /// The API key record when authentication was via an API key (as opposed
     /// to a session token).
     pub api_key: Option<ApiKeyRecord>,
     /// Parsed scopes from the API key (or `[All]` for session tokens).
+    #[allow(dead_code)] // Used by scope enforcement helpers (wired incrementally).
     pub scopes: Vec<ApiKeyScope>,
 }
 
@@ -409,6 +411,7 @@ async fn maybe_activate_dormant(
 /// ```ignore
 /// async fn my_handler(ApiKeyAuth(ctx): ApiKeyAuth) -> impl IntoResponse { .. }
 /// ```
+#[allow(dead_code)] // Scaffolded extractor for handler migration to extension-based auth.
 pub(crate) struct ApiKeyAuth(pub AuthenticatedContext);
 
 impl FromRequestParts<AppState> for ApiKeyAuth {
@@ -430,6 +433,7 @@ impl FromRequestParts<AppState> for ApiKeyAuth {
 /// Extractor that optionally reads the [`AuthenticatedContext`] from request
 /// extensions.  Returns `None` when the middleware did not run or the user is
 /// not authenticated.
+#[allow(dead_code)] // Scaffolded extractor for handlers with optional auth.
 pub(crate) struct OptionalApiKeyAuth(pub Option<AuthenticatedContext>);
 
 impl FromRequestParts<AppState> for OptionalApiKeyAuth {
@@ -450,6 +454,7 @@ impl FromRequestParts<AppState> for OptionalApiKeyAuth {
 // ---------------------------------------------------------------------------
 
 /// Returns `true` if the authenticated context has the given scope.
+#[allow(dead_code)] // Scaffolded for scope-gated route handlers.
 pub(crate) fn has_scope(ctx: &AuthenticatedContext, required: ApiKeyScope) -> bool {
     ctx.scopes
         .iter()
@@ -458,7 +463,7 @@ pub(crate) fn has_scope(ctx: &AuthenticatedContext, required: ApiKeyScope) -> bo
 
 /// Middleware-style helper that checks scope and returns an error response
 /// if the scope requirement is not met.
-#[allow(clippy::result_large_err)]
+#[allow(clippy::result_large_err, dead_code)] // Scaffolded for scope-gated route handlers.
 pub(crate) fn require_scope(
     ctx: &AuthenticatedContext,
     required: ApiKeyScope,
