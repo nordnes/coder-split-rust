@@ -5870,8 +5870,14 @@ mod tests {
             Some(s) => s,
             None => return Ok(()),
         };
+        let pool = store.pool();
 
-        // Clear any existing defaults so this test is deterministic
+        // Soft-delete ALL existing configs and clear defaults so this test
+        // is fully isolated — ensure_default picks the earliest enabled row
+        // from the entire table.
+        sqlx::query("UPDATE chat_model_configs SET deleted_at = NOW() WHERE deleted_at IS NULL")
+            .execute(&pool)
+            .await?;
         store.unset_default_chat_model_configs().await?;
 
         let model_a = format!("model-a-{}", uniq());
