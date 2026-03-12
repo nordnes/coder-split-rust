@@ -992,14 +992,8 @@ impl ActivityBumpWorker {
         let task = tokio::spawn(async move {
             run_activity_bump_loop(store, interval_secs, cancel_clone).await;
         });
-        info!(
-            interval_secs,
-            "activity bump worker started"
-        );
-        Arc::new(Self {
-            cancel,
-            task,
-        })
+        info!(interval_secs, "activity bump worker started");
+        Arc::new(Self { cancel, task })
     }
 
     /// Signals the worker to stop.
@@ -1095,11 +1089,7 @@ async fn activity_bump_once<S: ActivityBumpStore>(
             continue;
         }
         match store
-            .update_workspace_build_deadline(
-                ws.build_id,
-                Some(new_deadline),
-                ws.max_deadline,
-            )
+            .update_workspace_build_deadline(ws.build_id, Some(new_deadline), ws.max_deadline)
             .await
         {
             Ok(true) => {
@@ -1185,14 +1175,8 @@ impl DormancyCheckerWorker {
         let task = tokio::spawn(async move {
             run_dormancy_check_loop(store, interval_secs, cancel_clone).await;
         });
-        info!(
-            interval_secs,
-            "dormancy checker worker started"
-        );
-        Arc::new(Self {
-            cancel,
-            task,
-        })
+        info!(interval_secs, "dormancy checker worker started");
+        Arc::new(Self { cancel, task })
     }
 
     /// Signals the worker to stop.
@@ -2627,7 +2611,8 @@ mod tests {
     /// Mock store for ActivityBumpStore tests.
     struct MockActivityBumpStore {
         workspaces: Vec<WorkspaceTransitionRow>,
-        updated_deadlines: std::sync::Mutex<Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)>>,
+        updated_deadlines:
+            std::sync::Mutex<Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)>>,
         fail_transition: AtomicBool,
     }
 
@@ -2645,8 +2630,13 @@ mod tests {
             self
         }
 
-        fn deadline_updates(&self) -> Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)> {
-            self.updated_deadlines.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        fn deadline_updates(
+            &self,
+        ) -> Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)> {
+            self.updated_deadlines
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
         }
     }
 
@@ -2783,7 +2773,10 @@ mod tests {
         }
 
         fn dormancy_updates(&self) -> Vec<(uuid::Uuid, Option<OffsetDateTime>)> {
-            self.dormant_updates.lock().unwrap_or_else(|p| p.into_inner()).clone()
+            self.dormant_updates
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
         }
     }
 

@@ -82,15 +82,19 @@ where
 {
     /// Creates the dispatch service and starts the background poll loop.
     ///
+    /// Returns the shared service handle and a [`tokio::task::JoinHandle`]
+    /// for the background task.  During shutdown, cancel the
+    /// [`CancellationToken`] **and** await the handle to ensure in-flight
+    /// dispatch cycles finish their DB writes before the pool is closed.
+    ///
     /// The `poll_interval_secs` parameter controls how often the dispatch loop
-    /// polls for pending messages. The `cancel` token is used for graceful
-    /// shutdown.
+    /// polls for pending messages.
     pub fn new(
         store: S,
         config: NotificationConfig,
         poll_interval_secs: u64,
         cancel: CancellationToken,
-    ) -> Result<Arc<Self>, reqwest::Error> {
+    ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), reqwest::Error> {
         let http_client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(config.webhook_timeout_secs))
             .build()?;
@@ -101,8 +105,8 @@ where
             http_client,
             poll_interval_secs,
         });
-        Self::spawn_dispatch_loop(&service, cancel);
-        Ok(service)
+        let handle = Self::spawn_dispatch_loop(&service, cancel);
+        Ok((service, handle))
     }
 
     /// Returns the current configuration.
@@ -243,12 +247,15 @@ where
         Ok(())
     }
 
-    fn spawn_dispatch_loop(service: &Arc<Self>, cancel: CancellationToken) {
+    fn spawn_dispatch_loop(
+        service: &Arc<Self>,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<()> {
         let weak = Arc::downgrade(service);
         let poll_secs = service.poll_interval_secs;
         tokio::spawn(async move {
             run_dispatch_loop(weak, poll_secs, cancel).await;
-        });
+        })
     }
 }
 
@@ -1135,8 +1142,9 @@ mod tests {
     ) -> Arc<NotificationDispatchService<MockStore>> {
         let cancel = CancellationToken::new();
         cancel.cancel();
-        NotificationDispatchService::new(store, config, 3600, cancel)
-            .unwrap_or_else(|e| panic!("failed to create service: {e}"))
+        let (service, _handle) = NotificationDispatchService::new(store, config, 3600, cancel)
+            .unwrap_or_else(|e| panic!("failed to create service: {e}"));
+        service
     }
 
     fn make_message(method: NotificationMethod, targets_json: &str) -> NotificationMessageRecord {

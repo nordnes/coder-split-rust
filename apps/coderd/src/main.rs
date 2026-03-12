@@ -802,9 +802,7 @@ async fn run() -> Result<(), MainError> {
         enabled: config.telemetry.enabled,
         deployment_id: deployment_metadata.deployment_id,
         version: BuildMetadata::default().version.clone(),
-        flush_interval: std::time::Duration::from_secs(
-            config.worker.telemetry_flush_interval_secs,
-        ),
+        flush_interval: std::time::Duration::from_secs(config.worker.telemetry_flush_interval_secs),
         ..coder_telemetry::TelemetryConfig::default()
     };
     let (mut telemetry_worker, telemetry_reporter) =
@@ -826,7 +824,7 @@ async fn run() -> Result<(), MainError> {
     // instantiate a `Webpusher<Arc<dyn AppStore>>` here and add it as a
     // field on `AppState` so HTTP handlers can send push notifications.
     let notification_cancel = CancellationToken::new();
-    let notification_service = NotificationDispatchService::new(
+    let (notification_service, notification_handle) = NotificationDispatchService::new(
         store.clone(),
         NotificationConfig::default(),
         config.worker.notification_dispatch_interval_secs,
@@ -924,10 +922,15 @@ async fn run() -> Result<(), MainError> {
         state.close_deployment_stats();
     });
 
-    // 4. Cancel the notification dispatch service background loop.
+    // 4. Cancel the notification dispatch loop and wait for in-flight
+    //    dispatch cycles to finish their DB writes before the pool is
+    //    closed in a later step.  Mirrors the autobuild executor pattern.
     coordinator.register("notifications", async move {
         notification_cancel.cancel();
         drop(notification_service);
+        if let Err(e) = notification_handle.await {
+            warn!(error = %e, "notification dispatch task panicked during shutdown");
+        }
     });
 
     // 4b. Cancel the activity bump background worker and await completion
@@ -964,7 +967,7 @@ async fn run() -> Result<(), MainError> {
         }
     });
 
-    // 6. Close the database connection pool last so preceding tasks can
+    // 7. Close the database connection pool last so preceding tasks can
     //    still issue final queries during their own shutdown.
     coordinator.register("database", async move {
         store_pool.close().await;
