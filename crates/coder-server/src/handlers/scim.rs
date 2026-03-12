@@ -230,7 +230,7 @@ pub(crate) async fn scim_post_user(
     scim_user.user_name = new_user.username;
     ensure_scim_schemas(&mut scim_user);
 
-    Ok((StatusCode::OK, Json(&scim_user)).into_response())
+    Ok((StatusCode::CREATED, Json(&scim_user)).into_response())
 }
 
 /// `PATCH /scim/v2/Users/{id}` — updates user status (activate/deactivate).
@@ -408,7 +408,7 @@ async fn find_existing_user(
             .list_users(UserListFilter {
                 search: email.to_owned(),
                 status: None,
-                limit: 1,
+                limit: 100,
                 offset: 0,
             })
             .await?;
@@ -474,13 +474,29 @@ fn sanitize_scim_username(raw: &str, email: &str) -> String {
         })
         .collect();
 
-    // Trim leading/trailing hyphens and truncate to 32 characters.
+    // Trim leading/trailing hyphens, collapse consecutive hyphens, and truncate.
     let trimmed = sanitized.trim_matches('-');
-    let truncated = if trimmed.len() > 32 {
-        &trimmed[..32]
+    // Collapse consecutive hyphens.
+    let mut collapsed = String::with_capacity(trimmed.len());
+    let mut prev_hyphen = false;
+    for c in trimmed.chars() {
+        if c == '-' {
+            if prev_hyphen {
+                continue;
+            }
+            prev_hyphen = true;
+        } else {
+            prev_hyphen = false;
+        }
+        collapsed.push(c);
+    }
+    let truncated = if collapsed.len() > 32 {
+        &collapsed[..32]
     } else {
-        trimmed
+        &collapsed
     };
+    // Re-trim in case truncation left a trailing hyphen.
+    let truncated = truncated.trim_end_matches('-');
 
     // If nothing remains, generate a fallback.
     if truncated.is_empty() {
@@ -746,7 +762,7 @@ mod tests {
         let scim_user = test_scim_user(true);
         let req = bearer_json_request(Method::POST, "/scim/v2/Users", "test-scim-key", &scim_user)?;
         let resp = call(app, req).await?;
-        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::CREATED);
 
         let created: ScimUser = response_typed(resp).await?;
         assert!(!created.id.is_empty());
@@ -788,7 +804,7 @@ mod tests {
         let req1 =
             bearer_json_request(Method::POST, "/scim/v2/Users", "test-scim-key", &scim_user)?;
         let resp1 = call(app.clone(), req1).await?;
-        assert_eq!(resp1.status(), StatusCode::OK);
+        assert_eq!(resp1.status(), StatusCode::CREATED);
         let body1: ScimUser = response_typed(resp1).await?;
 
         // POST again with same username — should return existing user.
@@ -934,6 +950,11 @@ mod tests {
             sanitize_scim_username("Hello World!", "x@y.com"),
             "hello-world"
         );
+    }
+
+    #[test]
+    fn test_sanitize_username_consecutive_special_chars() {
+        assert_eq!(sanitize_scim_username("a__b", "x@y.com"), "a-b");
     }
 
     #[test]
