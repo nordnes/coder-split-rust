@@ -237,29 +237,73 @@ pub(crate) fn strip_markdown(md: &str) -> String {
 }
 
 /// Strips paired Markdown emphasis delimiters (e.g. `**`, `__`, `*`, `_`)
-/// while preserving standalone occurrences (e.g. underscores in `snake_case`).
+/// while preserving standalone occurrences (e.g. underscores in `snake_case`
+/// or asterisks in glob patterns like `*.txt`).
 ///
-/// A delimiter is considered "paired" when it appears twice in the string with
-/// non-empty content between the pair.  Only the outermost pair is removed per
-/// iteration; the function loops until no more pairs are found.
+/// For single-character delimiters (`*`, `_`), a pair is only stripped when the
+/// opening delimiter is at a word boundary (preceded by whitespace or at the
+/// start of the string) and the closing delimiter is also at a word boundary
+/// (followed by whitespace, punctuation, or end of string).  This matches how
+/// CommonMark handles emphasis.
+///
+/// For multi-character delimiters (`**`, `__`), the boundary check is skipped
+/// because these are almost exclusively used for emphasis in practice.
 fn strip_paired_delimiter(input: &str, delim: &str) -> String {
     let mut s = input.to_string();
+    let single_char = delim.len() == 1;
+    let mut search_from = 0;
     loop {
-        if let Some(open) = s.find(delim) {
+        if search_from >= s.len() {
+            break;
+        }
+        if let Some(rel) = s[search_from..].find(delim) {
+            let open = search_from + rel;
             let after_open = open + delim.len();
-            if after_open < s.len() {
-                if let Some(close_offset) = s[after_open..].find(delim) {
-                    if close_offset > 0 {
-                        let close = after_open + close_offset;
-                        // Remove closing delimiter first (higher index) then opening.
-                        s = format!(
-                            "{}{}{}",
-                            &s[..open],
-                            &s[after_open..close],
-                            &s[close + delim.len()..]
-                        );
+            if after_open >= s.len() {
+                break;
+            }
+
+            // For single-char delimiters, require a word boundary before the
+            // opening delimiter: either start-of-string or preceding whitespace.
+            if single_char {
+                if open > 0 {
+                    let prev = s.as_bytes()[open - 1];
+                    if !prev.is_ascii_whitespace() {
+                        // Not at a word boundary – skip this occurrence.
+                        search_from = after_open;
                         continue;
                     }
+                }
+            }
+
+            if let Some(close_offset) = s[after_open..].find(delim) {
+                if close_offset > 0 {
+                    let close = after_open + close_offset;
+                    let after_close = close + delim.len();
+
+                    // For single-char delimiters, require a word boundary after
+                    // the closing delimiter: end-of-string, whitespace, or
+                    // common punctuation.
+                    if single_char && after_close < s.len() {
+                        let next = s.as_bytes()[after_close];
+                        if !next.is_ascii_whitespace()
+                            && !matches!(next, b'.' | b',' | b';' | b':' | b'!' | b'?')
+                        {
+                            search_from = after_open;
+                            continue;
+                        }
+                    }
+
+                    // Remove the pair.
+                    s = format!(
+                        "{}{}{}",
+                        &s[..open],
+                        &s[after_open..close],
+                        &s[after_close..]
+                    );
+                    // Don't advance search_from – there may be nested pairs
+                    // starting at the same position.
+                    continue;
                 }
             }
         }
