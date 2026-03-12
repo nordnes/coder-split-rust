@@ -1,5 +1,6 @@
 //! Audit log listing and test generation handlers.
 
+use super::users::clamp_pagination_limit;
 use super::*;
 
 #[derive(Debug, Default, Deserialize)]
@@ -41,7 +42,7 @@ pub(crate) async fn list_audit_logs(
         .store
         .list_audit_logs(AuditLogListFilter {
             search: query.q,
-            limit: query.limit.unwrap_or(50),
+            limit: clamp_pagination_limit(query.limit.unwrap_or(50)),
             offset: query.offset.unwrap_or_default(),
         })
         .await?;
