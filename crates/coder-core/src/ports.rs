@@ -1558,9 +1558,8 @@ pub trait IdentityStore: Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
@@ -1762,24 +1761,14 @@ pub trait OperationalStore: Send + Sync {
     async fn batch_insert_workspace_build_parameters(
         &self,
         params: Vec<WorkspaceBuildParameterRecord>,
-    ) -> Result<(), StorageError> {
-        let _ = params;
-        Err(StorageError::unavailable(
-            "batch workspace build parameter inserts are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Updates `last_used_at` for multiple workspaces in a single UPDATE statement.
     async fn batch_update_workspace_last_used_at(
         &self,
         ids: &[Uuid],
         last_used_at: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
-        let _ = (ids, last_used_at);
-        Err(StorageError::unavailable(
-            "batch workspace last_used_at updates are not implemented",
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     /// Looks up multiple users by their IDs in a single query.
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
@@ -1798,12 +1787,7 @@ pub trait OperationalStore: Send + Sync {
     async fn upsert_workspace_stats_workspace(
         &self,
         input: &WorkspaceStatsWorkspaceInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Upserts one provisioner job into the deployment-stats foundation tables.
     async fn upsert_provisioner_job_stats(
@@ -1815,43 +1799,24 @@ pub trait OperationalStore: Send + Sync {
     async fn upsert_workspace_build_stats(
         &self,
         input: &WorkspaceBuildStatsInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace build stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Inserts one raw agent-stat sample into the deployment-stats foundation tables.
     async fn insert_workspace_agent_stat(
         &self,
         input: &WorkspaceAgentStatInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace agent stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists persisted workspace proxies for deployment health checks.
     async fn list_workspace_proxies_for_health(
         &self,
-    ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "workspace proxy health is not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError>;
 
     /// Upserts one workspace proxy for deployment health checks.
     async fn upsert_workspace_proxy_for_health(
         &self,
         input: &WorkspaceProxyHealthInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace proxy health is not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists persisted provisioner daemons for deployment health checks.
     async fn list_provisioner_daemons_for_health(
@@ -1894,10 +1859,7 @@ pub trait OperationalStore: Send + Sync {
         &self,
         hash: &str,
         creator_id: Uuid,
-    ) -> Result<Option<FileRecord>, StorageError> {
-        let _ = (hash, creator_id);
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    ) -> Result<Option<FileRecord>, StorageError>;
 
     /// Deletes a file by stable identifier.
     ///
@@ -2715,10 +2677,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         hash: &str,
         creator_id: Uuid,
-    ) -> Result<Option<FileRecord>, StorageError> {
-        let _ = (hash, creator_id);
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    ) -> Result<Option<FileRecord>, StorageError>;
 
     /// Deletes a file by stable identifier.
     ///
@@ -3756,9 +3715,8 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
@@ -3961,12 +3919,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         jwt: &str,
         claims: &Value,
-    ) -> Result<LicenseRecord, StorageError> {
-        let _ = (jwt, claims);
-        Err(StorageError::unavailable(
-            "license storage is not implemented",
-        ))
-    }
+    ) -> Result<LicenseRecord, StorageError>;
 
     /// Deletes a license record by its numeric identifier.
     async fn delete_license(&self, id: i32) -> Result<bool, StorageError>;
@@ -5951,6 +5904,21 @@ where
         AppStore::batch_insert_audit_logs(self, logs).await
     }
 
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        AppStore::batch_insert_workspace_build_parameters(self, params).await
+    }
+
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        AppStore::batch_update_workspace_last_used_at(self, ids, last_used_at).await
+    }
+
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         AppStore::health_settings(self).await
     }
@@ -6082,6 +6050,25 @@ where
         logs: Vec<PersistAuditLogInput>,
     ) -> Result<(), StorageError> {
         (**self).batch_insert_audit_logs(logs).await
+    }
+
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .batch_insert_workspace_build_parameters(params)
+            .await
+    }
+
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        (**self)
+            .batch_update_workspace_last_used_at(ids, last_used_at)
+            .await
     }
 
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
