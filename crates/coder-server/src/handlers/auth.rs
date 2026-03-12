@@ -10,6 +10,7 @@ pub(crate) struct TokenListQuery {
     include_expired: bool,
 }
 
+/// GET /api/v2/apikey-scopes — list available API key scopes.
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     Json(ExternalApiKeyScopes {
         external: PUBLIC_API_KEY_SCOPES
@@ -19,10 +20,12 @@ pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     })
 }
 
+/// GET /api/v2/auth-methods — return the supported authentication methods.
 pub(crate) async fn auth_methods() -> Json<AuthMethods> {
     Json(supported_auth_methods())
 }
 
+/// GET /api/v2/users/first — check whether the initial admin user has been created.
 pub(crate) async fn get_first_user(State(state): State<AppState>) -> Result<Response, AppError> {
     let exists = state.auth.first_user_exists().await?;
     let body = if exists {
@@ -44,6 +47,7 @@ pub(crate) async fn get_first_user(State(state): State<AppState>) -> Result<Resp
         .into_response())
 }
 
+/// POST /api/v2/users/first — create the initial admin user and organization.
 pub(crate) async fn post_first_user(
     State(state): State<AppState>,
     payload: Result<Json<CreateFirstUserRequest>, JsonRejection>,
@@ -78,6 +82,7 @@ pub(crate) async fn post_first_user(
     }
 }
 
+/// POST /api/v2/users/login — authenticate with email and password.
 pub(crate) async fn login_with_password(
     State(state): State<AppState>,
     payload: Result<Json<LoginWithPasswordRequest>, JsonRejection>,
@@ -104,6 +109,7 @@ pub(crate) async fn login_with_password(
     Ok((StatusCode::CREATED, Json(outcome.response)).into_response())
 }
 
+/// POST /api/v2/users/logout — invalidate the current session.
 pub(crate) async fn logout(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -125,6 +131,7 @@ pub(crate) async fn logout(
     Ok((StatusCode::OK, Json(ApiResponse::ok("Logged out!"))).into_response())
 }
 
+/// POST /api/v2/users/validate-password — check password strength without creating a user.
 pub(crate) async fn post_validate_user_password(
     State(state): State<AppState>,
     payload: Result<Json<ValidateUserPasswordRequest>, JsonRejection>,
@@ -141,6 +148,7 @@ pub(crate) async fn post_validate_user_password(
         .into_response()
 }
 
+/// POST /api/v2/users/otp/request — send a one-time passcode for password reset.
 pub(crate) async fn post_request_one_time_passcode(
     State(state): State<AppState>,
     payload: Result<Json<RequestOneTimePasscodeRequest>, JsonRejection>,
@@ -157,6 +165,7 @@ pub(crate) async fn post_request_one_time_passcode(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// POST /api/v2/users/otp/change-password — reset password using a one-time passcode.
 pub(crate) async fn post_change_password_with_one_time_passcode(
     State(state): State<AppState>,
     payload: Result<Json<ChangePasswordWithOneTimePasscodeRequest>, JsonRejection>,
@@ -188,6 +197,7 @@ pub(crate) async fn post_change_password_with_one_time_passcode(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// GET /api/v2/externalauth/github/device — error response when GitHub OAuth is not configured.
 pub(crate) async fn get_github_oauth_device_disabled() -> Response {
     (
         StatusCode::BAD_REQUEST,
@@ -792,7 +802,7 @@ async fn create_oauth_user_and_link(
     Ok(user)
 }
 
-/// Builds an HTTP 303 redirect response with the session token cookie set.
+/// Build an HTTP 303 redirect response that sets the session cookie after OAuth login.
 fn build_oauth_redirect_response(
     session_token: &str,
     redirect_path: &str,
@@ -829,6 +839,7 @@ fn build_oauth_redirect_response(
     response
 }
 
+/// GET /api/v2/debug/user-link — return the external auth link for a user (debug only).
 pub(crate) async fn get_user_debug_link(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -863,6 +874,7 @@ pub(crate) async fn get_user_debug_link(
     Ok((StatusCode::OK, Json(claims)).into_response())
 }
 
+/// POST /api/v2/users/me/convert-login — convert a user's login method (e.g. password to OIDC).
 pub(crate) async fn post_convert_login(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -887,6 +899,7 @@ pub(crate) async fn post_convert_login(
     Ok((StatusCode::BAD_REQUEST, Json(ApiResponse::ok(message))).into_response())
 }
 
+/// Create a session-scoped API key for the authenticated user.
 pub(crate) async fn create_session_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -936,6 +949,7 @@ pub(crate) async fn create_session_api_key(
     Ok((StatusCode::CREATED, Json(result.response)).into_response())
 }
 
+/// POST /api/v2/users/:user/keys/tokens — create a long-lived token API key.
 pub(crate) async fn create_token_api_key(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -990,6 +1004,7 @@ pub(crate) async fn create_token_api_key(
     Ok((StatusCode::CREATED, Json(result.response)).into_response())
 }
 
+/// GET /api/v2/users/:user/keys/tokens — list token API keys for a user.
 pub(crate) async fn list_token_api_keys(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -1017,6 +1032,7 @@ pub(crate) async fn list_token_api_keys(
     Ok((StatusCode::OK, Json(keys)).into_response())
 }
 
+/// GET /api/v2/users/:user/keys/:key — return a single API key by ID.
 pub(crate) async fn get_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
@@ -1037,6 +1053,7 @@ pub(crate) async fn get_api_key(
     Ok((StatusCode::OK, Json(key)).into_response())
 }
 
+/// GET /api/v2/users/:user/keys/tokens/:name — return a token API key by name.
 pub(crate) async fn get_api_key_by_name(
     State(state): State<AppState>,
     Path((user, keyname)): Path<(String, String)>,
@@ -1057,6 +1074,7 @@ pub(crate) async fn get_api_key_by_name(
     Ok((StatusCode::OK, Json(key)).into_response())
 }
 
+/// DELETE /api/v2/users/:user/keys/:key — permanently delete an API key.
 pub(crate) async fn delete_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
@@ -1106,6 +1124,7 @@ pub(crate) async fn delete_api_key(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// PUT /api/v2/users/:user/keys/:key/expire — mark an API key as expired.
 pub(crate) async fn expire_api_key(
     State(state): State<AppState>,
     Path((user, keyid)): Path<(String, String)>,
@@ -1155,6 +1174,7 @@ pub(crate) async fn expire_api_key(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
+/// GET /api/v2/users/:user/keys/tokens/tokenconfig — return token creation configuration.
 pub(crate) async fn get_token_config(
     State(state): State<AppState>,
     Path(user): Path<String>,
@@ -1174,6 +1194,7 @@ pub(crate) async fn get_token_config(
     Ok((StatusCode::OK, Json(config)).into_response())
 }
 
+/// POST /api/v2/authcheck — verify whether the caller is authorized for a given RBAC action.
 pub(crate) async fn post_authcheck(
     State(state): State<AppState>,
     headers: HeaderMap,

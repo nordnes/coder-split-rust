@@ -859,6 +859,7 @@ pub fn generate_git_ssh_key(comment: &str) -> Result<GeneratedGitSshKey, GitSshK
 mod tests {
     use super::*;
     use async_trait::async_trait;
+    use coder_core::identity::UserRecord;
     use coder_core::{
         DeploymentMetadata, DeploymentStore, HealthSeverity, OperationalStore,
         ProvisionerDaemonHealthRecord, StorageError, WorkspaceProxyHealthRecord,
@@ -944,6 +945,13 @@ mod tests {
                 workspaces: Default::default(),
                 session_count: Default::default(),
             })
+        }
+
+        async fn find_users_by_ids(
+            &self,
+            _ids: &[uuid::Uuid],
+        ) -> Result<Vec<UserRecord>, StorageError> {
+            Ok(Vec::new())
         }
     }
 
