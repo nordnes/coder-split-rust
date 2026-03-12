@@ -3452,6 +3452,17 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM files WHERE id = $1")
+            .bind(file_id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_external_auth_links(
         &self,
         user_id: Uuid,
