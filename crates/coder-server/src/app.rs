@@ -1348,10 +1348,10 @@ pub(crate) mod tests {
         HealthSettings, InsertAgentLogInput, InsertChatInput, InsertChatMessageInput,
         InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
         InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LogFormat,
-        LoginType, LoginWithPasswordRequest, NotificationMessageRecord, NotificationMessageStatus,
-        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
-        PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord,
+        LogFormat, LoginType, LoginWithPasswordRequest, NotificationMessageRecord,
+        NotificationMessageStatus, OrganizationMemberListFilter, OrganizationMemberRecord,
+        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
         ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
         ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
@@ -1498,6 +1498,11 @@ pub(crate) mod tests {
         // User deletions and status changes
         user_deletions: Mutex<Vec<UserDeletedRecord>>,
         user_status_changes: Mutex<Vec<UserStatusChangeRecord>>,
+        // Licenses
+        licenses: Mutex<HashMap<i32, LicenseRecord>>,
+        license_next_id: Mutex<i32>,
+        // VAPID keys
+        vapid_keys: Mutex<Option<crate::api::VapidKeyPair>>,
     }
 
     impl FakeStore {
@@ -1582,6 +1587,9 @@ pub(crate) mod tests {
                 group_members: Mutex::new(Vec::new()),
                 user_deletions: Mutex::new(Vec::new()),
                 user_status_changes: Mutex::new(Vec::new()),
+                licenses: Mutex::new(HashMap::new()),
+                license_next_id: Mutex::new(1),
+                vapid_keys: Mutex::new(None),
             }
         }
 
@@ -4901,6 +4909,48 @@ pub(crate) mod tests {
                 .is_some())
         }
 
+        async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError> {
+            let mut subs = self
+                .webpush_subscriptions
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            subs.retain(|_, v| !ids.contains(&v.id));
+            Ok(())
+        }
+
+        async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError> {
+            self.webpush_subscriptions
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .clear();
+            Ok(())
+        }
+
+        async fn get_webpush_vapid_keys(
+            &self,
+        ) -> Result<Option<crate::api::VapidKeyPair>, StorageError> {
+            Ok(self
+                .vapid_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .clone())
+        }
+
+        async fn upsert_webpush_vapid_keys(
+            &self,
+            public_key: &str,
+            private_key: &str,
+        ) -> Result<(), StorageError> {
+            *self
+                .vapid_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))? =
+                Some(crate::api::VapidKeyPair {
+                    public_key: public_key.to_owned(),
+                    private_key: private_key.to_owned(),
+                });
+            Ok(())
+        }
         // ----- Template Store Methods -----
 
         async fn list_templates(
@@ -7620,6 +7670,51 @@ pub(crate) mod tests {
                 .max()
                 .unwrap_or(0);
             Ok(max + 1)
+        }
+
+        async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError> {
+            let licenses = self
+                .licenses
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let mut result: Vec<LicenseRecord> = licenses.values().cloned().collect();
+            result.sort_by_key(|l| l.id);
+            Ok(result)
+        }
+
+        async fn insert_license(
+            &self,
+            jwt: &str,
+            claims: &Value,
+        ) -> Result<LicenseRecord, StorageError> {
+            let mut licenses = self
+                .licenses
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let mut next_id = self
+                .license_next_id
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let id = *next_id;
+            *next_id += 1;
+            let record = LicenseRecord {
+                id,
+                uuid: Uuid::new_v4(),
+                uploaded_at: OffsetDateTime::now_utc(),
+                jwt: jwt.to_owned(),
+                claims: claims.clone(),
+            };
+            licenses.insert(id, record.clone());
+            Ok(record)
+        }
+
+        async fn delete_license(&self, id: i32) -> Result<bool, StorageError> {
+            Ok(self
+                .licenses
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .remove(&id)
+                .is_some())
         }
     }
 
@@ -31894,6 +31989,134 @@ pub(crate) mod tests {
             body.get("deployment_id").is_some(),
             "response should include 'deployment_id' field"
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Enterprise store method tests (licenses, VAPID keys, webpush bulk delete)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn license_crud_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        // Initially empty
+        let licenses = store.list_licenses().await?;
+        assert!(licenses.is_empty(), "expected no licenses initially");
+
+        // Insert a license
+        let claims = json!({"license_expires": 1893456000, "features": {"audit_log": true}});
+        let record = store.insert_license("test.jwt.token", &claims).await?;
+        assert_eq!(record.jwt, "test.jwt.token");
+        assert_eq!(record.claims, claims);
+
+        // List should return it
+        let licenses = store.list_licenses().await?;
+        assert_eq!(licenses.len(), 1);
+        assert_eq!(licenses[0].id, record.id);
+
+        // Insert another license
+        let claims2 = json!({"license_expires": 1893456000, "features": {"ha": true}});
+        let record2 = store.insert_license("test2.jwt.token", &claims2).await?;
+        let licenses = store.list_licenses().await?;
+        assert_eq!(licenses.len(), 2);
+
+        // Delete the first license
+        let deleted = store.delete_license(record.id).await?;
+        assert!(deleted, "should have deleted a license");
+        let licenses = store.list_licenses().await?;
+        assert_eq!(licenses.len(), 1);
+        assert_eq!(licenses[0].id, record2.id);
+
+        // Delete non-existent license
+        let deleted = store.delete_license(999).await?;
+        assert!(!deleted, "should not have deleted anything");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn vapid_keys_crud_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        // Initially no keys
+        let keys = store.get_webpush_vapid_keys().await?;
+        assert!(keys.is_none(), "expected no VAPID keys initially");
+
+        // Upsert keys
+        store
+            .upsert_webpush_vapid_keys("public_key_123", "private_key_456")
+            .await?;
+
+        let keys = store.get_webpush_vapid_keys().await?;
+        let keys = keys.expect("expected VAPID keys to be present");
+        assert_eq!(keys.public_key, "public_key_123");
+        assert_eq!(keys.private_key, "private_key_456");
+
+        // Upsert again to update
+        store
+            .upsert_webpush_vapid_keys("new_public", "new_private")
+            .await?;
+        let keys = store
+            .get_webpush_vapid_keys()
+            .await?
+            .expect("expected VAPID keys");
+        assert_eq!(keys.public_key, "new_public");
+        assert_eq!(keys.private_key, "new_private");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_bulk_delete_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let user_id = Uuid::new_v4();
+        let endpoint1 = "https://push.example.com/sub1";
+        let endpoint2 = "https://push.example.com/sub2";
+        let endpoint3 = "https://push.example.com/sub3";
+
+        // Insert subscriptions
+        let sub1 = store
+            .insert_webpush_subscription(user_id, endpoint1, "p256dh1", "auth1")
+            .await?;
+        let sub2 = store
+            .insert_webpush_subscription(user_id, endpoint2, "p256dh2", "auth2")
+            .await?;
+        let sub3 = store
+            .insert_webpush_subscription(user_id, endpoint3, "p256dh3", "auth3")
+            .await?;
+
+        // Delete specific subscriptions by ID
+        store
+            .delete_webpush_subscriptions(&[sub1.id, sub3.id])
+            .await?;
+        let remaining = store.get_webpush_subscriptions_by_user_id(user_id).await?;
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].id, sub2.id);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_delete_all_via_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let user_id = Uuid::new_v4();
+
+        // Insert subscriptions
+        store
+            .insert_webpush_subscription(user_id, "https://push.example.com/a", "p256dh", "auth")
+            .await?;
+        store
+            .insert_webpush_subscription(user_id, "https://push.example.com/b", "p256dh", "auth")
+            .await?;
+
+        // Delete all
+        store.delete_all_webpush_subscriptions().await?;
+        let remaining = store.get_webpush_subscriptions_by_user_id(user_id).await?;
+        assert!(remaining.is_empty(), "all subscriptions should be deleted");
+
         Ok(())
     }
 }

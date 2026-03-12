@@ -4632,6 +4632,77 @@ impl AppStore for PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError> {
+        sqlx::query("DELETE FROM webpush_subscriptions WHERE id = ANY($1)")
+            .bind(ids)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError> {
+        sqlx::query("TRUNCATE TABLE webpush_subscriptions")
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_webpush_vapid_keys(&self) -> Result<Option<VapidKeyPair>, StorageError> {
+        let public_key: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM site_configs WHERE key = 'webpush_vapid_public_key'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        let private_key: Option<String> = sqlx::query_scalar(
+            "SELECT value FROM site_configs WHERE key = 'webpush_vapid_private_key'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        match (public_key, private_key) {
+            (Some(public_key), Some(private_key)) if !public_key.is_empty() => {
+                Ok(Some(VapidKeyPair {
+                    public_key,
+                    private_key,
+                }))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    #[instrument(skip(self, public_key, private_key), err(level = tracing::Level::WARN))]
+    async fn upsert_webpush_vapid_keys(
+        &self,
+        public_key: &str,
+        private_key: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES
+                 ('webpush_vapid_public_key', $1),
+                 ('webpush_vapid_private_key', $2)
+             ON CONFLICT (key)
+             DO UPDATE SET value = EXCLUDED.value WHERE site_configs.key = EXCLUDED.key",
+        )
+        .bind(public_key)
+        .bind(private_key)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Notification message dispatch
     // -----------------------------------------------------------------------
@@ -7653,5 +7724,82 @@ impl AppStore for PostgresStore {
             .map_err(storage_error)?
         };
         Ok(row.map(template_version_record_from_row))
+    }
+
+    // -----------------------------------------------------------------------
+    // Licenses
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredLicenseRow>(
+            "SELECT id, uuid, uploaded_at, jwt, exp FROM licenses ORDER BY id",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let claims = decode_jwt_claims(&r.jwt);
+                LicenseRecord {
+                    id: r.id,
+                    uuid: r.uuid,
+                    uploaded_at: r.uploaded_at,
+                    jwt: r.jwt,
+                    claims,
+                }
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, jwt, claims), err(level = tracing::Level::WARN))]
+    async fn insert_license(
+        &self,
+        jwt: &str,
+        claims: &Value,
+    ) -> Result<LicenseRecord, StorageError> {
+        let exp = claims
+            .get("license_expires")
+            .and_then(|v| v.as_i64())
+            .or_else(|| claims.get("exp").and_then(|v| v.as_i64()))
+            .ok_or_else(|| {
+                StorageError::invalid_data(
+                    "license claims must contain 'license_expires' or 'exp' field",
+                )
+            })?;
+        let exp_dt = OffsetDateTime::from_unix_timestamp(exp)
+            .map_err(|e| StorageError::invalid_data(format!("invalid expiry timestamp: {e}")))?;
+
+        let row = sqlx::query_as::<_, StoredLicenseRow>(
+            "INSERT INTO licenses (uploaded_at, jwt, exp, uuid)
+             VALUES (NOW(), $1, $2, gen_random_uuid())
+             RETURNING id, uuid, uploaded_at, jwt, exp",
+        )
+        .bind(jwt)
+        .bind(exp_dt)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(LicenseRecord {
+            id: row.id,
+            uuid: row.uuid,
+            uploaded_at: row.uploaded_at,
+            jwt: row.jwt,
+            claims: claims.clone(),
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_license(&self, id: i32) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM licenses WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
     }
 }
