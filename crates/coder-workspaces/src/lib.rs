@@ -1062,6 +1062,10 @@ async fn activity_bump_once<S: ActivityBumpStore>(
         if ws.build_transition != "start" {
             continue;
         }
+        // Skip workspaces whose latest build did not succeed.
+        if ws.job_status != "succeeded" {
+            continue;
+        }
         // Skip if the template has no activity bump configured.
         if ws.activity_bump_ns <= 0 {
             continue;
