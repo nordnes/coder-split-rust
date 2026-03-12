@@ -19,7 +19,7 @@ DO $$ BEGIN
     ) THEN
         ALTER TABLE provisioner_job_logs ALTER COLUMN source DROP DEFAULT;
         ALTER TABLE provisioner_job_logs ALTER COLUMN source TYPE log_source USING source::log_source;
-        ALTER TABLE provisioner_job_logs ALTER COLUMN source SET DEFAULT 'provisioner'::log_source;
+        ALTER TABLE provisioner_job_logs ALTER COLUMN source SET DEFAULT 'provisioner_daemon'::log_source;
 
         ALTER TABLE provisioner_job_logs ALTER COLUMN level DROP DEFAULT;
         ALTER TABLE provisioner_job_logs ALTER COLUMN level TYPE log_level USING level::log_level;
@@ -52,8 +52,10 @@ DO $$ BEGIN
     ) THEN
         ALTER TABLE provisioner_jobs ALTER COLUMN provisioner DROP DEFAULT;
         ALTER TABLE provisioner_jobs ALTER COLUMN provisioner TYPE provisioner_type USING provisioner::provisioner_type;
+        ALTER TABLE provisioner_jobs ALTER COLUMN provisioner SET DEFAULT 'terraform'::provisioner_type;
 
         ALTER TABLE provisioner_jobs ALTER COLUMN "type" DROP DEFAULT;
         ALTER TABLE provisioner_jobs ALTER COLUMN "type" TYPE provisioner_job_type USING "type"::provisioner_job_type;
+        ALTER TABLE provisioner_jobs ALTER COLUMN "type" SET DEFAULT 'template_version_import'::provisioner_job_type;
     END IF;
 END $$;
