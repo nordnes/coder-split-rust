@@ -315,3 +315,363 @@ pub(crate) async fn insights_user_status_counts(
         .await?;
     Ok((StatusCode::OK, Json(response)).into_response())
 }
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::build_router;
+    use crate::app::tests::{create_and_login, test_state};
+    use axum::body::{Body, to_bytes};
+    use axum::http::{Method, Request, Response as HttpResponse};
+    use tower::ServiceExt;
+
+    type TestResult = Result<(), Box<dyn std::error::Error>>;
+
+    async fn call(
+        app: axum::Router,
+        request: Request<Body>,
+    ) -> Result<HttpResponse<Body>, Box<dyn std::error::Error>> {
+        let response = match app.oneshot(request).await {
+            Ok(response) => response,
+            Err(never) => match never {},
+        };
+        Ok(response)
+    }
+
+    fn auth_request(
+        method: Method,
+        uri: &str,
+        session_token: &str,
+    ) -> Result<Request<Body>, http::Error> {
+        Request::builder()
+            .method(method)
+            .uri(uri)
+            .header("Coder-Session-Token", session_token)
+            .body(Body::empty())
+    }
+
+    async fn resp_json(
+        response: HttpResponse<Body>,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    // ── parse helpers ─────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_template_ids_empty() {
+        assert!(parse_template_ids(&None).is_empty());
+        assert!(parse_template_ids(&Some(String::new())).is_empty());
+    }
+
+    #[test]
+    fn test_parse_template_ids_valid() {
+        let id1 = Uuid::new_v4();
+        let id2 = Uuid::new_v4();
+        let raw = Some(format!("{id1},{id2}"));
+        let result = parse_template_ids(&raw);
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], id1);
+        assert_eq!(result[1], id2);
+    }
+
+    #[test]
+    fn test_parse_template_ids_ignores_invalid() {
+        let id1 = Uuid::new_v4();
+        let raw = Some(format!("{id1},not-a-uuid,"));
+        let result = parse_template_ids(&raw);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0], id1);
+    }
+
+    #[test]
+    fn test_parse_rfc3339_valid() {
+        let raw = Some("2024-01-01T00:00:00Z".to_owned());
+        assert!(parse_rfc3339(&raw).is_some());
+    }
+
+    #[test]
+    fn test_parse_rfc3339_invalid() {
+        assert!(parse_rfc3339(&None).is_none());
+        assert!(parse_rfc3339(&Some("not-a-date".to_owned())).is_none());
+    }
+
+    // ── DAUs handler ──────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_daus_unauthenticated() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/insights/daus")
+            .body(Body::empty())?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_daus_returns_ok() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(Method::GET, "/api/v2/insights/daus", &token)?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp_json(resp).await?;
+        assert!(body.get("tz_hour_offset").is_some());
+        assert!(body.get("entries").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_daus_invalid_tz_offset() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(Method::GET, "/api/v2/insights/daus?tz_offset=99", &token)?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ── Template insights handler ─────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_template_insights_unauthenticated() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z")
+            .body(Body::empty())?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_template_insights_missing_start_time() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/templates?end_time=2024-01-02T00:00:00Z",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_template_insights_returns_ok() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp_json(resp).await?;
+        assert!(body.get("report").is_some());
+        assert!(body.get("interval_reports").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_template_insights_week_interval() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-08T00:00:00Z&interval=week",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_template_insights_invalid_interval() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/templates?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z&interval=month",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ── User activity insights handler ────────────────────────────────
+
+    #[tokio::test]
+    async fn test_user_activity_unauthenticated() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/insights/user-activity?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z")
+            .body(Body::empty())?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_user_activity_returns_ok() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/user-activity?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp_json(resp).await?;
+        assert!(body.get("report").is_some());
+        let report = body.get("report").ok_or("missing report")?;
+        assert!(report.get("users").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_user_activity_missing_end_time() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/user-activity?start_time=2024-01-01T00:00:00Z",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ── User latency insights handler ─────────────────────────────────
+
+    #[tokio::test]
+    async fn test_user_latency_unauthenticated() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/insights/user-latency?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z")
+            .body(Body::empty())?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_user_latency_returns_ok() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/user-latency?start_time=2024-01-01T00:00:00Z&end_time=2024-01-02T00:00:00Z",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp_json(resp).await?;
+        assert!(body.get("report").is_some());
+        let report = body.get("report").ok_or("missing report")?;
+        assert!(report.get("users").is_some());
+        Ok(())
+    }
+
+    // ── User status counts handler ────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_user_status_counts_unauthenticated() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/insights/user-status-counts")
+            .body(Body::empty())?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_user_status_counts_returns_ok() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(Method::GET, "/api/v2/insights/user-status-counts", &token)?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = resp_json(resp).await?;
+        assert!(body.get("status_counts").is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_user_status_counts_with_timezone() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/user-status-counts?timezone=America/Chicago",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_user_status_counts_with_tz_offset() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/user-status-counts?tz_offset=5",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_user_status_counts_invalid_tz_offset() -> TestResult {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let req = auth_request(
+            Method::GET,
+            "/api/v2/insights/user-status-counts?tz_offset=99",
+            &token,
+        )?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+}
