@@ -1129,6 +1129,183 @@ mod tests {
                 .push(message_id);
             Ok(true)
         }
+
+        // ----- OAuth2 Provider (stubs for test mock) -----
+
+        async fn list_oauth2_provider_apps(
+            &self,
+        ) -> Result<Vec<coder_core::identity::OAuth2ProviderAppRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn create_oauth2_provider_app(
+            &self,
+            _input: &coder_core::identity::CreateOAuth2ProviderAppInput,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_by_id(
+            &self,
+            _app_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn update_oauth2_provider_app(
+            &self,
+            _input: &coder_core::identity::UpdateOAuth2ProviderAppInput,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_oauth2_provider_app(
+            &self,
+            _app_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn list_oauth2_provider_app_secrets(
+            &self,
+            _app_id: Uuid,
+        ) -> Result<Vec<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn create_oauth2_provider_app_secret(
+            &self,
+            _app_id: Uuid,
+            _secret_prefix: &[u8],
+            _hashed_secret: &[u8],
+            _display_secret: &str,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppSecretRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_secret_by_prefix(
+            &self,
+            _secret_prefix: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn update_oauth2_provider_app_secret_last_used(
+            &self,
+            _secret_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_oauth2_provider_app_secret(
+            &self,
+            _secret_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_secret_by_id(
+            &self,
+            _secret_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppSecretRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn create_oauth2_provider_app_code(
+            &self,
+            _app_id: Uuid,
+            _user_id: Uuid,
+            _secret_prefix: &[u8],
+            _hashed_secret: &[u8],
+            _expires_at: time::OffsetDateTime,
+            _resource_uri: &str,
+            _code_challenge: &str,
+            _code_challenge_method: &str,
+            _state_hash: Option<&str>,
+            _redirect_uri: Option<&str>,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppCodeRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_code_by_id(
+            &self,
+            _code_id: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppCodeRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_code_by_prefix(
+            &self,
+            _secret_prefix: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppCodeRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_oauth2_provider_app_code(
+            &self,
+            _code_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_oauth2_provider_app_codes_by_app_and_user(
+            &self,
+            _app_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<u64, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn create_oauth2_provider_app_token(
+            &self,
+            _input: &coder_core::identity::CreateOAuth2ProviderAppTokenInput,
+        ) -> Result<coder_core::identity::OAuth2ProviderAppTokenRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_token_by_prefix(
+            &self,
+            _hash_prefix: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_token_by_api_key_id(
+            &self,
+            _api_key_id: &str,
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_oauth2_provider_app_token_by_refresh_hash(
+            &self,
+            _refresh_hash: &[u8],
+        ) -> Result<Option<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_oauth2_provider_app_token(
+            &self,
+            _token_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn list_oauth2_provider_app_tokens_by_app_and_user(
+            &self,
+            _app_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<Vec<coder_core::identity::OAuth2ProviderAppTokenRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_oauth2_provider_app_tokens_by_app_and_user(
+            &self,
+            _app_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<u64, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
     }
 
     // ── Helpers ──────────────────────────────────────────────
