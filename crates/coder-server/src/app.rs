@@ -34806,3 +34806,363 @@ pub(crate) mod tests {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod store_method_tests {
+    use std::error::Error;
+
+    use time::OffsetDateTime;
+    use uuid::Uuid;
+
+    use coder_core::UpsertExternalAuthLinkInput;
+
+    // Re-use test infrastructure from the parent tests module.
+    use super::tests::test_state;
+
+    // -----------------------------------------------------------------------
+    // FakeStore: upsert_git_ssh_key
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_store_upsert_git_ssh_key_inserts_new_key() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let user_id = Uuid::new_v4();
+
+        // Initially no key exists.
+        let existing = state.store.find_git_ssh_key(user_id).await?;
+        assert!(existing.is_none());
+
+        // Upsert creates the key.
+        let key = state
+            .store
+            .upsert_git_ssh_key(
+                user_id,
+                "ssh-ed25519 AAAA public",
+                "-----BEGIN PRIVATE-----",
+            )
+            .await?;
+
+        assert_eq!(key.user_id, user_id);
+        assert_eq!(key.public_key, "ssh-ed25519 AAAA public");
+        assert_eq!(key.private_key, "-----BEGIN PRIVATE-----");
+
+        // find_git_ssh_key returns it.
+        let found = state.store.find_git_ssh_key(user_id).await?;
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().public_key, "ssh-ed25519 AAAA public");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_upsert_git_ssh_key_updates_existing() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let user_id = Uuid::new_v4();
+
+        let key1 = state
+            .store
+            .upsert_git_ssh_key(user_id, "pub1", "priv1")
+            .await?;
+
+        let key2 = state
+            .store
+            .upsert_git_ssh_key(user_id, "pub2", "priv2")
+            .await?;
+
+        assert_eq!(key2.user_id, user_id);
+        assert_eq!(key2.public_key, "pub2");
+        assert_eq!(key2.private_key, "priv2");
+        assert!(key2.updated_at >= key1.updated_at);
+
+        // Only the latest key is returned.
+        let found = state.store.find_git_ssh_key(user_id).await?;
+        assert_eq!(found.unwrap().public_key, "pub2");
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // FakeStore: find_external_auth_link
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_store_find_external_auth_link_returns_none_when_missing()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let result = state
+            .store
+            .find_external_auth_link(Uuid::new_v4(), "github")
+            .await?;
+        assert!(result.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_find_external_auth_link_returns_existing() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let user_id = Uuid::new_v4();
+
+        let input = UpsertExternalAuthLinkInput {
+            provider_id: "github".to_owned(),
+            access_token: "gho_abc123".to_owned(),
+            refresh_token: "ghr_xyz789".to_owned(),
+            token_type: "Bearer".to_owned(),
+            scopes: vec!["repo".to_owned(), "read:user".to_owned()],
+            expires_at: OffsetDateTime::now_utc(),
+            authenticated: true,
+            validate_error: String::new(),
+            refresh_error: String::new(),
+            last_validated_at: Some(OffsetDateTime::now_utc()),
+            last_refreshed_at: None,
+            user: None,
+            installations: vec![],
+            app_installable: false,
+        };
+
+        state
+            .store
+            .upsert_external_auth_link(user_id, &input)
+            .await?;
+
+        let found = state
+            .store
+            .find_external_auth_link(user_id, "github")
+            .await?;
+        assert!(found.is_some());
+        let link = found.unwrap();
+        assert_eq!(link.provider_id, "github");
+        assert_eq!(link.access_token, "gho_abc123");
+        assert!(link.has_refresh_token);
+        assert!(link.authenticated);
+        assert_eq!(link.scopes, vec!["repo", "read:user"]);
+
+        // Different provider returns None.
+        let other = state
+            .store
+            .find_external_auth_link(user_id, "gitlab")
+            .await?;
+        assert!(other.is_none());
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // FakeStore: delete_external_auth_link
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_store_delete_external_auth_link_returns_false_when_missing()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let deleted = state
+            .store
+            .delete_external_auth_link(Uuid::new_v4(), "github")
+            .await?;
+        assert!(!deleted);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_delete_external_auth_link_removes_existing() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let user_id = Uuid::new_v4();
+
+        let input = UpsertExternalAuthLinkInput {
+            provider_id: "github".to_owned(),
+            access_token: "tok".to_owned(),
+            refresh_token: String::new(),
+            token_type: "Bearer".to_owned(),
+            scopes: vec![],
+            expires_at: OffsetDateTime::now_utc(),
+            authenticated: true,
+            validate_error: String::new(),
+            refresh_error: String::new(),
+            last_validated_at: None,
+            last_refreshed_at: None,
+            user: None,
+            installations: vec![],
+            app_installable: false,
+        };
+
+        state
+            .store
+            .upsert_external_auth_link(user_id, &input)
+            .await?;
+
+        let deleted = state
+            .store
+            .delete_external_auth_link(user_id, "github")
+            .await?;
+        assert!(deleted);
+
+        // Confirm it's gone.
+        let found = state
+            .store
+            .find_external_auth_link(user_id, "github")
+            .await?;
+        assert!(found.is_none());
+
+        // Deleting again returns false.
+        let deleted_again = state
+            .store
+            .delete_external_auth_link(user_id, "github")
+            .await?;
+        assert!(!deleted_again);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // FakeStore: upsert_external_auth_link
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_store_upsert_external_auth_link_creates_new() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let user_id = Uuid::new_v4();
+
+        let input = UpsertExternalAuthLinkInput {
+            provider_id: "gitlab".to_owned(),
+            access_token: "glpat-abc".to_owned(),
+            refresh_token: "refresh-tok".to_owned(),
+            token_type: "Bearer".to_owned(),
+            scopes: vec!["api".to_owned()],
+            expires_at: OffsetDateTime::now_utc(),
+            authenticated: true,
+            validate_error: String::new(),
+            refresh_error: String::new(),
+            last_validated_at: None,
+            last_refreshed_at: None,
+            user: None,
+            installations: vec![],
+            app_installable: true,
+        };
+
+        let record = state
+            .store
+            .upsert_external_auth_link(user_id, &input)
+            .await?;
+        assert_eq!(record.provider_id, "gitlab");
+        assert_eq!(record.access_token, "glpat-abc");
+        assert!(record.has_refresh_token);
+        assert!(record.app_installable);
+        assert_eq!(record.scopes, vec!["api"]);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_upsert_external_auth_link_updates_existing() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let user_id = Uuid::new_v4();
+
+        let input1 = UpsertExternalAuthLinkInput {
+            provider_id: "github".to_owned(),
+            access_token: "tok1".to_owned(),
+            refresh_token: "ref1".to_owned(),
+            token_type: "Bearer".to_owned(),
+            scopes: vec!["repo".to_owned()],
+            expires_at: OffsetDateTime::now_utc(),
+            authenticated: true,
+            validate_error: String::new(),
+            refresh_error: String::new(),
+            last_validated_at: None,
+            last_refreshed_at: None,
+            user: None,
+            installations: vec![],
+            app_installable: false,
+        };
+
+        let record1 = state
+            .store
+            .upsert_external_auth_link(user_id, &input1)
+            .await?;
+
+        let input2 = UpsertExternalAuthLinkInput {
+            provider_id: "github".to_owned(),
+            access_token: "tok2".to_owned(),
+            refresh_token: String::new(),
+            token_type: "Bearer".to_owned(),
+            scopes: vec!["repo".to_owned(), "user".to_owned()],
+            expires_at: OffsetDateTime::now_utc(),
+            authenticated: false,
+            validate_error: "token expired".to_owned(),
+            refresh_error: String::new(),
+            last_validated_at: None,
+            last_refreshed_at: None,
+            user: None,
+            installations: vec![],
+            app_installable: false,
+        };
+
+        let record2 = state
+            .store
+            .upsert_external_auth_link(user_id, &input2)
+            .await?;
+
+        assert_eq!(record2.provider_id, "github");
+        assert_eq!(record2.access_token, "tok2");
+        assert!(!record2.has_refresh_token);
+        assert!(!record2.authenticated);
+        assert_eq!(record2.validate_error, "token expired");
+        // created_at should be preserved from the first insert.
+        assert_eq!(record2.created_at, record1.created_at);
+        assert!(record2.updated_at >= record1.updated_at);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // FakeStore: list_external_auth_links filters by user
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_store_list_external_auth_links_returns_user_links() -> Result<(), Box<dyn Error>>
+    {
+        let state = test_state(true)?;
+        let user_a = Uuid::new_v4();
+        let user_b = Uuid::new_v4();
+
+        let make_input = |provider: &str| UpsertExternalAuthLinkInput {
+            provider_id: provider.to_owned(),
+            access_token: "tok".to_owned(),
+            refresh_token: String::new(),
+            token_type: "Bearer".to_owned(),
+            scopes: vec![],
+            expires_at: OffsetDateTime::now_utc(),
+            authenticated: true,
+            validate_error: String::new(),
+            refresh_error: String::new(),
+            last_validated_at: None,
+            last_refreshed_at: None,
+            user: None,
+            installations: vec![],
+            app_installable: false,
+        };
+
+        state
+            .store
+            .upsert_external_auth_link(user_a, &make_input("github"))
+            .await?;
+        state
+            .store
+            .upsert_external_auth_link(user_a, &make_input("gitlab"))
+            .await?;
+        state
+            .store
+            .upsert_external_auth_link(user_b, &make_input("bitbucket"))
+            .await?;
+
+        let links_a = state.store.list_external_auth_links(user_a).await?;
+        assert_eq!(links_a.len(), 2);
+
+        let links_b = state.store.list_external_auth_links(user_b).await?;
+        assert_eq!(links_b.len(), 1);
+        assert_eq!(links_b[0].provider_id, "bitbucket");
+
+        let links_empty = state.store.list_external_auth_links(Uuid::new_v4()).await?;
+        assert!(links_empty.is_empty());
+
+        Ok(())
+    }
+}
