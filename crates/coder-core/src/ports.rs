@@ -1967,12 +1967,7 @@ pub trait OperationalStore: Send + Sync {
     async fn upsert_provisioner_job_stats(
         &self,
         input: &ProvisionerJobStatsInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "provisioner stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Upserts one workspace build into the deployment-stats foundation tables.
     async fn upsert_workspace_build_stats(
@@ -2019,22 +2014,13 @@ pub trait OperationalStore: Send + Sync {
     /// Lists persisted provisioner daemons for deployment health checks.
     async fn list_provisioner_daemons_for_health(
         &self,
-    ) -> Result<Vec<ProvisionerDaemonHealthRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "provisioner daemon health is not implemented",
-        ))
-    }
+    ) -> Result<Vec<ProvisionerDaemonHealthRecord>, StorageError>;
 
     /// Upserts one provisioner daemon for deployment health checks.
     async fn upsert_provisioner_daemon_for_health(
         &self,
         input: &ProvisionerDaemonHealthInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "provisioner daemon health is not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Returns the stored git SSH keypair when one exists.
     async fn find_git_ssh_key(
@@ -2095,12 +2081,7 @@ pub trait OperationalStore: Send + Sync {
 #[async_trait]
 pub trait InsightsStore: Send + Sync {
     /// Returns DAU (daily active user) entries for the deployment.
-    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
-        let _ = tz_offset;
-        Err(StorageError::unavailable(
-            "deployment DAUs are not implemented",
-        ))
-    }
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError>;
 
     /// Returns template-level insights for a time range.
     async fn get_template_insights(
@@ -2883,12 +2864,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn upsert_provisioner_job_stats(
         &self,
         input: &ProvisionerJobStatsInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "provisioner stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Upserts one workspace build into the deployment-stats foundation tables.
     async fn upsert_workspace_build_stats(
@@ -2935,22 +2911,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Lists persisted provisioner daemons for deployment health checks.
     async fn list_provisioner_daemons_for_health(
         &self,
-    ) -> Result<Vec<ProvisionerDaemonHealthRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "provisioner daemon health is not implemented",
-        ))
-    }
+    ) -> Result<Vec<ProvisionerDaemonHealthRecord>, StorageError>;
 
     /// Upserts one provisioner daemon for deployment health checks.
     async fn upsert_provisioner_daemon_for_health(
         &self,
         input: &ProvisionerDaemonHealthInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "provisioner daemon health is not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Returns the stored git SSH keypair when one exists.
     async fn find_git_ssh_key(
@@ -3056,12 +3023,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // ── InsightsStore delegate methods ──────────────────────────────
 
     /// Returns DAU entries for the deployment.
-    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError> {
-        let _ = tz_offset;
-        Err(StorageError::unavailable(
-            "deployment DAUs are not implemented",
-        ))
-    }
+    async fn get_deployment_daus(&self, tz_offset: i32) -> Result<DAUsResponse, StorageError>;
 
     /// Returns template-level insights for a time range.
     async fn get_template_insights(
@@ -3995,12 +3957,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn list_provisioner_job_timings(
         &self,
         job_id: Uuid,
-    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
-        let _ = job_id;
-        Err(StorageError::unavailable(
-            "provisioner job timings are not implemented",
-        ))
-    }
+    ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError>;
 
     /// Looks up a workspace resource by stable identifier.
     async fn find_workspace_resource_by_id(
@@ -4092,105 +4049,64 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn list_templates(
         &self,
         filter: TemplateListFilter,
-    ) -> Result<Vec<TemplateRecord>, StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
+    ) -> Result<Vec<TemplateRecord>, StorageError>;
 
     /// Finds a template by identifier.
     async fn find_template_by_id(
         &self,
         template_id: Uuid,
-    ) -> Result<Option<TemplateRecord>, StorageError> {
-        let _ = template_id;
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
+    ) -> Result<Option<TemplateRecord>, StorageError>;
 
     /// Finds a template by organization and name.
     async fn find_template_by_org_and_name(
         &self,
         organization_id: Uuid,
         name: &str,
-    ) -> Result<Option<TemplateRecord>, StorageError> {
-        let _ = (organization_id, name);
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
+    ) -> Result<Option<TemplateRecord>, StorageError>;
 
     /// Creates a new template.
     async fn insert_template(
         &self,
         input: CreateTemplateInput,
-    ) -> Result<TemplateRecord, CreateTemplateStoreError> {
-        let _ = input;
-        Err(CreateTemplateStoreError::Storage(
-            StorageError::unavailable("templates are not implemented"),
-        ))
-    }
+    ) -> Result<TemplateRecord, CreateTemplateStoreError>;
 
     /// Updates a template's metadata.
     async fn update_template_meta(
         &self,
         input: UpdateTemplateMetaInput,
-    ) -> Result<Option<TemplateRecord>, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
+    ) -> Result<Option<TemplateRecord>, StorageError>;
 
     /// Soft-deletes a template.
-    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError> {
-        let _ = template_id;
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
+    async fn soft_delete_template(&self, template_id: Uuid) -> Result<bool, StorageError>;
 
     /// Updates the active version on a template.
     async fn update_template_active_version(
         &self,
         template_id: Uuid,
         active_version_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = (template_id, active_version_id);
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Returns DAU rows for a template.
-    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError> {
-        let _ = template_id;
-        Err(StorageError::unavailable("templates are not implemented"))
-    }
+    async fn template_daus(&self, template_id: Uuid) -> Result<Vec<TemplateDAURow>, StorageError>;
 
     /// Lists template versions matching the supplied filter.
     async fn list_template_versions(
         &self,
         filter: TemplateVersionListFilter,
-    ) -> Result<Vec<TemplateVersionRecord>, StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateVersionRecord>, StorageError>;
 
     /// Finds a template version by identifier.
     async fn find_template_version_by_id(
         &self,
         version_id: Uuid,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        let _ = version_id;
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 
     /// Finds a template version by template ID and name.
     async fn find_template_version_by_template_and_name(
         &self,
         template_id: Uuid,
         name: &str,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        let _ = (template_id, name);
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 
     /// Finds a template version by organization and name.
     async fn find_template_version_by_org_and_name(
@@ -4198,23 +4114,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         organization_id: Uuid,
         template_name: &str,
         version_name: &str,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        let _ = (organization_id, template_name, version_name);
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 
     /// Creates a new template version.
     async fn insert_template_version(
         &self,
         input: CreateTemplateVersionInput,
-    ) -> Result<TemplateVersionRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    ) -> Result<TemplateVersionRecord, StorageError>;
 
     /// Updates a template version's name and message.
     async fn update_template_version(
@@ -4222,12 +4128,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         version_id: Uuid,
         name: &str,
         message: &str,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        let _ = (version_id, name, message);
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 
     /// Finds the template version created immediately before the named version.
     async fn find_previous_template_version(
@@ -4235,114 +4136,59 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         organization_id: Uuid,
         template_name: &str,
         version_name: &str,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        let _ = (organization_id, template_name, version_name);
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 
     /// Archives a template version.
-    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
-        let _ = version_id;
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    async fn archive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError>;
 
     /// Unarchives a template version.
-    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError> {
-        let _ = version_id;
-        Err(StorageError::unavailable(
-            "template versions are not implemented",
-        ))
-    }
+    async fn unarchive_template_version(&self, version_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists parameters for a template version.
     async fn list_template_version_parameters(
         &self,
         version_id: Uuid,
-    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError> {
-        let _ = version_id;
-        Err(StorageError::unavailable(
-            "template version parameters are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateVersionParameterRecord>, StorageError>;
 
     /// Lists variables for a template version.
     async fn list_template_version_variables(
         &self,
         version_id: Uuid,
-    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError> {
-        let _ = version_id;
-        Err(StorageError::unavailable(
-            "template version variables are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateVersionVariableRecord>, StorageError>;
 
     /// Lists presets for a template version.
     async fn list_template_version_presets(
         &self,
         version_id: Uuid,
-    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError> {
-        let _ = version_id;
-        Err(StorageError::unavailable(
-            "template version presets are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateVersionPresetRecord>, StorageError>;
 
     /// Lists preset parameters for a specific preset.
     async fn list_template_version_preset_parameters(
         &self,
         preset_id: Uuid,
-    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError> {
-        let _ = preset_id;
-        Err(StorageError::unavailable(
-            "template version preset parameters are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateVersionPresetParameterRecord>, StorageError>;
 
     /// Creates a provisioner job (template workflow).
     async fn create_provisioner_job(
         &self,
         input: CreateProvisionerJobInput,
-    ) -> Result<TemplateProvisionerJobRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "provisioner jobs are not implemented",
-        ))
-    }
+    ) -> Result<TemplateProvisionerJobRecord, StorageError>;
 
     /// Finds a provisioner job by identifier (template workflow).
     async fn find_provisioner_job(
         &self,
         job_id: Uuid,
-    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
-        let _ = job_id;
-        Err(StorageError::unavailable(
-            "provisioner jobs are not implemented",
-        ))
-    }
+    ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError>;
 
     /// Cancels a provisioner job (template workflow).
-    async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
-        let _ = job_id;
-        Err(StorageError::unavailable(
-            "provisioner jobs are not implemented",
-        ))
-    }
+    async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
 
     /// Archives unused template versions for a template.
     async fn archive_unused_template_versions(
         &self,
         template_id: Uuid,
         all: bool,
-    ) -> Result<Vec<Uuid>, StorageError> {
-        let _ = (template_id, all);
-        Err(StorageError::unavailable(
-            "archive unused template versions is not implemented",
-        ))
-    }
+    ) -> Result<Vec<Uuid>, StorageError>;
 
     /// Returns the template version created immediately before the given one.
     async fn get_previous_template_version(
@@ -4350,12 +4196,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         organization_id: Uuid,
         name: &str,
         template_id: Option<Uuid>,
-    ) -> Result<Option<TemplateVersionRecord>, StorageError> {
-        let _ = (organization_id, name, template_id);
-        Err(StorageError::unavailable(
-            "get previous template version is not implemented",
-        ))
-    }
+    ) -> Result<Option<TemplateVersionRecord>, StorageError>;
 
     // -----------------------------------------------------------------------
     // Notifications domain
@@ -4383,12 +4224,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn get_notification_templates_by_kind(
         &self,
         kind: &str,
-    ) -> Result<Vec<NotificationTemplate>, StorageError> {
-        let _ = kind;
-        Err(StorageError::unavailable(
-            "notification templates are not implemented",
-        ))
-    }
+    ) -> Result<Vec<NotificationTemplate>, StorageError>;
 
     /// Updates the delivery method for a notification template.
     async fn update_notification_template_method(
