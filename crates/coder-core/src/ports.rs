@@ -5202,6 +5202,22 @@ where
         AppStore::delete_custom_role(self, name, organization_id).await
     }
 
+    async fn acquire_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        AppStore::acquire_pending_notification_messages(self, limit, max_attempt_count).await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_notification_message_status(self, message_id, status).await
+    }
+
     async fn increment_notification_message_attempt_count(
         &self,
         message_id: Uuid,
@@ -5745,6 +5761,26 @@ where
         organization_id: Option<Uuid>,
     ) -> Result<bool, StorageError> {
         (**self).delete_custom_role(name, organization_id).await
+    }
+
+    async fn acquire_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        (**self)
+            .acquire_pending_notification_messages(limit, max_attempt_count)
+            .await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_notification_message_status(message_id, status)
+            .await
     }
 
     async fn increment_notification_message_attempt_count(
