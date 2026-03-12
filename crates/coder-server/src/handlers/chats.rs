@@ -698,7 +698,6 @@ pub(crate) async fn watch_chats(
 ///
 /// Authentication is required but no RBAC check is performed — any
 /// authenticated user can list available models, matching the Go reference.
-/// GET /api/v2/chats/models — list available LLM models for chat.
 pub(crate) async fn list_chat_models(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -719,7 +718,6 @@ pub(crate) async fn list_chat_models(
 /// status updates, and errors. The Go reference subscribes to a chat daemon
 /// for live events and sends an initial snapshot. This implementation
 /// subscribes to the chat's pub/sub channel and streams events.
-/// POST /api/v2/chats/:id/stream — stream LLM responses for a chat via SSE.
 pub(crate) async fn stream_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
