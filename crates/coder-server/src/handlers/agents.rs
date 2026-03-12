@@ -1084,12 +1084,11 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
             display_order: m.display_order,
         })
         .collect();
-    let initial_payload = serde_json::to_string(&initial_metadata).map_err(|e| {
-        AppError::InternalError {
+    let initial_payload =
+        serde_json::to_string(&initial_metadata).map_err(|e| AppError::InternalError {
             message: "failed to serialize initial agent metadata".to_owned(),
             detail: e.to_string(),
-        }
-    })?;
+        })?;
 
     tokio::spawn(async move {
         // Send initial snapshot (multiline-safe per SSE spec).
@@ -2096,8 +2095,8 @@ pub(crate) async fn handle_auth_instance_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::app::tests::{create_and_login, test_state_with_store};
     use crate::app::build_router;
+    use crate::app::tests::{create_and_login, test_state_with_store};
     use axum::Router;
     use coder_core::WorkspaceAgentRow;
     use futures_util::{SinkExt, StreamExt};
@@ -2120,9 +2119,7 @@ mod tests {
     }
 
     /// Seed a minimal workspace agent into the FakeStore and return its ID.
-    fn seed_agent(
-        store: &crate::app::tests::FakeStore,
-    ) -> Result<Uuid, Box<dyn Error>> {
+    fn seed_agent(store: &crate::app::tests::FakeStore) -> Result<Uuid, Box<dyn Error>> {
         let agent_id = Uuid::new_v4();
         let row = WorkspaceAgentRow {
             id: agent_id,
@@ -2174,15 +2171,8 @@ mod tests {
     ) -> Result<tungstenite::http::Request<()>, Box<dyn Error>> {
         let parsed = url::Url::parse(url)?;
         let host = match parsed.port() {
-            Some(port) => format!(
-                "{}:{}",
-                parsed.host_str().unwrap_or("127.0.0.1"),
-                port
-            ),
-            None => parsed
-                .host_str()
-                .unwrap_or("127.0.0.1")
-                .to_owned(),
+            Some(port) => format!("{}:{}", parsed.host_str().unwrap_or("127.0.0.1"), port),
+            None => parsed.host_str().unwrap_or("127.0.0.1").to_owned(),
         };
         let request = tungstenite::http::Request::builder()
             .uri(url)
@@ -2305,10 +2295,7 @@ mod tests {
         let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app).await?;
 
-        let url = ws_url(
-            &base_url,
-            &format!("api/v2/workspaceagents/{agent_id}/pty"),
-        );
+        let url = ws_url(&base_url, &format!("api/v2/workspaceagents/{agent_id}/pty"));
         let result = tokio_tungstenite::connect_async(&url).await;
         assert!(result.is_err(), "should reject unauthenticated connection");
         Ok(())
@@ -2322,10 +2309,7 @@ mod tests {
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
         let session_token = create_and_login(&app).await?;
-        let url = ws_url(
-            &base_url,
-            &format!("api/v2/workspaceagents/{agent_id}/pty"),
-        );
+        let url = ws_url(&base_url, &format!("api/v2/workspaceagents/{agent_id}/pty"));
         let request = ws_request(&url, &session_token)?;
         let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
 
@@ -2362,16 +2346,12 @@ mod tests {
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
         let session_token = create_and_login(&app).await?;
-        let url = ws_url(
-            &base_url,
-            &format!("api/v2/workspaceagents/{agent_id}/pty"),
-        );
+        let url = ws_url(&base_url, &format!("api/v2/workspaceagents/{agent_id}/pty"));
         let request = ws_request(&url, &session_token)?;
         let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
 
         // Subscribe to the PTY input channel to verify the relay.
-        let input_channel =
-            coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
+        let input_channel = coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
         let mut input_sub = pubsub.subscribe(&input_channel).await?;
 
         // Send binary data from the client.
@@ -2379,13 +2359,11 @@ mod tests {
             .await?;
 
         // Verify the data arrives on the pubsub input channel.
-        let received =
-            tokio::time::timeout(Duration::from_secs(2), input_sub.recv()).await?;
+        let received = tokio::time::timeout(Duration::from_secs(2), input_sub.recv()).await?;
         assert_eq!(received?, b"hello pty");
 
         // Now publish data on the output channel and verify it arrives on the WS.
-        let output_channel =
-            coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
+        let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
         pubsub.publish(&output_channel, b"pty output").await?;
 
         let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
@@ -2447,7 +2425,9 @@ mod tests {
                 "expected devcontainers field"
             );
         } else {
-            return Err(format!("expected text message with initial snapshot, got: {msg:?}").into());
+            return Err(
+                format!("expected text message with initial snapshot, got: {msg:?}").into(),
+            );
         }
 
         ws.close(None).await?;
@@ -2474,8 +2454,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
 
         // Publish a container state change.
-        let channel =
-            coder_core::pubsub::workspace_agent_containers_channel(agent_id);
+        let channel = coder_core::pubsub::workspace_agent_containers_channel(agent_id);
         let update = serde_json::json!({
             "containers": [{"id": "c1", "name": "test"}],
             "devcontainers": []
@@ -2490,7 +2469,9 @@ mod tests {
             let received: serde_json::Value = serde_json::from_str(&text)?;
             assert!(received.get("containers").is_some());
         } else {
-            return Err(format!("expected text message with container update, got: {msg:?}").into());
+            return Err(
+                format!("expected text message with container update, got: {msg:?}").into(),
+            );
         }
 
         ws.close(None).await?;
@@ -2508,9 +2489,7 @@ mod tests {
         let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app).await?;
 
-        let url = format!(
-            "{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata"
-        );
+        let url = format!("{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata");
         let resp = reqwest::get(&url).await?;
         assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
         Ok(())
@@ -2524,9 +2503,7 @@ mod tests {
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
         let session_token = create_and_login(&app).await?;
-        let url = format!(
-            "{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata"
-        );
+        let url = format!("{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata");
         let client = reqwest::Client::new();
         let resp = client
             .get(&url)
@@ -2589,9 +2566,7 @@ mod tests {
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
         let session_token = create_and_login(&app).await?;
-        let url = format!(
-            "{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata"
-        );
+        let url = format!("{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata");
         let client = reqwest::Client::new();
         let mut resp = client
             .get(&url)
@@ -2603,8 +2578,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await;
 
         // Publish a metadata update.
-        let channel =
-            coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+        let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
         let update = serde_json::json!([{
             "display_name": "CPU",
             "key": "cpu",
@@ -2646,9 +2620,7 @@ mod tests {
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
         let session_token = create_and_login(&app).await?;
-        let url = format!(
-            "{base_url}api/v2/workspaceagents/{unknown_id}/watch-metadata"
-        );
+        let url = format!("{base_url}api/v2/workspaceagents/{unknown_id}/watch-metadata");
         let client = reqwest::Client::new();
         let resp = client
             .get(&url)
@@ -2703,7 +2675,9 @@ mod tests {
                 "expected JSON array for metadata snapshot"
             );
         } else {
-            return Err(format!("expected text message with metadata snapshot, got: {msg:?}").into());
+            return Err(
+                format!("expected text message with metadata snapshot, got: {msg:?}").into(),
+            );
         }
 
         ws.close(None).await?;
@@ -2730,8 +2704,7 @@ mod tests {
         let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
 
         // Publish a metadata update via pubsub.
-        let channel =
-            coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+        let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
         let update = serde_json::json!([{
             "display_name": "Memory",
             "key": "memory",
