@@ -63,7 +63,7 @@ use crate::handlers::tasks::*;
 use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
 use crate::handlers::users::*;
-use crate::handlers::workspace_apps::workspace_apps_proxy_path;
+use crate::handlers::workspace_apps::{workspace_apps_proxy_path, workspace_port_forward};
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
@@ -261,6 +261,11 @@ pub fn build_router(
         .route(
             "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/{*rest}",
             axum::routing::any(workspace_apps_proxy_path),
+        )
+        // Workspace port forwarding.
+        .route(
+            "/@{user}/{workspace_and_agent}/port/{port}/{*rest}",
+            axum::routing::any(workspace_port_forward),
         )
         .route("/mcp/http", post(mcp_http_handler))
         .route(
