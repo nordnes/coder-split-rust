@@ -3027,8 +3027,8 @@ pub struct CreateChatProviderConfigRequest {
     pub enabled: Option<bool>,
 }
 
-impl std::fmt::Debug for CreateChatProviderConfigRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for CreateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CreateChatProviderConfigRequest")
             .field("provider", &self.provider)
             .field("display_name", &self.display_name)
@@ -3052,8 +3052,8 @@ pub struct UpdateChatProviderConfigRequest {
     pub enabled: Option<bool>,
 }
 
-impl std::fmt::Debug for UpdateChatProviderConfigRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for UpdateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UpdateChatProviderConfigRequest")
             .field("display_name", &self.display_name)
             .field("api_key", &"[REDACTED]")
