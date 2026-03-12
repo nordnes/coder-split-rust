@@ -597,6 +597,19 @@ impl DerpServer {
         false
     }
 
+    /// Sends a pre-built frame directly to a client's channel without wrapping
+    /// it in a `RecvPacket`. Use this for control frames like `KeepAlive` and
+    /// `Pong` that should be delivered as-is to the client.
+    ///
+    /// Returns `true` if the frame was queued for delivery.
+    pub async fn send_raw_frame(&self, dst: &NodeKey, frame: Frame) -> bool {
+        let clients = self.clients.read().await;
+        if let Some(client) = clients.get(dst) {
+            return client.sender.try_send(frame).is_ok();
+        }
+        false
+    }
+
     /// Marks a client's preferred DERP status.
     pub async fn note_preferred(&self, key: &NodeKey, preferred: bool) {
         let mut clients = self.clients.write().await;
@@ -1297,6 +1310,34 @@ mod tests {
         // Remove forwarder — should no longer deliver.
         server.remove_packet_forwarder(&remote_dst).await;
         let delivered = server.send_packet(&src, &remote_dst, b"lost packet").await;
+        assert!(!delivered);
+    }
+
+    #[tokio::test]
+    async fn server_send_raw_frame_delivers_without_wrapping() {
+        let server_key = NodeKey::new([1u8; NODE_KEY_LEN]);
+        let server = DerpServer::new(server_key);
+
+        let alice = NodeKey::new([2u8; NODE_KEY_LEN]);
+        let mut alice_rx = server.accept_client(alice).await;
+
+        // send_raw_frame should deliver a KeepAlive as-is (not wrapped in RecvPacket).
+        let ka = Frame::keep_alive();
+        let delivered = server.send_raw_frame(&alice, ka).await;
+        assert!(delivered);
+
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(100), alice_rx.recv())
+            .await
+            .ok()
+            .flatten();
+        assert!(frame.is_some());
+        let frame = frame.unwrap();
+        assert_eq!(frame.frame_type, FrameType::KeepAlive);
+        assert!(frame.payload.is_empty());
+
+        // send_raw_frame to unknown peer returns false.
+        let unknown = NodeKey::new([99u8; NODE_KEY_LEN]);
+        let delivered = server.send_raw_frame(&unknown, Frame::keep_alive()).await;
         assert!(!delivered);
     }
 

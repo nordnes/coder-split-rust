@@ -180,18 +180,11 @@ async fn derp_relay_session(state: AppState, socket: WebSocket) {
             if !keep_alive_server.has_client(&keep_alive_key).await {
                 break;
             }
-            // Send keep-alive as a direct RecvPacket to the client via the
-            // server's channel. The keep-alive is a zero-length "packet" from
-            // the server's own key, which the client recognizes as a keep-alive.
+            // Send a bare KeepAlive frame directly to the client's channel
+            // (not via send_packet, which would wrap it in a RecvPacket).
             let ka_frame = Frame::keep_alive();
-            // Try to deliver via the server's send mechanism.
-            // If the client's channel is full, skip this keep-alive.
             if !keep_alive_server
-                .send_packet(
-                    keep_alive_server.server_key(),
-                    &keep_alive_key,
-                    &ka_frame.to_bytes(),
-                )
+                .send_raw_frame(&keep_alive_key, ka_frame)
                 .await
             {
                 // Client may have disconnected.
@@ -276,17 +269,27 @@ async fn handle_client_frame(state: &AppState, src_key: &NodeKey, frame: Frame) 
             state.derp_server.note_preferred(src_key, preferred).await;
         }
         FrameType::WatchConns => {
-            let _watcher_rx = state.derp_server.watch_conns(*src_key).await;
+            // Register as a watcher and forward notifications through the
+            // client's existing frame channel so the writer task delivers them.
+            let mut watcher_rx = state.derp_server.watch_conns(*src_key).await;
+            let server = state.derp_server.clone();
+            let watcher_dst = *src_key;
+            tokio::spawn(async move {
+                while let Some(notification) = watcher_rx.recv().await {
+                    if !server.send_raw_frame(&watcher_dst, notification).await {
+                        break;
+                    }
+                }
+            });
         }
         FrameType::Ping => {
             if frame.payload.len() == 8 {
                 let mut data = [0u8; 8];
                 data.copy_from_slice(&frame.payload);
                 let pong = Frame::pong(data);
-                let _ = state
-                    .derp_server
-                    .send_packet(src_key, src_key, &pong.to_bytes())
-                    .await;
+                // Send the Pong frame directly (not via send_packet which
+                // would wrap it in a RecvPacket, causing double-framing).
+                let _ = state.derp_server.send_raw_frame(src_key, pong).await;
             }
         }
         // Other frame types are server-to-client or unexpected. Ignore gracefully.
