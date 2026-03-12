@@ -1786,6 +1786,7 @@ pub(crate) mod tests {
             job.updated_at = input.started_at;
             job.worker_id = Some(input.worker_id);
             let result = job.clone();
+            drop(jobs);
 
             // Sync acquisition to template-side provisioner_jobs.
             if let Ok(mut tmpl_jobs) = self.provisioner_jobs.lock() {
@@ -5630,42 +5631,52 @@ pub(crate) mod tests {
             &self,
             job_id: Uuid,
         ) -> Result<bool, StorageError> {
-            let mut jobs = self
-                .provisioner_jobs
-                .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            match jobs.get_mut(&job_id) {
-                Some(j) if j.canceled_at.is_none() && j.completed_at.is_none() => {
-                    let now = OffsetDateTime::now_utc();
-                    j.canceled_at = Some(now);
-                    // Only complete immediately if no worker has picked up the job
-                    // (matches Go semantics: !job.WorkerID.Valid)
-                    if j.worker_id.is_none() {
-                        j.completed_at = Some(now);
-                        j.job_status = "canceled".to_owned();
-                    } else {
-                        j.job_status = "canceling".to_owned();
+            // Extract cancellation state and drop provisioner_jobs lock
+            // before acquiring prov_jobs, to maintain consistent lock
+            // ordering (prov_jobs → provisioner_jobs) with acquire_provisioner_job.
+            let (canceled, now, worker_is_none) = {
+                let mut jobs = self
+                    .provisioner_jobs
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                match jobs.get_mut(&job_id) {
+                    Some(j) if j.canceled_at.is_none() && j.completed_at.is_none() => {
+                        let now = OffsetDateTime::now_utc();
+                        let worker_is_none = j.worker_id.is_none();
+                        j.canceled_at = Some(now);
+                        // Only complete immediately if no worker has picked up the job
+                        // (matches Go semantics: !job.WorkerID.Valid)
+                        if worker_is_none {
+                            j.completed_at = Some(now);
+                            j.job_status = "canceled".to_owned();
+                        } else {
+                            j.job_status = "canceling".to_owned();
+                        }
+                        j.updated_at = now;
+                        (true, now, worker_is_none)
                     }
-                    j.updated_at = now;
+                    _ => return Ok(false),
+                }
+            };
+            // provisioner_jobs lock is now dropped.
 
-                    // Sync cancellation to daemon-side prov_jobs.
-                    if let Ok(mut prov_jobs) = self.prov_jobs.lock() {
-                        if let Some(pj) = prov_jobs.get_mut(&job_id) {
-                            pj.canceled_at = Some(now);
-                            pj.updated_at = now;
-                            if pj.worker_id.is_none() {
-                                pj.completed_at = Some(now);
-                                pj.job_status = ProvisionerJobStatus::Canceled;
-                            } else {
-                                pj.job_status = ProvisionerJobStatus::Canceling;
-                            }
+            // Sync cancellation to daemon-side prov_jobs.
+            if canceled {
+                if let Ok(mut prov_jobs) = self.prov_jobs.lock() {
+                    if let Some(pj) = prov_jobs.get_mut(&job_id) {
+                        pj.canceled_at = Some(now);
+                        pj.updated_at = now;
+                        if worker_is_none {
+                            pj.completed_at = Some(now);
+                            pj.job_status = ProvisionerJobStatus::Canceled;
+                        } else {
+                            pj.job_status = ProvisionerJobStatus::Canceling;
                         }
                     }
-
-                    Ok(true)
                 }
-                _ => Ok(false),
             }
+
+            Ok(true)
         }
 
         async fn insert_file(
