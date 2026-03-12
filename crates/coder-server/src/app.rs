@@ -34473,4 +34473,358 @@ pub(crate) mod tests {
         assert!(found.is_empty());
         Ok(())
     }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: Template version management
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn cancel_template_version_job() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ver = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/templateversions/{}/cancel", ver.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_external_auth_returns_list() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ver = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/external-auth", ver.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.as_array().is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_template_version_dry_run_creates_job() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ver = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{}/dry-run", ver.id),
+                &session_token,
+                &json!({
+                    "workspace_name": "dry-run-ws",
+                    "rich_parameter_values": [],
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("id").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn archive_unused_template_versions_returns_ids() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let _ver = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/templates/{}/versions/archive", tmpl.id),
+                &session_token,
+                &json!({ "all": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let tmpl_id_str = tmpl.id.to_string();
+        assert_eq!(
+            body.get("template_id").and_then(Value::as_str),
+            Some(tmpl_id_str.as_str())
+        );
+        assert!(body.get("archived_ids").and_then(Value::as_array).is_some());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: Deployment (healthz, build info)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn healthz_returns_ok() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::GET, "/healthz")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body_bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        assert_eq!(String::from_utf8(body_bytes.to_vec())?, "OK");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn build_info_returns_version_and_url() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::GET, "/api/v2/buildinfo")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("version").and_then(Value::as_str).is_some());
+        assert!(body.get("dashboard_url").and_then(Value::as_str).is_some());
+        assert!(
+            body.get("workspace_proxy")
+                .and_then(Value::as_bool)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: Audit logs
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_audit_logs_with_pagination() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/audit?limit=5&offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("audit_logs").and_then(Value::as_array).is_some());
+        assert!(body.get("count").and_then(Value::as_i64).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_generate_test_audit_log_creates_entry() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/audit/testgenerate",
+                &session_token,
+                &json!({
+                    "resource_type": "user",
+                    "action": "create",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify audit log was created
+        let list_resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/audit", &session_token)?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let body = response_json(list_resp).await?;
+        let logs = body
+            .get("audit_logs")
+            .and_then(Value::as_array)
+            .ok_or("expected audit_logs array")?;
+        assert!(!logs.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_create_generates_audit_entry() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let (session_token, _org_id, _template) = create_test_template(&app).await?;
+
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/audit", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        let logs = body
+            .get("audit_logs")
+            .and_then(Value::as_array)
+            .ok_or("expected audit_logs array")?;
+        assert!(!logs.is_empty(), "expected at least 1 audit log entry");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: File handlers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn upload_zip_file_returns_created() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let file_data = b"fake zip content for testing";
+        let response = call(app, {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v2/files")
+                .header(CONTENT_TYPE, "application/zip")
+                .header(SESSION_TOKEN_HEADER, &session_token)
+                .body(Body::from(file_data.to_vec()))?
+        })
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("hash").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn upload_windows_zip_file_returns_created() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let file_data = b"fake windows zip content";
+        let response = call(app, {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v2/files")
+                .header(CONTENT_TYPE, "application/x-zip-compressed")
+                .header(SESSION_TOKEN_HEADER, &session_token)
+                .body(Body::from(file_data.to_vec()))?
+        })
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert!(body.get("hash").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_file_by_id_returns_correct_content_type() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let file_data = b"zip file body";
+        let upload_resp = call(app.clone(), {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/api/v2/files")
+                .header(CONTENT_TYPE, "application/zip")
+                .header(SESSION_TOKEN_HEADER, &session_token)
+                .body(Body::from(file_data.to_vec()))?
+        })
+        .await?;
+        assert_eq!(upload_resp.status(), StatusCode::CREATED);
+        let upload_body = response_json(upload_resp).await?;
+        let file_id = upload_body
+            .get("hash")
+            .and_then(Value::as_str)
+            .ok_or("missing file hash/id")?
+            .to_owned();
+
+        let get_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/files/{file_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        assert_eq!(
+            get_resp
+                .headers()
+                .get("content-type")
+                .and_then(|v| v.to_str().ok()),
+            Some("application/zip")
+        );
+        let body_bytes = to_bytes(get_resp.into_body(), usize::MAX).await?;
+        assert_eq!(body_bytes.as_ref(), file_data);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: Notification inbox
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_inbox_notifications_with_read_status_filter() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/inbox?read_status=unread",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("notifications")
+                .and_then(Value::as_array)
+                .is_some()
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: Latency check
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn latency_check_returns_ok() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::GET, "/latency-check")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
 }
