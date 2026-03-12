@@ -7221,7 +7221,9 @@ pub(crate) mod tests {
             };
 
             ws.updated_at = OffsetDateTime::now_utc();
-            Ok(Some(ws.clone()))
+            let mut result = ws.clone();
+            result.favorite = false;
+            Ok(Some(result))
         }
 
         async fn get_workspaces_eligible_for_transition(
@@ -32119,17 +32121,6 @@ pub(crate) mod tests {
         );
         Ok(())
     }
-}
-
-#[cfg(test)]
-mod workspace_transition_tests {
-    use std::error::Error;
-
-    use time::OffsetDateTime;
-    use uuid::Uuid;
-
-    use super::tests::test_state;
-
     #[tokio::test]
     async fn update_workspace_dormant_deleting_at_not_found() -> Result<(), Box<dyn Error>> {
         let state = test_state(true)?;
