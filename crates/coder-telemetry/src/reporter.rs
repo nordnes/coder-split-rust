@@ -53,6 +53,7 @@ impl TelemetryReporter {
     ///
     /// Pass `None` for `sender` when telemetry is disabled — all
     /// [`report`](Self::report) calls become no-ops.
+    #[must_use]
     pub fn new(sender: Option<mpsc::Sender<TelemetryEvent>>, deployment_id: Uuid) -> Self {
         Self {
             sender,
@@ -61,6 +62,7 @@ impl TelemetryReporter {
     }
 
     /// Creates a disabled reporter that silently drops all events.
+    #[must_use]
     pub fn disabled(deployment_id: Uuid) -> Self {
         Self {
             sender: None,
@@ -69,11 +71,13 @@ impl TelemetryReporter {
     }
 
     /// Returns whether telemetry collection is active.
+    #[must_use]
     pub fn is_enabled(&self) -> bool {
         self.sender.is_some()
     }
 
     /// Returns the deployment identifier.
+    #[must_use]
     pub fn deployment_id(&self) -> Uuid {
         self.deployment_id
     }

@@ -221,6 +221,7 @@ impl From<OAuth2ProviderError> for AppError {
 impl AppError {
     /// Convert an [`ExternalAuthServiceError`] into an [`AppError`], wrapping
     /// the service-level detail with a caller-supplied user-facing message.
+    #[allow(dead_code)] // Scaffolded for external auth route handlers.
     pub(crate) fn from_external_auth(
         message: &'static str,
         error: ExternalAuthServiceError,

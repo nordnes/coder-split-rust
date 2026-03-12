@@ -39,6 +39,7 @@ use coder_core::{
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
+use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
 use coder_workspaces::AutobuildExecutor;
 use metrics_exporter_prometheus::PrometheusBuilder;
@@ -761,7 +762,7 @@ async fn run() -> Result<(), MainError> {
     let derp_tracker = DerpTrafficTracker::new();
     // Start the telemetry background worker.
     let telemetry_config = coder_telemetry::TelemetryConfig {
-        enabled: config.telemetry_enabled,
+        enabled: config.telemetry.enabled,
         deployment_id: deployment_metadata.deployment_id,
         version: BuildMetadata::default().version.clone(),
         ..coder_telemetry::TelemetryConfig::default()
@@ -772,6 +773,21 @@ async fn run() -> Result<(), MainError> {
     let prometheus_handle = PrometheusBuilder::new()
         .install_recorder()
         .map_err(|error| MainError::Config(format!("install prometheus recorder: {error}")))?;
+
+    // Start the notification dispatch background worker.
+    //
+    // NOTE: The `Webpusher` is NOT wired into `AppState` yet because the
+    // `AppStore` trait methods it depends on (`get_webpush_vapid_keys`,
+    // `upsert_webpush_vapid_keys`, `get_webpush_subscriptions_by_user_id`,
+    // `delete_webpush_subscription_by_user_and_endpoint`,
+    // `delete_webpush_subscriptions`, `delete_all_webpush_subscriptions`)
+    // currently return `StorageError::unavailable` — the `PostgresStore`
+    // implementations have not been added.  Once those DB methods exist,
+    // instantiate a `Webpusher<Arc<dyn AppStore>>` here and add it as a
+    // field on `AppState` so HTTP handlers can send push notifications.
+    let notification_service =
+        NotificationDispatchService::new(store.clone(), NotificationConfig::default())
+            .map_err(|error| MainError::Config(format!("create notification service: {error}")))?;
 
     // Start the autobuild lifecycle executor (workspace auto-start/stop).
     let autobuild_cancel = CancellationToken::new();
@@ -847,9 +863,14 @@ async fn run() -> Result<(), MainError> {
         state.close_deployment_stats();
     });
 
-    // 4. Cancel the autobuild lifecycle executor and wait for in-flight
+    // 4. Drop the notification dispatch service so its background loop stops.
+    coordinator.register("notifications", async move {
+        drop(notification_service);
+    });
+
+    // 5. Cancel the autobuild lifecycle executor and wait for in-flight
     //    evaluations to finish so database writes complete before the pool
-    //    is closed in step 6.
+    //    is closed later.
     coordinator.register("autobuild", async move {
         autobuild_cancel.cancel();
         if let Err(e) = autobuild_handle.await {
@@ -857,7 +878,7 @@ async fn run() -> Result<(), MainError> {
         }
     });
 
-    // 5. Flush and shut down the OpenTelemetry tracer provider so buffered
+    // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
     //    sends to a remote collector (gRPC), not to the database, so this
     //    is safe to run before closing the DB pool.

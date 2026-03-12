@@ -2222,6 +2222,47 @@ pub struct DeleteWebpushSubscription {
     pub endpoint: String,
 }
 
+/// An action button inside a web push notification.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebpushMessageAction {
+    /// Display label for the action button.
+    pub label: String,
+    /// URL to navigate to when the action is activated.
+    pub url: String,
+}
+
+/// Payload for a web push notification sent to the browser.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebpushMessage {
+    /// Icon URL for the notification.
+    #[serde(default)]
+    pub icon: String,
+    /// Title text of the notification.
+    #[serde(default)]
+    pub title: String,
+    /// Body text of the notification.
+    #[serde(default)]
+    pub body: String,
+    /// Notification tag for grouping or replacing.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub tag: String,
+    /// Action buttons shown with the notification.
+    #[serde(default)]
+    pub actions: Vec<WebpushMessageAction>,
+    /// Arbitrary key-value data attached to the notification.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub data: HashMap<String, String>,
+}
+
+/// Stored VAPID key pair for web push.
+#[derive(Clone, Debug)]
+pub struct VapidKeyPair {
+    /// Base64url-encoded public key.
+    pub public_key: String,
+    /// PEM-encoded EC private key (SEC1 format).
+    pub private_key: String,
+}
+
 /// An action inside an inbox notification.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InboxNotificationAction {
@@ -2986,8 +3027,8 @@ pub struct CreateChatProviderConfigRequest {
     pub enabled: Option<bool>,
 }
 
-impl std::fmt::Debug for CreateChatProviderConfigRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for CreateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("CreateChatProviderConfigRequest")
             .field("provider", &self.provider)
             .field("display_name", &self.display_name)
@@ -3011,8 +3052,8 @@ pub struct UpdateChatProviderConfigRequest {
     pub enabled: Option<bool>,
 }
 
-impl std::fmt::Debug for UpdateChatProviderConfigRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for UpdateChatProviderConfigRequest {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("UpdateChatProviderConfigRequest")
             .field("display_name", &self.display_name)
             .field("api_key", &"[REDACTED]")
