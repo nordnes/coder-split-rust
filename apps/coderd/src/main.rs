@@ -897,6 +897,9 @@ async fn run() -> Result<(), MainError> {
         agent_provider,
         coordinator,
         derp_tracker,
+        coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+            [0u8; 32],
+        )),
         Some(prometheus_handle),
         telemetry_reporter,
     )

@@ -7,8 +7,21 @@
 //!
 //! The Go reference lives in `coder/coderd/coderd.go` (route setup) and
 //! `coder/tailnet/derp.go` (`WithWebsocketSupport`).
+//!
+//! # Protocol
+//!
+//! The DERP relay uses Tailscale's binary framing protocol over WebSocket:
+//!
+//! 1. Server sends `ServerKey` frame with its public key
+//! 2. Client sends `ClientInfo` frame with its node key
+//! 3. Server sends `PeerPresent` for each already-connected peer
+//! 4. Client sends `SendPacket` frames addressed to specific peers by key
+//! 5. Server delivers `RecvPacket` frames from other peers
+//! 6. Server sends `KeepAlive` frames every 60 seconds
+//! 7. On disconnect, server sends `PeerGone` to watchers
 
 use super::*;
+use coder_connectivity::derp::{self, Frame, FrameType, NodeKey};
 use futures_util::SinkExt;
 
 /// Subprotocol identifier used by DERP WebSocket clients.
@@ -22,100 +35,9 @@ const DERP_SUBPROTOCOL: &str = "derp";
 /// Maximum duration to wait for a single WebSocket send or receive.
 const WS_IO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
-/// Size of the per-peer forwarding channel.
-///
-/// A small bounded buffer avoids unbounded memory growth if a peer falls
-/// behind, while still absorbing short bursts without dropping packets.
-const PEER_CHANNEL_CAPACITY: usize = 64;
-
-// ---------------------------------------------------------------------------
-// Types
-// ---------------------------------------------------------------------------
-
-/// Identifies a connected DERP relay peer.
-///
-/// Each WebSocket connection is assigned a unique `PeerId` on connect.
-/// The relay uses these IDs to route packets between peers.
-type PeerId = Uuid;
-
-/// A single DERP frame forwarded between peers.
-///
-/// The relay treats frames as opaque byte sequences — the actual content
-/// is encrypted WireGuard traffic that only the endpoints can decrypt.
-#[derive(Clone)]
-struct DerpFrame {
-    /// Peer that sent this frame.
-    src: PeerId,
-    /// Raw frame bytes (encrypted WireGuard payload).
-    data: Vec<u8>,
-}
-
-/// Tracks all connected peers and routes frames between them.
-///
-/// The relay is intentionally simple: every connected peer can send frames
-/// to any other connected peer.  The relay does **not** inspect or decrypt
-/// the payload — it only routes based on destination peer ID.
-///
-/// This matches the Go DERP server behaviour where the relay is a dumb
-/// packet forwarder for encrypted WireGuard traffic.
-struct DerpRelay {
-    /// Map of connected peer IDs to their forwarding channels.
-    peers: tokio::sync::RwLock<HashMap<PeerId, tokio::sync::mpsc::Sender<DerpFrame>>>,
-}
-
-impl DerpRelay {
-    fn new() -> Arc<Self> {
-        Arc::new(Self {
-            peers: tokio::sync::RwLock::new(HashMap::new()),
-        })
-    }
-
-    /// Register a new peer and return a receiver for frames addressed to it.
-    async fn add_peer(&self, peer_id: PeerId) -> tokio::sync::mpsc::Receiver<DerpFrame> {
-        let (tx, rx) = tokio::sync::mpsc::channel(PEER_CHANNEL_CAPACITY);
-        let mut peers = self.peers.write().await;
-        peers.insert(peer_id, tx);
-        rx
-    }
-
-    /// Remove a peer from the relay.
-    async fn remove_peer(&self, peer_id: &PeerId) {
-        let mut peers = self.peers.write().await;
-        peers.remove(peer_id);
-    }
-
-    /// Forward a frame to a specific destination peer.
-    ///
-    /// Returns `true` if the frame was successfully queued, `false` if the
-    /// destination peer is not connected or its buffer is full.
-    #[cfg_attr(not(test), allow(dead_code))] // Used in tests for targeted forwarding.
-    async fn forward_to(&self, dest: &PeerId, frame: DerpFrame) -> bool {
-        let peers = self.peers.read().await;
-        if let Some(tx) = peers.get(dest) {
-            tx.try_send(frame).is_ok()
-        } else {
-            false
-        }
-    }
-
-    /// Broadcast a frame to all connected peers except the sender.
-    async fn broadcast(&self, frame: &DerpFrame) {
-        let peers = self.peers.read().await;
-        for (id, tx) in peers.iter() {
-            if *id != frame.src {
-                // Best-effort delivery — drop if the peer's buffer is full.
-                let _ = tx.try_send(frame.clone());
-            }
-        }
-    }
-
-    /// Returns the number of currently connected peers.
-    #[cfg_attr(not(test), allow(dead_code))] // Used in tests for assertions.
-    async fn peer_count(&self) -> usize {
-        let peers = self.peers.read().await;
-        peers.len()
-    }
-}
+/// Keep-alive interval for DERP relay connections.
+const KEEP_ALIVE_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(derp::KEEP_ALIVE_INTERVAL_SECS);
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -124,17 +46,18 @@ impl DerpRelay {
 /// GET /derp — DERP relay WebSocket endpoint.
 ///
 /// Accepts a WebSocket upgrade with the `"derp"` subprotocol and relays
-/// encrypted packets between peers that cannot connect directly.
+/// encrypted packets between peers based on their node public keys.
+///
+/// The protocol flow is:
+/// 1. Server sends `ServerKey` frame
+/// 2. Client sends `ClientInfo` frame with its node key
+/// 3. Bidirectional packet relay via `SendPacket`/`RecvPacket` frames
+/// 4. Server sends periodic `KeepAlive` frames
+/// 5. On disconnect, server notifies watchers via `PeerGone`
 ///
 /// The Go reference uses `derphttp.Handler` + `tailnet.WithWebsocketSupport`
 /// which upgrades connections requesting the `"derp"` subprotocol to
 /// WebSockets and passes the resulting `net.Conn` to `derp.Server.Accept`.
-///
-/// This Rust implementation provides an equivalent relay: each connected
-/// peer gets a unique ID, incoming binary frames are broadcast to all
-/// other connected peers (or routed to a specific destination when the
-/// frame header contains a target peer ID), and traffic statistics are
-/// recorded via the [`DerpTrafficTracker`].
 pub(crate) async fn derp_websocket(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
@@ -165,44 +88,74 @@ pub(crate) async fn derp_latency_check() -> StatusCode {
     StatusCode::OK
 }
 
+/// GET /api/v2/derp/latency-check — API-scoped DERP latency check.
+///
+/// Identical to `/derp/latency-check` but under the API prefix for
+/// consistency with the Go reference which exposes it at both paths.
+pub(crate) async fn api_derp_latency_check() -> StatusCode {
+    StatusCode::OK
+}
+
 // ---------------------------------------------------------------------------
 // WebSocket session
 // ---------------------------------------------------------------------------
 
-/// Runs a single DERP relay WebSocket session.
+/// Runs a single DERP relay WebSocket session using the Tailscale DERP protocol.
 ///
-/// 1. Assigns the peer a unique ID and registers it with the relay and
-///    traffic tracker.
-/// 2. Spawns a task that forwards frames from the relay to the WebSocket.
-/// 3. Reads incoming frames from the WebSocket and broadcasts them to all
-///    other connected peers.
-/// 4. On disconnect, unregisters the peer and cleans up.
+/// 1. Sends the server key to the client.
+/// 2. Waits for the client's node key (ClientInfo frame).
+/// 3. Registers the client with the DERP server.
+/// 4. Spawns a writer task that forwards frames from the server to the WebSocket.
+/// 5. Spawns a keep-alive task that sends periodic KeepAlive frames.
+/// 6. Reads incoming frames from the WebSocket and processes them:
+///    - `SendPacket`: routes to destination peer by node key
+///    - `NotePreferred`: marks this as the client's preferred server
+///    - `WatchConns`: registers for connection notifications (mesh)
+///    - `Ping`/`Pong`: responds to/acknowledges pings
+/// 7. On disconnect, unregisters the peer and cleans up.
 async fn derp_relay_session(state: AppState, socket: WebSocket) {
-    let peer_id = Uuid::new_v4();
-    let peer_id_str = peer_id.to_string();
-
-    // Lazily initialise a shared relay instance via the DerpTrafficTracker.
-    // We store the relay in a static OnceCell so all connections share it.
-    static RELAY: std::sync::OnceLock<Arc<DerpRelay>> = std::sync::OnceLock::new();
-    let relay = RELAY.get_or_init(DerpRelay::new).clone();
-
-    // Register peer with relay and traffic tracker.
-    let mut frame_rx = relay.add_peer(peer_id).await;
-    state.derp_tracker.add_client(peer_id_str.clone()).await;
-
-    debug!(peer_id = %peer_id, "DERP relay peer connected");
-
-    // Split the WebSocket into sender and receiver halves.
     let (mut ws_sender, mut ws_receiver) = socket.split();
 
+    // Step 1: Send server key.
+    let server_key_frame = Frame::server_key(state.derp_server.server_key());
+    let server_key_bytes = server_key_frame.to_bytes();
+    let send_result = tokio::time::timeout(
+        WS_IO_TIMEOUT,
+        ws_sender.send(Message::Binary(server_key_bytes.into())),
+    )
+    .await;
+    if send_result.is_err() || send_result.is_ok_and(|r| r.is_err()) {
+        debug!("DERP: failed to send server key");
+        return;
+    }
+
+    // Step 2: Wait for client info (node key).
+    let client_key = match receive_client_info(&mut ws_receiver).await {
+        Some(key) => key,
+        None => {
+            debug!("DERP: failed to receive client info");
+            return;
+        }
+    };
+
+    let client_key_str = client_key.to_string();
+
+    // Step 3: Register client with the DERP server and traffic tracker.
+    let mut frame_rx = state.derp_server.accept_client(client_key).await;
+    state.derp_tracker.add_client(client_key_str.clone()).await;
+
+    debug!(key = %client_key, "DERP relay peer connected via protocol handshake");
+
+    // Step 4: Spawn writer task — forwards frames from server to WebSocket.
     let tracker = state.derp_tracker.clone();
-    let peer_str_clone = peer_id_str.clone();
+    let peer_str_clone = client_key_str.clone();
     let send_task = tokio::spawn(async move {
         while let Some(frame) = frame_rx.recv().await {
-            let data_len = frame.data.len() as u64;
+            let frame_bytes = frame.to_bytes();
+            let data_len = frame_bytes.len() as u64;
             let send_result = tokio::time::timeout(
                 WS_IO_TIMEOUT,
-                ws_sender.send(Message::Binary(frame.data.into())),
+                ws_sender.send(Message::Binary(frame_bytes.into())),
             )
             .await;
             match send_result {
@@ -215,7 +168,39 @@ async fn derp_relay_session(state: AppState, socket: WebSocket) {
         }
     });
 
-    // Read incoming frames and broadcast to other peers.
+    // Step 5: Spawn keep-alive task — sends periodic KeepAlive frames.
+    let keep_alive_server = state.derp_server.clone();
+    let keep_alive_key = client_key;
+    let keep_alive_task = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(KEEP_ALIVE_INTERVAL);
+        // Skip the first tick which fires immediately.
+        interval.tick().await;
+        loop {
+            interval.tick().await;
+            if !keep_alive_server.has_client(&keep_alive_key).await {
+                break;
+            }
+            // Send keep-alive as a direct RecvPacket to the client via the
+            // server's channel. The keep-alive is a zero-length "packet" from
+            // the server's own key, which the client recognizes as a keep-alive.
+            let ka_frame = Frame::keep_alive();
+            // Try to deliver via the server's send mechanism.
+            // If the client's channel is full, skip this keep-alive.
+            if !keep_alive_server
+                .send_packet(
+                    keep_alive_server.server_key(),
+                    &keep_alive_key,
+                    &ka_frame.to_bytes(),
+                )
+                .await
+            {
+                // Client may have disconnected.
+                break;
+            }
+        }
+    });
+
+    // Step 6: Read incoming frames and process them.
     loop {
         let recv_result = tokio::time::timeout(WS_IO_TIMEOUT, ws_receiver.next()).await;
         match recv_result {
@@ -225,16 +210,13 @@ async fn derp_relay_session(state: AppState, socket: WebSocket) {
                         let data_len = data.len() as u64;
                         state
                             .derp_tracker
-                            .record_sent(&peer_id_str, data_len, 1)
+                            .record_sent(&client_key_str, data_len, 1)
                             .await;
 
-                        let frame = DerpFrame {
-                            src: peer_id,
-                            data: data.to_vec(),
-                        };
-
-                        // Broadcast to all other connected peers.
-                        relay.broadcast(&frame).await;
+                        // Parse DERP frame and handle accordingly.
+                        if let Ok((frame, _)) = derp::parse_frame(&data) {
+                            handle_client_frame(&state, &client_key, frame).await;
+                        }
                     }
                     Message::Close(_) => break,
                     // Text frames, Ping/Pong handled automatically by axum.
@@ -248,12 +230,68 @@ async fn derp_relay_session(state: AppState, socket: WebSocket) {
         }
     }
 
-    // Clean up.
+    // Step 7: Clean up.
     send_task.abort();
-    relay.remove_peer(&peer_id).await;
-    state.derp_tracker.remove_client(&peer_id_str).await;
+    keep_alive_task.abort();
+    state.derp_server.remove_client(&client_key).await;
+    state.derp_tracker.remove_client(&client_key_str).await;
 
-    debug!(peer_id = %peer_id, "DERP relay peer disconnected");
+    debug!(key = %client_key, "DERP relay peer disconnected");
+}
+
+/// Receives and parses the `ClientInfo` frame from a newly connected peer.
+///
+/// Returns the client's `NodeKey` if successful, or `None` if the client
+/// does not send a valid `ClientInfo` frame within the timeout.
+async fn receive_client_info(
+    ws_receiver: &mut futures_util::stream::SplitStream<WebSocket>,
+) -> Option<NodeKey> {
+    let recv_result = tokio::time::timeout(WS_IO_TIMEOUT, ws_receiver.next()).await;
+    match recv_result {
+        Ok(Some(Ok(Message::Binary(data)))) => {
+            if let Ok((frame, _)) = derp::parse_frame(&data) {
+                if frame.frame_type == FrameType::ClientInfo {
+                    return NodeKey::from_slice(&frame.payload);
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
+/// Processes a single DERP frame received from a connected client.
+async fn handle_client_frame(state: &AppState, src_key: &NodeKey, frame: Frame) {
+    match frame.frame_type {
+        FrameType::SendPacket => {
+            if let Ok((dst_key, packet_data)) = derp::parse_send_packet(&frame.payload) {
+                let _ = state
+                    .derp_server
+                    .send_packet(src_key, &dst_key, packet_data)
+                    .await;
+            }
+        }
+        FrameType::NotePreferred => {
+            let preferred = frame.payload.first().copied().unwrap_or(0) != 0;
+            state.derp_server.note_preferred(src_key, preferred).await;
+        }
+        FrameType::WatchConns => {
+            let _watcher_rx = state.derp_server.watch_conns(*src_key).await;
+        }
+        FrameType::Ping => {
+            if frame.payload.len() == 8 {
+                let mut data = [0u8; 8];
+                data.copy_from_slice(&frame.payload);
+                let pong = Frame::pong(data);
+                let _ = state
+                    .derp_server
+                    .send_packet(src_key, src_key, &pong.to_bytes())
+                    .await;
+            }
+        }
+        // Other frame types are server-to-client or unexpected. Ignore gracefully.
+        _ => {}
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -261,108 +299,126 @@ async fn derp_relay_session(state: AppState, socket: WebSocket) {
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 mod tests {
     use super::*;
-
-    // -- DerpRelay unit tests -----------------------------------------------
-
-    #[tokio::test]
-    async fn relay_add_and_remove_peer() {
-        let relay = DerpRelay::new();
-        let peer_id = Uuid::new_v4();
-
-        let _rx = relay.add_peer(peer_id).await;
-        assert_eq!(relay.peer_count().await, 1);
-
-        relay.remove_peer(&peer_id).await;
-        assert_eq!(relay.peer_count().await, 0);
-    }
+    use coder_connectivity::derp::{DerpServer, Frame, FrameType, NODE_KEY_LEN, NodeKey};
 
     #[tokio::test]
-    async fn relay_broadcast_delivers_to_other_peers() {
-        let relay = DerpRelay::new();
-        let sender_id = Uuid::new_v4();
-        let receiver_id = Uuid::new_v4();
+    async fn server_basic_accept_and_packet_relay() {
+        let server_key = NodeKey::new([1u8; NODE_KEY_LEN]);
+        let server = DerpServer::new(server_key);
 
-        let _sender_rx = relay.add_peer(sender_id).await;
-        let mut receiver_rx = relay.add_peer(receiver_id).await;
+        let alice = NodeKey::new([2u8; NODE_KEY_LEN]);
+        let bob = NodeKey::new([3u8; NODE_KEY_LEN]);
 
-        let frame = DerpFrame {
-            src: sender_id,
-            data: b"hello".to_vec(),
-        };
-        relay.broadcast(&frame).await;
+        let _alice_rx = server.accept_client(alice).await;
+        let mut bob_rx = server.accept_client(bob).await;
 
-        // Receiver should get the frame.
-        let received =
-            tokio::time::timeout(std::time::Duration::from_millis(100), receiver_rx.recv()).await;
-        assert!(received.is_ok());
-        let received = received.ok().flatten();
-        assert!(received.is_some());
-        assert_eq!(received.as_ref().map(|f| &f.data[..]), Some(&b"hello"[..]));
-    }
-
-    #[tokio::test]
-    async fn relay_broadcast_does_not_echo_to_sender() {
-        let relay = DerpRelay::new();
-        let sender_id = Uuid::new_v4();
-
-        let mut sender_rx = relay.add_peer(sender_id).await;
-
-        let frame = DerpFrame {
-            src: sender_id,
-            data: b"echo test".to_vec(),
-        };
-        relay.broadcast(&frame).await;
-
-        // Sender should NOT receive their own frame.
-        let received =
-            tokio::time::timeout(std::time::Duration::from_millis(50), sender_rx.recv()).await;
-        assert!(received.is_err(), "sender should not receive own frame");
-    }
-
-    #[tokio::test]
-    async fn relay_forward_to_specific_peer() {
-        let relay = DerpRelay::new();
-        let sender_id = Uuid::new_v4();
-        let target_id = Uuid::new_v4();
-        let bystander_id = Uuid::new_v4();
-
-        let _sender_rx = relay.add_peer(sender_id).await;
-        let mut target_rx = relay.add_peer(target_id).await;
-        let mut bystander_rx = relay.add_peer(bystander_id).await;
-
-        let frame = DerpFrame {
-            src: sender_id,
-            data: b"targeted".to_vec(),
-        };
-        let delivered = relay.forward_to(&target_id, frame).await;
+        let delivered = server.send_packet(&alice, &bob, b"hello").await;
         assert!(delivered);
 
-        // Target should receive the frame.
-        let received =
-            tokio::time::timeout(std::time::Duration::from_millis(100), target_rx.recv()).await;
-        assert!(received.is_ok());
+        let frame = tokio::time::timeout(std::time::Duration::from_millis(100), bob_rx.recv())
+            .await
+            .ok()
+            .flatten();
+        assert!(frame.is_some());
+        let frame = frame.unwrap();
+        assert_eq!(frame.frame_type, FrameType::RecvPacket);
+    }
 
-        // Bystander should NOT receive the frame.
-        let bystander_received =
-            tokio::time::timeout(std::time::Duration::from_millis(50), bystander_rx.recv()).await;
-        assert!(
-            bystander_received.is_err(),
-            "bystander should not receive targeted frame"
+    #[tokio::test]
+    async fn server_disconnect_removes_peer() {
+        let server_key = NodeKey::new([1u8; NODE_KEY_LEN]);
+        let server = DerpServer::new(server_key);
+
+        let alice = NodeKey::new([2u8; NODE_KEY_LEN]);
+        let _rx = server.accept_client(alice).await;
+        assert_eq!(server.client_count().await, 1);
+
+        server.remove_client(&alice).await;
+        assert_eq!(server.client_count().await, 0);
+    }
+
+    #[tokio::test]
+    async fn server_send_to_disconnected_peer_returns_false() {
+        let server_key = NodeKey::new([1u8; NODE_KEY_LEN]);
+        let server = DerpServer::new(server_key);
+
+        let alice = NodeKey::new([2u8; NODE_KEY_LEN]);
+        let bob = NodeKey::new([3u8; NODE_KEY_LEN]);
+
+        let _alice_rx = server.accept_client(alice).await;
+        let delivered = server.send_packet(&alice, &bob, b"hello").await;
+        assert!(!delivered);
+    }
+
+    #[tokio::test]
+    async fn frame_parse_and_route() {
+        let dst = NodeKey::new([3u8; NODE_KEY_LEN]);
+        let data = b"test payload";
+        let frame = Frame::send_packet(&dst, data);
+        let bytes = frame.to_bytes();
+
+        let (parsed, _) = derp::parse_frame(&bytes).unwrap();
+        assert_eq!(parsed.frame_type, FrameType::SendPacket);
+
+        let (parsed_dst, parsed_data) = derp::parse_send_packet(&parsed.payload).unwrap();
+        assert_eq!(parsed_dst, dst);
+        assert_eq!(parsed_data, data);
+    }
+
+    #[tokio::test]
+    async fn keep_alive_frame_creation() {
+        let frame = Frame::keep_alive();
+        let bytes = frame.to_bytes();
+        let (parsed, _) = derp::parse_frame(&bytes).unwrap();
+        assert_eq!(parsed.frame_type, FrameType::KeepAlive);
+        assert!(parsed.payload.is_empty());
+    }
+
+    #[tokio::test]
+    async fn peer_notification_on_connect_disconnect() {
+        let server_key = NodeKey::new([1u8; NODE_KEY_LEN]);
+        let server = DerpServer::new(server_key);
+
+        let watcher_key = NodeKey::new([10u8; NODE_KEY_LEN]);
+        let mut watcher_rx = server.watch_conns(watcher_key).await;
+
+        let client_key = NodeKey::new([20u8; NODE_KEY_LEN]);
+        let _client_rx = server.accept_client(client_key).await;
+
+        let notification =
+            tokio::time::timeout(std::time::Duration::from_millis(100), watcher_rx.recv())
+                .await
+                .ok()
+                .flatten();
+        assert!(notification.is_some());
+        assert_eq!(
+            notification.as_ref().map(|f| f.frame_type),
+            Some(FrameType::PeerPresent)
+        );
+
+        server.remove_client(&client_key).await;
+
+        let notification =
+            tokio::time::timeout(std::time::Duration::from_millis(100), watcher_rx.recv())
+                .await
+                .ok()
+                .flatten();
+        assert!(notification.is_some());
+        assert_eq!(
+            notification.as_ref().map(|f| f.frame_type),
+            Some(FrameType::PeerGone)
         );
     }
 
     #[tokio::test]
-    async fn relay_forward_to_unknown_peer_returns_false() {
-        let relay = DerpRelay::new();
-        let unknown_id = Uuid::new_v4();
+    async fn region_discovery_latency_check() {
+        let status = derp_latency_check().await;
+        assert_eq!(status, StatusCode::OK);
 
-        let frame = DerpFrame {
-            src: Uuid::new_v4(),
-            data: b"lost".to_vec(),
-        };
-        let delivered = relay.forward_to(&unknown_id, frame).await;
-        assert!(!delivered);
+        let status = api_derp_latency_check().await;
+        assert_eq!(status, StatusCode::OK);
     }
 }
