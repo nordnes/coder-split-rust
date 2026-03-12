@@ -62,6 +62,7 @@ use crate::handlers::tasks::*;
 use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
 use crate::handlers::users::*;
+use crate::handlers::workspace_apps::workspace_apps_proxy_path;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
@@ -254,6 +255,11 @@ pub fn build_router(
         .route("/derp", get(derp_websocket))
         .route("/derp/latency-check", get(derp_latency_check))
         .route("/metrics", get(get_prometheus_metrics))
+        // Workspace app path-based proxying.
+        .route(
+            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/*rest",
+            axum::routing::any(workspace_apps_proxy_path),
+        )
         .route("/mcp/http", post(mcp_http_handler))
         .route(
             "/external-auth/{externalauth}/callback",

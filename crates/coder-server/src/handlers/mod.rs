@@ -121,4 +121,9 @@ pub(crate) mod tasks;
 pub(crate) mod telemetry;
 pub(crate) mod templates;
 pub(crate) mod users;
+// Many items are defined for incremental integration (database-backed app
+// resolution, subdomain middleware wiring, etc.) and are only exercised in
+// tests for now.
+#[allow(dead_code)]
+pub(crate) mod workspace_apps;
 pub(crate) mod workspaces;
