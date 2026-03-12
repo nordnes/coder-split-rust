@@ -1842,8 +1842,21 @@ fn percent_decode_str(input: &str) -> String {
     let mut chars = input.as_bytes().iter();
     while let Some(&b) = chars.next() {
         if b == b'%' {
-            let hi = chars.next().copied().unwrap_or(b'0');
-            let lo = chars.next().copied().unwrap_or(b'0');
+            let hi = match chars.next().copied() {
+                Some(v) => v,
+                None => {
+                    result.push('%');
+                    continue;
+                }
+            };
+            let lo = match chars.next().copied() {
+                Some(v) => v,
+                None => {
+                    result.push('%');
+                    result.push(hi as char);
+                    continue;
+                }
+            };
             let hex = [hi, lo];
             if let Ok(s) = std::str::from_utf8(&hex) {
                 if let Ok(byte) = u8::from_str_radix(s, 16) {
