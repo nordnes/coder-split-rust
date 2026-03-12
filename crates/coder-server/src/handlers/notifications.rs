@@ -71,13 +71,13 @@ pub(crate) async fn get_system_notification_templates(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: listing system notification templates is an admin action.
+    // RBAC: listing system notification templates requires template-level read access.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
             Action::Read,
-            &Object::new(ResourceType::DeploymentConfig),
+            &Object::new(ResourceType::NotificationTemplate),
         )
         .is_err()
     {
@@ -101,13 +101,13 @@ pub(crate) async fn get_custom_notification_templates(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: listing custom notification templates is an admin action.
+    // RBAC: listing custom notification templates requires template-level read access.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
             Action::Read,
-            &Object::new(ResourceType::DeploymentConfig),
+            &Object::new(ResourceType::NotificationTemplate),
         )
         .is_err()
     {
@@ -217,9 +217,24 @@ pub(crate) async fn get_notification_dispatch_methods(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: dispatch methods are admin-level notification configuration.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::NotificationTemplate),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read notification dispatch methods.",
+        ));
+    }
 
     let _ = &state;
     let response = coder_core::NotificationMethodsResponse {

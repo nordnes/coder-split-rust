@@ -1,6 +1,7 @@
 //! Workspace CRUD, builds, ACL, port shares, and related handlers.
 
 use super::templates::resolve_organization;
+use super::users::clamp_pagination_limit;
 use super::*;
 
 #[derive(Debug, Default, Deserialize)]
@@ -64,7 +65,7 @@ pub(crate) async fn list_workspaces(
         last_used_before: None,
         last_used_after: None,
         organization_id: None,
-        limit: query.limit.unwrap_or(25),
+        limit: clamp_pagination_limit(query.limit.unwrap_or(25)),
         offset: query.offset.unwrap_or(0),
         viewer_id: Some(context.user.id),
     };
@@ -199,7 +200,7 @@ pub(crate) async fn list_workspace_builds_handler(
         .store
         .list_workspace_builds(
             workspace_id,
-            query.limit.unwrap_or(25),
+            clamp_pagination_limit(query.limit.unwrap_or(25)),
             query.offset.unwrap_or(0),
         )
         .await?;
