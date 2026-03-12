@@ -973,6 +973,8 @@ mod tests {
                 r#""temporary_failure""#,
             ),
             (NotificationMessageStatus::PermanentFailure, r#""permanent_failure""#),
+            (NotificationMessageStatus::Unknown, r#""unknown""#),
+            (NotificationMessageStatus::Inhibited, r#""inhibited""#),
         ];
         for (variant, expected_json) in &variants {
             let serialized = serde_json::to_string(variant)

@@ -504,7 +504,12 @@ pub(crate) async fn get_oidc_callback(
 
     // Discover the OIDC endpoints.  Uses a process-wide cache with a 5-minute
     // TTL so we avoid fetching the rarely-changing discovery document on every
-    // single login callback.
+    // single login callback.  The cache is keyed on the issuer URL so that a
+    // config change does not serve a stale document from a different provider.
+    //
+    // The mutex is NOT held across the HTTP fetch to avoid serializing all
+    // concurrent logins behind a single outbound request.  Instead we use a
+    // check-release-fetch-recheck pattern.
     let discovery = {
         use std::sync::OnceLock;
         use tokio::sync::Mutex;
@@ -512,19 +517,48 @@ pub(crate) async fn get_oidc_callback(
         static CACHE: OnceLock<Mutex<Option<OidcDiscoveryCacheEntry>>> = OnceLock::new();
         const TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+        let issuer_key = oidc_config.issuer_url.as_str().to_owned();
         let cache = CACHE.get_or_init(|| Mutex::new(None));
-        let mut guard = cache.lock().await;
 
-        let now = std::time::Instant::now();
-        if let Some(ref cached) = *guard {
-            if now.duration_since(cached.fetched_at) < TTL {
-                cached.doc.clone()
+        // First check: read the cache while holding the lock briefly.
+        let cached_hit = {
+            let guard = cache.lock().await;
+            if let Some(ref cached) = *guard {
+                let now = std::time::Instant::now();
+                if cached.issuer_url == issuer_key
+                    && now.duration_since(cached.fetched_at) < TTL
+                {
+                    Some(cached.doc.clone())
+                } else {
+                    None
+                }
             } else {
-                // TTL expired, refetch below.
-                drop_cache_and_fetch(&state, oidc_config, &mut guard, now).await?
+                None
             }
+        }; // lock released here
+
+        if let Some(doc) = cached_hit {
+            doc
         } else {
-            drop_cache_and_fetch(&state, oidc_config, &mut guard, now).await?
+            // Fetch without holding the lock so concurrent requests are not blocked.
+            let doc = coder_auth::oauth_login::oidc_discover(
+                &state.http_client,
+                &oidc_config.issuer_url,
+            )
+            .await
+            .map_err(|e| {
+                tracing::error!("OIDC discovery failed: {e}");
+                AppError::from(StorageError::unavailable(e.to_string()))
+            })?;
+
+            // Re-acquire the lock and store the fresh document.
+            let mut guard = cache.lock().await;
+            *guard = Some(OidcDiscoveryCacheEntry {
+                doc: doc.clone(),
+                fetched_at: std::time::Instant::now(),
+                issuer_url: issuer_key,
+            });
+            doc
         }
     };
 
@@ -681,38 +715,11 @@ pub(crate) async fn get_oidc_callback(
     ))
 }
 
-// ---------------------------------------------------------------------------
-// OIDC discovery cache helper
-// ---------------------------------------------------------------------------
-
-/// Fetches the OIDC discovery document and stores it in the cache.
-///
-/// This is extracted as a helper to avoid code duplication in the cache-miss
-/// and TTL-expired branches of `get_oidc_callback`.
-async fn drop_cache_and_fetch(
-    state: &AppState,
-    oidc_config: &coder_core::config::OidcConfig,
-    guard: &mut Option<OidcDiscoveryCacheEntry>,
-    now: std::time::Instant,
-) -> Result<coder_auth::oauth_login::OidcDiscovery, AppError> {
-    let doc =
-        coder_auth::oauth_login::oidc_discover(&state.http_client, &oidc_config.issuer_url)
-            .await
-            .map_err(|e| {
-                tracing::error!("OIDC discovery failed: {e}");
-                AppError::from(StorageError::unavailable(e.to_string()))
-            })?;
-    *guard = Some(OidcDiscoveryCacheEntry {
-        doc: doc.clone(),
-        fetched_at: now,
-    });
-    Ok(doc)
-}
-
-/// Cache entry for the OIDC discovery document.
+/// Cache entry for the OIDC discovery document, keyed on issuer URL.
 struct OidcDiscoveryCacheEntry {
     doc: coder_auth::oauth_login::OidcDiscovery,
     fetched_at: std::time::Instant,
+    issuer_url: String,
 }
 
 // ---------------------------------------------------------------------------
