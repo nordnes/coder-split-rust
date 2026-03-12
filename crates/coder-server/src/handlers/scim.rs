@@ -668,6 +668,11 @@ mod tests {
         }
     }
 
+    async fn response_json(resp: Response<Body>) -> Result<Value, Box<dyn std::error::Error>> {
+        let bytes = to_bytes(resp.into_body(), usize::MAX).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
     async fn response_typed<T: serde::de::DeserializeOwned>(
         resp: Response<Body>,
     ) -> Result<T, Box<dyn std::error::Error>> {
