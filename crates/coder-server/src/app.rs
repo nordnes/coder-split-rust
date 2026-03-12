@@ -7277,7 +7277,10 @@ pub(crate) mod tests {
                         && ws.dormant_at.is_none()
                         && build.transition == "start"
                         && (owner_status == "suspended"
-                            || (build.deadline.is_some() && build.deadline < Some(now))))
+                            || (build.deadline.is_some()
+                                && build.deadline
+                                    != Some(time::OffsetDateTime::UNIX_EPOCH)
+                                && build.deadline < Some(now))))
                     ||
                     // Autostart
                     (owner_status == "active"
@@ -7301,7 +7304,25 @@ pub(crate) mod tests {
                     (ws.dormant_at.is_some()
                         && ws.deleting_at.is_some()
                         && ws.deleting_at < Some(now)
-                        && template.time_til_dormant_autodelete > 0)
+                        && template.time_til_dormant_autodelete > 0
+                        && {
+                            // Mirror the SQL CASE: if the latest build is a
+                            // failed "delete" transition, only allow re-deletion
+                            // after 24 hours have elapsed since job completion.
+                            if build.transition == "delete"
+                                && job_status == "failed"
+                            {
+                                let finish = job.canceled_at.or(job.completed_at);
+                                match finish {
+                                    Some(t) => {
+                                        (now - t).whole_hours() >= 24
+                                    }
+                                    None => false,
+                                }
+                            } else {
+                                true
+                            }
+                        })
                     ||
                     // Failed stop
                     (template.failure_ttl > 0
