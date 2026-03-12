@@ -840,7 +840,11 @@ impl AppCookies {
     /// Priority:
     /// 1. Access-method-specific cookie
     /// 2. Standard Coder token extraction (session header, cookie, bearer)
-    pub(crate) fn token_from_request(&self, headers: &HeaderMap, method: &AccessMethod) -> Option<String> {
+    pub(crate) fn token_from_request(
+        &self,
+        headers: &HeaderMap,
+        method: &AccessMethod,
+    ) -> Option<String> {
         let cookie_name = self.cookie_name_for_access_method(method);
 
         // Check method-specific cookie first.
