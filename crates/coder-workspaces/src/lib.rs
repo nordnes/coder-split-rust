@@ -1105,21 +1105,31 @@ async fn activity_bump_once<S: ActivityBumpStore>(
         if new_deadline <= current_deadline {
             continue;
         }
-        if store
+        match store
             .update_workspace_build_deadline(
                 ws.build_id,
                 Some(new_deadline),
                 ws.max_deadline,
             )
-            .await?
+            .await
         {
-            debug!(
-                workspace_id = %ws.id,
-                workspace_name = %ws.name,
-                new_deadline = %new_deadline,
-                "bumped workspace deadline"
-            );
-            bumped += 1;
+            Ok(true) => {
+                debug!(
+                    workspace_id = %ws.id,
+                    workspace_name = %ws.name,
+                    new_deadline = %new_deadline,
+                    "bumped workspace deadline"
+                );
+                bumped += 1;
+            }
+            Ok(false) => {}
+            Err(error) => {
+                warn!(
+                    workspace_id = %ws.id,
+                    error = %error,
+                    "activity bump: failed to update workspace deadline"
+                );
+            }
         }
     }
     Ok(bumped)
