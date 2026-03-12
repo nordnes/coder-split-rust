@@ -935,13 +935,6 @@ pub fn evaluate_dormancy(
 /// Trait for the store operations needed by the activity bump worker.
 #[async_trait]
 pub trait ActivityBumpStore: Send + Sync + 'static {
-    /// Updates the last used timestamp for a workspace.
-    async fn update_workspace_last_used_at(
-        &self,
-        workspace_id: uuid::Uuid,
-        last_used_at: OffsetDateTime,
-    ) -> Result<bool, StorageError>;
-
     /// Returns workspaces eligible for transition (used to find active ones).
     async fn get_workspaces_eligible_for_transition(
         &self,
@@ -959,14 +952,6 @@ pub trait ActivityBumpStore: Send + Sync + 'static {
 
 #[async_trait]
 impl<T: AppStore + 'static> ActivityBumpStore for T {
-    async fn update_workspace_last_used_at(
-        &self,
-        workspace_id: uuid::Uuid,
-        last_used_at: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        AppStore::update_workspace_last_used_at(self, workspace_id, last_used_at).await
-    }
-
     async fn get_workspaces_eligible_for_transition(
         &self,
         now: OffsetDateTime,
@@ -993,7 +978,7 @@ impl<T: AppStore + 'static> ActivityBumpStore for T {
 /// deadlines for workspaces whose `last_used_at` is recent.
 pub struct ActivityBumpWorker {
     cancel: CancellationToken,
-    _task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl ActivityBumpWorker {
@@ -1013,7 +998,7 @@ impl ActivityBumpWorker {
         );
         Arc::new(Self {
             cancel,
-            _task: task,
+            task,
         })
     }
 
@@ -1028,7 +1013,7 @@ impl ActivityBumpWorker {
         self.cancel.cancel();
         // Try to unwrap the Arc; if other references exist, just cancel.
         if let Ok(this) = Arc::try_unwrap(self) {
-            let _result = this._task.await;
+            let _result = this.task.await;
         }
     }
 }
@@ -1182,7 +1167,7 @@ impl<T: AppStore + 'static> DormancyCheckerStore for T {
 /// and marks them as dormant.
 pub struct DormancyCheckerWorker {
     cancel: CancellationToken,
-    _task: tokio::task::JoinHandle<()>,
+    task: tokio::task::JoinHandle<()>,
 }
 
 impl DormancyCheckerWorker {
@@ -1202,7 +1187,7 @@ impl DormancyCheckerWorker {
         );
         Arc::new(Self {
             cancel,
-            _task: task,
+            task,
         })
     }
 
@@ -1217,7 +1202,7 @@ impl DormancyCheckerWorker {
         self.cancel.cancel();
         // Try to unwrap the Arc; if other references exist, just cancel.
         if let Ok(this) = Arc::try_unwrap(self) {
-            let _result = this._task.await;
+            let _result = this.task.await;
         }
     }
 }
@@ -2656,14 +2641,6 @@ mod tests {
 
     #[async_trait]
     impl ActivityBumpStore for MockActivityBumpStore {
-        async fn update_workspace_last_used_at(
-            &self,
-            _workspace_id: uuid::Uuid,
-            _last_used_at: OffsetDateTime,
-        ) -> Result<bool, StorageError> {
-            Ok(true)
-        }
-
         async fn get_workspaces_eligible_for_transition(
             &self,
             _now: OffsetDateTime,

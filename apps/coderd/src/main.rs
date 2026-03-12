@@ -573,20 +573,36 @@ struct ServerArgs {
     #[arg(
         long,
         env = "CODER_NOTIFICATION_DISPATCH_INTERVAL",
-        default_value_t = 10
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..)
     )]
     notification_dispatch_interval_secs: u64,
 
     /// Poll interval in seconds for the activity bump worker.
-    #[arg(long, env = "CODER_ACTIVITY_BUMP_INTERVAL", default_value_t = 10)]
+    #[arg(
+        long,
+        env = "CODER_ACTIVITY_BUMP_INTERVAL",
+        default_value_t = 10,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     activity_bump_interval_secs: u64,
 
     /// Poll interval in seconds for the dormancy checker worker.
-    #[arg(long, env = "CODER_DORMANCY_CHECK_INTERVAL", default_value_t = 60)]
+    #[arg(
+        long,
+        env = "CODER_DORMANCY_CHECK_INTERVAL",
+        default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     dormancy_check_interval_secs: u64,
 
     /// Flush interval in seconds for the telemetry batching worker.
-    #[arg(long, env = "CODER_TELEMETRY_FLUSH_INTERVAL", default_value_t = 1800)]
+    #[arg(
+        long,
+        env = "CODER_TELEMETRY_FLUSH_INTERVAL",
+        default_value_t = 1800,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     telemetry_flush_interval_secs: u64,
 
     /// Comma-separated list of allowed CORS origins.  When empty every origin
