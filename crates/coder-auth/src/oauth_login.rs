@@ -542,6 +542,35 @@ pub async fn fetch_jwks(
         .map_err(|e| OAuthLoginError::Http(format!("JWKS parse error: {e}")))
 }
 
+/// Converts a [`jsonwebtoken::jwk::KeyAlgorithm`] to a
+/// [`jsonwebtoken::Algorithm`].  Returns `None` for key-management-only
+/// algorithms (RSA1_5, RSA-OAEP, RSA-OAEP-256) that are not used for
+/// JWT signing.
+fn key_algorithm_to_algorithm(
+    ka: jsonwebtoken::jwk::KeyAlgorithm,
+) -> Option<jsonwebtoken::Algorithm> {
+    use jsonwebtoken::jwk::KeyAlgorithm;
+    use jsonwebtoken::Algorithm;
+
+    match ka {
+        KeyAlgorithm::HS256 => Some(Algorithm::HS256),
+        KeyAlgorithm::HS384 => Some(Algorithm::HS384),
+        KeyAlgorithm::HS512 => Some(Algorithm::HS512),
+        KeyAlgorithm::RS256 => Some(Algorithm::RS256),
+        KeyAlgorithm::RS384 => Some(Algorithm::RS384),
+        KeyAlgorithm::RS512 => Some(Algorithm::RS512),
+        KeyAlgorithm::PS256 => Some(Algorithm::PS256),
+        KeyAlgorithm::PS384 => Some(Algorithm::PS384),
+        KeyAlgorithm::PS512 => Some(Algorithm::PS512),
+        KeyAlgorithm::ES256 => Some(Algorithm::ES256),
+        KeyAlgorithm::ES384 => Some(Algorithm::ES384),
+        KeyAlgorithm::EdDSA => Some(Algorithm::EdDSA),
+        // Key-management algorithms (RSA1_5, RSA-OAEP, RSA-OAEP-256) are
+        // not valid for JWT signing.
+        _ => None,
+    }
+}
+
 /// Decodes and cryptographically verifies an OIDC ID token using the
 /// provider's JWKS.
 ///
@@ -582,8 +611,21 @@ pub fn decode_id_token_claims(
         OAuthLoginError::InvalidIdToken(format!("failed to build decoding key from JWK: {e}"))
     })?;
 
+    // Determine the verification algorithm.  Prefer the JWK's declared
+    // algorithm (`alg` field) over the JWT header's `alg`, because the
+    // header is attacker-controlled.  Fall back to the header only when
+    // the JWK does not declare an algorithm.
+    let alg = match jwk.common.key_algorithm {
+        Some(ka) => key_algorithm_to_algorithm(ka).ok_or_else(|| {
+            OAuthLoginError::InvalidIdToken(format!(
+                "JWK declares unsupported algorithm: {ka:?}"
+            ))
+        })?,
+        None => header.alg,
+    };
+
     // Build validation: check issuer, audience, and expiry.
-    let mut validation = jsonwebtoken::Validation::new(header.alg);
+    let mut validation = jsonwebtoken::Validation::new(alg);
     let issuer = config.issuer_url.as_str().trim_end_matches('/');
     // Also accept the issuer with a trailing slash so providers that include
     // one in their `iss` claim are not rejected (the old validate_oidc_claims
