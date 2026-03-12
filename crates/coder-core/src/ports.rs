@@ -1714,24 +1714,14 @@ pub trait IdentityStore: Send + Sync {
         &self,
         limit: u32,
         max_attempt_count: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = (limit, max_attempt_count);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError>;
 
     /// Updates the status of a notification message after dispatch.
     async fn update_notification_message_status(
         &self,
         message_id: Uuid,
         status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        let _ = (message_id, status);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Increments the attempt count for a notification message.
     async fn increment_notification_message_attempt_count(
@@ -3621,12 +3611,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         template_id: Uuid,
         method: Option<&str>,
-    ) -> Result<Option<NotificationTemplate>, StorageError> {
-        let _ = (template_id, method);
-        Err(StorageError::unavailable(
-            "notification templates are not implemented",
-        ))
-    }
+    ) -> Result<Option<NotificationTemplate>, StorageError>;
 
     /// Returns notification preferences for a user.
     async fn get_user_notification_preferences(
@@ -3640,12 +3625,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         user_id: Uuid,
         template_ids: &[Uuid],
         disableds: &[bool],
-    ) -> Result<(), StorageError> {
-        let _ = (user_id, template_ids, disableds);
-        Err(StorageError::unavailable(
-            "notification preferences are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists inbox notifications for a user with optional filtering.
     async fn get_filtered_inbox_notifications(
@@ -3655,12 +3635,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         targets: Option<&[Uuid]>,
         read_status: &str,
         created_before: Option<OffsetDateTime>,
-    ) -> Result<Vec<InboxNotification>, StorageError> {
-        let _ = (user_id, templates, targets, read_status, created_before);
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    ) -> Result<Vec<InboxNotification>, StorageError>;
 
     /// Counts unread inbox notifications for a user.
     async fn count_unread_inbox_notifications(&self, user_id: Uuid) -> Result<i64, StorageError>;
@@ -3676,24 +3651,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         id: Uuid,
         read_at: Option<OffsetDateTime>,
-    ) -> Result<(), StorageError> {
-        let _ = (id, read_at);
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Marks all unread inbox notifications as read for a user.
     async fn mark_all_inbox_notifications_as_read(
         &self,
         user_id: Uuid,
         read_at: OffsetDateTime,
-    ) -> Result<(), StorageError> {
-        let _ = (user_id, read_at);
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists webpush subscriptions for a user.
     async fn get_webpush_subscriptions_by_user_id(
@@ -3708,24 +3673,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         endpoint: &str,
         p256dh_key: &str,
         auth_key: &str,
-    ) -> Result<(), StorageError> {
-        let _ = (user_id, endpoint, p256dh_key, auth_key);
-        Err(StorageError::unavailable(
-            "webpush subscriptions are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Deletes a webpush subscription by user ID and endpoint.
     async fn delete_webpush_subscription_by_user_and_endpoint(
         &self,
         user_id: Uuid,
         endpoint: &str,
-    ) -> Result<bool, StorageError> {
-        let _ = (user_id, endpoint);
-        Err(StorageError::unavailable(
-            "webpush subscriptions are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Deletes webpush subscriptions by their IDs.
     async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError>;
@@ -3746,12 +3701,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         public_key: &str,
         private_key: &str,
-    ) -> Result<(), StorageError> {
-        let _ = (public_key, private_key);
-        Err(StorageError::unavailable(
-            "webpush VAPID keys are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     // ----- OAuth2 Provider -----
 
@@ -3912,24 +3862,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         limit: u32,
         max_attempt_count: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = (limit, max_attempt_count);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError>;
 
     /// Updates the status of a notification message after dispatch.
     async fn update_notification_message_status(
         &self,
         message_id: Uuid,
         status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        let _ = (message_id, status);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Increments the attempt count for a notification message.
     async fn increment_notification_message_attempt_count(
@@ -5389,6 +5329,22 @@ where
         AppStore::delete_custom_role(self, name, organization_id).await
     }
 
+    async fn acquire_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        AppStore::acquire_pending_notification_messages(self, limit, max_attempt_count).await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_notification_message_status(self, message_id, status).await
+    }
+
     async fn increment_notification_message_attempt_count(
         &self,
         message_id: Uuid,
@@ -5916,6 +5872,26 @@ where
         organization_id: Option<Uuid>,
     ) -> Result<bool, StorageError> {
         (**self).delete_custom_role(name, organization_id).await
+    }
+
+    async fn acquire_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        (**self)
+            .acquire_pending_notification_messages(limit, max_attempt_count)
+            .await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_notification_message_status(message_id, status)
+            .await
     }
 
     async fn increment_notification_message_attempt_count(
