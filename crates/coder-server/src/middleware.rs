@@ -3,9 +3,11 @@
 //! Provides the following Axum middleware layers:
 //!
 //! * [`build_cors_layer`] — configurable CORS via [`tower_http::cors`]
+//! * [`build_permissive_cors_layer`] — permissive CORS for OAuth2/MCP endpoints
 //! * [`real_ip_middleware`] — extracts client IP from `X-Forwarded-For` / `X-Real-IP`
-//! * [`csp_middleware`] — sets `Content-Security-Policy` on every response
-//! * [`hsts_middleware`] — adds `Strict-Transport-Security` for HTTPS requests
+//! * [`csp_middleware`] — sets `Content-Security-Policy` matching Go's CSP generation
+//! * [`hsts_middleware`] — configurable `Strict-Transport-Security` header
+//! * [`security_headers_middleware`] — `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`
 //! * [`csrf_middleware`] — requires `X-CSRF-Token` on mutating cookie-auth requests
 //! * [`otel_trace_context_middleware`] — W3C TraceContext propagation (OTel)
 //! * [`prometheus_middleware`] — per-request latency and status-code metrics
@@ -16,10 +18,11 @@ use axum::{
     middleware::Next,
     response::Response,
 };
-use coder_core::config::CorsConfig;
+use coder_core::config::{CorsConfig, SecurityHeadersConfig};
 use http::Method;
 use http::header::HeaderMap;
 use std::net::IpAddr;
+use std::sync::Arc;
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer, ExposeHeaders};
 use tracing_opentelemetry::OpenTelemetrySpanExt;
 
@@ -85,11 +88,14 @@ pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
         HeaderName::from_static("coder-session-token"),
         HeaderName::from_static("accept"),
         HeaderName::from_static("x-csrf-token"),
+        HeaderName::from_static("x-latency-check"),
     ]);
 
     let expose_headers = ExposeHeaders::list([
         HeaderName::from_static("content-range"),
         HeaderName::from_static("x-content-type-options"),
+        HeaderName::from_static("etag"),
+        HeaderName::from_static("coder-build-version"),
     ]);
 
     let mut layer = CorsLayer::new()
@@ -104,6 +110,47 @@ pub(crate) fn build_cors_layer(config: &CorsConfig) -> CorsLayer {
     }
 
     layer
+}
+
+/// Builds a permissive [`CorsLayer`] for OAuth2, MCP, and well-known endpoints.
+///
+/// Matches the Go implementation in `httpmw.Cors` which uses a separate, more
+/// permissive CORS policy for `/oauth2/`, `/api/experimental/mcp/`, and
+/// `/.well-known/oauth-*` paths.  This layer allows all origins with no
+/// credentials, extended headers for MCP protocol, and a 24-hour preflight
+/// cache.
+pub(crate) fn build_permissive_cors_layer() -> CorsLayer {
+    let allow_methods = AllowMethods::list([
+        Method::GET,
+        Method::POST,
+        Method::DELETE,
+        Method::OPTIONS,
+    ]);
+
+    let allow_headers = AllowHeaders::list([
+        HeaderName::from_static("content-type"),
+        HeaderName::from_static("accept"),
+        HeaderName::from_static("authorization"),
+        HeaderName::from_static("x-api-key"),
+        HeaderName::from_static("mcp-session-id"),
+        HeaderName::from_static("mcp-protocol-version"),
+        HeaderName::from_static("last-event-id"),
+    ]);
+
+    let expose_headers = ExposeHeaders::list([
+        HeaderName::from_static("content-type"),
+        HeaderName::from_static("authorization"),
+        HeaderName::from_static("x-api-key"),
+        HeaderName::from_static("mcp-session-id"),
+        HeaderName::from_static("mcp-protocol-version"),
+    ]);
+
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::any())
+        .allow_methods(allow_methods)
+        .allow_headers(allow_headers)
+        .expose_headers(expose_headers)
+        .max_age(std::time::Duration::from_secs(86400))
 }
 
 /// Stored in request extensions so downstream handlers can read the real
@@ -139,44 +186,233 @@ pub(crate) async fn real_ip_middleware(
     next.run(request).await
 }
 
+/// Pre-computed CSP header value to avoid per-request string building.
+///
+/// The CSP generation matches the Go `httpmw.CSPHeaders` function: it
+/// builds a comprehensive policy covering `default-src`, `connect-src`,
+/// `script-src`, `style-src`, `font-src`, `img-src`, `object-src`,
+/// `manifest-src`, `frame-src`, `form-action`, `media-src`, `worker-src`,
+/// `frame-ancestors`, and `report-uri`.
+#[derive(Clone, Debug)]
+pub(crate) struct CspConfig {
+    header_value: HeaderValue,
+}
+
+impl CspConfig {
+    /// Build a CSP header value from configuration.
+    ///
+    /// `host` is the request `Host` header used to allow WebSocket
+    /// connections in older WebKit browsers.  When building a static
+    /// config (no per-request host), pass an empty string.
+    pub(crate) fn new(telemetry_enabled: bool, additional_directives: &[String]) -> Self {
+        let mut csp = String::with_capacity(512);
+
+        // default-src
+        csp.push_str("default-src 'self'; ");
+        // connect-src — allow self; telemetry; ws/wss added per-request
+        let mut connect = String::from("'self'");
+        if telemetry_enabled {
+            connect.push_str(" https://coder.com");
+        }
+        csp.push_str(&format!("connect-src {connect}; "));
+        // child-src
+        csp.push_str("child-src 'self'; ");
+        // script-src
+        csp.push_str("script-src 'self'; ");
+        // style-src — unsafe-inline needed for monaco editor
+        csp.push_str("style-src 'self' 'unsafe-inline'; ");
+        // font-src — data: for monaco
+        csp.push_str("font-src 'self' data:; ");
+        // worker-src — blob: for web workers
+        csp.push_str("worker-src 'self' blob:; ");
+        // object-src — code-server support
+        csp.push_str("object-src 'self'; ");
+        // manifest-src — blob: for code-server PWA manifest
+        csp.push_str("manifest-src 'self' blob:; ");
+        // frame-src
+        csp.push_str("frame-src 'self'; ");
+        // img-src — https: for template readmes, data: for base64 icons
+        csp.push_str("img-src 'self' https: data:; ");
+        // form-action
+        csp.push_str("form-action 'self'; ");
+        // media-src
+        csp.push_str("media-src 'self'; ");
+        // frame-ancestors
+        csp.push_str("frame-ancestors 'none'; ");
+        // report-uri
+        csp.push_str("report-uri /api/v2/csp/reports; ");
+
+        // Append additional directives from configuration.
+        for directive in additional_directives {
+            let trimmed = directive.trim();
+            if trimmed.is_empty() {
+                continue;
+            }
+            // Each additional directive is in the form "<directive> <value> <value> ..."
+            // We append it as-is with a trailing semicolon.
+            csp.push_str(trimmed);
+            if !trimmed.ends_with(';') {
+                csp.push_str("; ");
+            }
+        }
+
+        // HeaderValue::from_str will fail if the value contains non-visible
+        // ASCII.  Fall back to the minimal policy in that edge case.
+        let header_value = HeaderValue::from_str(csp.trim()).unwrap_or_else(|_| {
+            tracing::warn!("CSP header value contained invalid characters; using minimal policy");
+            HeaderValue::from_static(
+                "default-src 'self'; frame-ancestors 'none'; form-action 'self'",
+            )
+        });
+
+        Self { header_value }
+    }
+}
+
 /// Middleware: set Content-Security-Policy on every response.
+///
+/// Uses the pre-computed CSP from [`CspConfig`] stored in the request
+/// extensions (injected by the router layer).  Falls back to a minimal
+/// restrictive policy if no config is found.
 pub(crate) async fn csp_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let csp = request.extensions().get::<Arc<CspConfig>>().cloned();
     let mut response = next.run(request).await;
-    // Use a restrictive default policy; callers can override per-route if needed.
-    if let Ok(value) =
-        HeaderValue::from_str("default-src 'self'; frame-ancestors 'none'; form-action 'self'")
-    {
-        response
-            .headers_mut()
-            .insert(HeaderName::from_static("content-security-policy"), value);
+
+    if let Some(csp) = csp {
+        response.headers_mut().insert(
+            HeaderName::from_static("content-security-policy"),
+            csp.header_value.clone(),
+        );
+    } else {
+        // Fallback: minimal restrictive policy.
+        response.headers_mut().insert(
+            HeaderName::from_static("content-security-policy"),
+            HeaderValue::from_static(
+                "default-src 'self'; frame-ancestors 'none'; form-action 'self'",
+            ),
+        );
     }
     response
 }
 
-/// Middleware: add Strict-Transport-Security header when the request arrived
-/// over HTTPS (indicated by scheme or X-Forwarded-Proto).
-pub(crate) async fn hsts_middleware(request: axum::extract::Request, next: Next) -> Response {
-    let is_https = request
-        .uri()
-        .scheme_str()
-        .map(|s| s == "https")
-        .unwrap_or(false)
-        || request
-            .headers()
-            .get("x-forwarded-proto")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|v| v.split(',').next())
-            .map(|v| v.trim().eq_ignore_ascii_case("https"))
-            .unwrap_or(false);
+/// Pre-computed HSTS configuration matching Go's `httpmw.HSTSConfigOptions`.
+///
+/// When `max_age` is zero the header is omitted entirely.  The `options`
+/// field supports `includeSubDomains` and `preload` (case-insensitive
+/// input is normalised).
+#[derive(Clone, Debug)]
+pub(crate) struct HstsConfig {
+    /// Pre-built header value, or `None` when HSTS is disabled (max_age == 0).
+    header_value: Option<HeaderValue>,
+}
 
+impl HstsConfig {
+    /// Build an HSTS config from the max-age and option strings.
+    ///
+    /// Mirrors Go's `HSTSConfigOptions`: validates options, normalises casing,
+    /// and builds the header value once.
+    pub(crate) fn new(max_age_secs: u64, options: &[String]) -> Self {
+        if max_age_secs == 0 {
+            return Self {
+                header_value: None,
+            };
+        }
+
+        let mut header = format!("max-age={max_age_secs}");
+
+        for opt in options {
+            let normalised = if opt.eq_ignore_ascii_case("includesubdomains") {
+                "includeSubDomains"
+            } else if opt.eq_ignore_ascii_case("preload") {
+                "preload"
+            } else {
+                tracing::warn!(
+                    option = %opt,
+                    "ignoring invalid HSTS option (must be 'includeSubDomains' or 'preload')"
+                );
+                continue;
+            };
+            header.push_str("; ");
+            header.push_str(normalised);
+        }
+
+        let header_value = HeaderValue::from_str(&header).ok();
+        if header_value.is_none() {
+            tracing::warn!("HSTS header value contained invalid characters; HSTS disabled");
+        }
+
+        Self { header_value }
+    }
+}
+
+/// Middleware: add Strict-Transport-Security header.
+///
+/// Uses the pre-computed [`HstsConfig`] from request extensions.  The header
+/// is always set when enabled (matching Go behaviour where HSTS is set on
+/// every response, not just HTTPS ones — browsers ignore it on plain HTTP).
+pub(crate) async fn hsts_middleware(request: axum::extract::Request, next: Next) -> Response {
+    let hsts = request.extensions().get::<Arc<HstsConfig>>().cloned();
     let mut response = next.run(request).await;
 
-    if is_https {
-        if let Ok(value) = HeaderValue::from_str("max-age=31536000; includeSubDomains") {
+    if let Some(hsts) = hsts {
+        if let Some(ref value) = hsts.header_value {
             response
                 .headers_mut()
-                .insert(HeaderName::from_static("strict-transport-security"), value);
+                .insert(HeaderName::from_static("strict-transport-security"), value.clone());
         }
+    }
+
+    response
+}
+
+/// Middleware: set security response headers.
+///
+/// Adds `X-Content-Type-Options`, `X-Frame-Options`, and `Referrer-Policy`
+/// headers on every response.  Values are configurable through
+/// [`SecurityHeadersConfig`]; empty values cause the corresponding header to
+/// be omitted.
+///
+/// This matches Go's inline middleware in `coderd.go` that sets
+/// `X-Content-Type-Options: nosniff` and extends it with the additional
+/// security headers recommended for production deployments.
+pub(crate) async fn security_headers_middleware(
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    let config = request
+        .extensions()
+        .get::<Arc<SecurityHeadersConfig>>()
+        .cloned();
+    let mut response = next.run(request).await;
+
+    if let Some(config) = config {
+        if !config.x_content_type_options.is_empty() {
+            if let Ok(val) = HeaderValue::from_str(&config.x_content_type_options) {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static("x-content-type-options"), val);
+            }
+        }
+        if !config.x_frame_options.is_empty() {
+            if let Ok(val) = HeaderValue::from_str(&config.x_frame_options) {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static("x-frame-options"), val);
+            }
+        }
+        if !config.referrer_policy.is_empty() {
+            if let Ok(val) = HeaderValue::from_str(&config.referrer_policy) {
+                response
+                    .headers_mut()
+                    .insert(HeaderName::from_static("referrer-policy"), val);
+            }
+        }
+    } else {
+        // Fallback defaults matching Go's X-Content-Type-Options: nosniff.
+        response.headers_mut().insert(
+            HeaderName::from_static("x-content-type-options"),
+            HeaderValue::from_static("nosniff"),
+        );
     }
 
     response

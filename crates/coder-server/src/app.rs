@@ -66,8 +66,9 @@ use crate::handlers::workspace_apps::workspace_apps_proxy_path;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
-    build_cors_layer, csp_middleware, csrf_middleware, hsts_middleware,
+    CspConfig, HstsConfig, build_cors_layer, csp_middleware, csrf_middleware, hsts_middleware,
     otel_trace_context_middleware, prometheus_middleware, real_ip_middleware,
+    security_headers_middleware,
 };
 
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
@@ -969,6 +970,17 @@ pub fn build_router(
         router
     };
 
+    // Build pre-computed middleware configs from ServerConfig.
+    let csp_config = Arc::new(CspConfig::new(
+        state.config.telemetry.enabled,
+        &state.config.additional_csp_policy,
+    ));
+    let hsts_config = Arc::new(HstsConfig::new(
+        state.config.strict_transport_security,
+        &state.config.strict_transport_security_options,
+    ));
+    let security_headers_config = Arc::new(state.config.security_headers.clone());
+
     router
         .layer(middleware::from_fn_with_state(
             rate_limit_state,
@@ -976,9 +988,14 @@ pub fn build_router(
         ))
         .layer(middleware::from_fn(csrf_middleware))
         .layer(build_cors_layer(&state.config.cors))
+        .layer(middleware::from_fn(security_headers_middleware))
         .layer(middleware::from_fn(csp_middleware))
         .layer(middleware::from_fn(hsts_middleware))
         .layer(middleware::from_fn(real_ip_middleware))
+        // Inject pre-computed middleware configs into request extensions.
+        .layer(axum::Extension(csp_config))
+        .layer(axum::Extension(hsts_config))
+        .layer(axum::Extension(security_headers_config))
         .layer(middleware::from_fn({
             let guard_state = crate::connection_guard::ConnectionGuardState::new(
                 state.config.max_concurrent_requests,
@@ -7451,6 +7468,9 @@ pub(crate) mod tests {
                         template_time_til_dormant: template.time_til_dormant,
                         template_time_til_dormant_autodelete: template.time_til_dormant_autodelete,
                         owner_status,
+                        build_id: build.id,
+                        max_deadline: build.max_deadline,
+                        activity_bump_ns: template.activity_bump,
                     });
                 }
             }
@@ -8011,11 +8031,13 @@ pub(crate) mod tests {
             oidc: None,
             otel: coder_core::config::OtelConfig::default(),
             cors: coder_core::config::CorsConfig::default(),
+            security_headers: coder_core::config::SecurityHeadersConfig::default(),
             provisioner: coder_core::config::ProvisionerConfig::default(),
             session_lifetime: coder_core::config::SessionLifetimeConfig::default(),
             dangerous: coder_core::config::DangerousConfig::default(),
             healthcheck: coder_core::config::HealthcheckConfig::default(),
             workspace: coder_core::config::WorkspaceConfig::default(),
+            worker: coder_core::config::WorkerConfig::default(),
             swagger_enabled: true,
             update_check: false,
             ssh_keygen_algorithm: "ed25519".to_owned(),
@@ -32087,6 +32109,290 @@ pub(crate) mod tests {
                 .get("access-control-allow-origin")
                 .is_none(),
             "all-invalid origins should block all cross-origin requests"
+        );
+        Ok(())
+    }
+
+    // --- Security headers tests ---
+
+    #[tokio::test]
+    async fn security_headers_present_on_all_responses() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "X-Content-Type-Options should be nosniff"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-frame-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("DENY"),
+            "X-Frame-Options should be DENY"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("referrer-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-referrer"),
+            "Referrer-Policy should be no-referrer"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn security_headers_present_on_error_responses() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/users/me")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        assert_eq!(
+            response
+                .headers()
+                .get("x-content-type-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("nosniff"),
+            "X-Content-Type-Options should be present on error responses"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("x-frame-options")
+                .and_then(|v| v.to_str().ok()),
+            Some("DENY"),
+            "X-Frame-Options should be present on error responses"
+        );
+        assert_eq!(
+            response
+                .headers()
+                .get("referrer-policy")
+                .and_then(|v| v.to_str().ok()),
+            Some("no-referrer"),
+            "Referrer-Policy should be present on error responses"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn csp_header_matches_go_directives() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let csp = response
+            .headers()
+            .get("content-security-policy")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        assert!(csp.is_some(), "CSP header should be present");
+        let csp_val = csp.unwrap_or_default();
+        assert!(
+            csp_val.contains("default-src 'self'"),
+            "CSP should contain default-src, got: {csp_val}"
+        );
+        assert!(
+            csp_val.contains("frame-ancestors 'none'"),
+            "CSP should contain frame-ancestors, got: {csp_val}"
+        );
+        assert!(
+            csp_val.contains("script-src 'self'"),
+            "CSP should contain script-src, got: {csp_val}"
+        );
+        assert!(
+            csp_val.contains("style-src 'self' 'unsafe-inline'"),
+            "CSP should contain style-src with unsafe-inline, got: {csp_val}"
+        );
+        assert!(
+            csp_val.contains("img-src 'self' https: data:"),
+            "CSP should contain img-src, got: {csp_val}"
+        );
+        assert!(
+            csp_val.contains("worker-src 'self' blob:"),
+            "CSP should contain worker-src, got: {csp_val}"
+        );
+        assert!(
+            csp_val.contains("report-uri /api/v2/csp/reports"),
+            "CSP should contain report-uri, got: {csp_val}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hsts_header_not_set_when_disabled() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        assert!(
+            response
+                .headers()
+                .get("strict-transport-security")
+                .is_none(),
+            "HSTS should not be set when max-age is 0"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn hsts_header_present_when_configured() -> Result<(), Box<dyn Error>> {
+        let mut config = test_config()?;
+        config.strict_transport_security = 31536000;
+        config.strict_transport_security_options =
+            vec!["includeSubDomains".to_owned(), "preload".to_owned()];
+
+        let state = {
+            use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+            let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
+            let audit: Arc<dyn AuditSink> = Arc::new(MemoryAuditSink::default());
+            let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+                Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+            let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+                Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+            let coordinator = InMemoryCoordinator::new(Default::default());
+            let derp_tracker = DerpTrafficTracker::new();
+            AppState::new(
+                config,
+                BuildMetadata::default(),
+                Uuid::nil(),
+                store,
+                audit,
+                pubsub,
+                agent_provider,
+                coordinator,
+                derp_tracker,
+                None,
+                coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            )?
+        };
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let hsts = response
+            .headers()
+            .get("strict-transport-security")
+            .and_then(|v| v.to_str().ok())
+            .map(String::from);
+        assert!(hsts.is_some(), "HSTS header should be present when configured");
+        let hsts_val = hsts.unwrap_or_default();
+        assert!(
+            hsts_val.contains("max-age=31536000"),
+            "HSTS should contain configured max-age, got: {hsts_val}"
+        );
+        assert!(
+            hsts_val.contains("includeSubDomains"),
+            "HSTS should contain includeSubDomains, got: {hsts_val}"
+        );
+        assert!(
+            hsts_val.contains("preload"),
+            "HSTS should contain preload, got: {hsts_val}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_allows_x_latency_check_header() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        let request = Request::builder()
+            .method(Method::OPTIONS)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .header("access-control-request-method", "GET")
+            .header("access-control-request-headers", "x-latency-check")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let allow_headers = response
+            .headers()
+            .get("access-control-allow-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            allow_headers.contains("x-latency-check"),
+            "CORS should allow x-latency-check header, got: {allow_headers}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cors_exposes_etag_and_build_version() -> Result<(), Box<dyn Error>> {
+        let state = test_state_with_cors(coder_core::config::CorsConfig {
+            allowed_origins: vec!["https://example.com".to_owned()],
+            allow_credentials: true,
+            max_age_secs: 3600,
+        })?;
+        let app = build_router(state, None);
+
+        // Expose headers appear on actual responses, not preflight OPTIONS.
+        let request = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v2/buildinfo")
+            .header("origin", "https://example.com")
+            .body(Body::empty())?;
+
+        let response = call(app, request).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let expose_headers = response
+            .headers()
+            .get("access-control-expose-headers")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_lowercase();
+        assert!(
+            expose_headers.contains("etag"),
+            "CORS should expose etag header, got: {expose_headers}"
+        );
+        assert!(
+            expose_headers.contains("coder-build-version"),
+            "CORS should expose coder-build-version header, got: {expose_headers}"
         );
         Ok(())
     }

@@ -58,6 +58,8 @@ pub struct ServerConfig {
     pub otel: OtelConfig,
     /// CORS (Cross-Origin Resource Sharing) configuration.
     pub cors: CorsConfig,
+    /// Security headers configuration.
+    pub security_headers: SecurityHeadersConfig,
     /// Provisioner daemon settings.
     pub provisioner: ProvisionerConfig,
     /// Session and token lifetime settings.
@@ -162,6 +164,7 @@ impl ServerConfig {
             web_terminal_renderer: self.web_terminal_renderer.clone(),
             allow_workspace_renames: self.allow_workspace_renames,
             additional_csp_policy: self.additional_csp_policy.clone(),
+            security_headers: self.security_headers.clone(),
             disable_workspace_sharing: self.disable_workspace_sharing,
             ssh_keygen_algorithm: self.ssh_keygen_algorithm.clone(),
             cache_dir: self.cache_dir.clone(),
@@ -695,6 +698,25 @@ impl ServerConfig {
                 default: Some(""),
                 description: "Comma-separated additional Content-Security-Policy directives.",
             },
+            // -- Security Headers --
+            ConfigOption {
+                name: "x-content-type-options",
+                env: "CODER_X_CONTENT_TYPE_OPTIONS",
+                default: Some("nosniff"),
+                description: "Value for the X-Content-Type-Options response header.",
+            },
+            ConfigOption {
+                name: "x-frame-options",
+                env: "CODER_X_FRAME_OPTIONS",
+                default: Some("DENY"),
+                description: "Value for the X-Frame-Options response header. Empty to omit.",
+            },
+            ConfigOption {
+                name: "referrer-policy",
+                env: "CODER_REFERRER_POLICY",
+                default: Some("no-referrer"),
+                description: "Value for the Referrer-Policy response header. Empty to omit.",
+            },
         ]
     }
 }
@@ -773,6 +795,33 @@ impl Default for OtelConfig {
 }
 
 /// CORS (Cross-Origin Resource Sharing) configuration.
+/// Security headers configuration for the HTTP layer.
+///
+/// Controls `X-Content-Type-Options`, `X-Frame-Options`, and
+/// `Referrer-Policy` headers on all responses.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct SecurityHeadersConfig {
+    /// Value for the `X-Content-Type-Options` header.
+    /// Default: `"nosniff"`.
+    pub x_content_type_options: String,
+    /// Value for the `X-Frame-Options` header.
+    /// Default: `"DENY"`. Set to an empty string to omit.
+    pub x_frame_options: String,
+    /// Value for the `Referrer-Policy` header.
+    /// Default: `"no-referrer"`. Set to an empty string to omit.
+    pub referrer_policy: String,
+}
+
+impl Default for SecurityHeadersConfig {
+    fn default() -> Self {
+        Self {
+            x_content_type_options: "nosniff".to_owned(),
+            x_frame_options: "DENY".to_owned(),
+            referrer_policy: "no-referrer".to_owned(),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CorsConfig {
     /// Allowed origins for cross-origin requests.
@@ -1176,6 +1225,8 @@ pub struct PublicDeploymentConfig {
     pub allow_workspace_renames: bool,
     /// Additional Content-Security-Policy directives.
     pub additional_csp_policy: Vec<String>,
+    /// Security headers configuration.
+    pub security_headers: SecurityHeadersConfig,
     /// Whether workspace sharing is disabled.
     pub disable_workspace_sharing: bool,
     /// SSH key generation algorithm.
@@ -1272,6 +1323,7 @@ mod tests {
             oidc: None,
             otel: OtelConfig::default(),
             cors: CorsConfig::default(),
+            security_headers: SecurityHeadersConfig::default(),
             provisioner: ProvisionerConfig::default(),
             session_lifetime: SessionLifetimeConfig::default(),
             dangerous: DangerousConfig::default(),
