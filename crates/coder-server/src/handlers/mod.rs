@@ -327,6 +327,7 @@ pub(crate) mod mcp;
 pub(crate) mod notifications;
 pub(crate) mod oauth2;
 pub(crate) mod organizations;
+pub(crate) mod scim;
 pub(crate) mod tasks;
 pub(crate) mod telemetry;
 pub(crate) mod templates;

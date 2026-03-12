@@ -5688,3 +5688,121 @@ mod tests {
         assert_eq!(result.len(), 64);
     }
 }
+
+// ---------------------------------------------------------------------------
+// SCIM (System for Cross-domain Identity Management) types
+// ---------------------------------------------------------------------------
+
+/// SCIM user resource used by the `/scim/v2/Users` endpoints.
+///
+/// Mirrors the Go `SCIMUser` struct from `enterprise/coderd/scim.go`.
+/// Only the fields needed for Okta-style provisioning are included.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ScimUser {
+    /// SCIM schema URNs.
+    #[serde(default)]
+    pub schemas: Vec<String>,
+    /// Stable user identifier (UUID string).
+    #[serde(default)]
+    pub id: String,
+    /// Login username.
+    #[serde(default, rename = "userName")]
+    pub user_name: String,
+    /// Structured name component.
+    #[serde(default)]
+    pub name: ScimUserName,
+    /// Email addresses attached to the user.
+    #[serde(default)]
+    pub emails: Vec<ScimUserEmail>,
+    /// Whether the user is active. Pointer semantics (Option) to distinguish
+    /// absent from `false`.
+    pub active: Option<bool>,
+    /// Group memberships (currently unused).
+    #[serde(default)]
+    pub groups: Vec<Value>,
+    /// SCIM resource metadata.
+    #[serde(default)]
+    pub meta: ScimUserMeta,
+}
+
+/// Structured name inside a SCIM user resource.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ScimUserName {
+    /// Given (first) name.
+    #[serde(default, rename = "givenName")]
+    pub given_name: String,
+    /// Family (last) name.
+    #[serde(default, rename = "familyName")]
+    pub family_name: String,
+}
+
+/// One email entry inside a SCIM user resource.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ScimUserEmail {
+    /// Whether this is the primary email.
+    #[serde(default)]
+    pub primary: bool,
+    /// Email address value.
+    #[serde(default)]
+    pub value: String,
+    /// Email type label (e.g. "work").
+    #[serde(default, rename = "type")]
+    pub email_type: String,
+    /// Display string.
+    #[serde(default)]
+    pub display: String,
+}
+
+/// Resource metadata inside a SCIM user resource.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct ScimUserMeta {
+    /// SCIM resource type.
+    #[serde(default, rename = "resourceType")]
+    pub resource_type: String,
+}
+
+/// SCIM list response wrapper (RFC 7644 §3.4.2).
+#[derive(Clone, Debug, Serialize)]
+pub struct ScimListResponse<T: Serialize> {
+    /// Schema URNs for the list response.
+    pub schemas: Vec<String>,
+    /// Total number of results.
+    #[serde(rename = "totalResults")]
+    pub total_results: usize,
+    /// 1-based start index.
+    #[serde(rename = "startIndex")]
+    pub start_index: usize,
+    /// Number of items in this page.
+    #[serde(rename = "itemsPerPage")]
+    pub items_per_page: usize,
+    /// Resource items.
+    #[serde(rename = "Resources")]
+    pub resources: Vec<T>,
+}
+
+/// SCIM error response (RFC 7644 §3.12).
+#[derive(Clone, Debug, Serialize)]
+pub struct ScimErrorResponse {
+    /// Schema URNs for the error response.
+    pub schemas: Vec<String>,
+    /// SCIM error type.
+    #[serde(rename = "scimType")]
+    pub scim_type: String,
+    /// Human-readable error detail.
+    pub detail: String,
+    /// HTTP status code.
+    pub status: u16,
+}
+
+impl ScimErrorResponse {
+    /// Builds a SCIM-compliant error response.
+    #[must_use]
+    pub fn new(status: u16, scim_type: impl Into<String>, detail: impl Into<String>) -> Self {
+        Self {
+            schemas: vec!["urn:ietf:params:scim:api:messages:2.0:Error".to_owned()],
+            scim_type: scim_type.into(),
+            detail: detail.into(),
+            status,
+        }
+    }
+}
