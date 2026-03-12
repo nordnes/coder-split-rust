@@ -975,6 +975,13 @@ mod tests {
             }
             Ok(self.stats.lock().await.clone())
         }
+
+        async fn find_users_by_ids(
+            &self,
+            _ids: &[uuid::Uuid],
+        ) -> Result<Vec<coder_core::identity::UserRecord>, StorageError> {
+            Ok(Vec::new())
+        }
     }
 
     fn default_stats() -> DeploymentStatsResponse {

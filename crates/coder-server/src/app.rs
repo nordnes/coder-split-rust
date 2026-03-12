@@ -7489,6 +7489,21 @@ pub(crate) mod tests {
         }
 
         // -----------------------------------------------------------------
+        // Batch User Lookup
+        // -----------------------------------------------------------------
+
+        async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(ids
+                .iter()
+                .filter_map(|id| users.get(id).filter(|u| !u.deleted).cloned())
+                .collect())
+        }
+
+        // -----------------------------------------------------------------
         // Workspace Domain
         // -----------------------------------------------------------------
 
@@ -31895,6 +31910,354 @@ pub(crate) mod tests {
             body.get("deployment_id").is_some(),
             "response should include 'deployment_id' field"
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Identity domain FakeStore unit tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_store_user_link_crud() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let user = store
+            .create_user(CreateUserInput {
+                email: "link@example.com".into(),
+                username: "linkuser".into(),
+                name: "Link User".into(),
+                password_hash: Some("hashed".into()),
+                login_type: LoginType::Github,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+
+        let links = store.list_user_links(user.id).await?;
+        assert!(links.is_empty(), "new user should have no links");
+
+        let input = UpsertUserLinkInput {
+            login_type: LoginType::Github,
+            linked_id: "gh-123".into(),
+            oauth_access_token: "access".into(),
+            oauth_refresh_token: "refresh".into(),
+            oauth_expiry: OffsetDateTime::now_utc(),
+            claims: UserLinkClaims {
+                id_token_claims: Default::default(),
+                user_info_claims: Default::default(),
+                merged_claims: Default::default(),
+            },
+        };
+        let link = store.upsert_user_link(user.id, &input).await?;
+        assert_eq!(link.user_id, user.id);
+        assert_eq!(link.linked_id, "gh-123");
+        assert_eq!(link.login_type, LoginType::Github);
+
+        let links = store.list_user_links(user.id).await?;
+        assert_eq!(links.len(), 1);
+
+        let found = store
+            .find_user_by_linked_id(LoginType::Github, "gh-123")
+            .await?;
+        assert!(found.is_some(), "should find user by linked id");
+        assert_eq!(found.as_ref().map(|u| u.id), Some(user.id));
+
+        let not_found = store
+            .find_user_by_linked_id(LoginType::Github, "nonexistent")
+            .await?;
+        assert!(not_found.is_none());
+
+        let deleted = store.delete_user_link(user.id, LoginType::Github).await?;
+        assert!(deleted, "delete should return true");
+
+        let links = store.list_user_links(user.id).await?;
+        assert!(links.is_empty(), "links should be empty after deletion");
+
+        let deleted_again = store.delete_user_link(user.id, LoginType::Github).await?;
+        assert!(!deleted_again, "second delete should return false");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_find_active_user_by_email_and_login_type() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let user = store
+            .create_user(CreateUserInput {
+                email: "active@example.com".into(),
+                username: "activeuser".into(),
+                name: "Active User".into(),
+                password_hash: Some("hashed".into()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+
+        let found = store
+            .find_active_user_by_email_and_login_type("active@example.com", LoginType::Password)
+            .await?;
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().map(|u| u.id), Some(user.id));
+
+        let not_found = store
+            .find_active_user_by_email_and_login_type("active@example.com", LoginType::Github)
+            .await?;
+        assert!(not_found.is_none());
+
+        let not_found = store
+            .find_active_user_by_email_and_login_type("other@example.com", LoginType::Password)
+            .await?;
+        assert!(not_found.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_user_config_crud() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let user = store
+            .create_user(CreateUserInput {
+                email: "cfg@example.com".into(),
+                username: "cfguser".into(),
+                name: "Config User".into(),
+                password_hash: Some("hashed".into()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+
+        let cfg = store.get_user_config(user.id, "theme").await?;
+        assert!(cfg.is_none());
+
+        let cfg = store.upsert_user_config(user.id, "theme", "dark").await?;
+        assert_eq!(cfg.user_id, user.id);
+        assert_eq!(cfg.key, "theme");
+        assert_eq!(cfg.value, "dark");
+
+        let cfg = store.get_user_config(user.id, "theme").await?;
+        assert_eq!(cfg.as_ref().map(|c| c.value.as_str()), Some("dark"));
+
+        let cfg = store.upsert_user_config(user.id, "theme", "light").await?;
+        assert_eq!(cfg.value, "light");
+
+        let deleted = store.delete_user_config(user.id, "theme").await?;
+        assert!(deleted);
+        let deleted = store.delete_user_config(user.id, "theme").await?;
+        assert!(!deleted);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_user_deleted_tracking() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let user = store
+            .create_user(CreateUserInput {
+                email: "del@example.com".into(),
+                username: "deluser".into(),
+                name: "Del User".into(),
+                password_hash: Some("hashed".into()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+
+        let record = store
+            .insert_user_deleted(user.id, None, "account cleanup")
+            .await?;
+        assert_eq!(record.user_id, user.id);
+        assert_eq!(record.reason, "account cleanup");
+        assert!(record.deleted_by.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_user_status_changes() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let user = store
+            .create_user(CreateUserInput {
+                email: "status@example.com".into(),
+                username: "statususer".into(),
+                name: "Status User".into(),
+                password_hash: Some("hashed".into()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+
+        let changes = store.list_user_status_changes(user.id).await?;
+        assert!(changes.is_empty());
+
+        let change = store
+            .insert_user_status_change(
+                user.id,
+                UserStatus::Active,
+                UserStatus::Suspended,
+                None,
+                "policy violation",
+            )
+            .await?;
+        assert_eq!(change.user_id, user.id);
+        assert_eq!(change.old_status, UserStatus::Active);
+        assert_eq!(change.new_status, UserStatus::Suspended);
+        assert_eq!(change.reason, "policy violation");
+
+        let changes = store.list_user_status_changes(user.id).await?;
+        assert_eq!(changes.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_custom_role_crud() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let roles = store.list_custom_roles(None).await?;
+        assert!(roles.is_empty());
+
+        let input = UpsertCustomRoleInput {
+            name: "deployer".into(),
+            display_name: "Deployer".into(),
+            organization_id: None,
+            site_permissions: "[]".into(),
+            org_permissions: "[]".into(),
+            user_permissions: "[]".into(),
+        };
+        let role = store.upsert_custom_role(&input).await?;
+        assert_eq!(role.name, "deployer");
+        assert_eq!(role.display_name, "Deployer");
+
+        let roles = store.list_custom_roles(None).await?;
+        assert_eq!(roles.len(), 1);
+
+        let input2 = UpsertCustomRoleInput {
+            name: "deployer".into(),
+            display_name: "Super Deployer".into(),
+            organization_id: None,
+            site_permissions: "[]".into(),
+            org_permissions: "[]".into(),
+            user_permissions: "[]".into(),
+        };
+        let role = store.upsert_custom_role(&input2).await?;
+        assert_eq!(role.display_name, "Super Deployer");
+
+        let deleted = store.delete_custom_role("deployer", None).await?;
+        assert!(deleted);
+        let deleted = store.delete_custom_role("deployer", None).await?;
+        assert!(!deleted);
+        let roles = store.list_custom_roles(None).await?;
+        assert!(roles.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_group_crud() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let org_id = Uuid::new_v4();
+
+        let groups = store.list_groups(org_id).await?;
+        assert!(groups.is_empty());
+
+        let group = store
+            .create_group(&CreateGroupInput {
+                name: "devs".into(),
+                display_name: "Developers".into(),
+                organization_id: org_id,
+                avatar_url: String::new(),
+                quota_allowance: 10,
+            })
+            .await?;
+        assert_eq!(group.name, "devs");
+        assert_eq!(group.organization_id, org_id);
+
+        let found = store.find_group_by_id(group.id).await?;
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().map(|g| g.name.as_str()), Some("devs"));
+
+        let groups = store.list_groups(org_id).await?;
+        assert_eq!(groups.len(), 1);
+
+        let deleted = store.delete_group(group.id).await?;
+        assert!(deleted);
+        let found = store.find_group_by_id(group.id).await?;
+        assert!(found.is_none());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_group_members() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let org_id = Uuid::new_v4();
+        let user = store
+            .create_user(CreateUserInput {
+                email: "grp@example.com".into(),
+                username: "grpuser".into(),
+                name: "Group User".into(),
+                password_hash: Some("hashed".into()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+
+        let group = store
+            .create_group(&CreateGroupInput {
+                name: "team".into(),
+                display_name: "Team".into(),
+                organization_id: org_id,
+                avatar_url: String::new(),
+                quota_allowance: 0,
+            })
+            .await?;
+
+        let members = store.list_group_members(group.id).await?;
+        assert!(members.is_empty());
+
+        store.insert_group_member(group.id, user.id).await?;
+        let members = store.list_group_members(group.id).await?;
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].user_id, user.id);
+
+        let removed = store.delete_group_member(group.id, user.id).await?;
+        assert!(removed);
+        let members = store.list_group_members(group.id).await?;
+        assert!(members.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_find_users_by_ids() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        let u1 = store
+            .create_user(CreateUserInput {
+                email: "a@example.com".into(),
+                username: "usera".into(),
+                name: "User A".into(),
+                password_hash: Some("h".into()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+        let u2 = store
+            .create_user(CreateUserInput {
+                email: "b@example.com".into(),
+                username: "userb".into(),
+                name: "User B".into(),
+                password_hash: Some("h".into()),
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: vec![],
+            })
+            .await?;
+
+        let found = store.find_users_by_ids(&[u1.id, u2.id]).await?;
+        assert_eq!(found.len(), 2);
+
+        let found = store.find_users_by_ids(&[u1.id, Uuid::new_v4()]).await?;
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id, u1.id);
+
+        let found = store.find_users_by_ids(&[]).await?;
+        assert!(found.is_empty());
         Ok(())
     }
 }
