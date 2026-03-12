@@ -21390,8 +21390,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-
-
     // -----------------------------------------------------------------------
     // OAuth2 FakeStore direct unit tests
     // -----------------------------------------------------------------------
@@ -21652,30 +21650,12 @@ pub(crate) mod tests {
         // Create 2 codes for user_id and 1 for other_user_id
         store
             .create_oauth2_provider_app_code(
-                app.id,
-                user_id,
-                b"p1",
-                b"h1",
-                expires,
-                "res",
-                "ch",
-                "S256",
-                None,
-                None,
+                app.id, user_id, b"p1", b"h1", expires, "res", "ch", "S256", None, None,
             )
             .await?;
         store
             .create_oauth2_provider_app_code(
-                app.id,
-                user_id,
-                b"p2",
-                b"h2",
-                expires,
-                "res",
-                "ch",
-                "S256",
-                None,
-                None,
+                app.id, user_id, b"p2", b"h2", expires, "res", "ch", "S256", None, None,
             )
             .await?;
         store
@@ -21700,9 +21680,7 @@ pub(crate) mod tests {
         assert_eq!(removed, 2);
 
         // Other user's code should remain
-        let remaining = store
-            .find_oauth2_provider_app_code_by_prefix(b"p3")
-            .await?;
+        let remaining = store.find_oauth2_provider_app_code_by_prefix(b"p3").await?;
         assert!(remaining.is_some());
 
         Ok(())
@@ -34825,6 +34803,366 @@ pub(crate) mod tests {
         let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/latency-check")?).await?;
         assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: Provisioner job lifecycle handlers (templates.rs)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn get_template_version_logs_returns_seeded_logs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Seed provisioner job logs for the template version's job.
+        let now = OffsetDateTime::now_utc();
+        {
+            let mut logs = store
+                .provisioner_job_logs
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            logs.insert(
+                tv.job_id,
+                vec![PortsJobLogRecord {
+                    id: 1,
+                    job_id: tv.job_id,
+                    created_at: now,
+                    source: "provisioner".to_owned(),
+                    level: "info".to_owned(),
+                    stage: "init".to_owned(),
+                    output: "hello from provisioner".to_owned(),
+                }],
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/logs", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected array")?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0]["output"], "hello from provisioner");
+        assert_eq!(logs[0]["stage"], "init");
+        assert_eq!(logs[0]["log_level"], "info");
+        assert_eq!(logs[0]["log_source"], "provisioner");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_resources_returns_seeded_resources() -> Result<(), Box<dyn Error>>
+    {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let resource_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        {
+            let mut resources = store
+                .workspace_resources
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            resources.insert(
+                tv.job_id,
+                vec![WorkspaceResourceRecord {
+                    id: resource_id,
+                    created_at: now,
+                    job_id: tv.job_id,
+                    transition: "start".to_owned(),
+                    resource_type: "docker_container".to_owned(),
+                    name: "main".to_owned(),
+                    hide: false,
+                    icon: "/icon/docker.png".to_owned(),
+                    daily_cost: 10,
+                }],
+            );
+        }
+        {
+            let mut metadata = store
+                .workspace_resource_metadata
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            metadata.insert(
+                resource_id,
+                vec![WorkspaceResourceMetadataRecord {
+                    workspace_resource_id: resource_id,
+                    key: "region".to_owned(),
+                    value: "us-east-1".to_owned(),
+                    sensitive: false,
+                }],
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/resources", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let resources = body.as_array().ok_or("expected array")?;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0]["name"], "main");
+        assert_eq!(resources[0]["type"], "docker_container");
+        assert_eq!(resources[0]["daily_cost"], 10);
+        let meta = resources[0]["metadata"]
+            .as_array()
+            .ok_or("expected metadata array")?;
+        assert_eq!(meta.len(), 1);
+        assert_eq!(meta[0]["key"], "region");
+        assert_eq!(meta[0]["value"], "us-east-1");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_dynamic_parameters_returns_seeded_params()
+    -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Seed a template version parameter.
+        {
+            let mut params = store
+                .template_version_parameters
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            params.insert(
+                tv.id,
+                vec![TemplateVersionParameterRecord {
+                    template_version_id: tv.id,
+                    name: "instance_type".to_owned(),
+                    description: "The **instance** type".to_owned(),
+                    param_type: "string".to_owned(),
+                    mutable: true,
+                    default_value: "t3.micro".to_owned(),
+                    icon: "/icon/aws.png".to_owned(),
+                    options: json!([]),
+                    validation_regex: String::new(),
+                    validation_min: None,
+                    validation_max: None,
+                    validation_error: String::new(),
+                    validation_monotonic: String::new(),
+                    required: true,
+                    display_name: "Instance Type".to_owned(),
+                    display_order: 1,
+                    ephemeral: false,
+                    form_type: "input".to_owned(),
+                }],
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/dynamic-parameters", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let params = body
+            .get("parameters")
+            .and_then(Value::as_array)
+            .ok_or("expected parameters array")?;
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0]["name"], "instance_type");
+        assert_eq!(params[0]["default_value"], "t3.micro");
+        assert_eq!(params[0]["required"], true);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_external_auth_returns_seeded_providers()
+    -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Update the template version to include external auth providers.
+        {
+            let mut versions = store
+                .template_versions
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            if let Some(v) = versions.get_mut(&tv.id) {
+                v.external_auth_providers = json!(["github", "gitlab"]);
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/templateversions/{}/external-auth", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let auths = body.as_array().ok_or("expected array")?;
+        assert_eq!(auths.len(), 2);
+        assert_eq!(auths[0]["id"], "github");
+        assert_eq!(auths[1]["id"], "gitlab");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_dry_run_logs_returns_seeded_logs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Create a dry-run provisioner job.
+        let dry_run_job_id = Uuid::new_v4();
+        seed_provisioner_job(&store, dry_run_job_id, org_id);
+
+        // Seed logs for the dry-run job.
+        let now = OffsetDateTime::now_utc();
+        {
+            let mut logs = store
+                .provisioner_job_logs
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            logs.insert(
+                dry_run_job_id,
+                vec![
+                    PortsJobLogRecord {
+                        id: 1,
+                        job_id: dry_run_job_id,
+                        created_at: now,
+                        source: "provisioner".to_owned(),
+                        level: "info".to_owned(),
+                        stage: "plan".to_owned(),
+                        output: "Planning resources...".to_owned(),
+                    },
+                    PortsJobLogRecord {
+                        id: 2,
+                        job_id: dry_run_job_id,
+                        created_at: now,
+                        source: "provisioner".to_owned(),
+                        level: "info".to_owned(),
+                        stage: "apply".to_owned(),
+                        output: "Applying changes...".to_owned(),
+                    },
+                ],
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/api/v2/templateversions/{}/dry-run/{}/logs",
+                    tv.id, dry_run_job_id
+                ),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let logs = body.as_array().ok_or("expected array")?;
+        assert_eq!(logs.len(), 2);
+        assert_eq!(logs[0]["output"], "Planning resources...");
+        assert_eq!(logs[1]["output"], "Applying changes...");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_template_version_dry_run_resources_returns_seeded_resources()
+    -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        // Create a dry-run provisioner job.
+        let dry_run_job_id = Uuid::new_v4();
+        seed_provisioner_job(&store, dry_run_job_id, org_id);
+
+        let resource_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        {
+            let mut resources = store
+                .workspace_resources
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            resources.insert(
+                dry_run_job_id,
+                vec![WorkspaceResourceRecord {
+                    id: resource_id,
+                    created_at: now,
+                    job_id: dry_run_job_id,
+                    transition: "start".to_owned(),
+                    resource_type: "kubernetes_pod".to_owned(),
+                    name: "dev".to_owned(),
+                    hide: false,
+                    icon: String::new(),
+                    daily_cost: 5,
+                }],
+            );
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/api/v2/templateversions/{}/dry-run/{}/resources",
+                    tv.id, dry_run_job_id
+                ),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let resources = body.as_array().ok_or("expected array")?;
+        assert_eq!(resources.len(), 1);
+        assert_eq!(resources[0]["name"], "dev");
+        assert_eq!(resources[0]["type"], "kubernetes_pod");
+        assert_eq!(resources[0]["daily_cost"], 5);
         Ok(())
     }
 }
