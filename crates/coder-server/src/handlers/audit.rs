@@ -10,6 +10,7 @@ pub(crate) struct AuditQuery {
     offset: Option<u32>,
 }
 
+/// GET /api/v2/audit — list audit log entries with optional filtering.
 pub(crate) async fn list_audit_logs(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -48,6 +49,7 @@ pub(crate) async fn list_audit_logs(
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
+/// POST /api/v2/audit/testgenerate — create a synthetic audit log entry for testing.
 pub(crate) async fn post_generate_test_audit_log(
     State(state): State<AppState>,
     headers: HeaderMap,

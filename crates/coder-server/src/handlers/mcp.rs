@@ -29,7 +29,7 @@ pub(crate) async fn mcp_http_handler(
         Ok(req) => req,
         Err(e) => {
             let error_response = JsonRpcResponse::error(
-                serde_json::Value::Null,
+                Value::Null,
                 JsonRpcError::from_code(
                     JsonRpcErrorCode::ParseError,
                     format!("Invalid JSON-RPC request: {e}"),
@@ -42,7 +42,7 @@ pub(crate) async fn mcp_http_handler(
     let tool_context = ToolContext {
         user_id: context.actor.user_id,
         username: context.actor.username.clone(),
-        telemetry_enabled: state.config.telemetry_enabled,
+        telemetry_enabled: state.config.telemetry.enabled,
         access_url: state.config.access_url.to_string(),
         deployment_id: state.deployment_id.to_string(),
         server_version: state.build_metadata.version.clone(),

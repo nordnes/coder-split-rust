@@ -1425,12 +1425,7 @@ pub trait IdentityStore: Send + Sync {
         &self,
         login_type: crate::identity::LoginType,
         linked_id: &str,
-    ) -> Result<Option<UserRecord>, StorageError> {
-        let _ = (login_type, linked_id);
-        Err(StorageError::unavailable(
-            "find_user_by_linked_id is not implemented",
-        ))
-    }
+    ) -> Result<Option<UserRecord>, StorageError>;
 
     /// Finds an active, non-deleted user by email AND login_type.
     ///
@@ -1442,50 +1437,31 @@ pub trait IdentityStore: Send + Sync {
         &self,
         email: &str,
         login_type: crate::identity::LoginType,
-    ) -> Result<Option<UserRecord>, StorageError> {
-        let _ = (email, login_type);
-        Err(StorageError::unavailable(
-            "find_active_user_by_email_and_login_type is not implemented",
-        ))
-    }
+    ) -> Result<Option<UserRecord>, StorageError>;
 
     /// Lists user links for a user.
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError>;
 
     /// Upserts a user link.
     async fn upsert_user_link(
         &self,
         user_id: Uuid,
         input: &UpsertUserLinkInput,
-    ) -> Result<UserLinkRecord, StorageError> {
-        let _ = (user_id, input);
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
+    ) -> Result<UserLinkRecord, StorageError>;
 
     /// Deletes a user link.
     async fn delete_user_link(
         &self,
         user_id: Uuid,
         login_type: crate::identity::LoginType,
-    ) -> Result<bool, StorageError> {
-        let _ = (user_id, login_type);
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Returns a user configuration value.
     async fn get_user_config(
         &self,
         user_id: Uuid,
         key: &str,
-    ) -> Result<Option<UserConfigRecord>, StorageError> {
-        let _ = (user_id, key);
-        Err(StorageError::unavailable(
-            "user configs are not implemented",
-        ))
-    }
+    ) -> Result<Option<UserConfigRecord>, StorageError>;
 
     /// Sets a user configuration value.
     async fn upsert_user_config(
@@ -1493,20 +1469,10 @@ pub trait IdentityStore: Send + Sync {
         user_id: Uuid,
         key: &str,
         value: &str,
-    ) -> Result<UserConfigRecord, StorageError> {
-        let _ = (user_id, key, value);
-        Err(StorageError::unavailable(
-            "user configs are not implemented",
-        ))
-    }
+    ) -> Result<UserConfigRecord, StorageError>;
 
     /// Deletes a user configuration value.
-    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
-        let _ = (user_id, key);
-        Err(StorageError::unavailable(
-            "user configs are not implemented",
-        ))
-    }
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError>;
 
     /// Records a soft-delete tracking entry.
     async fn insert_user_deleted(
@@ -1514,12 +1480,7 @@ pub trait IdentityStore: Send + Sync {
         user_id: Uuid,
         deleted_by: Option<Uuid>,
         reason: &str,
-    ) -> Result<UserDeletedRecord, StorageError> {
-        let _ = (user_id, deleted_by, reason);
-        Err(StorageError::unavailable(
-            "user deletion tracking is not implemented",
-        ))
-    }
+    ) -> Result<UserDeletedRecord, StorageError>;
 
     /// Records a user status change.
     async fn insert_user_status_change(
@@ -1529,23 +1490,13 @@ pub trait IdentityStore: Send + Sync {
         new_status: UserStatus,
         changed_by: Option<Uuid>,
         reason: &str,
-    ) -> Result<UserStatusChangeRecord, StorageError> {
-        let _ = (user_id, old_status, new_status, changed_by, reason);
-        Err(StorageError::unavailable(
-            "user status changes are not implemented",
-        ))
-    }
+    ) -> Result<UserStatusChangeRecord, StorageError>;
 
     /// Lists status changes for a user.
     async fn list_user_status_changes(
         &self,
         user_id: Uuid,
-    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "user status changes are not implemented",
-        ))
-    }
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError>;
 
     // ----- Custom roles -----
 
@@ -1553,92 +1504,50 @@ pub trait IdentityStore: Send + Sync {
     async fn list_custom_roles(
         &self,
         organization_id: Option<Uuid>,
-    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
-        let _ = organization_id;
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
+    ) -> Result<Vec<CustomRoleRecord>, StorageError>;
 
     /// Upserts a custom role.
     async fn upsert_custom_role(
         &self,
         input: &UpsertCustomRoleInput,
-    ) -> Result<CustomRoleRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
+    ) -> Result<CustomRoleRecord, StorageError>;
 
     /// Deletes a custom role.
     async fn delete_custom_role(
         &self,
         name: &str,
         organization_id: Option<Uuid>,
-    ) -> Result<bool, StorageError> {
-        let _ = (name, organization_id);
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     // ----- Groups -----
 
     /// Lists groups for an organization.
-    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
-        let _ = organization_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError>;
 
     /// Creates a new group.
-    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError>;
 
     /// Looks up a group by identifier.
-    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
 
     /// Deletes a group.
-    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists members of a group.
     async fn list_group_members(
         &self,
         group_id: Uuid,
-    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
+    ) -> Result<Vec<GroupMemberRecord>, StorageError>;
 
     /// Adds a user to a group.
-    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
-        let _ = (group_id, user_id);
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError>;
 
     /// Removes a user from a group.
     async fn delete_group_member(
         &self,
         group_id: Uuid,
         user_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = (group_id, user_id);
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     // ----- OAuth2 Provider -----
 
@@ -2010,12 +1919,7 @@ pub trait OperationalStore: Send + Sync {
     }
 
     /// Looks up multiple users by their IDs in a single query.
-    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
-        let _ = ids;
-        Err(StorageError::unavailable(
-            "batch user lookups are not implemented",
-        ))
-    }
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
 
     /// Returns deployment health settings.
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
@@ -2675,62 +2579,38 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         login_type: crate::identity::LoginType,
         linked_id: &str,
-    ) -> Result<Option<UserRecord>, StorageError> {
-        let _ = (login_type, linked_id);
-        Err(StorageError::unavailable(
-            "find_user_by_linked_id is not implemented",
-        ))
-    }
+    ) -> Result<Option<UserRecord>, StorageError>;
 
     /// Finds an active, non-deleted user by email AND login_type.
     async fn find_active_user_by_email_and_login_type(
         &self,
         email: &str,
         login_type: crate::identity::LoginType,
-    ) -> Result<Option<UserRecord>, StorageError> {
-        let _ = (email, login_type);
-        Err(StorageError::unavailable(
-            "find_active_user_by_email_and_login_type is not implemented",
-        ))
-    }
+    ) -> Result<Option<UserRecord>, StorageError>;
 
     /// Lists user links for a user.
-    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
+    async fn list_user_links(&self, user_id: Uuid) -> Result<Vec<UserLinkRecord>, StorageError>;
 
     /// Upserts a user link.
     async fn upsert_user_link(
         &self,
         user_id: Uuid,
         input: &UpsertUserLinkInput,
-    ) -> Result<UserLinkRecord, StorageError> {
-        let _ = (user_id, input);
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
+    ) -> Result<UserLinkRecord, StorageError>;
 
     /// Deletes a user link.
     async fn delete_user_link(
         &self,
         user_id: Uuid,
         login_type: crate::identity::LoginType,
-    ) -> Result<bool, StorageError> {
-        let _ = (user_id, login_type);
-        Err(StorageError::unavailable("user links are not implemented"))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Returns a user configuration value.
     async fn get_user_config(
         &self,
         user_id: Uuid,
         key: &str,
-    ) -> Result<Option<UserConfigRecord>, StorageError> {
-        let _ = (user_id, key);
-        Err(StorageError::unavailable(
-            "user configs are not implemented",
-        ))
-    }
+    ) -> Result<Option<UserConfigRecord>, StorageError>;
 
     /// Sets a user configuration value.
     async fn upsert_user_config(
@@ -2738,20 +2618,10 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         user_id: Uuid,
         key: &str,
         value: &str,
-    ) -> Result<UserConfigRecord, StorageError> {
-        let _ = (user_id, key, value);
-        Err(StorageError::unavailable(
-            "user configs are not implemented",
-        ))
-    }
+    ) -> Result<UserConfigRecord, StorageError>;
 
     /// Deletes a user configuration value.
-    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError> {
-        let _ = (user_id, key);
-        Err(StorageError::unavailable(
-            "user configs are not implemented",
-        ))
-    }
+    async fn delete_user_config(&self, user_id: Uuid, key: &str) -> Result<bool, StorageError>;
 
     /// Records a soft-delete tracking entry.
     async fn insert_user_deleted(
@@ -2759,12 +2629,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         user_id: Uuid,
         deleted_by: Option<Uuid>,
         reason: &str,
-    ) -> Result<UserDeletedRecord, StorageError> {
-        let _ = (user_id, deleted_by, reason);
-        Err(StorageError::unavailable(
-            "user deletion tracking is not implemented",
-        ))
-    }
+    ) -> Result<UserDeletedRecord, StorageError>;
 
     /// Records a user status change.
     async fn insert_user_status_change(
@@ -2774,35 +2639,20 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         new_status: UserStatus,
         changed_by: Option<Uuid>,
         reason: &str,
-    ) -> Result<UserStatusChangeRecord, StorageError> {
-        let _ = (user_id, old_status, new_status, changed_by, reason);
-        Err(StorageError::unavailable(
-            "user status changes are not implemented",
-        ))
-    }
+    ) -> Result<UserStatusChangeRecord, StorageError>;
 
     /// Lists status changes for a user.
     async fn list_user_status_changes(
         &self,
         user_id: Uuid,
-    ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "user status changes are not implemented",
-        ))
-    }
+    ) -> Result<Vec<UserStatusChangeRecord>, StorageError>;
 
     /// Deletes a custom role.
     async fn delete_custom_role(
         &self,
         name: &str,
         organization_id: Option<Uuid>,
-    ) -> Result<bool, StorageError> {
-        let _ = (name, organization_id);
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Lists organizations, optionally filtering by identifiers.
     async fn list_organizations(
@@ -2977,12 +2827,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Looks up multiple users by their IDs in a single query.
-    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
-        let _ = ids;
-        Err(StorageError::unavailable(
-            "batch user lookups are not implemented",
-        ))
-    }
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
 
     /// Returns deployment health settings.
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
@@ -3940,59 +3785,32 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Creates a new group.
-    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError>;
 
     /// Deletes a group.
-    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn delete_group(&self, group_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists groups for an organization.
-    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError> {
-        let _ = organization_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn list_groups(&self, organization_id: Uuid) -> Result<Vec<GroupRecord>, StorageError>;
 
     /// Adds a user to a group.
-    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError> {
-        let _ = (group_id, user_id);
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
+    async fn insert_group_member(&self, group_id: Uuid, user_id: Uuid) -> Result<(), StorageError>;
 
     /// Lists members of a group.
     async fn list_group_members(
         &self,
         group_id: Uuid,
-    ) -> Result<Vec<GroupMemberRecord>, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
+    ) -> Result<Vec<GroupMemberRecord>, StorageError>;
 
     /// Removes a user from a group.
     async fn delete_group_member(
         &self,
         group_id: Uuid,
         user_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = (group_id, user_id);
-        Err(StorageError::unavailable(
-            "group members are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Looks up a group by identifier.
-    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
-        let _ = group_id;
-        Err(StorageError::unavailable("groups are not implemented"))
-    }
+    async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
 
     /// Returns the ACL for a workspace.
     async fn get_workspace_acl(
@@ -5040,23 +4858,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn list_custom_roles(
         &self,
         organization_id: Option<Uuid>,
-    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
-        let _ = organization_id;
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
+    ) -> Result<Vec<CustomRoleRecord>, StorageError>;
 
     /// Upserts a custom role.
     async fn upsert_custom_role(
         &self,
         input: &UpsertCustomRoleInput,
-    ) -> Result<CustomRoleRecord, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "custom roles are not implemented",
-        ))
-    }
+    ) -> Result<CustomRoleRecord, StorageError>;
 
     // ----- Licenses -----
 
@@ -6208,6 +6016,36 @@ where
         AppStore::delete_group_member(self, group_id, user_id).await
     }
 
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: crate::identity::LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        AppStore::find_user_by_linked_id(self, login_type, linked_id).await
+    }
+
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: crate::identity::LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        AppStore::find_active_user_by_email_and_login_type(self, email, login_type).await
+    }
+
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        AppStore::list_custom_roles(self, organization_id).await
+    }
+
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        AppStore::upsert_custom_role(self, input).await
+    }
+
     // ----- OAuth2 Provider delegations -----
 
     async fn list_oauth2_provider_apps(
@@ -6682,6 +6520,38 @@ where
         (**self).delete_group_member(group_id, user_id).await
     }
 
+    async fn find_user_by_linked_id(
+        &self,
+        login_type: crate::identity::LoginType,
+        linked_id: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        (**self).find_user_by_linked_id(login_type, linked_id).await
+    }
+
+    async fn find_active_user_by_email_and_login_type(
+        &self,
+        email: &str,
+        login_type: crate::identity::LoginType,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        (**self)
+            .find_active_user_by_email_and_login_type(email, login_type)
+            .await
+    }
+
+    async fn list_custom_roles(
+        &self,
+        organization_id: Option<Uuid>,
+    ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+        (**self).list_custom_roles(organization_id).await
+    }
+
+    async fn upsert_custom_role(
+        &self,
+        input: &UpsertCustomRoleInput,
+    ) -> Result<CustomRoleRecord, StorageError> {
+        (**self).upsert_custom_role(input).await
+    }
+
     // ----- OAuth2 Provider delegations -----
 
     async fn list_oauth2_provider_apps(
@@ -7082,6 +6952,10 @@ where
     ) -> Result<Option<FileRecord>, StorageError> {
         AppStore::get_file_by_hash_and_creator(self, hash, creator_id).await
     }
+
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
+        AppStore::find_users_by_ids(self, ids).await
+    }
 }
 
 #[async_trait]
@@ -7203,6 +7077,10 @@ where
         (**self)
             .get_file_by_hash_and_creator(hash, creator_id)
             .await
+    }
+
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
+        (**self).find_users_by_ids(ids).await
     }
 }
 

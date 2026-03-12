@@ -2,6 +2,7 @@
 
 use super::*;
 
+/// GET /api/v2/workspaceagents/me/gitsshkey — return the workspace owner's Git SSH key.
 pub(crate) async fn workspace_agent_git_ssh_key(
     State(state): State<AppState>,
     headers: HeaderMap,

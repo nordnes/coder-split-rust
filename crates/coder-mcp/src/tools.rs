@@ -40,6 +40,7 @@ pub struct McpToolRegistry {
 
 impl McpToolRegistry {
     /// Creates a new registry pre-populated with all built-in tools.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             tools: vec![
@@ -52,11 +53,16 @@ impl McpToolRegistry {
     }
 
     /// Returns the list of registered tools.
+    #[must_use]
     pub fn list_tools(&self) -> &[McpTool] {
         &self.tools
     }
 
     /// Dispatches a tool call by name and returns the result.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`JsonRpcError`] if the requested tool name is not registered.
     pub fn call_tool(
         &self,
         name: &str,
@@ -66,10 +72,10 @@ impl McpToolRegistry {
         debug!(tool = name, "dispatching MCP tool call");
 
         match name {
-            "coder_get_deployment_info" => Ok(self.handle_deployment_info(context)),
-            "coder_whoami" => Ok(self.handle_whoami(context)),
-            "coder_list_workspaces" => Ok(self.handle_list_workspaces(context)),
-            "coder_list_templates" => Ok(self.handle_list_templates(context)),
+            "coder_get_deployment_info" => Ok(Self::handle_deployment_info(context)),
+            "coder_whoami" => Ok(Self::handle_whoami(context)),
+            "coder_list_workspaces" => Ok(Self::handle_list_workspaces(context)),
+            "coder_list_templates" => Ok(Self::handle_list_templates(context)),
             _ => Err(JsonRpcError::from_code(
                 JsonRpcErrorCode::InvalidParams,
                 format!("Unknown tool: {name}"),
@@ -144,7 +150,7 @@ impl McpToolRegistry {
     // Tool handlers
     // ------------------------------------------------------------------
 
-    fn handle_deployment_info(&self, context: &ToolContext) -> McpToolCallResult {
+    fn handle_deployment_info(context: &ToolContext) -> McpToolCallResult {
         let info = serde_json::json!({
             "deployment_id": context.deployment_id,
             "version": context.server_version,
@@ -158,7 +164,7 @@ impl McpToolRegistry {
         }
     }
 
-    fn handle_whoami(&self, context: &ToolContext) -> McpToolCallResult {
+    fn handle_whoami(context: &ToolContext) -> McpToolCallResult {
         let info = serde_json::json!({
             "user_id": context.user_id.to_string(),
             "username": context.username,
@@ -170,7 +176,7 @@ impl McpToolRegistry {
         }
     }
 
-    fn handle_list_workspaces(&self, _context: &ToolContext) -> McpToolCallResult {
+    fn handle_list_workspaces(_context: &ToolContext) -> McpToolCallResult {
         // Workspace management is a STUB domain — return an informative message.
         let info = serde_json::json!({
             "workspaces": [],
@@ -183,7 +189,7 @@ impl McpToolRegistry {
         }
     }
 
-    fn handle_list_templates(&self, _context: &ToolContext) -> McpToolCallResult {
+    fn handle_list_templates(_context: &ToolContext) -> McpToolCallResult {
         // Template listing via MCP returns a placeholder until wired to the store.
         let info = serde_json::json!({
             "templates": [],

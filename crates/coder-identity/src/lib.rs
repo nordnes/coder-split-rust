@@ -23,7 +23,7 @@ use coder_core::{
     OrganizationMemberRecord, PasswordError, RoleResponse, StorageError, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPreferenceSettingsRequest,
     UpdateUserProfileRequest, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
-    UserConfigRecord, UserLinkClaims, UserLinkRecord, UserPreferenceRecord, UserRecord, UserStatus,
+    UserConfigRecord, UserLinkRecord, UserPreferenceRecord, UserRecord, UserStatus,
     UserStatusChangeRecord, ValidationError, hash_password, normalize_real_name, validate_email,
     validate_password, validate_real_name, validate_username,
 };
@@ -1421,6 +1421,7 @@ fn push_validation(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use coder_core::UserLinkClaims;
 
     #[test]
     fn create_user_validation_rejects_empty_organizations() {

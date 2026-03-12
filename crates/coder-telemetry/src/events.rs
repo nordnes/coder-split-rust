@@ -59,6 +59,7 @@ pub struct TelemetryEvent {
 
 impl TelemetryEvent {
     /// Creates a new telemetry event, anonymizing optional user and resource IDs.
+    #[must_use]
     pub fn new(kind: TelemetryEventKind, user_id: Option<Uuid>, resource_id: Option<Uuid>) -> Self {
         Self {
             id: Uuid::new_v4(),

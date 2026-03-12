@@ -5,7 +5,7 @@
 //! flows which link third-party tokens to existing users).
 
 use coder_core::config::{GithubOAuthConfig, OidcConfig};
-use coder_core::{LoginType, StorageError, UserLinkClaims};
+use coder_core::{StorageError, UserLinkClaims};
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
 

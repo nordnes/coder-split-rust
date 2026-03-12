@@ -598,8 +598,11 @@ fn collect_block(lines: &[&str], start: usize) -> (String, usize) {
             block.push('\n');
         }
         block.push_str(line);
-        paren_balance += line.chars().filter(|character| *character == '(').count() as i32;
-        paren_balance -= line.chars().filter(|character| *character == ')').count() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        {
+            paren_balance += line.chars().filter(|character| *character == '(').count() as i32;
+            paren_balance -= line.chars().filter(|character| *character == ')').count() as i32;
+        }
         index += 1;
 
         if paren_balance <= 0 {
