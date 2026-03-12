@@ -46,7 +46,7 @@ pub(crate) async fn debug_health(
                     .format(&time::format_description::well_known::Rfc3339)
                     .unwrap_or_default(),
                 report.healthy,
-                serde_json::to_value(&report.severity)
+                serde_json::to_value(report.severity)
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_default(),
@@ -55,7 +55,7 @@ pub(crate) async fn debug_health(
                 report.websocket.healthy,
                 report.database.healthy,
                 report.workspace_proxy.healthy,
-                serde_json::to_value(&report.provisioner_daemons.base.severity)
+                serde_json::to_value(report.provisioner_daemons.base.severity)
                     .ok()
                     .and_then(|v| v.as_str().map(String::from))
                     .unwrap_or_default(),

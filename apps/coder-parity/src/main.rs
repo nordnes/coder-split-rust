@@ -1,3 +1,8 @@
+//! Route parity comparison tool between the Go and Rust Coder backends.
+//!
+//! Provides `inventory` and `compare` subcommands for tracking and validating
+//! API route porting progress.
+
 #![forbid(unsafe_code)]
 
 use std::{

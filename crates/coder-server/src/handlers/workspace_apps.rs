@@ -1345,6 +1345,7 @@ async fn authenticate_app_request(
 /// 3. Strips Coder cookies from the forwarded request
 /// 4. Forwards the request using the HTTP client
 /// 5. Returns the proxied response
+#[allow(clippy::too_many_arguments)]
 async fn proxy_workspace_app(
     state: &AppState,
     _server: &WorkspaceAppServer,
@@ -1952,7 +1953,7 @@ mod tests {
             app_slug_or_port: "8080".to_owned(),
         };
         // Verify the UUID parse path works (this is the sync part of the logic).
-        let parsed: Result<uuid::Uuid, _> = req.agent_name_or_id.parse();
+        let parsed: Result<Uuid, _> = req.agent_name_or_id.parse();
         assert!(parsed.is_ok(), "UUID agent_name_or_id should parse");
     }
 
@@ -1969,7 +1970,7 @@ mod tests {
             agent_name_or_id: "main".to_owned(),
             app_slug_or_port: "8080".to_owned(),
         };
-        let parsed: Result<uuid::Uuid, _> = req.agent_name_or_id.parse();
+        let parsed: Result<Uuid, _> = req.agent_name_or_id.parse();
         assert!(
             parsed.is_err(),
             "non-UUID agent name must fall through to workspace lookup"

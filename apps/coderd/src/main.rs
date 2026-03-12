@@ -814,7 +814,7 @@ async fn run() -> Result<(), MainError> {
         enabled: config.telemetry.enabled,
         deployment_id: deployment_metadata.deployment_id,
         version: BuildMetadata::default().version.clone(),
-        flush_interval: std::time::Duration::from_secs(config.worker.telemetry_flush_interval_secs),
+        flush_interval: Duration::from_secs(config.worker.telemetry_flush_interval_secs),
         ..coder_telemetry::TelemetryConfig::default()
     };
     let (mut telemetry_worker, telemetry_reporter) =

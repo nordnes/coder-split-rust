@@ -1938,7 +1938,7 @@ mod tests {
         async fn batch_update_workspace_last_used_at(
             &self,
             _ids: &[uuid::Uuid],
-            _last_used_at: time::OffsetDateTime,
+            _last_used_at: OffsetDateTime,
         ) -> Result<u64, StorageError> {
             Err(StorageError::unavailable("not implemented in mock"))
         }
@@ -3298,11 +3298,12 @@ mod tests {
 
     // ── Activity Bump Worker tests ──────────────────────────
 
+    type DeadlineUpdate = (uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>);
+
     /// Mock store for ActivityBumpStore tests.
     struct MockActivityBumpStore {
         workspaces: Vec<WorkspaceTransitionRow>,
-        updated_deadlines:
-            std::sync::Mutex<Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)>>,
+        updated_deadlines: std::sync::Mutex<Vec<DeadlineUpdate>>,
         fail_transition: AtomicBool,
     }
 
@@ -3320,9 +3321,7 @@ mod tests {
             self
         }
 
-        fn deadline_updates(
-            &self,
-        ) -> Vec<(uuid::Uuid, Option<OffsetDateTime>, Option<OffsetDateTime>)> {
+        fn deadline_updates(&self) -> Vec<DeadlineUpdate> {
             self.updated_deadlines
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())

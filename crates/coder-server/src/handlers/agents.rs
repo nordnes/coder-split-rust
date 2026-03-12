@@ -1472,7 +1472,7 @@ pub(crate) async fn get_workspace_agent_external_auth(
                 Json(build_agent_external_auth_response(
                     &state,
                     &query,
-                    &provider_config,
+                    provider_config,
                     link.as_ref(),
                     authenticated,
                 )?),
@@ -1494,7 +1494,7 @@ pub(crate) async fn get_workspace_agent_external_auth(
                     Json(build_agent_external_auth_response(
                         &state,
                         &query,
-                        &provider_config,
+                        provider_config,
                         link.as_ref(),
                         authenticated,
                     )?),
@@ -2124,10 +2124,10 @@ mod tests {
         let row = WorkspaceAgentRow {
             id: agent_id,
             parent_id: None,
-            created_at: time::OffsetDateTime::now_utc(),
-            updated_at: time::OffsetDateTime::now_utc(),
-            first_connected_at: Some(time::OffsetDateTime::now_utc()),
-            last_connected_at: Some(time::OffsetDateTime::now_utc()),
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+            first_connected_at: Some(OffsetDateTime::now_utc()),
+            last_connected_at: Some(OffsetDateTime::now_utc()),
             disconnected_at: None,
             started_at: None,
             ready_at: None,
@@ -2165,16 +2165,13 @@ mod tests {
     }
 
     /// Build an authenticated WebSocket request with a session token header.
-    fn ws_request(
-        url: &str,
-        session_token: &str,
-    ) -> Result<tungstenite::http::Request<()>, Box<dyn Error>> {
+    fn ws_request(url: &str, session_token: &str) -> Result<http::Request<()>, Box<dyn Error>> {
         let parsed = url::Url::parse(url)?;
         let host = match parsed.port() {
             Some(port) => format!("{}:{}", parsed.host_str().unwrap_or("127.0.0.1"), port),
             None => parsed.host_str().unwrap_or("127.0.0.1").to_owned(),
         };
-        let request = tungstenite::http::Request::builder()
+        let request = http::Request::builder()
             .uri(url)
             .header("Host", &host)
             .header("Coder-Session-Token", session_token)
@@ -2334,11 +2331,10 @@ mod tests {
         let agent_id = seed_agent(&store)?;
 
         // Register a fake agent connection so PTY handler doesn't reject.
-        let conn: Arc<dyn coder_connectivity::agents::AgentConnection> =
-            Arc::new(FakeAgentConnection {
-                id: agent_id,
-                connected_at: time::OffsetDateTime::now_utc(),
-            });
+        let conn: Arc<dyn AgentConnection> = Arc::new(FakeAgentConnection {
+            id: agent_id,
+            connected_at: OffsetDateTime::now_utc(),
+        });
         state.agent_provider.register_agent(agent_id, conn).await;
 
         let pubsub = state.pubsub.clone();
@@ -2415,7 +2411,7 @@ mod tests {
         // Should receive an initial snapshot (empty containers/devcontainers).
         let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
         if let Some(Ok(tungstenite::Message::Text(text))) = msg {
-            let snapshot: serde_json::Value = serde_json::from_str(&text)?;
+            let snapshot: Value = serde_json::from_str(&text)?;
             assert!(
                 snapshot.get("containers").is_some(),
                 "expected containers field"
@@ -2466,7 +2462,7 @@ mod tests {
         // Verify the update arrives on the WebSocket.
         let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
         if let Some(Ok(tungstenite::Message::Text(text))) = msg {
-            let received: serde_json::Value = serde_json::from_str(&text)?;
+            let received: Value = serde_json::from_str(&text)?;
             assert!(received.get("containers").is_some());
         } else {
             return Err(
@@ -2491,7 +2487,7 @@ mod tests {
 
         let url = format!("{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata");
         let resp = reqwest::get(&url).await?;
-        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }
 
@@ -2511,7 +2507,7 @@ mod tests {
             .send()
             .await?;
 
-        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        assert_eq!(resp.status(), StatusCode::OK);
         let content_type = resp
             .headers()
             .get("content-type")
@@ -2551,7 +2547,7 @@ mod tests {
         );
         // The data should be a JSON array (empty metadata).
         let json_str = frame.trim_start_matches("data: ").trim();
-        let parsed: serde_json::Value = serde_json::from_str(json_str)?;
+        let parsed: Value = serde_json::from_str(json_str)?;
         assert!(parsed.is_array(), "expected JSON array");
 
         Ok(())
@@ -2627,7 +2623,7 @@ mod tests {
             .header("Coder-Session-Token", &session_token)
             .send()
             .await?;
-        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
         Ok(())
     }
 
@@ -2669,7 +2665,7 @@ mod tests {
         // Should receive initial metadata snapshot (empty array).
         let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
         if let Some(Ok(tungstenite::Message::Text(text))) = msg {
-            let parsed: serde_json::Value = serde_json::from_str(&text)?;
+            let parsed: Value = serde_json::from_str(&text)?;
             assert!(
                 parsed.is_array(),
                 "expected JSON array for metadata snapshot"
@@ -2754,22 +2750,16 @@ mod tests {
     #[derive(Debug)]
     struct FakeAgentConnection {
         id: Uuid,
-        connected_at: time::OffsetDateTime,
+        connected_at: OffsetDateTime,
     }
 
     #[async_trait::async_trait]
-    impl coder_connectivity::agents::AgentConnection for FakeAgentConnection {
-        async fn recreate_devcontainer(
-            &self,
-            _container_id: &str,
-        ) -> Result<(), coder_connectivity::agents::AgentError> {
+    impl AgentConnection for FakeAgentConnection {
+        async fn recreate_devcontainer(&self, _container_id: &str) -> Result<(), AgentError> {
             Ok(())
         }
 
-        async fn delete_devcontainer(
-            &self,
-            _container_id: &str,
-        ) -> Result<(), coder_connectivity::agents::AgentError> {
+        async fn delete_devcontainer(&self, _container_id: &str) -> Result<(), AgentError> {
             Ok(())
         }
 
@@ -2777,7 +2767,7 @@ mod tests {
             self.id
         }
 
-        fn connected_at(&self) -> time::OffsetDateTime {
+        fn connected_at(&self) -> OffsetDateTime {
             self.connected_at
         }
     }
