@@ -257,7 +257,7 @@ pub fn build_router(
         .route("/metrics", get(get_prometheus_metrics))
         // Workspace app path-based proxying.
         .route(
-            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/*rest",
+            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/{*rest}",
             axum::routing::any(workspace_apps_proxy_path),
         )
         .route("/mcp/http", post(mcp_http_handler))
@@ -1324,7 +1324,7 @@ pub(crate) mod tests {
         ProvisionerJobLogRecord as PortsJobLogRecord,
         ProvisionerJobTimingRecord as PortsJobTimingRecord,
     };
-    use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord};
+    use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord, WorkspaceTransitionRow};
     use coder_core::provisioner::{
         LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord, ProvisionerJobStatus,
         ProvisionerJobTimingRecord as ProvisionerTimingRecord, ProvisionerJobType,
@@ -1406,7 +1406,7 @@ pub(crate) mod tests {
     }
 
     #[derive(Debug)]
-    struct FakeStore {
+    pub(crate) struct FakeStore {
         health_ok: bool,
         users: Mutex<HashMap<Uuid, UserRecord>>,
         organizations: Mutex<HashMap<Uuid, OrganizationRecord>>,
@@ -1596,7 +1596,7 @@ pub(crate) mod tests {
         }
 
         /// Inserts a workspace agent into the fake store for testing.
-        fn insert_agent(&self, agent: WorkspaceAgentRow) -> Result<(), StorageError> {
+        pub(crate) fn insert_agent(&self, agent: WorkspaceAgentRow) -> Result<(), StorageError> {
             self.workspace_agents
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
@@ -7233,6 +7233,231 @@ pub(crate) mod tests {
             }
         }
 
+        async fn update_workspace_dormant_deleting_at(
+            &self,
+            workspace_id: Uuid,
+            dormant_at: Option<OffsetDateTime>,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let mut workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(ws) = workspaces.get_mut(&workspace_id) else {
+                return Ok(None);
+            };
+            if ws.deleted {
+                return Ok(None);
+            }
+            // Exclude prebuilds system user workspaces (mirrors SQL).
+            let prebuilds_system_user =
+                Uuid::parse_str("c42fdf75-3097-471c-8c33-fb52454d81c0").unwrap_or_default();
+            if ws.owner_id == prebuilds_system_user {
+                return Ok(None);
+            }
+
+            // Look up the template to compute deleting_at.
+            // The SQL uses FROM templates ... AND templates.id = workspaces.template_id,
+            // so if the template is missing, no row is updated. Mirror that here.
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let Some(template) = templates.get(&ws.template_id) else {
+                return Ok(None);
+            };
+            let time_til_dormant_autodelete = template.time_til_dormant_autodelete;
+
+            ws.dormant_at = dormant_at;
+
+            // When activating (clearing dormant_at), refresh last_used_at.
+            if dormant_at.is_none() {
+                ws.last_used_at = OffsetDateTime::now_utc();
+            }
+
+            // Compute deleting_at from template settings.
+            ws.deleting_at = match dormant_at {
+                Some(d) if time_til_dormant_autodelete != 0 => {
+                    // time_til_dormant_autodelete is in nanoseconds; convert to
+                    // a Duration of whole milliseconds (matching the Go SQL).
+                    let ms = time_til_dormant_autodelete / 1_000_000;
+                    Some(d + time::Duration::milliseconds(ms))
+                }
+                _ => None,
+            };
+
+            ws.updated_at = OffsetDateTime::now_utc();
+            let mut result = ws.clone();
+            result.favorite = false;
+            Ok(Some(result))
+        }
+
+        async fn get_workspaces_eligible_for_transition(
+            &self,
+            now: OffsetDateTime,
+        ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let jobs = self
+                .provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+            let prebuilds_system_user =
+                Uuid::parse_str("c42fdf75-3097-471c-8c33-fb52454d81c0").unwrap_or_default();
+
+            let mut results = Vec::new();
+
+            for ws in workspaces.values() {
+                if ws.deleted || ws.owner_id == prebuilds_system_user {
+                    continue;
+                }
+
+                // Find the latest build for this workspace.
+                let latest_build = builds
+                    .values()
+                    .filter(|b| b.workspace_id == ws.id)
+                    .max_by_key(|b| b.build_number);
+                let Some(build) = latest_build else {
+                    continue;
+                };
+
+                let Some(job) = jobs.get(&build.job_id) else {
+                    continue;
+                };
+                let Some(template) = templates.get(&ws.template_id) else {
+                    continue;
+                };
+                let Some(user) = users.get(&ws.owner_id) else {
+                    continue;
+                };
+
+                let owner_status = user.status.as_str().to_owned();
+                let job_status = job.job_status.clone();
+
+                let eligible = {
+                    // Autostop
+                    (job_status != "failed"
+                        && ws.dormant_at.is_none()
+                        && build.transition == "start"
+                        && (owner_status == "suspended"
+                            || (build.deadline.is_some()
+                                && {
+                                    // Go zero time: 0001-01-01 00:00:00 UTC
+                                    let go_zero = time::PrimitiveDateTime::new(
+                                        time::Date::from_calendar_date(
+                                            1,
+                                            time::Month::January,
+                                            1,
+                                        )
+                                        .unwrap_or(time::Date::MIN),
+                                        time::Time::MIDNIGHT,
+                                    )
+                                    .assume_utc();
+                                    build.deadline != Some(go_zero)
+                                }
+                                && build.deadline < Some(now))))
+                    ||
+                    // Autostart
+                    (owner_status == "active"
+                        && job_status != "failed"
+                        && build.transition == "stop"
+                        && ws.dormant_at.is_none()
+                        && ws.autostart_schedule.is_some()
+                        && (ws.next_start_at.is_none()
+                            || ws.next_start_at <= Some(now)))
+                    ||
+                    // Dormant stop
+                    (ws.dormant_at.is_none()
+                        && template.time_til_dormant > 0
+                        && {
+                            let dormant_dur_ms = template.time_til_dormant / 1_000_000;
+                            (now - ws.last_used_at).whole_milliseconds()
+                                > i128::from(dormant_dur_ms)
+                        })
+                    ||
+                    // Deletion
+                    (ws.dormant_at.is_some()
+                        && ws.deleting_at.is_some()
+                        && ws.deleting_at < Some(now)
+                        && template.time_til_dormant_autodelete > 0
+                        && {
+                            // Mirror the SQL CASE: if the latest build is a
+                            // failed "delete" transition, only allow re-deletion
+                            // after 24 hours have elapsed since job completion.
+                            if build.transition == "delete"
+                                && job_status == "failed"
+                            {
+                                let finish = job.canceled_at.or(job.completed_at);
+                                match finish {
+                                    Some(t) => {
+                                        (now - t) > time::Duration::hours(24)
+                                    }
+                                    None => false,
+                                }
+                            } else {
+                                true
+                            }
+                        })
+                    ||
+                    // Failed stop
+                    (template.failure_ttl > 0
+                        && build.transition == "start"
+                        && job_status == "failed"
+                        && job.completed_at.is_some()
+                        && {
+                            if let Some(completed) = job.completed_at {
+                                let failure_dur_ms = template.failure_ttl / 1_000_000;
+                                (now - completed).whole_milliseconds()
+                                    > i128::from(failure_dur_ms)
+                            } else {
+                                false
+                            }
+                        })
+                };
+
+                if eligible {
+                    results.push(WorkspaceTransitionRow {
+                        id: ws.id,
+                        name: ws.name.clone(),
+                        owner_id: ws.owner_id,
+                        template_id: ws.template_id,
+                        autostart_schedule: ws.autostart_schedule.clone(),
+                        ttl_ns: ws.ttl_ns,
+                        last_used_at: ws.last_used_at,
+                        dormant_at: ws.dormant_at,
+                        deleting_at: ws.deleting_at,
+                        deleted: ws.deleted,
+                        build_transition: build.transition.clone(),
+                        build_deadline: build.deadline,
+                        job_status,
+                        job_completed_at: job.completed_at,
+                        template_allow_user_autostart: template.allow_user_autostart,
+                        template_default_ttl: template.default_ttl,
+                        template_failure_ttl: template.failure_ttl,
+                        template_time_til_dormant: template.time_til_dormant,
+                        template_time_til_dormant_autodelete: template.time_til_dormant_autodelete,
+                        owner_status,
+                    });
+                }
+            }
+
+            Ok(results)
+        }
+
         // -----------------------------------------------------------------
         // Groups
         // -----------------------------------------------------------------
@@ -7814,7 +8039,7 @@ pub(crate) mod tests {
         })
     }
 
-    fn test_state_with_store(
+    pub(crate) fn test_state_with_store(
         health_ok: bool,
     ) -> Result<(AppState, Arc<FakeStore>), Box<dyn Error>> {
         use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
@@ -32201,6 +32426,29 @@ pub(crate) mod tests {
         let app = build_router(test_state(true)?, None);
         let response = call(app, request(Method::GET, "/api/v2/entitlements")?).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+    #[tokio::test]
+    async fn update_workspace_dormant_deleting_at_not_found() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let store = &*state.store;
+
+        let result = store
+            .update_workspace_dormant_deleting_at(Uuid::new_v4(), Some(OffsetDateTime::now_utc()))
+            .await?;
+        assert!(result.is_none(), "should return None for missing workspace");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspaces_eligible_for_transition_empty() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let store = &*state.store;
+
+        let rows = store
+            .get_workspaces_eligible_for_transition(OffsetDateTime::now_utc())
+            .await?;
+        assert!(rows.is_empty(), "no workspaces should be eligible");
         Ok(())
     }
     // -----------------------------------------------------------------------

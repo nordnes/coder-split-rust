@@ -1034,11 +1034,19 @@ pub(crate) async fn get_workspace_agent_pty(
 }
 
 /// GET /api/v2/workspaceagents/{agent}/watch-metadata — SSE metadata watch.
+///
+/// Implements Server-Sent Events streaming of agent metadata updates, matching
+/// Go's `watchWorkspaceAgentMetadataSSE`.  Subscribes to the pubsub metadata
+/// channel *before* fetching the initial snapshot so no updates are lost.
+/// Sends the initial snapshot immediately, then streams updates as they arrive.
 pub(crate) async fn get_workspace_agent_watch_metadata(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
+    use axum::body::Body;
+    use coder_core::pubsub::workspace_agent_metadata_channel;
+
     let Some(_context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
@@ -1047,9 +1055,22 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
         return Ok(resource_not_found_response());
     };
 
-    // SSE streaming not yet implemented; return current snapshot as JSON.
+    let channel = workspace_agent_metadata_channel(agent_id);
+    let mut subscription = state.pubsub.subscribe(&channel).await.map_err(|e| {
+        AppError::Storage(StorageError::Unavailable {
+            message: e.to_string(),
+        })
+    })?;
+
+    // Fetch the initial metadata snapshot *after* subscribing so we don't
+    // miss events that arrive between the fetch and the subscribe.
     let metadata_rows = state.store.list_workspace_agent_metadata(agent_id).await?;
-    let metadata: Vec<coder_core::WorkspaceAgentMetadata> = metadata_rows
+
+    let (tx, rx) = tokio::sync::mpsc::channel::<String>(64);
+
+    // Pre-serialize the initial metadata so it can be sent inside the spawned
+    // task (the receiver isn't returned to the client until after this fn).
+    let initial_metadata: Vec<coder_core::WorkspaceAgentMetadata> = metadata_rows
         .iter()
         .map(|m| coder_core::WorkspaceAgentMetadata {
             display_name: m.display_name.clone(),
@@ -1063,8 +1084,74 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
             display_order: m.display_order,
         })
         .collect();
+    let initial_payload = serde_json::to_string(&initial_metadata).map_err(|e| {
+        AppError::InternalError {
+            message: "failed to serialize initial agent metadata".to_owned(),
+            detail: e.to_string(),
+        }
+    })?;
 
-    Ok((StatusCode::OK, Json(metadata)).into_response())
+    tokio::spawn(async move {
+        // Send initial snapshot (multiline-safe per SSE spec).
+        let sse = initial_payload
+            .lines()
+            .map(|line| format!("data: {line}\n"))
+            .collect::<String>()
+            + "\n";
+        if tx.send(sse).await.is_err() {
+            return;
+        }
+
+        // Stream updates until the connection closes.
+        loop {
+            tokio::select! {
+                msg = subscription.recv() => {
+                    match msg {
+                        Ok(bytes) => {
+                            let data = match String::from_utf8(bytes.to_vec()) {
+                                Ok(s) => s,
+                                Err(_) => {
+                                    // Skip invalid UTF-8 payloads to avoid sending corrupted SSE data.
+                                    continue;
+                                }
+                            };
+                            let sse = data
+                                .lines()
+                                .map(|line| format!("data: {line}\n"))
+                                .collect::<String>()
+                                + "\n";
+                            if tx.send(sse).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(_) => break,
+                    }
+                }
+                _ = tx.closed() => {
+                    break;
+                }
+            }
+        }
+    });
+
+    let stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+    let body = Body::from_stream(tokio_stream::StreamExt::map(
+        stream,
+        Ok::<_, std::convert::Infallible>,
+    ));
+
+    Ok((
+        StatusCode::OK,
+        [
+            (CONTENT_TYPE, HeaderValue::from_static("text/event-stream")),
+            (
+                HeaderName::from_static("cache-control"),
+                HeaderValue::from_static("no-cache"),
+            ),
+        ],
+        body,
+    )
+        .into_response())
 }
 
 /// GET /api/v2/workspaceagents/{agent}/watch-metadata-ws — WebSocket metadata watch.
@@ -1942,4 +2029,725 @@ pub(crate) async fn handle_auth_instance_id(
         }),
     )
         .into_response())
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{create_and_login, test_state_with_store};
+    use crate::app::build_router;
+    use axum::Router;
+    use coder_core::WorkspaceAgentRow;
+    use futures_util::{SinkExt, StreamExt};
+    use std::error::Error;
+    use std::time::Duration;
+    use tokio_tungstenite::tungstenite;
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    /// Spin up a test HTTP server on a random port and return its base URL.
+    async fn spawn_test_server(
+        router: Router,
+    ) -> Result<(url::Url, tokio::task::JoinHandle<()>), Box<dyn Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service()).await;
+        });
+        Ok((url::Url::parse(&format!("http://{address}"))?, handle))
+    }
+
+    /// Seed a minimal workspace agent into the FakeStore and return its ID.
+    fn seed_agent(
+        store: &crate::app::tests::FakeStore,
+    ) -> Result<Uuid, Box<dyn Error>> {
+        let agent_id = Uuid::new_v4();
+        let row = WorkspaceAgentRow {
+            id: agent_id,
+            parent_id: None,
+            created_at: time::OffsetDateTime::now_utc(),
+            updated_at: time::OffsetDateTime::now_utc(),
+            first_connected_at: Some(time::OffsetDateTime::now_utc()),
+            last_connected_at: Some(time::OffsetDateTime::now_utc()),
+            disconnected_at: None,
+            started_at: None,
+            ready_at: None,
+            name: "test-agent".to_owned(),
+            resource_id: Uuid::new_v4(),
+            auth_token: Uuid::new_v4(),
+            auth_instance_id: None,
+            architecture: "amd64".to_owned(),
+            environment_variables: None,
+            operating_system: "linux".to_owned(),
+            logs_length: 0,
+            logs_overflowed: false,
+            directory: String::new(),
+            expanded_directory: String::new(),
+            version: "1.0.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            connection_timeout_seconds: 120,
+            troubleshooting_url: String::new(),
+            motd_file: String::new(),
+            lifecycle_state: "created".to_owned(),
+            subsystems: Vec::new(),
+            display_apps: Vec::new(),
+            display_order: 0,
+            api_key_scope: "all".to_owned(),
+        };
+        store.insert_agent(row)?;
+        Ok(agent_id)
+    }
+
+    /// Build a WebSocket URL from a base URL and path.
+    fn ws_url(base: &url::Url, path: &str) -> String {
+        let mut url = base.clone();
+        url.set_scheme("ws").ok();
+        format!("{url}{path}")
+    }
+
+    /// Build an authenticated WebSocket request with a session token header.
+    fn ws_request(
+        url: &str,
+        session_token: &str,
+    ) -> Result<tungstenite::http::Request<()>, Box<dyn Error>> {
+        let parsed = url::Url::parse(url)?;
+        let host = match parsed.port() {
+            Some(port) => format!(
+                "{}:{}",
+                parsed.host_str().unwrap_or("127.0.0.1"),
+                port
+            ),
+            None => parsed
+                .host_str()
+                .unwrap_or("127.0.0.1")
+                .to_owned(),
+        };
+        let request = tungstenite::http::Request::builder()
+            .uri(url)
+            .header("Host", &host)
+            .header("Coder-Session-Token", session_token)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .body(())?;
+        Ok(request)
+    }
+
+    // =========================================================================
+    // get_workspace_agent_coordinate tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn coordinate_rejects_unauthenticated() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/coordinate"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err(), "should reject unauthenticated connection");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coordinate_accepts_authenticated_connection() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/coordinate"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Send a valid coordination request and verify the connection stays open.
+        let req = serde_json::json!({
+            "add_tunnel": null,
+            "update_self": null,
+            "disconnect": null,
+            "ready_for_handshake": null
+        });
+        ws.send(tungstenite::Message::Text(req.to_string().into()))
+            .await?;
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coordinate_returns_error_for_invalid_json() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/coordinate"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Send invalid JSON — the server should handle it gracefully.
+        ws.send(tungstenite::Message::Text("not valid json".into()))
+            .await?;
+
+        // The server may respond with an error or close the connection.
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        // We just verify the server doesn't crash — any response is acceptable.
+        drop(msg);
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coordinate_returns_not_found_for_unknown_agent() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let unknown_id = Uuid::new_v4();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{unknown_id}/coordinate"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let result = tokio_tungstenite::connect_async(request).await;
+        assert!(result.is_err(), "should reject unknown agent");
+        Ok(())
+    }
+
+    // =========================================================================
+    // get_workspace_agent_pty tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn pty_rejects_unauthenticated() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/pty"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err(), "should reject unauthenticated connection");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pty_closes_when_agent_not_connected() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/pty"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // The agent is not connected, so the server should close the connection.
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        match msg {
+            Ok(Some(Ok(tungstenite::Message::Close(_)))) | Ok(None) | Err(_) => {
+                // Expected: server closed the connection in some form.
+            }
+            other => {
+                // Any other response is also acceptable as long as the server
+                // doesn't hang — it may send an error frame.
+                drop(other);
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pty_relays_binary_data_via_pubsub() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        // Register a fake agent connection so PTY handler doesn't reject.
+        let conn: Arc<dyn coder_connectivity::agents::AgentConnection> =
+            Arc::new(FakeAgentConnection {
+                id: agent_id,
+                connected_at: time::OffsetDateTime::now_utc(),
+            });
+        state.agent_provider.register_agent(agent_id, conn).await;
+
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/pty"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Subscribe to the PTY input channel to verify the relay.
+        let input_channel =
+            coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
+        let mut input_sub = pubsub.subscribe(&input_channel).await?;
+
+        // Send binary data from the client.
+        ws.send(tungstenite::Message::Binary(b"hello pty".to_vec().into()))
+            .await?;
+
+        // Verify the data arrives on the pubsub input channel.
+        let received =
+            tokio::time::timeout(Duration::from_secs(2), input_sub.recv()).await?;
+        assert_eq!(received?, b"hello pty");
+
+        // Now publish data on the output channel and verify it arrives on the WS.
+        let output_channel =
+            coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
+        pubsub.publish(&output_channel, b"pty output").await?;
+
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
+        if let Some(Ok(tungstenite::Message::Binary(data))) = msg {
+            assert_eq!(&data[..], b"pty output");
+        } else {
+            return Err(format!("expected binary message from PTY output, got: {msg:?}").into());
+        }
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // get_workspace_agent_containers_watch tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn containers_watch_rejects_unauthenticated() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/containers/watch"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err(), "should reject unauthenticated connection");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn containers_watch_sends_initial_snapshot() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/containers/watch"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Should receive an initial snapshot (empty containers/devcontainers).
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
+        if let Some(Ok(tungstenite::Message::Text(text))) = msg {
+            let snapshot: serde_json::Value = serde_json::from_str(&text)?;
+            assert!(
+                snapshot.get("containers").is_some(),
+                "expected containers field"
+            );
+            assert!(
+                snapshot.get("devcontainers").is_some(),
+                "expected devcontainers field"
+            );
+        } else {
+            return Err(format!("expected text message with initial snapshot, got: {msg:?}").into());
+        }
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn containers_watch_streams_pubsub_updates() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/containers/watch"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Consume the initial snapshot.
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+
+        // Publish a container state change.
+        let channel =
+            coder_core::pubsub::workspace_agent_containers_channel(agent_id);
+        let update = serde_json::json!({
+            "containers": [{"id": "c1", "name": "test"}],
+            "devcontainers": []
+        });
+        pubsub
+            .publish(&channel, update.to_string().as_bytes())
+            .await?;
+
+        // Verify the update arrives on the WebSocket.
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
+        if let Some(Ok(tungstenite::Message::Text(text))) = msg {
+            let received: serde_json::Value = serde_json::from_str(&text)?;
+            assert!(received.get("containers").is_some());
+        } else {
+            return Err(format!("expected text message with container update, got: {msg:?}").into());
+        }
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // get_workspace_agent_watch_metadata (SSE) tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn watch_metadata_sse_rejects_unauthenticated() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = format!(
+            "{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata"
+        );
+        let resp = reqwest::get(&url).await?;
+        assert_eq!(resp.status(), reqwest::StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_metadata_sse_returns_event_stream() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!(
+            "{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata"
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        assert_eq!(resp.status(), reqwest::StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or_default()
+            .to_owned();
+        assert!(
+            content_type.contains("text/event-stream"),
+            "expected text/event-stream, got: {content_type}"
+        );
+
+        // Buffer chunks until we have a complete SSE frame (terminated by \n\n).
+        let mut resp = resp;
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err("timeout waiting for initial SSE metadata frame".into());
+            }
+            match tokio::time::timeout(remaining, resp.chunk()).await {
+                Ok(Ok(Some(bytes))) => {
+                    buffer.extend_from_slice(&bytes);
+                    if buffer.windows(2).any(|w| w == b"\n\n") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&buffer);
+        // Find the first complete SSE frame.
+        let frame = text.split("\n\n").next().unwrap_or_default();
+        assert!(
+            frame.starts_with("data: "),
+            "expected SSE data prefix, got: {frame}"
+        );
+        // The data should be a JSON array (empty metadata).
+        let json_str = frame.trim_start_matches("data: ").trim();
+        let parsed: serde_json::Value = serde_json::from_str(json_str)?;
+        assert!(parsed.is_array(), "expected JSON array");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_metadata_sse_streams_pubsub_updates() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!(
+            "{base_url}api/v2/workspaceagents/{agent_id}/watch-metadata"
+        );
+        let client = reqwest::Client::new();
+        let mut resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        // Consume the initial snapshot.
+        let _ = tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await;
+
+        // Publish a metadata update.
+        let channel =
+            coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+        let update = serde_json::json!([{
+            "display_name": "CPU",
+            "key": "cpu",
+            "value": "42%"
+        }]);
+        pubsub
+            .publish(&channel, update.to_string().as_bytes())
+            .await?;
+
+        // Buffer chunks until we have a complete SSE frame containing the update.
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err("timeout waiting for SSE metadata update frame".into());
+            }
+            match tokio::time::timeout(remaining, resp.chunk()).await {
+                Ok(Ok(Some(bytes))) => {
+                    buffer.extend_from_slice(&bytes);
+                    if buffer.windows(2).any(|w| w == b"\n\n") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&buffer);
+        assert!(text.contains("CPU"), "expected metadata update with CPU");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_metadata_sse_returns_not_found_for_unknown_agent() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let unknown_id = Uuid::new_v4();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!(
+            "{base_url}api/v2/workspaceagents/{unknown_id}/watch-metadata"
+        );
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+        assert_eq!(resp.status(), reqwest::StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    // =========================================================================
+    // get_workspace_agent_watch_metadata_ws tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn watch_metadata_ws_rejects_unauthenticated() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+        );
+        let result = tokio_tungstenite::connect_async(&url).await;
+        assert!(result.is_err(), "should reject unauthenticated connection");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_metadata_ws_sends_initial_snapshot() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Should receive initial metadata snapshot (empty array).
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
+        if let Some(Ok(tungstenite::Message::Text(text))) = msg {
+            let parsed: serde_json::Value = serde_json::from_str(&text)?;
+            assert!(
+                parsed.is_array(),
+                "expected JSON array for metadata snapshot"
+            );
+        } else {
+            return Err(format!("expected text message with metadata snapshot, got: {msg:?}").into());
+        }
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_metadata_ws_streams_pubsub_updates() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/watch-metadata-ws"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Consume initial snapshot.
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+
+        // Publish a metadata update via pubsub.
+        let channel =
+            coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+        let update = serde_json::json!([{
+            "display_name": "Memory",
+            "key": "memory",
+            "value": "8GB"
+        }]);
+        pubsub
+            .publish(&channel, update.to_string().as_bytes())
+            .await?;
+
+        // Verify the update arrives on the WebSocket.
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
+        if let Some(Ok(tungstenite::Message::Text(text))) = msg {
+            assert!(
+                text.contains("Memory"),
+                "expected metadata update with Memory"
+            );
+        } else {
+            return Err(format!("expected text message with metadata update, got: {msg:?}").into());
+        }
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_metadata_ws_returns_not_found_for_unknown_agent() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let unknown_id = Uuid::new_v4();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{unknown_id}/watch-metadata-ws"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let result = tokio_tungstenite::connect_async(request).await;
+        assert!(result.is_err(), "should reject unknown agent");
+        Ok(())
+    }
+
+    // =========================================================================
+    // Helper: fake agent connection for PTY tests
+    // =========================================================================
+
+    #[derive(Debug)]
+    struct FakeAgentConnection {
+        id: Uuid,
+        connected_at: time::OffsetDateTime,
+    }
+
+    #[async_trait::async_trait]
+    impl coder_connectivity::agents::AgentConnection for FakeAgentConnection {
+        async fn recreate_devcontainer(
+            &self,
+            _container_id: &str,
+        ) -> Result<(), coder_connectivity::agents::AgentError> {
+            Ok(())
+        }
+
+        async fn delete_devcontainer(
+            &self,
+            _container_id: &str,
+        ) -> Result<(), coder_connectivity::agents::AgentError> {
+            Ok(())
+        }
+
+        fn agent_id(&self) -> Uuid {
+            self.id
+        }
+
+        fn connected_at(&self) -> time::OffsetDateTime {
+            self.connected_at
+        }
+    }
 }

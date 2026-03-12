@@ -5727,6 +5727,178 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        sqlx::query_as::<_, StoredWorkspaceRow>(
+            "WITH updated AS (
+                UPDATE workspaces
+                SET
+                    dormant_at = $2,
+                    last_used_at = CASE WHEN $2::timestamptz IS NULL THEN
+                        now()
+                    ELSE
+                        last_used_at
+                    END,
+                    deleting_at = CASE WHEN $2::timestamptz IS NULL OR templates.time_til_dormant_autodelete = 0 THEN
+                        NULL
+                    ELSE
+                        $2::timestamptz + (INTERVAL '1 millisecond' * (templates.time_til_dormant_autodelete / 1000000))
+                    END,
+                    updated_at = NOW()
+                FROM
+                    templates
+                WHERE
+                    workspaces.id = $1
+                    AND workspaces.deleted = false
+                    AND templates.id = workspaces.template_id
+                    AND owner_id != 'c42fdf75-3097-471c-8c33-fb52454d81c0'::UUID
+                RETURNING workspaces.*
+             )
+             SELECT u.id, u.created_at, u.updated_at, u.deleted, u.owner_id,
+                    u.organization_id, u.template_id, u.name, u.autostart_schedule,
+                    u.ttl, u.last_used_at, u.dormant_at, u.deleting_at,
+                    u.automatic_updates,
+                    false AS favorite,
+                    u.next_start_at
+             FROM updated u",
+        )
+        .bind(workspace_id)
+        .bind(dormant_at)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| opt.map(workspace_record_from_row))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceTransitionRow>(
+            "SELECT
+                workspaces.id,
+                workspaces.name,
+                workspaces.owner_id,
+                workspaces.template_id,
+                workspaces.autostart_schedule,
+                workspaces.ttl,
+                workspaces.last_used_at,
+                workspaces.dormant_at,
+                workspaces.deleting_at,
+                workspaces.deleted,
+                workspace_builds.transition AS build_transition,
+                workspace_builds.deadline AS build_deadline,
+                provisioner_jobs.job_status::text AS job_status,
+                provisioner_jobs.completed_at AS job_completed_at,
+                templates.allow_user_autostart AS template_allow_user_autostart,
+                templates.default_ttl AS template_default_ttl,
+                templates.failure_ttl AS template_failure_ttl,
+                templates.time_til_dormant AS template_time_til_dormant,
+                templates.time_til_dormant_autodelete AS template_time_til_dormant_autodelete,
+                users.status::text AS owner_status
+             FROM workspaces
+             LEFT JOIN workspace_builds
+                ON workspace_builds.workspace_id = workspaces.id
+             INNER JOIN provisioner_jobs
+                ON workspace_builds.job_id = provisioner_jobs.id
+             INNER JOIN templates
+                ON workspaces.template_id = templates.id
+             INNER JOIN users
+                ON workspaces.owner_id = users.id
+             WHERE
+                workspace_builds.build_number = (
+                    SELECT MAX(build_number)
+                    FROM workspace_builds
+                    WHERE workspace_builds.workspace_id = workspaces.id
+                )
+                AND (
+                    -- Autostop: build started, deadline passed or owner suspended
+                    (
+                        provisioner_jobs.job_status != 'failed'::provisioner_job_status
+                        AND workspaces.dormant_at IS NULL
+                        AND workspace_builds.transition = 'start'::workspace_transition
+                        AND (
+                            users.status = 'suspended'::user_status
+                            OR (
+                                workspace_builds.deadline != '0001-01-01 00:00:00+00'::timestamptz
+                                AND workspace_builds.deadline < $1::timestamptz
+                            )
+                        )
+                    )
+                    OR
+                    -- Autostart: build stopped, schedule ready
+                    (
+                        users.status = 'active'::user_status
+                        AND provisioner_jobs.job_status != 'failed'::provisioner_job_status
+                        AND workspace_builds.transition = 'stop'::workspace_transition
+                        AND workspaces.dormant_at IS NULL
+                        AND workspaces.autostart_schedule IS NOT NULL
+                        AND (
+                            workspaces.next_start_at IS NULL
+                            OR workspaces.next_start_at <= $1::timestamptz
+                        )
+                    )
+                    OR
+                    -- Dormant stop: unused longer than time_til_dormant
+                    (
+                        workspaces.dormant_at IS NULL
+                        AND templates.time_til_dormant > 0
+                        AND ($1::timestamptz) - workspaces.last_used_at > (INTERVAL '1 millisecond' * (templates.time_til_dormant / 1000000))
+                    )
+                    OR
+                    -- Deletion: dormant and past deleting_at
+                    (
+                        workspaces.dormant_at IS NOT NULL
+                        AND workspaces.deleting_at IS NOT NULL
+                        AND workspaces.deleting_at < $1::timestamptz
+                        AND templates.time_til_dormant_autodelete > 0
+                        AND CASE
+                            WHEN (
+                                workspace_builds.transition = 'delete'::workspace_transition
+                                AND provisioner_jobs.job_status = 'failed'::provisioner_job_status
+                            ) THEN (
+                                (
+                                    provisioner_jobs.canceled_at IS NOT NULL
+                                    OR provisioner_jobs.completed_at IS NOT NULL
+                                ) AND (
+                                    ($1::timestamptz) - (CASE
+                                        WHEN provisioner_jobs.canceled_at IS NOT NULL THEN provisioner_jobs.canceled_at
+                                        ELSE provisioner_jobs.completed_at
+                                    END) > INTERVAL '24 hours'
+                                )
+                            )
+                            ELSE true
+                        END
+                    )
+                    OR
+                    -- Failed stop: failure_ttl exceeded
+                    (
+                        templates.failure_ttl > 0
+                        AND workspace_builds.transition = 'start'::workspace_transition
+                        AND provisioner_jobs.job_status = 'failed'::provisioner_job_status
+                        AND provisioner_jobs.completed_at IS NOT NULL
+                        AND ($1::timestamptz) - provisioner_jobs.completed_at > (INTERVAL '1 millisecond' * (templates.failure_ttl / 1000000))
+                    )
+                )
+                AND workspaces.deleted = false
+                AND workspaces.owner_id != 'c42fdf75-3097-471c-8c33-fb52454d81c0'::UUID",
+        )
+        .bind(now)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(workspace_transition_row_from_stored)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn create_group(&self, input: &CreateGroupInput) -> Result<GroupRecord, StorageError> {
         let row: (
             Uuid,
