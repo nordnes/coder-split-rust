@@ -1959,6 +1959,9 @@ struct StoredWorkspaceTransitionRow {
     template_time_til_dormant: i64,
     template_time_til_dormant_autodelete: i64,
     owner_status: String,
+    build_id: Uuid,
+    max_deadline: Option<OffsetDateTime>,
+    activity_bump_ns: i64,
 }
 
 fn workspace_transition_row_from_stored(
@@ -1985,6 +1988,9 @@ fn workspace_transition_row_from_stored(
         template_time_til_dormant: row.template_time_til_dormant,
         template_time_til_dormant_autodelete: row.template_time_til_dormant_autodelete,
         owner_status: row.owner_status,
+        build_id: row.build_id,
+        max_deadline: row.max_deadline,
+        activity_bump_ns: row.activity_bump_ns,
     }
 }
 

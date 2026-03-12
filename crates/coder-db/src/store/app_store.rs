@@ -5801,7 +5801,10 @@ impl AppStore for PostgresStore {
                 templates.failure_ttl AS template_failure_ttl,
                 templates.time_til_dormant AS template_time_til_dormant,
                 templates.time_til_dormant_autodelete AS template_time_til_dormant_autodelete,
-                users.status::text AS owner_status
+                users.status::text AS owner_status,
+                workspace_builds.id AS build_id,
+                workspace_builds.max_deadline AS max_deadline,
+                COALESCE(templates.activity_bump, 0) AS activity_bump_ns
              FROM workspaces
              LEFT JOIN workspace_builds
                 ON workspace_builds.workspace_id = workspaces.id

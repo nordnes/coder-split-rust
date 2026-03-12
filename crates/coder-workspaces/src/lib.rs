@@ -951,7 +951,7 @@ pub trait ActivityBumpStore: Send + Sync + 'static {
 }
 
 #[async_trait]
-impl<T: AppStore + 'static> ActivityBumpStore for T {
+impl ActivityBumpStore for dyn AppStore {
     async fn get_workspaces_eligible_for_transition(
         &self,
         now: OffsetDateTime,
@@ -966,6 +966,27 @@ impl<T: AppStore + 'static> ActivityBumpStore for T {
         max_deadline: Option<OffsetDateTime>,
     ) -> Result<bool, StorageError> {
         AppStore::update_workspace_build_deadline(self, build_id, deadline, max_deadline).await
+    }
+}
+
+#[async_trait]
+impl<T: ActivityBumpStore + ?Sized> ActivityBumpStore for Arc<T> {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        (**self).get_workspaces_eligible_for_transition(now).await
+    }
+
+    async fn update_workspace_build_deadline(
+        &self,
+        build_id: uuid::Uuid,
+        deadline: Option<OffsetDateTime>,
+        max_deadline: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_workspace_build_deadline(build_id, deadline, max_deadline)
+            .await
     }
 }
 
@@ -1136,7 +1157,7 @@ pub trait DormancyCheckerStore: Send + Sync + 'static {
 }
 
 #[async_trait]
-impl<T: AppStore + 'static> DormancyCheckerStore for T {
+impl DormancyCheckerStore for dyn AppStore {
     async fn get_workspaces_eligible_for_transition(
         &self,
         now: OffsetDateTime,
@@ -1150,6 +1171,26 @@ impl<T: AppStore + 'static> DormancyCheckerStore for T {
         dormant_at: Option<OffsetDateTime>,
     ) -> Result<Option<WorkspaceRecord>, StorageError> {
         AppStore::update_workspace_dormant_deleting_at(self, workspace_id, dormant_at).await
+    }
+}
+
+#[async_trait]
+impl<T: DormancyCheckerStore + ?Sized> DormancyCheckerStore for Arc<T> {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        (**self).get_workspaces_eligible_for_transition(now).await
+    }
+
+    async fn update_workspace_dormant_deleting_at(
+        &self,
+        workspace_id: uuid::Uuid,
+        dormant_at: Option<OffsetDateTime>,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self)
+            .update_workspace_dormant_deleting_at(workspace_id, dormant_at)
+            .await
     }
 }
 
