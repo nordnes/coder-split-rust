@@ -1,5 +1,6 @@
 //! Template and template version handlers.
 
+use super::workspaces::workspace_transition_from_str;
 use super::*;
 
 /// Query parameters for listing template versions.
@@ -1354,9 +1355,20 @@ pub(crate) async fn get_template_version_dry_run_logs(
         None => return Ok(not_found_response("Dry-run job not found.")),
     };
 
-    // Provisioner logs are not stored in the stub implementation.
-    let logs: Vec<ProvisionerJobLog> = Vec::new();
-    Ok((StatusCode::OK, Json(logs)).into_response())
+    let logs = state.store.list_provisioner_job_logs(job_id, None).await?;
+
+    let items: Vec<ProvisionerJobLog> = logs
+        .into_iter()
+        .map(|l| ProvisionerJobLog {
+            id: l.id,
+            created_at: l.created_at,
+            log_source: l.source,
+            log_level: l.level,
+            stage: l.stage,
+            output: l.output,
+        })
+        .collect();
+    Ok((StatusCode::OK, Json(items)).into_response())
 }
 
 /// GET /templateversions/{templateversion}/dry-run/{jobid}/resources
@@ -1369,14 +1381,52 @@ pub(crate) async fn get_template_version_dry_run_resources(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Verify the job exists.
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
     };
 
-    // Resources are populated by the provisioner daemon. Return empty for stub.
-    let resources: Vec<WorkspaceResource> = Vec::new();
-    Ok((StatusCode::OK, Json(resources)).into_response())
+    let resources = state.store.list_workspace_resources_by_job(job_id).await?;
+
+    let resource_ids: Vec<Uuid> = resources.iter().map(|r| r.id).collect();
+    let all_metadata = state
+        .store
+        .list_workspace_resource_metadata(&resource_ids)
+        .await?;
+
+    let mut metadata_map: HashMap<Uuid, Vec<WorkspaceResourceMetadata>> = HashMap::new();
+    for m in all_metadata {
+        metadata_map
+            .entry(m.workspace_resource_id)
+            .or_default()
+            .push(WorkspaceResourceMetadata {
+                key: m.key,
+                value: m.value,
+                sensitive: m.sensitive,
+            });
+    }
+
+    let items: Vec<WorkspaceResourceResponse> = resources
+        .into_iter()
+        .map(|r| {
+            let meta = metadata_map.remove(&r.id).unwrap_or_default();
+            WorkspaceResourceResponse {
+                id: r.id,
+                created_at: r.created_at,
+                job_id: r.job_id,
+                workspace_transition: workspace_transition_from_str(&r.transition),
+                resource_type: r.resource_type,
+                name: r.name,
+                hide: r.hide,
+                icon: r.icon,
+                daily_cost: r.daily_cost,
+                agents: Vec::new(),
+                metadata: meta,
+            }
+        })
+        .collect();
+    Ok((StatusCode::OK, Json(items)).into_response())
 }
 
 /// GET /templateversions/{templateversion}/dry-run/{jobid}/matched-provisioners
@@ -1409,17 +1459,73 @@ pub(crate) async fn get_template_version_dynamic_parameters(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
 
-    // Dynamic parameters are evaluated via the provisioner. Return empty stub.
-    let response = DynamicParametersResponse::default();
+    // RBAC: verify the actor can read this template.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Read, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view template version parameters.",
+        ));
+    }
+
+    let params = state
+        .store
+        .list_template_version_parameters(version_id)
+        .await?;
+
+    let parameters: Vec<Value> = params
+        .iter()
+        .map(|p| -> Result<Value, AppError> {
+            let options: Vec<coder_core::api::TemplateVersionParameterOption> =
+                serde_json::from_value(p.options.clone()).map_err(|e| AppError::InternalError {
+                    message: format!("Failed to deserialize options for parameter '{}'", p.name),
+                    detail: e.to_string(),
+                })?;
+            Ok(serde_json::to_value(TemplateVersionParameter {
+                name: p.name.clone(),
+                display_name: p.display_name.clone(),
+                description: p.description.clone(),
+                description_plaintext: strip_markdown(&p.description),
+                param_type: p.param_type.clone(),
+                form_type: p.form_type.clone(),
+                mutable: p.mutable,
+                default_value: p.default_value.clone(),
+                icon: p.icon.clone(),
+                options,
+                validation_error: p.validation_error.clone(),
+                validation_regex: p.validation_regex.clone(),
+                validation_min: p.validation_min,
+                validation_max: p.validation_max,
+                validation_monotonic: p.validation_monotonic.clone(),
+                required: p.required,
+                ephemeral: p.ephemeral,
+            })
+            .map_err(|e| AppError::InternalError {
+                message: "Failed to serialize parameter".to_string(),
+                detail: e.to_string(),
+            })?)
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+
+    let response = DynamicParametersResponse {
+        parameters,
+        ..DynamicParametersResponse::default()
+    };
     Ok((StatusCode::OK, Json(response)).into_response())
 }
 
@@ -1656,13 +1762,24 @@ pub(crate) async fn get_template_version_external_auth(
     };
 
     // Verify the version exists.
-    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
 
-    // External auth requirements come from provisioner output. Return empty for stub.
-    let auths: Vec<TemplateVersionExternalAuth> = Vec::new();
+    // The external_auth_providers field on template_versions is a JSON array of
+    // provider ID strings written by the provisioner daemon.  We convert each
+    // entry into a minimal TemplateVersionExternalAuth response.
+    let provider_ids: Vec<String> =
+        serde_json::from_value(ver.external_auth_providers.clone()).unwrap_or_default();
+
+    let auths: Vec<TemplateVersionExternalAuth> = provider_ids
+        .into_iter()
+        .map(|id| TemplateVersionExternalAuth {
+            id,
+            ..TemplateVersionExternalAuth::default()
+        })
+        .collect();
     Ok((StatusCode::OK, Json(auths)).into_response())
 }
 
@@ -1676,13 +1793,28 @@ pub(crate) async fn get_template_version_logs(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
 
-    let logs: Vec<ProvisionerJobLog> = Vec::new();
-    Ok((StatusCode::OK, Json(logs)).into_response())
+    let logs = state
+        .store
+        .list_provisioner_job_logs(ver.job_id, None)
+        .await?;
+
+    let items: Vec<ProvisionerJobLog> = logs
+        .into_iter()
+        .map(|l| ProvisionerJobLog {
+            id: l.id,
+            created_at: l.created_at,
+            log_source: l.source,
+            log_level: l.level,
+            stage: l.stage,
+            output: l.output,
+        })
+        .collect();
+    Ok((StatusCode::OK, Json(items)).into_response())
 }
 
 /// GET /templateversions/{templateversion}/parameters (deprecated alias for rich-parameters)
@@ -1820,14 +1952,54 @@ pub(crate) async fn get_template_version_resources(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _ver = match state.store.find_template_version_by_id(version_id).await? {
+    let ver = match state.store.find_template_version_by_id(version_id).await? {
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
 
-    // Resources are populated by the provisioner daemon. Return empty for stub.
-    let resources: Vec<WorkspaceResource> = Vec::new();
-    Ok((StatusCode::OK, Json(resources)).into_response())
+    let resources = state
+        .store
+        .list_workspace_resources_by_job(ver.job_id)
+        .await?;
+
+    let resource_ids: Vec<Uuid> = resources.iter().map(|r| r.id).collect();
+    let all_metadata = state
+        .store
+        .list_workspace_resource_metadata(&resource_ids)
+        .await?;
+
+    let mut metadata_map: HashMap<Uuid, Vec<WorkspaceResourceMetadata>> = HashMap::new();
+    for m in all_metadata {
+        metadata_map
+            .entry(m.workspace_resource_id)
+            .or_default()
+            .push(WorkspaceResourceMetadata {
+                key: m.key,
+                value: m.value,
+                sensitive: m.sensitive,
+            });
+    }
+
+    let items: Vec<WorkspaceResourceResponse> = resources
+        .into_iter()
+        .map(|r| {
+            let meta = metadata_map.remove(&r.id).unwrap_or_default();
+            WorkspaceResourceResponse {
+                id: r.id,
+                created_at: r.created_at,
+                job_id: r.job_id,
+                workspace_transition: workspace_transition_from_str(&r.transition),
+                resource_type: r.resource_type,
+                name: r.name,
+                hide: r.hide,
+                icon: r.icon,
+                daily_cost: r.daily_cost,
+                agents: Vec::new(),
+                metadata: meta,
+            }
+        })
+        .collect();
+    Ok((StatusCode::OK, Json(items)).into_response())
 }
 
 /// GET /templateversions/{templateversion}/schema (deprecated)
