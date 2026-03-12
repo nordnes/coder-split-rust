@@ -10536,7 +10536,7 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(auth_redirect_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /workspaceagents/me/gitsshkey with auth returns 200 with stub keys ---
+        // --- GET /workspaceagents/me/gitsshkey with user auth returns 400 (agent auth required) ---
         let gitsshkey_response = call(
             app.clone(),
             authenticated_request(
@@ -10546,16 +10546,7 @@ pub(crate) mod tests {
             )?,
         )
         .await?;
-        assert_eq!(gitsshkey_response.status(), StatusCode::OK);
-        let gitsshkey_body = response_json(gitsshkey_response).await?;
-        assert_eq!(
-            gitsshkey_body.get("public_key").and_then(Value::as_str),
-            Some("")
-        );
-        assert_eq!(
-            gitsshkey_body.get("private_key").and_then(Value::as_str),
-            Some("")
-        );
+        assert_eq!(gitsshkey_response.status(), StatusCode::BAD_REQUEST);
 
         // --- GET /workspaceagents/me/gitsshkey without auth returns 401 ---
         let gitsshkey_unauth = call(

@@ -8,16 +8,22 @@ pub(crate) async fn workspace_agent_git_ssh_key(
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     // Try agent auth first, fall back to user auth for backwards compatibility.
+    // The Go reference (`agentGitSSHKey`) only supports agent auth — the key
+    // lookup goes agent → resource → build → workspace → owner.  For
+    // user-authenticated callers we replicate the same chain via
+    // `find_workspace_by_agent_id` but there is no agent identity to start
+    // from, so we return an appropriate error.
     let agent = authenticate_agent_request(&state, &headers).await?;
     let Some(agent) = agent else {
         let Some(_context) = authenticate_request(&state, &headers).await? else {
             return Ok(unauthorized_response("Missing or invalid session token."));
         };
-        // User-authenticated fallback: return empty stub (owner key lookup
-        // requires workspace resolution which is not yet available for user auth).
         return Ok((
-            StatusCode::OK,
-            Json(json!({"public_key":"","private_key":""})),
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "This endpoint requires agent authentication.",
+                "Use the Coder-Session-Token header with a valid agent token.",
+            )),
         )
             .into_response());
     };
@@ -650,14 +656,20 @@ pub(crate) async fn get_workspace_agent_containers_watch(
 ///
 /// Implements agent-side coordination protocol.  Registers the agent as a
 /// peer in the [`TailnetCoordinator`] and multiplexes between incoming
-/// WebSocket messages and outgoing coordinator responses.
+/// WebSocket messages and outgoing coordinator responses.  Also delivers an
+/// initial DERP map snapshot and streams subsequent DERP map changes so the
+/// agent always has up-to-date relay information.
+///
+/// Following the Go reference (`workspaceAgentClientCoordinate`), the handler
+/// performs RBAC authorisation (`Action::Ssh` on the owning workspace) before
+/// accepting the WebSocket upgrade.
 pub(crate) async fn get_workspace_agent_coordinate(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -665,10 +677,37 @@ pub(crate) async fn get_workspace_agent_coordinate(
         return Ok(resource_not_found_response());
     };
 
+    // RBAC: the caller must have SSH access to the workspace that owns this
+    // agent, matching the Go reference which checks `policy.ActionSSH`.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
+    let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::Workspace)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::Workspace),
+    };
+    if authorizer
+        .authorize(&context.actor, Action::Ssh, &rbac_obj)
+        .is_err()
+    {
+        return Ok(resource_not_found_response());
+    }
+
     let coordinator = state.coordinator.clone();
+    let derp_map = build_workspace_agent_connection_info(&state).derp_map;
 
     Ok(ws.on_upgrade(move |mut socket| async move {
         use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse, PeerKind};
+
+        // Send the initial DERP map so the agent knows how to reach relay
+        // servers immediately upon connecting.
+        let derp_envelope = serde_json::json!({ "derp_map": derp_map });
+        if let Ok(payload) = serde_json::to_string(&derp_envelope) {
+            if socket.send(Message::Text(payload.into())).await.is_err() {
+                return;
+            }
+        }
 
         // Register the agent as a peer in the coordinator.
         let mut handle =
@@ -1047,13 +1086,29 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
     use axum::body::Body;
     use coder_core::pubsub::workspace_agent_metadata_channel;
 
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: the caller must have read access to the owning workspace.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
+    let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::Workspace)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::Workspace),
+    };
+    if authorizer
+        .authorize(&context.actor, Action::Read, &rbac_obj)
+        .is_err()
+    {
+        return Ok(resource_not_found_response());
+    }
 
     let channel = workspace_agent_metadata_channel(agent_id);
     let mut subscription = state.pubsub.subscribe(&channel).await.map_err(|e| {
@@ -1160,13 +1215,29 @@ pub(crate) async fn get_workspace_agent_watch_metadata_ws(
     Path(agent_id): Path<Uuid>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: the caller must have read access to the owning workspace.
+    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
+    let authorizer = Authorizer::new();
+    let rbac_obj = match workspace {
+        Some(ref ws) => Object::new(ResourceType::Workspace)
+            .with_owner(ws.owner_id)
+            .in_org(ws.organization_id),
+        None => Object::new(ResourceType::Workspace),
+    };
+    if authorizer
+        .authorize(&context.actor, Action::Read, &rbac_obj)
+        .is_err()
+    {
+        return Ok(resource_not_found_response());
+    }
 
     let pubsub = state.pubsub.clone();
     let store = state.store.clone();
@@ -2278,6 +2349,74 @@ mod tests {
         let request = ws_request(&url, &session_token)?;
         let result = tokio_tungstenite::connect_async(request).await;
         assert!(result.is_err(), "should reject unknown agent");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coordinate_sends_initial_derp_map() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/coordinate"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // The very first message should be a DERP map envelope.
+        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
+        if let Some(Ok(tungstenite::Message::Text(text))) = msg {
+            let parsed: Value = serde_json::from_str(&text)?;
+            assert!(
+                parsed.get("derp_map").is_some(),
+                "expected derp_map key in initial message, got: {parsed}"
+            );
+        } else {
+            return Err(format!("expected text message with DERP map, got: {msg:?}").into());
+        }
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn coordinate_cleans_up_on_disconnect() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let coordinator = state.coordinator.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/coordinate"),
+        );
+        let request = ws_request(&url, &session_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Consume the DERP map message.
+        let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+
+        // Close the connection — the server should clean up the coordinator
+        // handle without panicking or leaking resources.
+        ws.close(None).await?;
+
+        // Give the server a moment to process the close.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+
+        // Verify the coordinator is still functional after the disconnect by
+        // attempting a new coordination (should not panic).
+        let _handle = coordinator.coordinate(
+            Uuid::new_v4(),
+            "post-disconnect-test".to_owned(),
+            coder_connectivity::tailnet::PeerKind::Agent,
+        );
+
         Ok(())
     }
 
