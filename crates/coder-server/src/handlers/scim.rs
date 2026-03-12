@@ -1001,7 +1001,10 @@ mod tests {
     #[test]
     fn test_scim_verify_auth_wrong_token() {
         let mut headers = HeaderMap::new();
-        headers.insert("Authorization", HeaderValue::from_static("Bearer wrong-key"));
+        headers.insert(
+            "Authorization",
+            HeaderValue::from_static("Bearer wrong-key"),
+        );
         assert!(!scim_verify_auth(&headers, "test-key"));
     }
 

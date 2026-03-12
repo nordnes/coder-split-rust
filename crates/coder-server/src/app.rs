@@ -21390,8 +21390,6 @@ pub(crate) mod tests {
         Ok(())
     }
 
-
-
     // -----------------------------------------------------------------------
     // OAuth2 FakeStore direct unit tests
     // -----------------------------------------------------------------------
@@ -21652,30 +21650,12 @@ pub(crate) mod tests {
         // Create 2 codes for user_id and 1 for other_user_id
         store
             .create_oauth2_provider_app_code(
-                app.id,
-                user_id,
-                b"p1",
-                b"h1",
-                expires,
-                "res",
-                "ch",
-                "S256",
-                None,
-                None,
+                app.id, user_id, b"p1", b"h1", expires, "res", "ch", "S256", None, None,
             )
             .await?;
         store
             .create_oauth2_provider_app_code(
-                app.id,
-                user_id,
-                b"p2",
-                b"h2",
-                expires,
-                "res",
-                "ch",
-                "S256",
-                None,
-                None,
+                app.id, user_id, b"p2", b"h2", expires, "res", "ch", "S256", None, None,
             )
             .await?;
         store
@@ -21700,9 +21680,7 @@ pub(crate) mod tests {
         assert_eq!(removed, 2);
 
         // Other user's code should remain
-        let remaining = store
-            .find_oauth2_provider_app_code_by_prefix(b"p3")
-            .await?;
+        let remaining = store.find_oauth2_provider_app_code_by_prefix(b"p3").await?;
         assert!(remaining.is_some());
 
         Ok(())

@@ -1558,9 +1558,8 @@ pub trait IdentityStore: Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
@@ -3756,9 +3755,8 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(

@@ -2165,10 +2165,7 @@ mod tests {
     }
 
     /// Build an authenticated WebSocket request with a session token header.
-    fn ws_request(
-        url: &str,
-        session_token: &str,
-    ) -> Result<http::Request<()>, Box<dyn Error>> {
+    fn ws_request(url: &str, session_token: &str) -> Result<http::Request<()>, Box<dyn Error>> {
         let parsed = url::Url::parse(url)?;
         let host = match parsed.port() {
             Some(port) => format!("{}:{}", parsed.host_str().unwrap_or("127.0.0.1"), port),
@@ -2334,11 +2331,10 @@ mod tests {
         let agent_id = seed_agent(&store)?;
 
         // Register a fake agent connection so PTY handler doesn't reject.
-        let conn: Arc<dyn AgentConnection> =
-            Arc::new(FakeAgentConnection {
-                id: agent_id,
-                connected_at: OffsetDateTime::now_utc(),
-            });
+        let conn: Arc<dyn AgentConnection> = Arc::new(FakeAgentConnection {
+            id: agent_id,
+            connected_at: OffsetDateTime::now_utc(),
+        });
         state.agent_provider.register_agent(agent_id, conn).await;
 
         let pubsub = state.pubsub.clone();
@@ -2759,17 +2755,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl AgentConnection for FakeAgentConnection {
-        async fn recreate_devcontainer(
-            &self,
-            _container_id: &str,
-        ) -> Result<(), AgentError> {
+        async fn recreate_devcontainer(&self, _container_id: &str) -> Result<(), AgentError> {
             Ok(())
         }
 
-        async fn delete_devcontainer(
-            &self,
-            _container_id: &str,
-        ) -> Result<(), AgentError> {
+        async fn delete_devcontainer(&self, _container_id: &str) -> Result<(), AgentError> {
             Ok(())
         }
 
