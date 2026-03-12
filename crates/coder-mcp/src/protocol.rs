@@ -46,6 +46,7 @@ pub struct JsonRpcResponse {
 
 impl JsonRpcResponse {
     /// Builds a successful JSON-RPC response.
+    #[must_use]
     pub fn success(id: Value, result: Value) -> Self {
         Self {
             jsonrpc: "2.0",
@@ -56,6 +57,7 @@ impl JsonRpcResponse {
     }
 
     /// Builds an error JSON-RPC response.
+    #[must_use]
     pub fn error(id: Value, error: JsonRpcError) -> Self {
         Self {
             jsonrpc: "2.0",
