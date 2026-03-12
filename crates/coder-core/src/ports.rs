@@ -1913,10 +1913,8 @@ pub trait OperationalStore: Send + Sync {
     async fn health_settings(&self) -> Result<HealthSettings, StorageError>;
 
     /// Replaces deployment health settings, returning whether the value changed.
-    async fn upsert_health_settings(
-        &self,
-        settings: &HealthSettings,
-    ) -> Result<bool, StorageError>;
+    async fn upsert_health_settings(&self, settings: &HealthSettings)
+    -> Result<bool, StorageError>;
 
     /// Returns deployment statistics for the current backend slice.
     async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError>;
@@ -2789,10 +2787,8 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn health_settings(&self) -> Result<HealthSettings, StorageError>;
 
     /// Replaces deployment health settings, returning whether the value changed.
-    async fn upsert_health_settings(
-        &self,
-        settings: &HealthSettings,
-    ) -> Result<bool, StorageError>;
+    async fn upsert_health_settings(&self, settings: &HealthSettings)
+    -> Result<bool, StorageError>;
 
     /// Returns deployment statistics for the current backend slice.
     async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError>;

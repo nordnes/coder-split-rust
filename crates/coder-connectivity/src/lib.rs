@@ -947,9 +947,7 @@ mod tests {
             Ok(())
         }
 
-        async fn health_settings(
-            &self,
-        ) -> Result<coder_core::api::HealthSettings, StorageError> {
+        async fn health_settings(&self) -> Result<coder_core::api::HealthSettings, StorageError> {
             Ok(coder_core::api::HealthSettings {
                 dismissed_healthchecks: Vec::new(),
             })
