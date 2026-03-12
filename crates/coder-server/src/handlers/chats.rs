@@ -1004,6 +1004,7 @@ pub(crate) async fn watch_chat_git(
     };
 
     let agent_provider = state.agent_provider.clone();
+    let store = state.store.clone();
 
     // Upgrade to WebSocket.  All pre-upgrade validation has passed.
     Ok(ws.on_upgrade(move |mut socket| async move {
@@ -1013,11 +1014,8 @@ pub(crate) async fn watch_chat_git(
         // bidirectionally over the WebSocket.
         //
         // We check the connected agents via `AgentProvider::debug_info()` and
-        // attempt to find one matching this workspace.  If the store later
-        // gains `find_workspace_agents_in_latest_build_by_workspace_id`, we
-        // can use that for a precise lookup.  For now we use the agent
-        // provider directly which is the authoritative source of live
-        // connections.
+        // cross-reference each one against the store's `find_workspace_by_agent_id`
+        // to confirm the agent belongs to the target workspace.
         let connected = agent_provider.debug_info().await;
         if connected.is_empty() {
             let err_msg = serde_json::json!({
@@ -1038,14 +1036,40 @@ pub(crate) async fn watch_chat_git(
             return;
         }
 
-        // Find an agent that belongs to this workspace.  The
-        // `AgentConnectionInfo` from `debug_info()` includes the agent_id;
-        // ideally we'd cross-reference via the store's workspace→agent
-        // mapping.  For now, try each connected agent's connection for a
-        // `watch_git` RPC.  `AgentConnection` currently only exposes
-        // devcontainer commands, so we close cleanly until the RPC is added.
-        let first_agent_id = connected[0].agent_id;
-        match agent_provider.get_agent_connection(first_agent_id).await {
+        // Find a connected agent that belongs to the target workspace by
+        // checking each connected agent against the store.  This prevents
+        // accidentally routing to an agent from an unrelated workspace.
+        let mut matched_agent_id = None;
+        for info in &connected {
+            match store.find_workspace_by_agent_id(info.agent_id).await {
+                Ok(Some(ws)) if ws.id == workspace_id => {
+                    matched_agent_id = Some(info.agent_id);
+                    break;
+                }
+                _ => continue,
+            }
+        }
+
+        let Some(agent_id) = matched_agent_id else {
+            let err_msg = serde_json::json!({
+                "type": "error",
+                "message": "No connected agent found for this workspace."
+            });
+            let _ = socket
+                .send(Message::Text(
+                    serde_json::to_string(&err_msg).unwrap_or_default().into(),
+                ))
+                .await;
+            let _ = socket
+                .send(Message::Close(Some(CloseFrame {
+                    code: 4002,
+                    reason: "no matching agent for workspace".into(),
+                })))
+                .await;
+            return;
+        };
+
+        match agent_provider.get_agent_connection(agent_id).await {
             Some(_agent_conn) => {
                 // `AgentConnection` does not yet expose a `watch_git` RPC.
                 // Close the socket with a descriptive code so clients know
@@ -1068,7 +1092,7 @@ pub(crate) async fn watch_chat_git(
             }
             None => {
                 tracing::warn!(
-                    agent_id = %first_agent_id,
+                    agent_id = %agent_id,
                     workspace_id = %workspace_id,
                     "watch_git: agent listed in debug_info but connection not found"
                 );

@@ -585,7 +585,11 @@ pub fn decode_id_token_claims(
     // Build validation: check issuer, audience, and expiry.
     let mut validation = jsonwebtoken::Validation::new(header.alg);
     let issuer = config.issuer_url.as_str().trim_end_matches('/');
-    validation.set_issuer(&[issuer]);
+    // Also accept the issuer with a trailing slash so providers that include
+    // one in their `iss` claim are not rejected (the old validate_oidc_claims
+    // trimmed both sides; jsonwebtoken does exact matching).
+    let issuer_slashed = format!("{issuer}/");
+    validation.set_issuer(&[issuer, &issuer_slashed]);
     validation.set_audience(&[&config.client_id]);
     validation.validate_exp = true;
 
