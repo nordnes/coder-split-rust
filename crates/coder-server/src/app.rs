@@ -32081,10 +32081,7 @@ pub(crate) mod tests {
 #[cfg(test)]
 mod workspace_transition_tests {
     use std::error::Error;
-    use std::sync::Arc;
 
-    use coder_core::AppStore;
-    use coder_core::ports::WorkspaceTransitionRow;
     use time::OffsetDateTime;
     use uuid::Uuid;
 
