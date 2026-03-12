@@ -2827,12 +2827,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Looks up multiple users by their IDs in a single query.
-    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
-        let _ = ids;
-        Err(StorageError::unavailable(
-            "batch user lookups are not implemented",
-        ))
-    }
+    async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
 
     /// Returns deployment health settings.
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
