@@ -762,7 +762,7 @@ async fn run() -> Result<(), MainError> {
     let derp_tracker = DerpTrafficTracker::new();
     // Start the telemetry background worker.
     let telemetry_config = coder_telemetry::TelemetryConfig {
-        enabled: config.telemetry_enabled,
+        enabled: config.telemetry.enabled,
         deployment_id: deployment_metadata.deployment_id,
         version: BuildMetadata::default().version.clone(),
         ..coder_telemetry::TelemetryConfig::default()

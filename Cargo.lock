@@ -629,6 +629,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "coder-integration-tests"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum",
+ "coder-audit",
+ "coder-auth",
+ "coder-connectivity",
+ "coder-core",
+ "coder-db",
+ "coder-identity",
+ "coder-server",
+ "coder-telemetry",
+ "coder-workspaces",
+ "http 1.4.0",
+ "serde",
+ "serde_json",
+ "sqlx",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
+ "url",
+ "uuid",
+]
+
+[[package]]
 name = "coder-license"
 version = "0.1.0"
 dependencies = [

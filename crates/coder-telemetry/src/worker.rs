@@ -317,6 +317,7 @@ mod tests {
             flush_interval: Duration::from_millis(50),
             max_batch_size: 10,
             channel_capacity: 64,
+            max_buffer_size: 8192,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
         assert!(reporter.is_enabled());
@@ -351,6 +352,7 @@ mod tests {
             flush_interval: Duration::from_secs(3600),
             max_batch_size: 1000,
             channel_capacity: 64,
+            max_buffer_size: 8192,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
 
@@ -386,6 +388,7 @@ mod tests {
             flush_interval: Duration::from_secs(3600),
             max_batch_size: 5,
             channel_capacity: 64,
+            max_buffer_size: 8192,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
 

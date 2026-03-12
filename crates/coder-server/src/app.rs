@@ -257,7 +257,7 @@ pub fn build_router(
         .route("/metrics", get(get_prometheus_metrics))
         // Workspace app path-based proxying.
         .route(
-            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/*rest",
+            "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/{*rest}",
             axum::routing::any(workspace_apps_proxy_path),
         )
         .route("/mcp/http", post(mcp_http_handler))
