@@ -3416,6 +3416,16 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        async fn batch_insert_audit_logs(
+            &self,
+            logs: Vec<PersistAuditLogInput>,
+        ) -> Result<(), StorageError> {
+            for log in logs {
+                self.insert_audit_log(log).await?;
+            }
+            Ok(())
+        }
+
         async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
             self.health_settings
                 .lock()

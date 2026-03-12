@@ -1309,6 +1309,70 @@ mod tests {
 
     #[async_trait]
     impl OperationalStore for MockOperationalStore {
+        async fn list_audit_logs(
+            &self,
+            _filter: coder_core::ports::AuditLogListFilter,
+        ) -> Result<coder_core::api::AuditLogResponse, StorageError> {
+            Ok(coder_core::api::AuditLogResponse {
+                audit_logs: Vec::new(),
+                count: 0,
+            })
+        }
+
+        async fn insert_audit_log(
+            &self,
+            _input: coder_core::ports::PersistAuditLogInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn batch_insert_audit_logs(
+            &self,
+            _logs: Vec<coder_core::ports::PersistAuditLogInput>,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn health_settings(
+            &self,
+        ) -> Result<coder_core::api::HealthSettings, StorageError> {
+            Ok(coder_core::api::HealthSettings {
+                dismissed_healthchecks: Vec::new(),
+            })
+        }
+
+        async fn upsert_health_settings(
+            &self,
+            _settings: &coder_core::api::HealthSettings,
+        ) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
+        async fn find_git_ssh_key(
+            &self,
+            _user_id: uuid::Uuid,
+        ) -> Result<Option<coder_core::ports::GitSshKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn insert_file(
+            &self,
+            _input: coder_core::ports::InsertFileInput,
+        ) -> Result<coder_core::ports::InsertFileResult, StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn get_file_by_id(
+            &self,
+            _file_id: uuid::Uuid,
+        ) -> Result<Option<coder_core::ports::FileRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn delete_file(&self, _file_id: uuid::Uuid) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
         async fn deployment_stats(&self) -> Result<DeploymentStatsResponse, StorageError> {
             self.call_count.fetch_add(1, Ordering::SeqCst);
             if self.should_fail.load(Ordering::SeqCst) {
