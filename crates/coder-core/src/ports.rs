@@ -1737,12 +1737,7 @@ pub trait IdentityStore: Send + Sync {
     async fn increment_notification_message_attempt_count(
         &self,
         message_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = message_id;
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 }
 
 /// Narrow storage contract for operational and deployment-owned state.
@@ -1752,29 +1747,16 @@ pub trait OperationalStore: Send + Sync {
     async fn list_audit_logs(
         &self,
         filter: AuditLogListFilter,
-    ) -> Result<AuditLogResponse, StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable("audit logs are not implemented"))
-    }
+    ) -> Result<AuditLogResponse, StorageError>;
 
     /// Persists one audit log entry.
-    async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "audit log inserts are not implemented",
-        ))
-    }
+    async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError>;
 
     /// Persists a batch of audit log entries in a single multi-row INSERT.
     async fn batch_insert_audit_logs(
         &self,
         logs: Vec<PersistAuditLogInput>,
-    ) -> Result<(), StorageError> {
-        let _ = logs;
-        Err(StorageError::unavailable(
-            "batch audit log inserts are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
@@ -1803,29 +1785,14 @@ pub trait OperationalStore: Send + Sync {
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
 
     /// Returns deployment health settings.
-    async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
-        Err(StorageError::unavailable(
-            "deployment health settings are not implemented",
-        ))
-    }
+    async fn health_settings(&self) -> Result<HealthSettings, StorageError>;
 
     /// Replaces deployment health settings, returning whether the value changed.
-    async fn upsert_health_settings(
-        &self,
-        settings: &HealthSettings,
-    ) -> Result<bool, StorageError> {
-        let _ = settings;
-        Err(StorageError::unavailable(
-            "deployment health settings are not implemented",
-        ))
-    }
+    async fn upsert_health_settings(&self, settings: &HealthSettings)
+    -> Result<bool, StorageError>;
 
     /// Returns deployment statistics for the current backend slice.
-    async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError> {
-        Err(StorageError::unavailable(
-            "deployment stats are not implemented",
-        ))
-    }
+    async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError>;
 
     /// Upserts one workspace into the deployment-stats foundation tables.
     async fn upsert_workspace_stats_workspace(
@@ -1901,12 +1868,7 @@ pub trait OperationalStore: Send + Sync {
     async fn find_git_ssh_key(
         &self,
         user_id: Uuid,
-    ) -> Result<Option<GitSshKeyRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "git ssh keys are not implemented",
-        ))
-    }
+    ) -> Result<Option<GitSshKeyRecord>, StorageError>;
 
     /// Inserts or updates the git SSH keypair for a user.
     async fn upsert_git_ssh_key(
@@ -1922,16 +1884,10 @@ pub trait OperationalStore: Send + Sync {
     }
 
     /// Inserts a new file record.
-    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError>;
 
     /// Looks up a file by stable identifier.
-    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
-        let _ = file_id;
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError>;
 
     /// Looks up a file by hash and creator.
     async fn get_file_by_hash_and_creator(
@@ -1946,10 +1902,7 @@ pub trait OperationalStore: Send + Sync {
     /// Deletes a file by stable identifier.
     ///
     /// Returns `true` when a row was actually removed.
-    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
-        let _ = file_id;
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError>;
 }
 
 /// Narrow storage contract for insights and analytics queries.
@@ -2649,29 +2602,16 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn list_audit_logs(
         &self,
         filter: AuditLogListFilter,
-    ) -> Result<AuditLogResponse, StorageError> {
-        let _ = filter;
-        Err(StorageError::unavailable("audit logs are not implemented"))
-    }
+    ) -> Result<AuditLogResponse, StorageError>;
 
     /// Persists one audit log entry.
-    async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "audit log inserts are not implemented",
-        ))
-    }
+    async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError>;
 
     /// Persists a batch of audit log entries in a single multi-row INSERT.
     async fn batch_insert_audit_logs(
         &self,
         logs: Vec<PersistAuditLogInput>,
-    ) -> Result<(), StorageError> {
-        let _ = logs;
-        Err(StorageError::unavailable(
-            "batch audit log inserts are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
@@ -2690,29 +2630,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
 
     /// Returns deployment health settings.
-    async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
-        Err(StorageError::unavailable(
-            "deployment health settings are not implemented",
-        ))
-    }
+    async fn health_settings(&self) -> Result<HealthSettings, StorageError>;
 
     /// Replaces deployment health settings, returning whether the value changed.
-    async fn upsert_health_settings(
-        &self,
-        settings: &HealthSettings,
-    ) -> Result<bool, StorageError> {
-        let _ = settings;
-        Err(StorageError::unavailable(
-            "deployment health settings are not implemented",
-        ))
-    }
+    async fn upsert_health_settings(&self, settings: &HealthSettings)
+    -> Result<bool, StorageError>;
 
     /// Returns deployment statistics for the current backend slice.
-    async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError> {
-        Err(StorageError::unavailable(
-            "deployment stats are not implemented",
-        ))
-    }
+    async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError>;
 
     /// Upserts one workspace into the deployment-stats foundation tables.
     async fn upsert_workspace_stats_workspace(
@@ -2764,12 +2689,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn find_git_ssh_key(
         &self,
         user_id: Uuid,
-    ) -> Result<Option<GitSshKeyRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "git ssh keys are not implemented",
-        ))
-    }
+    ) -> Result<Option<GitSshKeyRecord>, StorageError>;
 
     /// Inserts or updates the git SSH keypair for a user.
     async fn upsert_git_ssh_key(
@@ -2785,16 +2705,10 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Inserts a new file record.
-    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError>;
 
     /// Looks up a file by stable identifier.
-    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError> {
-        let _ = file_id;
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    async fn get_file_by_id(&self, file_id: Uuid) -> Result<Option<FileRecord>, StorageError>;
 
     /// Looks up a file by hash and creator.
     async fn get_file_by_hash_and_creator(
@@ -2809,21 +2723,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Deletes a file by stable identifier.
     ///
     /// Returns `true` when a row was actually removed.
-    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
-        let _ = file_id;
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError>;
 
     /// Lists configured external-auth links for one user.
     async fn list_external_auth_links(
         &self,
         user_id: Uuid,
-    ) -> Result<Vec<ExternalAuthLinkRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "external auth links are not implemented",
-        ))
-    }
+    ) -> Result<Vec<ExternalAuthLinkRecord>, StorageError>;
 
     /// Looks up one external-auth link for a user.
     async fn find_external_auth_link(
@@ -3696,22 +3602,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // -----------------------------------------------------------------------
 
     /// Returns the current global notification settings JSON.
-    async fn get_notifications_settings(&self) -> Result<NotificationsSettings, StorageError> {
-        Err(StorageError::unavailable(
-            "notifications settings are not implemented",
-        ))
-    }
+    async fn get_notifications_settings(&self) -> Result<NotificationsSettings, StorageError>;
 
     /// Replaces the global notification settings.
     async fn upsert_notifications_settings(
         &self,
         settings: &NotificationsSettings,
-    ) -> Result<(), StorageError> {
-        let _ = settings;
-        Err(StorageError::unavailable(
-            "notifications settings are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Returns notification templates filtered by kind.
     async fn get_notification_templates_by_kind(
@@ -3735,12 +3632,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn get_user_notification_preferences(
         &self,
         user_id: Uuid,
-    ) -> Result<Vec<NotificationPreference>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "notification preferences are not implemented",
-        ))
-    }
+    ) -> Result<Vec<NotificationPreference>, StorageError>;
 
     /// Updates notification preferences for a user.
     async fn update_user_notification_preferences(
@@ -3771,23 +3663,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Counts unread inbox notifications for a user.
-    async fn count_unread_inbox_notifications(&self, user_id: Uuid) -> Result<i64, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    async fn count_unread_inbox_notifications(&self, user_id: Uuid) -> Result<i64, StorageError>;
 
     /// Finds an inbox notification by ID.
     async fn get_inbox_notification_by_id(
         &self,
         id: Uuid,
-    ) -> Result<Option<InboxNotification>, StorageError> {
-        let _ = id;
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    ) -> Result<Option<InboxNotification>, StorageError>;
 
     /// Updates the read status of an inbox notification.
     async fn update_inbox_notification_read_status(
@@ -3817,12 +3699,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn get_webpush_subscriptions_by_user_id(
         &self,
         user_id: Uuid,
-    ) -> Result<Vec<WebpushSubscriptionRecord>, StorageError> {
-        let _ = user_id;
-        Err(StorageError::unavailable(
-            "webpush subscriptions are not implemented",
-        ))
-    }
+    ) -> Result<Vec<WebpushSubscriptionRecord>, StorageError>;
 
     /// Inserts a webpush subscription.
     async fn insert_webpush_subscription(
@@ -3851,28 +3728,15 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Deletes webpush subscriptions by their IDs.
-    async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError> {
-        let _ = ids;
-        Err(StorageError::unavailable(
-            "webpush subscriptions are not implemented",
-        ))
-    }
+    async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError>;
 
     /// Deletes all webpush subscriptions (used when regenerating VAPID keys).
-    async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError> {
-        Err(StorageError::unavailable(
-            "webpush subscriptions are not implemented",
-        ))
-    }
+    async fn delete_all_webpush_subscriptions(&self) -> Result<(), StorageError>;
 
     /// Retrieves the stored VAPID key pair for web push.
     async fn get_webpush_vapid_keys(
         &self,
-    ) -> Result<Option<crate::api::VapidKeyPair>, StorageError> {
-        Err(StorageError::unavailable(
-            "webpush VAPID keys are not implemented",
-        ))
-    }
+    ) -> Result<Option<crate::api::VapidKeyPair>, StorageError>;
 
     /// Stores or updates the VAPID key pair for web push.
     ///
@@ -4071,12 +3935,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     async fn increment_notification_message_attempt_count(
         &self,
         message_id: Uuid,
-    ) -> Result<bool, StorageError> {
-        let _ = message_id;
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     // ----- Custom roles -----
 
@@ -4095,11 +3954,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // ----- Licenses -----
 
     /// Lists all stored license records.
-    async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "license storage is not implemented",
-        ))
-    }
+    async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, StorageError>;
 
     /// Inserts a new license record from its raw JWT and parsed claims.
     async fn insert_license(
@@ -4114,12 +3969,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     }
 
     /// Deletes a license record by its numeric identifier.
-    async fn delete_license(&self, id: i32) -> Result<bool, StorageError> {
-        let _ = id;
-        Err(StorageError::unavailable(
-            "license storage is not implemented",
-        ))
-    }
+    async fn delete_license(&self, id: i32) -> Result<bool, StorageError>;
 }
 
 /// Stored webpush subscription record.
@@ -5538,6 +5388,13 @@ where
     ) -> Result<bool, StorageError> {
         AppStore::delete_custom_role(self, name, organization_id).await
     }
+
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::increment_notification_message_attempt_count(self, message_id).await
+    }
 }
 
 #[async_trait]
@@ -6060,6 +5917,15 @@ where
     ) -> Result<bool, StorageError> {
         (**self).delete_custom_role(name, organization_id).await
     }
+
+    async fn increment_notification_message_attempt_count(
+        &self,
+        message_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .increment_notification_message_attempt_count(message_id)
+            .await
+    }
 }
 
 #[async_trait]
@@ -6076,6 +5942,13 @@ where
 
     async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
         AppStore::insert_audit_log(self, input).await
+    }
+
+    async fn batch_insert_audit_logs(
+        &self,
+        logs: Vec<PersistAuditLogInput>,
+    ) -> Result<(), StorageError> {
+        AppStore::batch_insert_audit_logs(self, logs).await
     }
 
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
@@ -6202,6 +6075,13 @@ where
 
     async fn insert_audit_log(&self, input: PersistAuditLogInput) -> Result<(), StorageError> {
         (**self).insert_audit_log(input).await
+    }
+
+    async fn batch_insert_audit_logs(
+        &self,
+        logs: Vec<PersistAuditLogInput>,
+    ) -> Result<(), StorageError> {
+        (**self).batch_insert_audit_logs(logs).await
     }
 
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
