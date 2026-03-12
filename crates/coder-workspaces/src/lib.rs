@@ -1090,8 +1090,8 @@ async fn activity_bump_once<S: ActivityBumpStore>(
         // Only bump if the workspace already has a deadline set (no auto-stop
         // configured means deadline is None — we must not create one).
         let current_deadline = match ws.build_deadline {
-            Some(d) => d,
-            None => continue,
+            Some(d) if d != OffsetDateTime::UNIX_EPOCH => d,
+            _ => continue,
         };
         // Extend the deadline from now.
         let new_deadline = now + bump_duration;
