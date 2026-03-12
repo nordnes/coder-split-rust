@@ -16,15 +16,6 @@ const SCIM_USER_SCHEMA: &str = "urn:ietf:params:scim:schemas:core:2.0:User";
 /// SCIM list response schema URN.
 const SCIM_LIST_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:ListResponse";
 
-/// Additional audit fields attached to every SCIM-initiated audit event.
-#[allow(dead_code)]
-fn scim_audit_fields() -> HashMap<String, String> {
-    let mut m = HashMap::new();
-    m.insert("automatic_actor".to_owned(), "coder".to_owned());
-    m.insert("automatic_subsystem".to_owned(), "scim".to_owned());
-    m
-}
-
 // ---------------------------------------------------------------------------
 // Auth helper
 // ---------------------------------------------------------------------------
@@ -124,11 +115,16 @@ pub(crate) async fn scim_get_user(State(state): State<AppState>, headers: Header
 pub(crate) async fn scim_post_user(
     State(state): State<AppState>,
     headers: HeaderMap,
-    Json(mut scim_user): Json<coder_core::api::ScimUser>,
+    payload: Result<Json<coder_core::api::ScimUser>, JsonRejection>,
 ) -> Result<Response, AppError> {
     if !scim_verify_auth(&headers, &state.config.scim_api_key) {
         return Ok(scim_unauthorized_response());
     }
+
+    let Json(mut scim_user) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
 
     // Validate required fields.
     if scim_user.active.is_none() {
@@ -164,11 +160,12 @@ pub(crate) async fn scim_post_user(
         scim_user.user_name.clone_from(&db_user.username);
 
         let active = scim_user.active.unwrap_or(false);
-        if active && db_user.status == UserStatus::Suspended {
-            // Transition Suspended → Dormant (will become Active on login).
+        let new_status = compute_scim_user_status(&db_user, active);
+
+        if db_user.status != new_status {
             let updated = state
                 .store
-                .update_user_status(db_user.id, UserStatus::Dormant)
+                .update_user_status(db_user.id, new_status)
                 .await?;
 
             if let Some(ref new_user) = updated {
@@ -178,7 +175,10 @@ pub(crate) async fn scim_post_user(
                     ResourceKind::User,
                     None,
                     Some(new_user.id.to_string()),
-                    format!("SCIM: reactivated user {}", new_user.username),
+                    format!(
+                        "SCIM: updated existing user {} status to {:?}",
+                        new_user.username, new_status,
+                    ),
                 )
                 .await;
             }
@@ -238,11 +238,16 @@ pub(crate) async fn scim_patch_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(mut scim_user): Json<coder_core::api::ScimUser>,
+    payload: Result<Json<coder_core::api::ScimUser>, JsonRejection>,
 ) -> Result<Response, AppError> {
     if !scim_verify_auth(&headers, &state.config.scim_api_key) {
         return Ok(scim_unauthorized_response());
     }
+
+    let Json(mut scim_user) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
 
     let uid = match Uuid::from_str(&id) {
         Ok(u) => u,
@@ -309,11 +314,16 @@ pub(crate) async fn scim_put_user(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(id): Path<String>,
-    Json(mut scim_user): Json<coder_core::api::ScimUser>,
+    payload: Result<Json<coder_core::api::ScimUser>, JsonRejection>,
 ) -> Result<Response, AppError> {
     if !scim_verify_auth(&headers, &state.config.scim_api_key) {
         return Ok(scim_unauthorized_response());
     }
+
+    let Json(mut scim_user) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
 
     let uid = match Uuid::from_str(&id) {
         Ok(u) => u,
