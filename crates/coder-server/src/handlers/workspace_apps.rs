@@ -1515,6 +1515,11 @@ async fn resolve_app_url(
         &agent.name
     };
 
+    // Check if the slug is a port number. The appurl::PORT_REGEX only matches
+    // 4-5 digit numbers (with optional trailing 's' for HTTPS), but port
+    // forwarding accepts any valid u16 >= AGENT_MINIMUM_LISTENING_PORT. Handle
+    // both the regex-style format (e.g. "8080s" for HTTPS) and plain numeric
+    // ports (e.g. "80", "443").
     if appurl::PORT_REGEX.is_match(slug) {
         let (port_str, protocol) = if slug.ends_with('s') {
             (&slug[..slug.len() - 1], "https")
@@ -1527,6 +1532,12 @@ async fn resolve_app_url(
             return url::Url::parse(&url_str)
                 .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
         }
+    } else if let Ok(port) = slug.parse::<u16>() {
+        // Plain numeric port that doesn't match PORT_REGEX (1-3 digit ports
+        // like 80, 443). Always use HTTP for these.
+        let url_str = format!("http://{agent_host}:{port}");
+        return url::Url::parse(&url_str)
+            .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
     }
 
     // For slug-based apps, look up the app record in the database.
