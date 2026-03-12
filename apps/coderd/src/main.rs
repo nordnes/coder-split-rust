@@ -41,7 +41,10 @@ use coder_core::{
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
-use coder_workspaces::{ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker};
+use coder_workspaces::{
+    ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker, LifecycleScheduler,
+    QuietHoursWindow,
+};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
@@ -605,6 +608,15 @@ struct ServerArgs {
     )]
     telemetry_flush_interval_secs: u64,
 
+    /// Poll interval in seconds for the lifecycle scheduler (autostart/autostop).
+    #[arg(
+        long,
+        env = "CODER_LIFECYCLE_CHECK_INTERVAL",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    lifecycle_check_interval_secs: u64,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -853,6 +865,16 @@ async fn run() -> Result<(), MainError> {
     let (_autobuild_executor, autobuild_handle) =
         AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
 
+    // Start the lifecycle scheduler (autostart/autostop/failed-stop retry).
+    let lifecycle_cancel = CancellationToken::new();
+    let quiet_hours = parse_quiet_hours_schedule(&config.workspace.default_quiet_hours_schedule);
+    let lifecycle_scheduler = LifecycleScheduler::start(
+        store.clone(),
+        config.worker.lifecycle_check_interval_secs,
+        quiet_hours,
+        lifecycle_cancel.clone(),
+    );
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -943,6 +965,12 @@ async fn run() -> Result<(), MainError> {
     //     so in-flight DB queries finish before the pool is closed.
     coordinator.register("dormancy_checker", async move {
         dormancy_worker.join().await;
+    });
+
+    // 4d. Cancel the lifecycle scheduler and await completion so in-flight
+    //     DB queries finish before the pool is closed.
+    coordinator.register("lifecycle_scheduler", async move {
+        lifecycle_scheduler.join().await;
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight
@@ -1148,6 +1176,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             activity_bump_interval_secs: args.activity_bump_interval_secs,
             dormancy_check_interval_secs: args.dormancy_check_interval_secs,
             telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
+            lifecycle_check_interval_secs: args.lifecycle_check_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,
@@ -1169,6 +1198,50 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         docs_url: args.docs_url,
         scim_api_key: args.scim_api_key,
         cli_upgrade_message: args.cli_upgrade_message,
+    })
+}
+
+/// Attempts to parse a quiet-hours cron schedule string (e.g.
+/// `"CRON_TZ=UTC 0 0 * * *"`) into a [`QuietHoursWindow`].
+///
+/// The schedule is expected to fire at a specific hour; the quiet window spans
+/// from that hour to six hours later (matching the Go default).  Returns
+/// `None` when the schedule is empty or cannot be parsed.
+fn parse_quiet_hours_schedule(schedule: &str) -> Option<QuietHoursWindow> {
+    let schedule = schedule.trim();
+    if schedule.is_empty() {
+        return None;
+    }
+
+    // Strip optional CRON_TZ prefix: "CRON_TZ=UTC 0 0 * * *" → "0 0 * * *"
+    let cron_part = if let Some(rest) = schedule.strip_prefix("CRON_TZ=") {
+        // Skip until the first space after the timezone name.
+        rest.split_once(' ').map_or(rest, |(_, cron)| cron)
+    } else {
+        schedule
+    };
+
+    let fields: Vec<&str> = cron_part.split_whitespace().collect();
+    // Standard cron: minute hour day month weekday
+    if fields.len() < 2 {
+        warn!(schedule, "quiet hours schedule has too few fields");
+        return None;
+    }
+
+    let start_hour: u8 = match fields[1].parse() {
+        Ok(h) if h < 24 => h,
+        _ => {
+            warn!(schedule, "quiet hours schedule has invalid hour field");
+            return None;
+        }
+    };
+
+    // Default quiet window is 6 hours (matching Go behaviour).
+    let end_hour = (start_hour + 6) % 24;
+
+    Some(QuietHoursWindow {
+        start_hour,
+        end_hour,
     })
 }
 

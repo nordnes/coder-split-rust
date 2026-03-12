@@ -1269,6 +1269,335 @@ async fn dormancy_check_once<S: DormancyCheckerStore>(
     Ok(marked)
 }
 
+// ---------------------------------------------------------------------------
+// Lifecycle Scheduler (Autostart / Autostop / Failed-Stop Retry)
+// ---------------------------------------------------------------------------
+
+/// Statistics for one lifecycle scheduler tick.
+#[derive(Clone, Debug, Default)]
+pub struct LifecycleStats {
+    /// Number of workspaces that were autostarted.
+    pub started: u32,
+    /// Number of workspaces that were autostopped (including failed-stop retries).
+    pub stopped: u32,
+    /// Number of workspaces that encountered errors during transition.
+    pub errors: u32,
+}
+
+/// Narrow storage trait for the lifecycle scheduler.
+///
+/// Contains only the methods required for triggering workspace start/stop
+/// transitions.  Implementations are provided for any `T: AppStore`.
+#[async_trait]
+pub trait LifecycleStore: Send + Sync + 'static {
+    /// Returns workspaces that are candidates for a lifecycle transition.
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError>;
+
+    /// Returns the latest workspace build for a workspace.
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError>;
+
+    /// Returns the next build number for a workspace.
+    async fn next_workspace_build_number(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<i64, StorageError>;
+
+    /// Creates a new workspace build to trigger a start/stop transition.
+    async fn insert_workspace_build(
+        &self,
+        input: coder_core::ports::CreateWorkspaceBuildInput,
+    ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError>;
+}
+
+#[async_trait]
+impl<T: AppStore + 'static> LifecycleStore for T {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        AppStore::get_workspaces_eligible_for_transition(self, now).await
+    }
+
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
+        AppStore::find_latest_workspace_build(self, workspace_id).await
+    }
+
+    async fn next_workspace_build_number(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<i64, StorageError> {
+        AppStore::next_workspace_build_number(self, workspace_id).await
+    }
+
+    async fn insert_workspace_build(
+        &self,
+        input: coder_core::ports::CreateWorkspaceBuildInput,
+    ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
+        AppStore::insert_workspace_build(self, input).await
+    }
+}
+
+/// Background worker that schedules workspace autostart, enforces autostop
+/// deadlines, and retries previously failed stop transitions.
+///
+/// Mirrors the start/stop portion of Go's `autobuild.Executor`.  The worker
+/// polls on a configurable interval (default 30 s), evaluates each eligible
+/// workspace, and creates workspace builds for transitions that should fire.
+///
+/// An optional [`QuietHoursWindow`] can be provided to suppress autostart
+/// during user-configured quiet hours.
+pub struct LifecycleScheduler {
+    cancel: CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl LifecycleScheduler {
+    /// Creates and starts the lifecycle scheduler background worker.
+    pub fn start<S: LifecycleStore>(
+        store: S,
+        interval_secs: u64,
+        quiet_hours: Option<QuietHoursWindow>,
+        cancel: CancellationToken,
+    ) -> Arc<Self> {
+        let cancel_clone = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_lifecycle_loop(store, interval_secs, quiet_hours, cancel_clone).await;
+        });
+        info!(interval_secs, "lifecycle scheduler started");
+        Arc::new(Self { cancel, task })
+    }
+
+    /// Signals the worker to stop.
+    pub fn close(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Cancels the worker and awaits the background task to completion,
+    /// ensuring in-flight DB queries finish before the pool is closed.
+    pub async fn join(self: Arc<Self>) {
+        self.cancel.cancel();
+        if let Ok(this) = Arc::try_unwrap(self) {
+            let _result = this.task.await;
+        }
+    }
+}
+
+/// Core loop: periodically evaluate workspace lifecycle transitions.
+async fn run_lifecycle_loop<S: LifecycleStore>(
+    store: S,
+    interval_secs: u64,
+    quiet_hours: Option<QuietHoursWindow>,
+    cancel: CancellationToken,
+) {
+    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                info!("lifecycle scheduler cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
+
+        let now = OffsetDateTime::now_utc();
+        match lifecycle_tick_once(&store, now, quiet_hours.as_ref()).await {
+            Ok(stats) => {
+                if stats.started > 0 || stats.stopped > 0 || stats.errors > 0 {
+                    info!(
+                        started = stats.started,
+                        stopped = stats.stopped,
+                        errors = stats.errors,
+                        "lifecycle scheduler tick completed"
+                    );
+                }
+            }
+            Err(error) => warn!(error = %error, "lifecycle scheduler tick failed"),
+        }
+    }
+}
+
+/// Single tick of the lifecycle scheduler.
+///
+/// Queries workspaces eligible for transition and processes autostart,
+/// autostop, and failed-stop retry actions.  Returns statistics for the tick.
+pub async fn lifecycle_tick_once<S: LifecycleStore>(
+    store: &S,
+    now: OffsetDateTime,
+    quiet_hours: Option<&QuietHoursWindow>,
+) -> Result<LifecycleStats, StorageError> {
+    let workspaces = store.get_workspaces_eligible_for_transition(now).await?;
+    let mut stats = LifecycleStats::default();
+
+    for ws in &workspaces {
+        // --- Autostop: running workspaces past their deadline ---
+        if is_eligible_for_autostop(ws, now) {
+            match trigger_workspace_stop(store, ws, "autostop", now).await {
+                Ok(()) => {
+                    info!(
+                        workspace_id = %ws.id,
+                        workspace_name = %ws.name,
+                        "lifecycle: autostopped workspace"
+                    );
+                    stats.stopped = stats.stopped.saturating_add(1);
+                }
+                Err(error) => {
+                    warn!(
+                        workspace_id = %ws.id,
+                        workspace_name = %ws.name,
+                        error = %error,
+                        "lifecycle: failed to autostop workspace"
+                    );
+                    stats.errors = stats.errors.saturating_add(1);
+                }
+            }
+            continue;
+        }
+
+        // --- Autostart: stopped workspaces whose cron schedule fired ---
+        if is_eligible_for_autostart(ws, now) {
+            // Respect quiet hours: skip autostart during the quiet window.
+            if let Some(qh) = quiet_hours {
+                if qh.is_quiet(now) {
+                    debug!(
+                        workspace_id = %ws.id,
+                        workspace_name = %ws.name,
+                        "lifecycle: skipping autostart during quiet hours"
+                    );
+                    continue;
+                }
+            }
+
+            match trigger_workspace_start(store, ws, now).await {
+                Ok(()) => {
+                    info!(
+                        workspace_id = %ws.id,
+                        workspace_name = %ws.name,
+                        "lifecycle: autostarted workspace"
+                    );
+                    stats.started = stats.started.saturating_add(1);
+                }
+                Err(error) => {
+                    warn!(
+                        workspace_id = %ws.id,
+                        workspace_name = %ws.name,
+                        error = %error,
+                        "lifecycle: failed to autostart workspace"
+                    );
+                    stats.errors = stats.errors.saturating_add(1);
+                }
+            }
+            continue;
+        }
+
+        // --- Failed stop retry: workspaces whose start build failed ---
+        if is_eligible_for_failed_stop(ws, now) {
+            match trigger_workspace_stop(store, ws, "autostop", now).await {
+                Ok(()) => {
+                    info!(
+                        workspace_id = %ws.id,
+                        workspace_name = %ws.name,
+                        "lifecycle: retried failed stop"
+                    );
+                    stats.stopped = stats.stopped.saturating_add(1);
+                }
+                Err(error) => {
+                    warn!(
+                        workspace_id = %ws.id,
+                        workspace_name = %ws.name,
+                        error = %error,
+                        "lifecycle: failed to retry stop"
+                    );
+                    stats.errors = stats.errors.saturating_add(1);
+                }
+            }
+        }
+    }
+
+    Ok(stats)
+}
+
+/// Creates a workspace build to start a workspace.
+async fn trigger_workspace_start<S: LifecycleStore>(
+    store: &S,
+    ws: &WorkspaceTransitionRow,
+    now: OffsetDateTime,
+) -> Result<(), StorageError> {
+    let latest_build = store
+        .find_latest_workspace_build(ws.id)
+        .await?
+        .ok_or_else(|| StorageError::not_found("no build found for workspace"))?;
+
+    let build_number = store.next_workspace_build_number(ws.id).await?;
+
+    let input = coder_core::ports::CreateWorkspaceBuildInput {
+        id: uuid::Uuid::new_v4(),
+        workspace_id: ws.id,
+        template_version_id: latest_build.template_version_id,
+        build_number,
+        transition: "start".to_owned(),
+        initiator_id: ws.owner_id,
+        job_id: uuid::Uuid::new_v4(),
+        reason: "autostart".to_owned(),
+        deadline: None,
+        max_deadline: None,
+    };
+
+    let _build = store.insert_workspace_build(input).await?;
+
+    debug!(
+        workspace_id = %ws.id,
+        "lifecycle: created start build at {now}"
+    );
+    Ok(())
+}
+
+/// Creates a workspace build to stop a workspace.
+async fn trigger_workspace_stop<S: LifecycleStore>(
+    store: &S,
+    ws: &WorkspaceTransitionRow,
+    reason: &str,
+    now: OffsetDateTime,
+) -> Result<(), StorageError> {
+    let latest_build = store
+        .find_latest_workspace_build(ws.id)
+        .await?
+        .ok_or_else(|| StorageError::not_found("no build found for workspace"))?;
+
+    let build_number = store.next_workspace_build_number(ws.id).await?;
+
+    let input = coder_core::ports::CreateWorkspaceBuildInput {
+        id: uuid::Uuid::new_v4(),
+        workspace_id: ws.id,
+        template_version_id: latest_build.template_version_id,
+        build_number,
+        transition: "stop".to_owned(),
+        initiator_id: ws.owner_id,
+        job_id: uuid::Uuid::new_v4(),
+        reason: reason.to_owned(),
+        deadline: None,
+        max_deadline: None,
+    };
+
+    let _build = store.insert_workspace_build(input).await?;
+
+    debug!(
+        workspace_id = %ws.id,
+        "lifecycle: created stop build at {now}"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2903,5 +3232,302 @@ mod tests {
         let result = dormancy_check_once(&store, now).await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap_or(1), 0);
+    }
+
+    // ── Lifecycle Scheduler tests ──────────────────────────
+
+    /// Mock store for LifecycleStore tests.
+    struct MockLifecycleStore {
+        workspaces: Vec<WorkspaceTransitionRow>,
+        latest_build: Option<coder_core::ports::WorkspaceBuildRecord>,
+        next_build_number: i64,
+        inserted_builds: std::sync::Mutex<Vec<coder_core::ports::CreateWorkspaceBuildInput>>,
+        fail_transition: AtomicBool,
+        fail_insert: AtomicBool,
+    }
+
+    impl MockLifecycleStore {
+        fn new(workspaces: Vec<WorkspaceTransitionRow>) -> Self {
+            Self {
+                workspaces,
+                latest_build: Some(make_build_record()),
+                next_build_number: 2,
+                inserted_builds: std::sync::Mutex::new(Vec::new()),
+                fail_transition: AtomicBool::new(false),
+                fail_insert: AtomicBool::new(false),
+            }
+        }
+
+        fn with_transition_failure(mut self) -> Self {
+            self.fail_transition = AtomicBool::new(true);
+            self
+        }
+
+        fn with_insert_failure(mut self) -> Self {
+            self.fail_insert = AtomicBool::new(true);
+            self
+        }
+
+        fn inserted_builds(&self) -> Vec<coder_core::ports::CreateWorkspaceBuildInput> {
+            self.inserted_builds
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+    }
+
+    fn make_build_record() -> coder_core::ports::WorkspaceBuildRecord {
+        coder_core::ports::WorkspaceBuildRecord {
+            id: uuid::Uuid::new_v4(),
+            created_at: OffsetDateTime::now_utc(),
+            updated_at: OffsetDateTime::now_utc(),
+            workspace_id: uuid::Uuid::new_v4(),
+            build_number: 1,
+            transition: "start".to_owned(),
+            job_id: uuid::Uuid::new_v4(),
+            template_version_id: uuid::Uuid::new_v4(),
+            initiator_id: uuid::Uuid::new_v4(),
+            provisioner_state: None,
+            deadline: None,
+            max_deadline: None,
+            reason: "initiator".to_owned(),
+            daily_cost: 0,
+        }
+    }
+
+    #[async_trait]
+    impl LifecycleStore for MockLifecycleStore {
+        async fn get_workspaces_eligible_for_transition(
+            &self,
+            _now: OffsetDateTime,
+        ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+            if self.fail_transition.load(Ordering::Relaxed) {
+                return Err(StorageError::unavailable("mock failure"));
+            }
+            Ok(self.workspaces.clone())
+        }
+
+        async fn find_latest_workspace_build(
+            &self,
+            _workspace_id: uuid::Uuid,
+        ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
+            Ok(self.latest_build.clone())
+        }
+
+        async fn next_workspace_build_number(
+            &self,
+            _workspace_id: uuid::Uuid,
+        ) -> Result<i64, StorageError> {
+            Ok(self.next_build_number)
+        }
+
+        async fn insert_workspace_build(
+            &self,
+            input: coder_core::ports::CreateWorkspaceBuildInput,
+        ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
+            if self.fail_insert.load(Ordering::Relaxed) {
+                return Err(StorageError::unavailable("mock insert failure"));
+            }
+            if let Ok(mut builds) = self.inserted_builds.lock() {
+                builds.push(input.clone());
+            }
+            let mut record = make_build_record();
+            record.id = input.id;
+            record.workspace_id = input.workspace_id;
+            record.transition = input.transition;
+            record.reason = input.reason;
+            record.build_number = input.build_number;
+            Ok(record)
+        }
+    }
+
+    #[tokio::test]
+    async fn lifecycle_autostop_triggers_stop_build() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+        ws.job_status = "succeeded".to_owned();
+
+        let store = MockLifecycleStore::new(vec![ws.clone()]);
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.stopped, 1);
+        assert_eq!(stats.started, 0);
+        assert_eq!(stats.errors, 0);
+
+        let builds = store.inserted_builds();
+        assert_eq!(builds.len(), 1);
+        assert_eq!(builds[0].transition, "stop");
+        assert_eq!(builds[0].workspace_id, ws.id);
+        assert_eq!(builds[0].reason, "autostop");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_autostart_triggers_start_build() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.owner_status = "active".to_owned();
+        ws.template_allow_user_autostart = true;
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_status = "succeeded".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::hours(1));
+
+        let store = MockLifecycleStore::new(vec![ws.clone()]);
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.started, 1);
+        assert_eq!(stats.stopped, 0);
+        assert_eq!(stats.errors, 0);
+
+        let builds = store.inserted_builds();
+        assert_eq!(builds.len(), 1);
+        assert_eq!(builds[0].transition, "start");
+        assert_eq!(builds[0].workspace_id, ws.id);
+        assert_eq!(builds[0].reason, "autostart");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_autostart_blocked_by_quiet_hours() {
+        let now = OffsetDateTime::now_utc();
+        let hour = now.hour();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.owner_status = "active".to_owned();
+        ws.template_allow_user_autostart = true;
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_status = "succeeded".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::hours(1));
+
+        // Create a quiet window that spans the current hour.
+        let start = if hour == 0 { 23 } else { hour - 1 };
+        let end = if hour >= 22 { 0 } else { hour + 2 };
+        let qh = QuietHoursWindow {
+            start_hour: start,
+            end_hour: end,
+        };
+
+        let store = MockLifecycleStore::new(vec![ws]);
+        let result = lifecycle_tick_once(&store, now, Some(&qh)).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.started, 0, "autostart should be blocked by quiet hours");
+        assert_eq!(stats.stopped, 0);
+        assert_eq!(stats.errors, 0);
+        assert!(store.inserted_builds().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_failed_stop_retry() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.job_status = "failed".to_owned();
+        ws.template_failure_ttl = 1_000_000_000; // 1 second in ns
+        ws.job_completed_at = Some(now - time::Duration::seconds(10));
+
+        let store = MockLifecycleStore::new(vec![ws.clone()]);
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.stopped, 1, "failed stop should be retried");
+        assert_eq!(stats.started, 0);
+        assert_eq!(stats.errors, 0);
+
+        let builds = store.inserted_builds();
+        assert_eq!(builds.len(), 1);
+        assert_eq!(builds[0].transition, "stop");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_empty_workspace_list() {
+        let now = OffsetDateTime::now_utc();
+        let store = MockLifecycleStore::new(vec![]);
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.started, 0);
+        assert_eq!(stats.stopped, 0);
+        assert_eq!(stats.errors, 0);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_store_error_propagates() {
+        let now = OffsetDateTime::now_utc();
+        let store = MockLifecycleStore::new(vec![]).with_transition_failure();
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_insert_failure_counted_as_error() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+        ws.job_status = "succeeded".to_owned();
+
+        let store = MockLifecycleStore::new(vec![ws]).with_insert_failure();
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.errors, 1);
+        assert_eq!(stats.stopped, 0);
+    }
+
+    #[tokio::test]
+    async fn lifecycle_no_action_for_ineligible_workspace() {
+        let now = OffsetDateTime::now_utc();
+        let ws = make_transition_row(); // default: running, no deadline, not eligible
+
+        let store = MockLifecycleStore::new(vec![ws]);
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.started, 0);
+        assert_eq!(stats.stopped, 0);
+        assert_eq!(stats.errors, 0);
+        assert!(store.inserted_builds().is_empty());
+    }
+
+    #[tokio::test]
+    async fn lifecycle_scheduler_cancellation() {
+        let store = MockLifecycleStore::new(vec![]);
+        let cancel = CancellationToken::new();
+        let scheduler = LifecycleScheduler::start(store, 1, None, cancel.clone());
+
+        // Give it a moment to start.
+        tokio::time::sleep(tokio::time::Duration::from_millis(50)).await;
+
+        // Cancel and join should complete promptly.
+        cancel.cancel();
+        let join_result = tokio::time::timeout(
+            tokio::time::Duration::from_secs(2),
+            scheduler.join(),
+        )
+        .await;
+        assert!(join_result.is_ok(), "scheduler should shut down within 2s");
+    }
+
+    #[tokio::test]
+    async fn lifecycle_autostop_suspended_user() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.owner_status = "suspended".to_owned();
+        ws.job_status = "succeeded".to_owned();
+
+        let store = MockLifecycleStore::new(vec![ws.clone()]);
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+        let stats = result.unwrap_or_else(|_| unreachable!());
+        assert_eq!(stats.stopped, 1, "suspended user workspace should be stopped");
+
+        let builds = store.inserted_builds();
+        assert_eq!(builds.len(), 1);
+        assert_eq!(builds[0].transition, "stop");
     }
 }

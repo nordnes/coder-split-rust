@@ -1098,6 +1098,8 @@ pub struct WorkerConfig {
     pub dormancy_check_interval_secs: u64,
     /// Flush interval in seconds for the telemetry batching worker.
     pub telemetry_flush_interval_secs: u64,
+    /// Poll interval in seconds for the lifecycle scheduler (autostart/autostop).
+    pub lifecycle_check_interval_secs: u64,
 }
 
 impl Default for WorkerConfig {
@@ -1107,6 +1109,7 @@ impl Default for WorkerConfig {
             activity_bump_interval_secs: 10,
             dormancy_check_interval_secs: 60,
             telemetry_flush_interval_secs: 1800,
+            lifecycle_check_interval_secs: 30,
         }
     }
 }
