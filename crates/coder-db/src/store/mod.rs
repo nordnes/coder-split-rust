@@ -470,6 +470,21 @@ struct StoredChatQueuedMessageRow {
 }
 
 #[derive(Debug, FromRow)]
+struct StoredChatDiffStatusRow {
+    chat_id: Uuid,
+    url: Option<String>,
+    pull_request_state: Option<String>,
+    changes_requested: bool,
+    additions: i32,
+    deletions: i32,
+    changed_files: i32,
+    refreshed_at: Option<OffsetDateTime>,
+    stale_at: Option<OffsetDateTime>,
+    git_branch: String,
+    git_remote_origin: String,
+}
+
+#[derive(Debug, FromRow)]
 struct StoredChatFileRow {
     id: Uuid,
     owner_id: Uuid,
