@@ -1558,9 +1558,8 @@ pub trait IdentityStore: Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
@@ -1918,12 +1917,7 @@ pub trait InsightsStore: Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<TemplateInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights are not implemented",
-        ))
-    }
+    ) -> Result<TemplateInsightsResponse, StorageError>;
 
     /// Returns template insights broken down by interval.
     async fn get_template_insights_by_interval(
@@ -1932,12 +1926,7 @@ pub trait InsightsStore: Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights by interval are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError>;
 
     /// Returns per-user activity insights for a time range.
     async fn get_user_activity_insights(
@@ -1945,12 +1934,7 @@ pub trait InsightsStore: Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserActivityInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user activity insights are not implemented",
-        ))
-    }
+    ) -> Result<UserActivityInsightsResponse, StorageError>;
 
     /// Returns per-user latency insights for a time range.
     async fn get_user_latency_insights(
@@ -1958,12 +1942,7 @@ pub trait InsightsStore: Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserLatencyInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user latency insights are not implemented",
-        ))
-    }
+    ) -> Result<UserLatencyInsightsResponse, StorageError>;
 
     /// Returns user status counts over time for the deployment.
     async fn get_user_status_counts(
@@ -1971,12 +1950,7 @@ pub trait InsightsStore: Send + Sync {
         timezone: &str,
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
-    ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = (timezone, start_time, end_time);
-        Err(StorageError::unavailable(
-            "user status counts are not implemented",
-        ))
-    }
+    ) -> Result<GetUserStatusCountsResponse, StorageError>;
 }
 
 /// Storage contract for provisioner job lifecycle, daemons, keys, logs, and timings.
@@ -2779,12 +2753,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<TemplateInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights are not implemented",
-        ))
-    }
+    ) -> Result<TemplateInsightsResponse, StorageError>;
 
     /// Returns template insights broken down by interval.
     async fn get_template_insights_by_interval(
@@ -2793,12 +2762,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights by interval are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError>;
 
     /// Returns per-user activity insights for a time range.
     async fn get_user_activity_insights(
@@ -2806,12 +2770,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserActivityInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user activity insights are not implemented",
-        ))
-    }
+    ) -> Result<UserActivityInsightsResponse, StorageError>;
 
     /// Returns per-user latency insights for a time range.
     async fn get_user_latency_insights(
@@ -2819,12 +2778,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserLatencyInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user latency insights are not implemented",
-        ))
-    }
+    ) -> Result<UserLatencyInsightsResponse, StorageError>;
 
     /// Returns user status counts over time.
     async fn get_user_status_counts(
@@ -2832,12 +2786,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         timezone: &str,
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
-    ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = (timezone, start_time, end_time);
-        Err(StorageError::unavailable(
-            "user status counts are not implemented",
-        ))
-    }
+    ) -> Result<GetUserStatusCountsResponse, StorageError>;
 
     // -----------------------------------------------------------------------
     // Tasks
@@ -3756,9 +3705,8 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
