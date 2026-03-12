@@ -5693,6 +5693,296 @@ mod tests {
     }
 
     // =========================================================================
+    // 11b. Chat Providers
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_provider_crud() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Insert a provider
+        let provider = store
+            .insert_chat_provider(coder_core::InsertChatProviderInput {
+                provider: format!("openai-{}", uniq()),
+                display_name: "OpenAI Test".to_string(),
+                api_key: "sk-test-key-1234".to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+                enabled: true,
+                created_by: None,
+            })
+            .await?;
+        assert_eq!(provider.display_name, "OpenAI Test");
+        assert!(provider.enabled);
+
+        // List providers — should contain the one we just created
+        let providers = store.list_chat_providers().await?;
+        assert!(
+            providers.iter().any(|p| p.id == provider.id),
+            "newly created provider should appear in list"
+        );
+
+        // Update the provider
+        let updated = store
+            .update_chat_provider(coder_core::UpdateChatProviderInput {
+                id: provider.id,
+                display_name: "OpenAI Updated".to_string(),
+                api_key: "sk-updated-key".to_string(),
+                base_url: "https://api.openai.com/v2".to_string(),
+                enabled: false,
+            })
+            .await?;
+        assert_eq!(updated.id, provider.id);
+        assert_eq!(updated.display_name, "OpenAI Updated");
+        assert_eq!(updated.base_url, "https://api.openai.com/v2");
+        assert!(!updated.enabled);
+
+        // Delete the provider
+        store.delete_chat_provider(provider.id).await?;
+
+        // Verify it's gone
+        let after_delete = store.list_chat_providers().await?;
+        assert!(
+            !after_delete.iter().any(|p| p.id == provider.id),
+            "deleted provider should not appear in list"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_provider_update_not_found() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Updating a non-existent provider should return an error
+        let result = store
+            .update_chat_provider(coder_core::UpdateChatProviderInput {
+                id: Uuid::new_v4(),
+                display_name: "Ghost".to_string(),
+                api_key: "key".to_string(),
+                base_url: "https://example.com".to_string(),
+                enabled: true,
+            })
+            .await;
+        assert!(result.is_err(), "updating a missing provider should fail");
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 11c. Chat Model Configs
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_model_config_crud() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Insert a model config
+        let config = store
+            .insert_chat_model_config(coder_core::InsertChatModelConfigInput {
+                provider: format!("openai-{}", uniq()),
+                model: "gpt-4".to_string(),
+                display_name: "GPT-4 Test".to_string(),
+                enabled: true,
+                is_default: false,
+                context_limit: 128000,
+                compression_threshold: 80000,
+                options: json!({"temperature": 0.7}),
+                created_by: None,
+            })
+            .await?;
+        assert_eq!(config.model, "gpt-4");
+        assert_eq!(config.display_name, "GPT-4 Test");
+        assert!(config.enabled);
+        assert!(!config.is_default);
+        assert_eq!(config.context_limit, 128000);
+
+        // List configs (all)
+        let configs = store.list_chat_model_configs(false).await?;
+        assert!(
+            configs.iter().any(|c| c.id == config.id),
+            "newly created config should appear in list"
+        );
+
+        // List configs (enabled only)
+        let enabled = store.list_chat_model_configs(true).await?;
+        assert!(
+            enabled.iter().any(|c| c.id == config.id),
+            "enabled config should appear in enabled-only list"
+        );
+
+        // Update the config
+        let updated = store
+            .update_chat_model_config(coder_core::UpdateChatModelConfigInput {
+                id: config.id,
+                provider: config.provider.clone(),
+                model: "gpt-4-turbo".to_string(),
+                display_name: "GPT-4 Turbo".to_string(),
+                enabled: false,
+                is_default: false,
+                context_limit: 256000,
+                compression_threshold: 120000,
+                options: json!({"temperature": 0.5}),
+                updated_by: None,
+            })
+            .await?;
+        assert_eq!(updated.id, config.id);
+        assert_eq!(updated.model, "gpt-4-turbo");
+        assert_eq!(updated.display_name, "GPT-4 Turbo");
+        assert!(!updated.enabled);
+        assert_eq!(updated.context_limit, 256000);
+
+        // Disabled config should NOT appear in enabled-only list
+        let enabled_after = store.list_chat_model_configs(true).await?;
+        assert!(
+            !enabled_after.iter().any(|c| c.id == config.id),
+            "disabled config should not appear in enabled-only list"
+        );
+
+        // Soft-delete the config
+        store.delete_chat_model_config(config.id).await?;
+
+        // Verify it's gone from all lists (soft-deleted)
+        let after_delete = store.list_chat_model_configs(false).await?;
+        assert!(
+            !after_delete.iter().any(|c| c.id == config.id),
+            "soft-deleted config should not appear in list"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_model_config_ensure_default() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        let provider_name = format!("ensure-default-{}", uniq());
+
+        // Insert two enabled configs, neither is default
+        let c1 = store
+            .insert_chat_model_config(coder_core::InsertChatModelConfigInput {
+                provider: provider_name.clone(),
+                model: "model-a".to_string(),
+                display_name: "Model A".to_string(),
+                enabled: true,
+                is_default: false,
+                context_limit: 4096,
+                compression_threshold: 2048,
+                options: json!({}),
+                created_by: None,
+            })
+            .await?;
+
+        let _c2 = store
+            .insert_chat_model_config(coder_core::InsertChatModelConfigInput {
+                provider: provider_name.clone(),
+                model: "model-b".to_string(),
+                display_name: "Model B".to_string(),
+                enabled: true,
+                is_default: false,
+                context_limit: 8192,
+                compression_threshold: 4096,
+                options: json!({}),
+                created_by: None,
+            })
+            .await?;
+
+        // Neither is default yet
+        let before = store.list_chat_model_configs(false).await?;
+        let our_configs: Vec<_> = before
+            .iter()
+            .filter(|c| c.provider == provider_name)
+            .collect();
+        assert!(
+            !our_configs.iter().any(|c| c.is_default),
+            "no config should be default yet"
+        );
+
+        // ensure_default should promote the earliest created enabled config
+        store.ensure_default_chat_model_config().await?;
+
+        let after = store.list_chat_model_configs(false).await?;
+        let our_configs_after: Vec<_> = after
+            .iter()
+            .filter(|c| c.provider == provider_name)
+            .collect();
+
+        // At least one of our configs should now be default (the earliest one)
+        // Note: ensure_default only promotes if there is NO existing default.
+        // If another test left a default in the DB, this won't change anything.
+        // We check that either a global default exists or c1 became default.
+        let any_default = after.iter().any(|c| c.is_default && c.enabled);
+        assert!(
+            any_default,
+            "after ensure_default, at least one enabled config should be default"
+        );
+
+        // If c1 became default, verify it's the right one
+        if let Some(c1_after) = our_configs_after.iter().find(|c| c.id == c1.id) {
+            if c1_after.is_default {
+                // c1 was the earliest, so this is correct
+                assert!(
+                    !our_configs_after
+                        .iter()
+                        .any(|c| c.id != c1.id && c.is_default),
+                    "only the earliest config should be promoted to default"
+                );
+            }
+        }
+
+        // Cleanup: unset defaults so we don't pollute other tests
+        store.unset_default_chat_model_configs().await?;
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_model_config_update_not_found() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+
+        // Updating a non-existent model config should return an error
+        let result = store
+            .update_chat_model_config(coder_core::UpdateChatModelConfigInput {
+                id: Uuid::new_v4(),
+                provider: "ghost".to_string(),
+                model: "ghost-model".to_string(),
+                display_name: "Ghost".to_string(),
+                enabled: true,
+                is_default: false,
+                context_limit: 1000,
+                compression_threshold: 500,
+                options: json!({}),
+                updated_by: None,
+            })
+            .await;
+        assert!(
+            result.is_err(),
+            "updating a missing model config should fail"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
     // 12. Provisioner Jobs
     // =========================================================================
 
