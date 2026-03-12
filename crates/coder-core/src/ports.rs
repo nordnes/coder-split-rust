@@ -1558,9 +1558,8 @@ pub trait IdentityStore: Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
@@ -1876,12 +1875,7 @@ pub trait OperationalStore: Send + Sync {
         user_id: Uuid,
         public_key: &str,
         private_key: &str,
-    ) -> Result<GitSshKeyRecord, StorageError> {
-        let _ = (user_id, public_key, private_key);
-        Err(StorageError::unavailable(
-            "git ssh keys are not implemented",
-        ))
-    }
+    ) -> Result<GitSshKeyRecord, StorageError>;
 
     /// Inserts a new file record.
     async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError>;
@@ -2697,12 +2691,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         user_id: Uuid,
         public_key: &str,
         private_key: &str,
-    ) -> Result<GitSshKeyRecord, StorageError> {
-        let _ = (user_id, public_key, private_key);
-        Err(StorageError::unavailable(
-            "git ssh keys are not implemented",
-        ))
-    }
+    ) -> Result<GitSshKeyRecord, StorageError>;
 
     /// Inserts a new file record.
     async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError>;
@@ -2736,36 +2725,21 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         user_id: Uuid,
         provider_id: &str,
-    ) -> Result<Option<ExternalAuthLinkRecord>, StorageError> {
-        let _ = (user_id, provider_id);
-        Err(StorageError::unavailable(
-            "external auth links are not implemented",
-        ))
-    }
+    ) -> Result<Option<ExternalAuthLinkRecord>, StorageError>;
 
     /// Deletes one external-auth link for a user.
     async fn delete_external_auth_link(
         &self,
         user_id: Uuid,
         provider_id: &str,
-    ) -> Result<bool, StorageError> {
-        let _ = (user_id, provider_id);
-        Err(StorageError::unavailable(
-            "external auth links are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Inserts or updates one external-auth link for a user.
     async fn upsert_external_auth_link(
         &self,
         user_id: Uuid,
         link: &UpsertExternalAuthLinkInput,
-    ) -> Result<ExternalAuthLinkRecord, StorageError> {
-        let _ = (user_id, link);
-        Err(StorageError::unavailable(
-            "external auth links are not implemented",
-        ))
-    }
+    ) -> Result<ExternalAuthLinkRecord, StorageError>;
 
     // ── InsightsStore delegate methods ──────────────────────────────
 
@@ -3756,9 +3730,8 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
