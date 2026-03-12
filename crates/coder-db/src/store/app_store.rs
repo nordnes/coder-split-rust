@@ -4670,7 +4670,7 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)?;
 
         match (public_key, private_key) {
-            (Some(public_key), Some(private_key)) if !public_key.is_empty() => {
+            (Some(public_key), Some(private_key)) if !public_key.is_empty() && !private_key.is_empty() => {
                 Ok(Some(VapidKeyPair {
                     public_key,
                     private_key,
