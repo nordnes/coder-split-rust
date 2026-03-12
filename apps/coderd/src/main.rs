@@ -43,7 +43,7 @@ use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
 use coder_workspaces::{
     ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker, LifecycleScheduler,
-    QuietHoursWindow,
+    parse_quiet_hours_schedule,
 };
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
@@ -866,13 +866,12 @@ async fn run() -> Result<(), MainError> {
         AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
 
     // Start the lifecycle scheduler (autostart/autostop/failed-stop retry).
-    let lifecycle_cancel = CancellationToken::new();
     let quiet_hours = parse_quiet_hours_schedule(&config.workspace.default_quiet_hours_schedule);
     let lifecycle_scheduler = LifecycleScheduler::start(
         store.clone(),
         config.worker.lifecycle_check_interval_secs,
         quiet_hours,
-        lifecycle_cancel.clone(),
+        CancellationToken::new(),
     );
 
     let state = AppState::new(
@@ -1198,50 +1197,6 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         docs_url: args.docs_url,
         scim_api_key: args.scim_api_key,
         cli_upgrade_message: args.cli_upgrade_message,
-    })
-}
-
-/// Attempts to parse a quiet-hours cron schedule string (e.g.
-/// `"CRON_TZ=UTC 0 0 * * *"`) into a [`QuietHoursWindow`].
-///
-/// The schedule is expected to fire at a specific hour; the quiet window spans
-/// from that hour to six hours later (matching the Go default).  Returns
-/// `None` when the schedule is empty or cannot be parsed.
-fn parse_quiet_hours_schedule(schedule: &str) -> Option<QuietHoursWindow> {
-    let schedule = schedule.trim();
-    if schedule.is_empty() {
-        return None;
-    }
-
-    // Strip optional CRON_TZ prefix: "CRON_TZ=UTC 0 0 * * *" → "0 0 * * *"
-    let cron_part = if let Some(rest) = schedule.strip_prefix("CRON_TZ=") {
-        // Skip until the first space after the timezone name.
-        rest.split_once(' ').map_or(rest, |(_, cron)| cron)
-    } else {
-        schedule
-    };
-
-    let fields: Vec<&str> = cron_part.split_whitespace().collect();
-    // Standard cron: minute hour day month weekday
-    if fields.len() < 2 {
-        warn!(schedule, "quiet hours schedule has too few fields");
-        return None;
-    }
-
-    let start_hour: u8 = match fields[1].parse() {
-        Ok(h) if h < 24 => h,
-        _ => {
-            warn!(schedule, "quiet hours schedule has invalid hour field");
-            return None;
-        }
-    };
-
-    // Default quiet window is 6 hours (matching Go behaviour).
-    let end_hour = (start_hour + 6) % 24;
-
-    Some(QuietHoursWindow {
-        start_hour,
-        end_hour,
     })
 }
 

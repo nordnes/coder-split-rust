@@ -293,9 +293,9 @@ pub struct TemplateScheduleConstraints {
 /// A quiet-hours window expressed as start/end hour in UTC.
 #[derive(Clone, Debug)]
 pub struct QuietHoursWindow {
-    /// Start hour (0-23).
+    /// Start hour in UTC (0-23).
     pub start_hour: u8,
-    /// End hour (0-23).
+    /// End hour in UTC (0-23).
     pub end_hour: u8,
 }
 
@@ -311,6 +311,83 @@ impl QuietHoursWindow {
             hour >= self.start_hour || hour < self.end_hour
         }
     }
+}
+
+/// Default quiet-hours window duration in hours (matching Go behaviour).
+const QUIET_HOURS_WINDOW_DURATION: u8 = 6;
+
+/// Parses a quiet-hours cron schedule string (e.g.
+/// `"CRON_TZ=America/New_York 0 0 * * *"`) into a [`QuietHoursWindow`]
+/// with start/end hours expressed in UTC.
+///
+/// The schedule is expected to fire at a specific hour in the given timezone;
+/// the quiet window spans from that hour to [`QUIET_HOURS_WINDOW_DURATION`]
+/// hours later, both converted to UTC.  Returns `None` when the schedule is
+/// empty or cannot be parsed.
+pub fn parse_quiet_hours_schedule(schedule: &str) -> Option<QuietHoursWindow> {
+    let schedule = schedule.trim();
+    if schedule.is_empty() {
+        return None;
+    }
+
+    // Extract timezone and cron fields.
+    let (tz_name, cron_part) = if let Some(rest) = schedule.strip_prefix("CRON_TZ=") {
+        match rest.split_once(' ') {
+            Some((tz, cron)) => (tz, cron),
+            None => {
+                warn!(
+                    schedule,
+                    "quiet hours schedule missing cron fields after CRON_TZ"
+                );
+                return None;
+            }
+        }
+    } else {
+        ("UTC", schedule)
+    };
+
+    let fields: Vec<&str> = cron_part.split_whitespace().collect();
+    // Standard cron: minute hour day month weekday
+    if fields.len() < 2 {
+        warn!(schedule, "quiet hours schedule has too few fields");
+        return None;
+    }
+
+    let local_hour: u8 = match fields[1].parse() {
+        Ok(h) if h < 24 => h,
+        _ => {
+            warn!(schedule, "quiet hours schedule has invalid hour field");
+            return None;
+        }
+    };
+
+    // Convert the local hour to UTC using the timezone offset.
+    let utc_start = match tz_name.parse::<chrono_tz::Tz>() {
+        Ok(tz) => {
+            use chrono::Offset;
+            // Use today's date to get the current UTC offset for this timezone.
+            let now_utc = chrono::Utc::now();
+            let local_now = now_utc.with_timezone(&tz);
+            let offset_secs = local_now.offset().fix().local_minus_utc();
+            let offset_hours = offset_secs / 3600;
+            // local_hour - offset_hours = utc_hour  (mod 24)
+            ((i32::from(local_hour) - offset_hours).rem_euclid(24)) as u8
+        }
+        Err(_) => {
+            warn!(
+                schedule,
+                tz_name, "quiet hours schedule has unrecognised timezone, assuming UTC"
+            );
+            local_hour
+        }
+    };
+
+    let utc_end = (utc_start + QUIET_HOURS_WINDOW_DURATION) % 24;
+
+    Some(QuietHoursWindow {
+        start_hour: utc_start,
+        end_hour: utc_end,
+    })
 }
 
 /// Workspace transition action determined by the autobuild executor.
@@ -1302,12 +1379,6 @@ pub trait LifecycleStore: Send + Sync + 'static {
         workspace_id: uuid::Uuid,
     ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError>;
 
-    /// Returns the next build number for a workspace.
-    async fn next_workspace_build_number(
-        &self,
-        workspace_id: uuid::Uuid,
-    ) -> Result<i64, StorageError>;
-
     /// Creates a new workspace build to trigger a start/stop transition.
     async fn insert_workspace_build(
         &self,
@@ -1329,13 +1400,6 @@ impl<T: AppStore + 'static> LifecycleStore for T {
         workspace_id: uuid::Uuid,
     ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
         AppStore::find_latest_workspace_build(self, workspace_id).await
-    }
-
-    async fn next_workspace_build_number(
-        &self,
-        workspace_id: uuid::Uuid,
-    ) -> Result<i64, StorageError> {
-        AppStore::next_workspace_build_number(self, workspace_id).await
     }
 
     async fn insert_workspace_build(
@@ -1431,6 +1495,10 @@ async fn run_lifecycle_loop<S: LifecycleStore>(
 ///
 /// Queries workspaces eligible for transition and processes autostart,
 /// autostop, and failed-stop retry actions.  Returns statistics for the tick.
+///
+/// NOTE: transitions are evaluated sequentially.  For deployments with many
+/// eligible workspaces, consider adding bounded concurrency (similar to
+/// `AutobuildExecutor`'s semaphore) in a follow-up.
 pub async fn lifecycle_tick_once<S: LifecycleStore>(
     store: &S,
     now: OffsetDateTime,
@@ -1538,16 +1606,14 @@ async fn trigger_workspace_start<S: LifecycleStore>(
         .await?
         .ok_or_else(|| StorageError::not_found("no build found for workspace"))?;
 
-    let build_number = store.next_workspace_build_number(ws.id).await?;
-
     let input = coder_core::ports::CreateWorkspaceBuildInput {
         id: uuid::Uuid::new_v4(),
         workspace_id: ws.id,
         template_version_id: latest_build.template_version_id,
-        build_number,
+        build_number: 0, // DB auto-computes the next build number on insert.
         transition: "start".to_owned(),
         initiator_id: ws.owner_id,
-        job_id: uuid::Uuid::new_v4(),
+        job_id: latest_build.job_id,
         reason: "autostart".to_owned(),
         deadline: None,
         max_deadline: None,
@@ -1557,7 +1623,8 @@ async fn trigger_workspace_start<S: LifecycleStore>(
 
     debug!(
         workspace_id = %ws.id,
-        "lifecycle: created start build at {now}"
+        now = %now,
+        "lifecycle: created start build"
     );
     Ok(())
 }
@@ -1574,16 +1641,14 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
         .await?
         .ok_or_else(|| StorageError::not_found("no build found for workspace"))?;
 
-    let build_number = store.next_workspace_build_number(ws.id).await?;
-
     let input = coder_core::ports::CreateWorkspaceBuildInput {
         id: uuid::Uuid::new_v4(),
         workspace_id: ws.id,
         template_version_id: latest_build.template_version_id,
-        build_number,
+        build_number: 0, // DB auto-computes the next build number on insert.
         transition: "stop".to_owned(),
         initiator_id: ws.owner_id,
-        job_id: uuid::Uuid::new_v4(),
+        job_id: latest_build.job_id,
         reason: reason.to_owned(),
         deadline: None,
         max_deadline: None,
@@ -1593,7 +1658,8 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
 
     debug!(
         workspace_id = %ws.id,
-        "lifecycle: created stop build at {now}"
+        now = %now,
+        "lifecycle: created stop build"
     );
     Ok(())
 }
@@ -3240,7 +3306,6 @@ mod tests {
     struct MockLifecycleStore {
         workspaces: Vec<WorkspaceTransitionRow>,
         latest_build: Option<coder_core::ports::WorkspaceBuildRecord>,
-        next_build_number: i64,
         inserted_builds: std::sync::Mutex<Vec<coder_core::ports::CreateWorkspaceBuildInput>>,
         fail_transition: AtomicBool,
         fail_insert: AtomicBool,
@@ -3251,7 +3316,6 @@ mod tests {
             Self {
                 workspaces,
                 latest_build: Some(make_build_record()),
-                next_build_number: 2,
                 inserted_builds: std::sync::Mutex::new(Vec::new()),
                 fail_transition: AtomicBool::new(false),
                 fail_insert: AtomicBool::new(false),
@@ -3312,13 +3376,6 @@ mod tests {
             _workspace_id: uuid::Uuid,
         ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
             Ok(self.latest_build.clone())
-        }
-
-        async fn next_workspace_build_number(
-            &self,
-            _workspace_id: uuid::Uuid,
-        ) -> Result<i64, StorageError> {
-            Ok(self.next_build_number)
         }
 
         async fn insert_workspace_build(
@@ -3414,7 +3471,10 @@ mod tests {
         let result = lifecycle_tick_once(&store, now, Some(&qh)).await;
         assert!(result.is_ok());
         let stats = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(stats.started, 0, "autostart should be blocked by quiet hours");
+        assert_eq!(
+            stats.started, 0,
+            "autostart should be blocked by quiet hours"
+        );
         assert_eq!(stats.stopped, 0);
         assert_eq!(stats.errors, 0);
         assert!(store.inserted_builds().is_empty());
@@ -3504,11 +3564,8 @@ mod tests {
 
         // Cancel and join should complete promptly.
         cancel.cancel();
-        let join_result = tokio::time::timeout(
-            tokio::time::Duration::from_secs(2),
-            scheduler.join(),
-        )
-        .await;
+        let join_result =
+            tokio::time::timeout(tokio::time::Duration::from_secs(2), scheduler.join()).await;
         assert!(join_result.is_ok(), "scheduler should shut down within 2s");
     }
 
@@ -3524,10 +3581,85 @@ mod tests {
         let result = lifecycle_tick_once(&store, now, None).await;
         assert!(result.is_ok());
         let stats = result.unwrap_or_else(|_| unreachable!());
-        assert_eq!(stats.stopped, 1, "suspended user workspace should be stopped");
+        assert_eq!(
+            stats.stopped, 1,
+            "suspended user workspace should be stopped"
+        );
 
         let builds = store.inserted_builds();
         assert_eq!(builds.len(), 1);
         assert_eq!(builds[0].transition, "stop");
+    }
+
+    // ── parse_quiet_hours_schedule tests ──────────────────────────
+
+    #[test]
+    fn parse_quiet_hours_utc_schedule() {
+        let window = parse_quiet_hours_schedule("CRON_TZ=UTC 0 2 * * *");
+        assert!(window.is_some());
+        let w = window.unwrap_or_else(|| unreachable!());
+        assert_eq!(w.start_hour, 2);
+        assert_eq!(w.end_hour, (2 + QUIET_HOURS_WINDOW_DURATION) % 24);
+    }
+
+    #[test]
+    fn parse_quiet_hours_empty_returns_none() {
+        assert!(parse_quiet_hours_schedule("").is_none());
+        assert!(parse_quiet_hours_schedule("   ").is_none());
+    }
+
+    #[test]
+    fn parse_quiet_hours_no_tz_prefix_assumes_utc() {
+        let window = parse_quiet_hours_schedule("0 3 * * *");
+        assert!(window.is_some());
+        let w = window.unwrap_or_else(|| unreachable!());
+        assert_eq!(w.start_hour, 3);
+    }
+
+    #[test]
+    fn parse_quiet_hours_invalid_hour_returns_none() {
+        assert!(parse_quiet_hours_schedule("CRON_TZ=UTC 0 25 * * *").is_none());
+        assert!(parse_quiet_hours_schedule("CRON_TZ=UTC 0 abc * * *").is_none());
+    }
+
+    #[test]
+    fn parse_quiet_hours_too_few_fields_returns_none() {
+        assert!(parse_quiet_hours_schedule("CRON_TZ=UTC 0").is_none());
+    }
+
+    #[test]
+    fn parse_quiet_hours_timezone_conversion() {
+        // America/New_York is UTC-5 (EST) or UTC-4 (EDT).
+        // Local midnight (hour 0) should map to UTC hour 4 or 5 depending
+        // on whether DST is active.  We just verify the conversion is
+        // different from the raw local hour.
+        let window = parse_quiet_hours_schedule("CRON_TZ=America/New_York 0 0 * * *");
+        assert!(window.is_some());
+        let w = window.unwrap_or_else(|| unreachable!());
+        // EST: 0 + 5 = 5,  EDT: 0 + 4 = 4.  Either way, not 0.
+        assert!(
+            w.start_hour == 4 || w.start_hour == 5,
+            "expected UTC hour 4 or 5 for America/New_York midnight, got {}",
+            w.start_hour
+        );
+    }
+
+    #[test]
+    fn parse_quiet_hours_positive_offset_timezone() {
+        // Asia/Tokyo is UTC+9, no DST.
+        // Local hour 1 → UTC hour = (1 - 9) mod 24 = 16.
+        let window = parse_quiet_hours_schedule("CRON_TZ=Asia/Tokyo 0 1 * * *");
+        assert!(window.is_some());
+        let w = window.unwrap_or_else(|| unreachable!());
+        assert_eq!(w.start_hour, 16, "Asia/Tokyo 01:00 should be UTC 16:00");
+    }
+
+    #[test]
+    fn parse_quiet_hours_unknown_timezone_falls_back_to_utc() {
+        let window = parse_quiet_hours_schedule("CRON_TZ=Fake/Zone 0 7 * * *");
+        assert!(window.is_some());
+        let w = window.unwrap_or_else(|| unreachable!());
+        // Unrecognised timezone falls back to treating the hour as UTC.
+        assert_eq!(w.start_hour, 7);
     }
 }
