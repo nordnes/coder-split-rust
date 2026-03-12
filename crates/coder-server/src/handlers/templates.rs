@@ -1381,6 +1381,7 @@ pub(crate) async fn get_template_version_dry_run_resources(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Verify the job exists.
     let _job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
@@ -1458,7 +1459,7 @@ pub(crate) async fn get_template_version_dynamic_parameters(
     Path(version_id): Path<Uuid>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
@@ -1466,6 +1467,21 @@ pub(crate) async fn get_template_version_dynamic_parameters(
         Some(v) => v,
         None => return Ok(not_found_response("Template version not found.")),
     };
+
+    // RBAC: verify the actor can read this template.
+    let authorizer = Authorizer::new();
+    let mut obj = Object::new(ResourceType::Template).in_org(ver.organization_id);
+    if let Some(tid) = ver.template_id {
+        obj = obj.with_id(tid);
+    }
+    if authorizer
+        .authorize(&context.actor, Action::Read, &obj)
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to view template version parameters.",
+        ));
+    }
 
     let params = state
         .store
@@ -1506,7 +1522,6 @@ pub(crate) async fn get_template_version_dynamic_parameters(
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    let _ = ver;
     let response = DynamicParametersResponse {
         parameters,
         ..DynamicParametersResponse::default()
