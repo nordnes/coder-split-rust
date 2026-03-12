@@ -1114,6 +1114,7 @@ pub(crate) async fn workspace_apps_proxy_path(
         body,
         app_path,
         original_uri.query().unwrap_or(""),
+        false,
     )
     .await
 }
@@ -1273,6 +1274,7 @@ pub(crate) async fn subdomain_app_middleware(
         body,
         &app_path,
         &app_query,
+        false,
     )
     .await
     {
@@ -1358,6 +1360,7 @@ async fn proxy_workspace_app(
     body: axum::body::Body,
     app_path: &str,
     app_query: &str,
+    slug_is_port: bool,
 ) -> Result<Response, WorkspaceAppError> {
     // For now, workspace app proxying requires authentication.
     // Public apps would be handled here with sharing level checks.
@@ -1368,7 +1371,7 @@ async fn proxy_workspace_app(
     // Resolve the target URL for the app.
     // In a full implementation, this would look up the workspace, agent, and
     // app in the database. For now, we build a reasonable proxy target.
-    let app_url = resolve_app_url(state, app_request).await?;
+    let app_url = resolve_app_url(state, app_request, slug_is_port).await?;
 
     // Validate port.
     if let Some(port_str) = app_url.port() {
@@ -1490,6 +1493,7 @@ async fn proxy_workspace_app(
 async fn resolve_app_url(
     state: &AppState,
     request: &AppRequest,
+    slug_is_port: bool,
 ) -> Result<url::Url, WorkspaceAppError> {
     let slug = &request.app_slug_or_port;
 
@@ -1532,12 +1536,15 @@ async fn resolve_app_url(
             return url::Url::parse(&url_str)
                 .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
         }
-    } else if let Ok(port) = slug.parse::<u16>() {
-        // Plain numeric port that doesn't match PORT_REGEX (1-3 digit ports
-        // like 80, 443). Always use HTTP for these.
-        let url_str = format!("http://{agent_host}:{port}");
-        return url::Url::parse(&url_str)
-            .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
+    } else if slug_is_port {
+        // The caller (port forwarding handler) has already validated this is a
+        // port number. Parse it as u16 — this covers 1-3 digit ports like 80,
+        // 443 that don't match PORT_REGEX (which only matches 4-5 digits).
+        if let Ok(port) = slug.parse::<u16>() {
+            let url_str = format!("http://{agent_host}:{port}");
+            return url::Url::parse(&url_str)
+                .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
+        }
     }
 
     // For slug-based apps, look up the app record in the database.
@@ -2142,6 +2149,7 @@ pub(crate) async fn workspace_port_forward(
         body,
         app_path,
         original_uri.query().unwrap_or(""),
+        true,
     )
     .await
 }
