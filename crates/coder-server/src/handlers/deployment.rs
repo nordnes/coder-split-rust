@@ -2,6 +2,7 @@
 
 use super::*;
 
+/// GET /api/v2/buildinfo — return build version and metadata.
 pub(crate) async fn build_info(
     State(state): State<AppState>,
 ) -> Json<coder_core::BuildInfoResponse> {
@@ -12,6 +13,7 @@ pub(crate) async fn build_info(
     ))
 }
 
+/// GET /api/v2/deployment/config — return the public deployment configuration.
 pub(crate) async fn deployment_config(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -46,6 +48,7 @@ pub(crate) async fn deployment_config(
         .into_response())
 }
 
+/// GET /api/v2/updatecheck — report whether the running version is current.
 pub(crate) async fn update_check(State(state): State<AppState>) -> Json<UpdateCheckResponse> {
     Json(UpdateCheckResponse {
         current: true,
@@ -54,6 +57,7 @@ pub(crate) async fn update_check(State(state): State<AppState>) -> Json<UpdateCh
     })
 }
 
+/// GET /api/v2/deployment/init/:os/:arch — render a platform-specific agent init script.
 pub(crate) async fn get_init_script(
     State(state): State<AppState>,
     Path((os, arch)): Path<(String, String)>,
@@ -85,6 +89,7 @@ pub(crate) async fn get_init_script(
     response
 }
 
+/// GET /api/v2/deployment/stats — return aggregate deployment statistics.
 pub(crate) async fn deployment_stats(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -101,6 +106,7 @@ pub(crate) async fn deployment_stats(
     Ok((StatusCode::OK, Json(state.deployment_stats.get().await?)).into_response())
 }
 
+/// GET /api/v2/deployment/ssh — return SSH hostname and config options.
 pub(crate) async fn deployment_ssh(State(state): State<AppState>) -> Json<SshConfigResponse> {
     Json(SshConfigResponse {
         hostname_prefix: state.config.ssh.hostname_prefix.clone(),
@@ -109,6 +115,7 @@ pub(crate) async fn deployment_ssh(State(state): State<AppState>) -> Json<SshCon
     })
 }
 
+/// GET /api/v2/experiments — list enabled feature experiments.
 pub(crate) async fn get_enabled_experiments(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -120,6 +127,7 @@ pub(crate) async fn get_enabled_experiments(
     Ok(Json(Vec::<String>::new()).into_response())
 }
 
+/// GET /api/v2/experiments/available — list all known experiments.
 pub(crate) async fn get_available_experiments(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -131,6 +139,7 @@ pub(crate) async fn get_available_experiments(
     Ok(Json(AvailableExperiments { safe: Vec::new() }).into_response())
 }
 
+/// GET /api/v2/organizations/:org/provisionerdaemons — list provisioner daemons in an org.
 pub(crate) async fn list_provisioner_daemons(
     State(state): State<AppState>,
     Path(organization): Path<String>,
@@ -416,6 +425,7 @@ pub(crate) async fn get_provisioner_job_logs(
     Ok((StatusCode::OK, Json(items)).into_response())
 }
 
+/// GET /api/v2/applications/host — return the wildcard hostname for workspace apps.
 pub(crate) async fn applications_host(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -432,6 +442,7 @@ pub(crate) async fn applications_host(
         .into_response())
 }
 
+/// GET /api/v2/applications/auth-redirect — redirect to the app auth flow.
 pub(crate) async fn applications_auth_redirect(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -455,6 +466,7 @@ pub(crate) async fn applications_auth_redirect(
 /// connected agents and clients.  In Go this calls
 /// `(*api.TailnetCoordinator.Load()).ServeHTTPDebug(rw, r)`.  The Rust
 /// backend does not yet have a tailnet coordination layer, so we return 501.
+/// GET /api/v2/debug/coordinator — dump the coordinator peer graph as HTML.
 pub(crate) async fn debug_coordinator(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -486,6 +498,7 @@ pub(crate) async fn debug_coordinator(
 /// connections over the tailnet mesh.  In Go this calls
 /// `api.agentProvider.ServeHTTPDebug(rw, r)`.  The Rust backend does not yet
 /// have a workspace-agent provider, so we return 501.
+/// GET /api/v2/debug/tailnet — dump tailnet node state as HTML.
 pub(crate) async fn debug_tailnet(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -509,6 +522,7 @@ pub(crate) async fn debug_tailnet(
 /// tracks per-client send/receive byte counters.  In Go this calls
 /// `options.DERPServer.ServeDebugTraffic`.  The Rust backend does not yet
 /// include a DERP relay, so we return 501.
+/// GET /api/v2/debug/derp-traffic — dump DERP relay traffic statistics as HTML.
 pub(crate) async fn debug_derp_traffic(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -532,6 +546,7 @@ pub(crate) async fn debug_derp_traffic(
 /// cmdline, and (when available) DERP metrics.  The Rust equivalent reads
 /// process stats from `/proc/self` (Linux) or returns basic runtime info
 /// on other platforms.
+/// GET /debug/expvar — export runtime variables as JSON (memory stats, etc.).
 pub(crate) async fn debug_expvar(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -605,6 +620,7 @@ pub(crate) fn parse_proc_kb(val: &str) -> Option<u64> {
 /// `pprof-rs` crate.  For heap profiling use jemalloc with
 /// `MALLOC_CONF="prof:true"`.  For async-task dumps use `tokio-console`.
 /// Each sub-route returns informational JSON about Rust alternatives.
+/// GET /debug/pprof — placeholder for Go-style pprof-compatible profiling data.
 pub(crate) async fn debug_pprof(
     State(state): State<AppState>,
     OriginalUri(uri): OriginalUri,
@@ -676,6 +692,7 @@ pub(crate) async fn debug_pprof(
 /// connection and echoes every received message back to the client.  The
 /// health checker (`healthcheck/websocket.go`) connects here and sends
 /// three numbered text messages, verifying each is echoed correctly.
+/// GET /api/v2/debug/ws — upgrade to a WebSocket for echo-based connectivity testing.
 pub(crate) async fn debug_websocket(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -730,6 +747,7 @@ pub(crate) async fn websocket_echo(mut socket: WebSocket) {
 /// so we emit a small set of process-level gauges in Prometheus exposition
 /// format.  Once a registry is wired into `AppState`, this handler should
 /// delegate to it.
+/// GET /debug/metrics — return Prometheus-format metrics.
 pub(crate) async fn debug_metrics(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -826,6 +844,7 @@ pub(crate) async fn debug_metrics(
 /// Upgrades to a WebSocket, sends the initial DERP map, then pushes updates
 /// whenever the map changes.  The Go handler does NOT require
 /// apiKeyMiddleware (it's commented out in coderd.go), so we mirror that.
+/// GET /api/v2/derp-map — stream DERP map updates via SSE.
 pub(crate) async fn derp_map_updates(
     State(state): State<AppState>,
     ws: WebSocketUpgrade,
@@ -867,6 +886,7 @@ pub(crate) async fn derp_map_updates(
 /// In the OSS edition this always returns a single "primary" region built from
 /// the deployment ID and access URL.  The enterprise edition may add additional
 /// workspace-proxy regions.
+/// GET /api/v2/regions — list DERP relay regions.
 pub(crate) async fn get_regions(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -908,6 +928,7 @@ pub(crate) async fn get_regions(
 /// Accepts a WebSocket upgrade and bridges the socket to the channel-based
 /// provisioner daemon server.  The daemon sends [`DaemonMessage`]s and
 /// receives [`ServerMessage`]s as JSON text frames.
+/// GET /api/v2/organizations/:org/provisionerdaemons/serve — upgrade to WebSocket for provisioner daemon RPC.
 pub(crate) async fn serve_provisioner_daemon(
     State(state): State<AppState>,
     Path(organization): Path<String>,
