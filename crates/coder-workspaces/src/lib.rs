@@ -1440,7 +1440,7 @@ pub trait LifecycleStore: Send + Sync + 'static {
 }
 
 #[async_trait]
-impl<T: AppStore + 'static> LifecycleStore for T {
+impl LifecycleStore for dyn AppStore {
     async fn get_workspaces_eligible_for_transition(
         &self,
         now: OffsetDateTime,
@@ -1474,6 +1474,44 @@ impl<T: AppStore + 'static> LifecycleStore for T {
         input: coder_core::ports::CreateWorkspaceBuildInput,
     ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
         AppStore::insert_workspace_build(self, input).await
+    }
+}
+
+#[async_trait]
+impl<T: LifecycleStore + ?Sized> LifecycleStore for Arc<T> {
+    async fn get_workspaces_eligible_for_transition(
+        &self,
+        now: OffsetDateTime,
+    ) -> Result<Vec<WorkspaceTransitionRow>, StorageError> {
+        (**self).get_workspaces_eligible_for_transition(now).await
+    }
+
+    async fn find_latest_workspace_build(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
+        (**self).find_latest_workspace_build(workspace_id).await
+    }
+
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        (**self).find_workspace_by_id(workspace_id).await
+    }
+
+    async fn create_provisioner_job(
+        &self,
+        input: coder_core::CreateProvisionerJobInput,
+    ) -> Result<coder_core::template::ProvisionerJobRecord, StorageError> {
+        (**self).create_provisioner_job(input).await
+    }
+
+    async fn insert_workspace_build(
+        &self,
+        input: coder_core::ports::CreateWorkspaceBuildInput,
+    ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
+        (**self).insert_workspace_build(input).await
     }
 }
 
@@ -1888,6 +1926,92 @@ mod tests {
             _ids: &[uuid::Uuid],
         ) -> Result<Vec<coder_core::identity::UserRecord>, StorageError> {
             Ok(Vec::new())
+        }
+
+        async fn batch_insert_workspace_build_parameters(
+            &self,
+            _params: Vec<coder_core::ports::WorkspaceBuildParameterRecord>,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn batch_update_workspace_last_used_at(
+            &self,
+            _ids: &[uuid::Uuid],
+            _last_used_at: time::OffsetDateTime,
+        ) -> Result<u64, StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn upsert_workspace_stats_workspace(
+            &self,
+            _input: &coder_core::ports::WorkspaceStatsWorkspaceInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn upsert_provisioner_job_stats(
+            &self,
+            _input: &coder_core::ports::ProvisionerJobStatsInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn upsert_workspace_build_stats(
+            &self,
+            _input: &coder_core::ports::WorkspaceBuildStatsInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn insert_workspace_agent_stat(
+            &self,
+            _input: &coder_core::ports::WorkspaceAgentStatInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn list_workspace_proxies_for_health(
+            &self,
+        ) -> Result<Vec<coder_core::ports::WorkspaceProxyHealthRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn upsert_workspace_proxy_for_health(
+            &self,
+            _input: &coder_core::ports::WorkspaceProxyHealthInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn list_provisioner_daemons_for_health(
+            &self,
+        ) -> Result<Vec<coder_core::ports::ProvisionerDaemonHealthRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn upsert_provisioner_daemon_for_health(
+            &self,
+            _input: &coder_core::ports::ProvisionerDaemonHealthInput,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn upsert_git_ssh_key(
+            &self,
+            _user_id: uuid::Uuid,
+            _public_key: &str,
+            _private_key: &str,
+        ) -> Result<coder_core::ports::GitSshKeyRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn get_file_by_hash_and_creator(
+            &self,
+            _hash: &str,
+            _creator_id: uuid::Uuid,
+        ) -> Result<Option<coder_core::ports::FileRecord>, StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
         }
     }
 

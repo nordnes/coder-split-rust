@@ -317,7 +317,6 @@ mod tests {
             max_batch_size: 10,
             max_buffer_size: 8192,
             channel_capacity: 64,
-            max_buffer_size: 8192,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
         assert!(reporter.is_enabled());
@@ -353,7 +352,6 @@ mod tests {
             max_batch_size: 1000,
             max_buffer_size: 8192,
             channel_capacity: 64,
-            max_buffer_size: 8192,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
 
@@ -390,7 +388,6 @@ mod tests {
             max_batch_size: 5,
             max_buffer_size: 8192,
             channel_capacity: 64,
-            max_buffer_size: 8192,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
 

@@ -1558,9 +1558,8 @@ pub trait IdentityStore: Send + Sync {
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
@@ -1714,24 +1713,14 @@ pub trait IdentityStore: Send + Sync {
         &self,
         limit: u32,
         max_attempt_count: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = (limit, max_attempt_count);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError>;
 
     /// Updates the status of a notification message after dispatch.
     async fn update_notification_message_status(
         &self,
         message_id: Uuid,
         status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        let _ = (message_id, status);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Increments the attempt count for a notification message.
     async fn increment_notification_message_attempt_count(
@@ -1762,24 +1751,14 @@ pub trait OperationalStore: Send + Sync {
     async fn batch_insert_workspace_build_parameters(
         &self,
         params: Vec<WorkspaceBuildParameterRecord>,
-    ) -> Result<(), StorageError> {
-        let _ = params;
-        Err(StorageError::unavailable(
-            "batch workspace build parameter inserts are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Updates `last_used_at` for multiple workspaces in a single UPDATE statement.
     async fn batch_update_workspace_last_used_at(
         &self,
         ids: &[Uuid],
         last_used_at: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
-        let _ = (ids, last_used_at);
-        Err(StorageError::unavailable(
-            "batch workspace last_used_at updates are not implemented",
-        ))
-    }
+    ) -> Result<u64, StorageError>;
 
     /// Looks up multiple users by their IDs in a single query.
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
@@ -1798,12 +1777,7 @@ pub trait OperationalStore: Send + Sync {
     async fn upsert_workspace_stats_workspace(
         &self,
         input: &WorkspaceStatsWorkspaceInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Upserts one provisioner job into the deployment-stats foundation tables.
     async fn upsert_provisioner_job_stats(
@@ -1815,43 +1789,24 @@ pub trait OperationalStore: Send + Sync {
     async fn upsert_workspace_build_stats(
         &self,
         input: &WorkspaceBuildStatsInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace build stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Inserts one raw agent-stat sample into the deployment-stats foundation tables.
     async fn insert_workspace_agent_stat(
         &self,
         input: &WorkspaceAgentStatInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace agent stats writers are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists persisted workspace proxies for deployment health checks.
     async fn list_workspace_proxies_for_health(
         &self,
-    ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError> {
-        Err(StorageError::unavailable(
-            "workspace proxy health is not implemented",
-        ))
-    }
+    ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError>;
 
     /// Upserts one workspace proxy for deployment health checks.
     async fn upsert_workspace_proxy_for_health(
         &self,
         input: &WorkspaceProxyHealthInput,
-    ) -> Result<(), StorageError> {
-        let _ = input;
-        Err(StorageError::unavailable(
-            "workspace proxy health is not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists persisted provisioner daemons for deployment health checks.
     async fn list_provisioner_daemons_for_health(
@@ -1876,12 +1831,7 @@ pub trait OperationalStore: Send + Sync {
         user_id: Uuid,
         public_key: &str,
         private_key: &str,
-    ) -> Result<GitSshKeyRecord, StorageError> {
-        let _ = (user_id, public_key, private_key);
-        Err(StorageError::unavailable(
-            "git ssh keys are not implemented",
-        ))
-    }
+    ) -> Result<GitSshKeyRecord, StorageError>;
 
     /// Inserts a new file record.
     async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError>;
@@ -1894,10 +1844,7 @@ pub trait OperationalStore: Send + Sync {
         &self,
         hash: &str,
         creator_id: Uuid,
-    ) -> Result<Option<FileRecord>, StorageError> {
-        let _ = (hash, creator_id);
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    ) -> Result<Option<FileRecord>, StorageError>;
 
     /// Deletes a file by stable identifier.
     ///
@@ -1918,12 +1865,7 @@ pub trait InsightsStore: Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<TemplateInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights are not implemented",
-        ))
-    }
+    ) -> Result<TemplateInsightsResponse, StorageError>;
 
     /// Returns template insights broken down by interval.
     async fn get_template_insights_by_interval(
@@ -1932,12 +1874,7 @@ pub trait InsightsStore: Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights by interval are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError>;
 
     /// Returns per-user activity insights for a time range.
     async fn get_user_activity_insights(
@@ -1945,12 +1882,7 @@ pub trait InsightsStore: Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserActivityInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user activity insights are not implemented",
-        ))
-    }
+    ) -> Result<UserActivityInsightsResponse, StorageError>;
 
     /// Returns per-user latency insights for a time range.
     async fn get_user_latency_insights(
@@ -1958,12 +1890,7 @@ pub trait InsightsStore: Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserLatencyInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user latency insights are not implemented",
-        ))
-    }
+    ) -> Result<UserLatencyInsightsResponse, StorageError>;
 
     /// Returns user status counts over time for the deployment.
     async fn get_user_status_counts(
@@ -1971,12 +1898,7 @@ pub trait InsightsStore: Send + Sync {
         timezone: &str,
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
-    ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = (timezone, start_time, end_time);
-        Err(StorageError::unavailable(
-            "user status counts are not implemented",
-        ))
-    }
+    ) -> Result<GetUserStatusCountsResponse, StorageError>;
 }
 
 /// Storage contract for provisioner job lifecycle, daemons, keys, logs, and timings.
@@ -2697,12 +2619,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         user_id: Uuid,
         public_key: &str,
         private_key: &str,
-    ) -> Result<GitSshKeyRecord, StorageError> {
-        let _ = (user_id, public_key, private_key);
-        Err(StorageError::unavailable(
-            "git ssh keys are not implemented",
-        ))
-    }
+    ) -> Result<GitSshKeyRecord, StorageError>;
 
     /// Inserts a new file record.
     async fn insert_file(&self, input: InsertFileInput) -> Result<InsertFileResult, StorageError>;
@@ -2715,10 +2632,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         hash: &str,
         creator_id: Uuid,
-    ) -> Result<Option<FileRecord>, StorageError> {
-        let _ = (hash, creator_id);
-        Err(StorageError::unavailable("file storage is not implemented"))
-    }
+    ) -> Result<Option<FileRecord>, StorageError>;
 
     /// Deletes a file by stable identifier.
     ///
@@ -2736,36 +2650,21 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         user_id: Uuid,
         provider_id: &str,
-    ) -> Result<Option<ExternalAuthLinkRecord>, StorageError> {
-        let _ = (user_id, provider_id);
-        Err(StorageError::unavailable(
-            "external auth links are not implemented",
-        ))
-    }
+    ) -> Result<Option<ExternalAuthLinkRecord>, StorageError>;
 
     /// Deletes one external-auth link for a user.
     async fn delete_external_auth_link(
         &self,
         user_id: Uuid,
         provider_id: &str,
-    ) -> Result<bool, StorageError> {
-        let _ = (user_id, provider_id);
-        Err(StorageError::unavailable(
-            "external auth links are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Inserts or updates one external-auth link for a user.
     async fn upsert_external_auth_link(
         &self,
         user_id: Uuid,
         link: &UpsertExternalAuthLinkInput,
-    ) -> Result<ExternalAuthLinkRecord, StorageError> {
-        let _ = (user_id, link);
-        Err(StorageError::unavailable(
-            "external auth links are not implemented",
-        ))
-    }
+    ) -> Result<ExternalAuthLinkRecord, StorageError>;
 
     // ── InsightsStore delegate methods ──────────────────────────────
 
@@ -2779,12 +2678,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<TemplateInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights are not implemented",
-        ))
-    }
+    ) -> Result<TemplateInsightsResponse, StorageError>;
 
     /// Returns template insights broken down by interval.
     async fn get_template_insights_by_interval(
@@ -2793,12 +2687,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         end_time: OffsetDateTime,
         interval: InsightsReportInterval,
         template_ids: Vec<Uuid>,
-    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError> {
-        let _ = (start_time, end_time, interval, template_ids);
-        Err(StorageError::unavailable(
-            "template insights by interval are not implemented",
-        ))
-    }
+    ) -> Result<Vec<TemplateInsightsIntervalReport>, StorageError>;
 
     /// Returns per-user activity insights for a time range.
     async fn get_user_activity_insights(
@@ -2806,12 +2695,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserActivityInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user activity insights are not implemented",
-        ))
-    }
+    ) -> Result<UserActivityInsightsResponse, StorageError>;
 
     /// Returns per-user latency insights for a time range.
     async fn get_user_latency_insights(
@@ -2819,12 +2703,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
         template_ids: Vec<Uuid>,
-    ) -> Result<UserLatencyInsightsResponse, StorageError> {
-        let _ = (start_time, end_time, template_ids);
-        Err(StorageError::unavailable(
-            "user latency insights are not implemented",
-        ))
-    }
+    ) -> Result<UserLatencyInsightsResponse, StorageError>;
 
     /// Returns user status counts over time.
     async fn get_user_status_counts(
@@ -2832,12 +2711,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         timezone: &str,
         start_time: OffsetDateTime,
         end_time: OffsetDateTime,
-    ) -> Result<GetUserStatusCountsResponse, StorageError> {
-        let _ = (timezone, start_time, end_time);
-        Err(StorageError::unavailable(
-            "user status counts are not implemented",
-        ))
-    }
+    ) -> Result<GetUserStatusCountsResponse, StorageError>;
 
     // -----------------------------------------------------------------------
     // Tasks
@@ -3377,12 +3251,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         job_id: Uuid,
         after: Option<i64>,
-    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
-        let _ = (job_id, after);
-        Err(StorageError::unavailable(
-            "provisioner job logs are not implemented",
-        ))
-    }
+    ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError>;
 
     /// Lists provisioner job timings.
     async fn list_provisioner_job_timings(
@@ -3621,12 +3490,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         template_id: Uuid,
         method: Option<&str>,
-    ) -> Result<Option<NotificationTemplate>, StorageError> {
-        let _ = (template_id, method);
-        Err(StorageError::unavailable(
-            "notification templates are not implemented",
-        ))
-    }
+    ) -> Result<Option<NotificationTemplate>, StorageError>;
 
     /// Returns notification preferences for a user.
     async fn get_user_notification_preferences(
@@ -3640,12 +3504,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         user_id: Uuid,
         template_ids: &[Uuid],
         disableds: &[bool],
-    ) -> Result<(), StorageError> {
-        let _ = (user_id, template_ids, disableds);
-        Err(StorageError::unavailable(
-            "notification preferences are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists inbox notifications for a user with optional filtering.
     async fn get_filtered_inbox_notifications(
@@ -3655,12 +3514,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         targets: Option<&[Uuid]>,
         read_status: &str,
         created_before: Option<OffsetDateTime>,
-    ) -> Result<Vec<InboxNotification>, StorageError> {
-        let _ = (user_id, templates, targets, read_status, created_before);
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    ) -> Result<Vec<InboxNotification>, StorageError>;
 
     /// Counts unread inbox notifications for a user.
     async fn count_unread_inbox_notifications(&self, user_id: Uuid) -> Result<i64, StorageError>;
@@ -3676,24 +3530,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         id: Uuid,
         read_at: Option<OffsetDateTime>,
-    ) -> Result<(), StorageError> {
-        let _ = (id, read_at);
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Marks all unread inbox notifications as read for a user.
     async fn mark_all_inbox_notifications_as_read(
         &self,
         user_id: Uuid,
         read_at: OffsetDateTime,
-    ) -> Result<(), StorageError> {
-        let _ = (user_id, read_at);
-        Err(StorageError::unavailable(
-            "inbox notifications are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Lists webpush subscriptions for a user.
     async fn get_webpush_subscriptions_by_user_id(
@@ -3708,24 +3552,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         endpoint: &str,
         p256dh_key: &str,
         auth_key: &str,
-    ) -> Result<(), StorageError> {
-        let _ = (user_id, endpoint, p256dh_key, auth_key);
-        Err(StorageError::unavailable(
-            "webpush subscriptions are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     /// Deletes a webpush subscription by user ID and endpoint.
     async fn delete_webpush_subscription_by_user_and_endpoint(
         &self,
         user_id: Uuid,
         endpoint: &str,
-    ) -> Result<bool, StorageError> {
-        let _ = (user_id, endpoint);
-        Err(StorageError::unavailable(
-            "webpush subscriptions are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Deletes webpush subscriptions by their IDs.
     async fn delete_webpush_subscriptions(&self, ids: &[Uuid]) -> Result<(), StorageError>;
@@ -3746,19 +3580,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         public_key: &str,
         private_key: &str,
-    ) -> Result<(), StorageError> {
-        let _ = (public_key, private_key);
-        Err(StorageError::unavailable(
-            "webpush VAPID keys are not implemented",
-        ))
-    }
+    ) -> Result<(), StorageError>;
 
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
-    async fn list_oauth2_provider_apps(
-        &self,
-    ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
+    async fn list_oauth2_provider_apps(&self)
+    -> Result<Vec<OAuth2ProviderAppRecord>, StorageError>;
 
     /// Creates an OAuth2 provider app.
     async fn create_oauth2_provider_app(
@@ -3912,24 +3740,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         limit: u32,
         max_attempt_count: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        let _ = (limit, max_attempt_count);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError>;
 
     /// Updates the status of a notification message after dispatch.
     async fn update_notification_message_status(
         &self,
         message_id: Uuid,
         status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        let _ = (message_id, status);
-        Err(StorageError::unavailable(
-            "notification messages are not implemented",
-        ))
-    }
+    ) -> Result<bool, StorageError>;
 
     /// Increments the attempt count for a notification message.
     async fn increment_notification_message_attempt_count(
@@ -3961,12 +3779,7 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         jwt: &str,
         claims: &Value,
-    ) -> Result<LicenseRecord, StorageError> {
-        let _ = (jwt, claims);
-        Err(StorageError::unavailable(
-            "license storage is not implemented",
-        ))
-    }
+    ) -> Result<LicenseRecord, StorageError>;
 
     /// Deletes a license record by its numeric identifier.
     async fn delete_license(&self, id: i32) -> Result<bool, StorageError>;
@@ -5395,6 +5208,22 @@ where
     ) -> Result<bool, StorageError> {
         AppStore::increment_notification_message_attempt_count(self, message_id).await
     }
+
+    async fn acquire_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        AppStore::acquire_pending_notification_messages(self, limit, max_attempt_count).await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        AppStore::update_notification_message_status(self, message_id, status).await
+    }
 }
 
 #[async_trait]
@@ -5926,6 +5755,26 @@ where
             .increment_notification_message_attempt_count(message_id)
             .await
     }
+
+    async fn acquire_pending_notification_messages(
+        &self,
+        limit: u32,
+        max_attempt_count: u32,
+    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        (**self)
+            .acquire_pending_notification_messages(limit, max_attempt_count)
+            .await
+    }
+
+    async fn update_notification_message_status(
+        &self,
+        message_id: Uuid,
+        status: crate::identity::NotificationMessageStatus,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .update_notification_message_status(message_id, status)
+            .await
+    }
 }
 
 #[async_trait]
@@ -6054,6 +5903,21 @@ where
 
     async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
         AppStore::delete_file(self, file_id).await
+    }
+
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        AppStore::batch_insert_workspace_build_parameters(self, params).await
+    }
+
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        AppStore::batch_update_workspace_last_used_at(self, ids, last_used_at).await
     }
 
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
@@ -6191,6 +6055,25 @@ where
 
     async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
         (**self).delete_file(file_id).await
+    }
+
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .batch_insert_workspace_build_parameters(params)
+            .await
+    }
+
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        (**self)
+            .batch_update_workspace_last_used_at(ids, last_used_at)
+            .await
     }
 
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
