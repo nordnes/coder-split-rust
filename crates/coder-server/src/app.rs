@@ -34327,6 +34327,8 @@ pub(crate) mod tests {
         let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let template_id = Uuid::new_v4();
+        let mut template_disabled_map = HashMap::new();
+        template_disabled_map.insert(template_id.to_string(), true);
 
         let response = call(
             app.clone(),
@@ -34334,11 +34336,7 @@ pub(crate) mod tests {
                 Method::PUT,
                 "/api/v2/users/me/notifications/preferences",
                 &session_token,
-                &json!({
-                    "template_disabled_map": {
-                        template_id.to_string(): true,
-                    }
-                }),
+                &json!({ "template_disabled_map": template_disabled_map }),
             )?,
         )
         .await?;
