@@ -41,7 +41,10 @@ use coder_core::{
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
 use coder_server::{AppState, build_router};
-use coder_workspaces::{ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker};
+use coder_workspaces::{
+    ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker, LifecycleScheduler,
+    parse_quiet_hours_schedule,
+};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use opentelemetry::trace::TracerProvider;
 use opentelemetry_otlp::WithExportConfig;
@@ -605,6 +608,15 @@ struct ServerArgs {
     )]
     telemetry_flush_interval_secs: u64,
 
+    /// Poll interval in seconds for the lifecycle scheduler (autostart/autostop).
+    #[arg(
+        long,
+        env = "CODER_LIFECYCLE_CHECK_INTERVAL",
+        default_value_t = 30,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    lifecycle_check_interval_secs: u64,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -853,6 +865,15 @@ async fn run() -> Result<(), MainError> {
     let (_autobuild_executor, autobuild_handle) =
         AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
 
+    // Start the lifecycle scheduler (autostart/autostop/failed-stop retry).
+    let quiet_hours = parse_quiet_hours_schedule(&config.workspace.default_quiet_hours_schedule);
+    let lifecycle_scheduler = LifecycleScheduler::start(
+        store.clone(),
+        config.worker.lifecycle_check_interval_secs,
+        quiet_hours,
+        CancellationToken::new(),
+    );
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -943,6 +964,12 @@ async fn run() -> Result<(), MainError> {
     //     so in-flight DB queries finish before the pool is closed.
     coordinator.register("dormancy_checker", async move {
         dormancy_worker.join().await;
+    });
+
+    // 4d. Cancel the lifecycle scheduler and await completion so in-flight
+    //     DB queries finish before the pool is closed.
+    coordinator.register("lifecycle_scheduler", async move {
+        lifecycle_scheduler.join().await;
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight
@@ -1148,6 +1175,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             activity_bump_interval_secs: args.activity_bump_interval_secs,
             dormancy_check_interval_secs: args.dormancy_check_interval_secs,
             telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
+            lifecycle_check_interval_secs: args.lifecycle_check_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,
