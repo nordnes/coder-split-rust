@@ -1502,7 +1502,7 @@ pub(crate) mod tests {
         licenses: Mutex<HashMap<i32, LicenseRecord>>,
         license_next_id: Mutex<i32>,
         // VAPID keys
-        vapid_keys: Mutex<Option<crate::api::VapidKeyPair>>,
+        vapid_keys: Mutex<Option<coder_core::api::VapidKeyPair>>,
     }
 
     impl FakeStore {
@@ -4928,7 +4928,7 @@ pub(crate) mod tests {
 
         async fn get_webpush_vapid_keys(
             &self,
-        ) -> Result<Option<crate::api::VapidKeyPair>, StorageError> {
+        ) -> Result<Option<coder_core::api::VapidKeyPair>, StorageError> {
             Ok(self
                 .vapid_keys
                 .lock()
@@ -4944,11 +4944,12 @@ pub(crate) mod tests {
             *self
                 .vapid_keys
                 .lock()
-                .map_err(|error| StorageError::unavailable(error.to_string()))? =
-                Some(crate::api::VapidKeyPair {
-                    public_key: public_key.to_owned(),
-                    private_key: private_key.to_owned(),
-                });
+                .map_err(|error: std::sync::PoisonError<_>| {
+                    StorageError::unavailable(error.to_string())
+                })? = Some(coder_core::api::VapidKeyPair {
+                public_key: public_key.to_owned(),
+                private_key: private_key.to_owned(),
+            });
             Ok(())
         }
         // ----- Template Store Methods -----
@@ -32076,24 +32077,43 @@ pub(crate) mod tests {
         let endpoint2 = "https://push.example.com/sub2";
         let endpoint3 = "https://push.example.com/sub3";
 
-        // Insert subscriptions
-        let sub1 = store
+        // Insert subscriptions (returns () so we fetch IDs after)
+        store
             .insert_webpush_subscription(user_id, endpoint1, "p256dh1", "auth1")
             .await?;
-        let sub2 = store
+        store
             .insert_webpush_subscription(user_id, endpoint2, "p256dh2", "auth2")
             .await?;
-        let sub3 = store
+        store
             .insert_webpush_subscription(user_id, endpoint3, "p256dh3", "auth3")
             .await?;
 
+        // Fetch all subscriptions to get their IDs
+        let subs = store.get_webpush_subscriptions_by_user_id(user_id).await?;
+        assert_eq!(subs.len(), 3);
+
+        // Find IDs by endpoint
+        let id1 = subs
+            .iter()
+            .find(|s| s.endpoint == endpoint1)
+            .map(|s| s.id)
+            .unwrap();
+        let id2 = subs
+            .iter()
+            .find(|s| s.endpoint == endpoint2)
+            .map(|s| s.id)
+            .unwrap();
+        let id3 = subs
+            .iter()
+            .find(|s| s.endpoint == endpoint3)
+            .map(|s| s.id)
+            .unwrap();
+
         // Delete specific subscriptions by ID
-        store
-            .delete_webpush_subscriptions(&[sub1.id, sub3.id])
-            .await?;
+        store.delete_webpush_subscriptions(&[id1, id3]).await?;
         let remaining = store.get_webpush_subscriptions_by_user_id(user_id).await?;
         assert_eq!(remaining.len(), 1);
-        assert_eq!(remaining[0].id, sub2.id);
+        assert_eq!(remaining[0].id, id2);
 
         Ok(())
     }
