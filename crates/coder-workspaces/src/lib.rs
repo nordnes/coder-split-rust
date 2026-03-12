@@ -369,7 +369,7 @@ pub fn parse_quiet_hours_schedule(schedule: &str) -> Option<QuietHoursWindow> {
             let now_utc = chrono::Utc::now();
             let local_now = now_utc.with_timezone(&tz);
             let offset_secs = local_now.offset().fix().local_minus_utc();
-            let offset_hours = offset_secs / 3600;
+            let offset_hours = (offset_secs as f64 / 3600.0).round() as i32;
             // local_hour - offset_hours = utc_hour  (mod 24)
             ((i32::from(local_hour) - offset_hours).rem_euclid(24)) as u8
         }
@@ -1379,6 +1379,18 @@ pub trait LifecycleStore: Send + Sync + 'static {
         workspace_id: uuid::Uuid,
     ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError>;
 
+    /// Returns a workspace record by ID (needed to obtain organization_id).
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<WorkspaceRecord>, StorageError>;
+
+    /// Creates a new provisioner job for a workspace build.
+    async fn create_provisioner_job(
+        &self,
+        input: coder_core::CreateProvisionerJobInput,
+    ) -> Result<coder_core::template::ProvisionerJobRecord, StorageError>;
+
     /// Creates a new workspace build to trigger a start/stop transition.
     async fn insert_workspace_build(
         &self,
@@ -1400,6 +1412,20 @@ impl<T: AppStore + 'static> LifecycleStore for T {
         workspace_id: uuid::Uuid,
     ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
         AppStore::find_latest_workspace_build(self, workspace_id).await
+    }
+
+    async fn find_workspace_by_id(
+        &self,
+        workspace_id: uuid::Uuid,
+    ) -> Result<Option<WorkspaceRecord>, StorageError> {
+        AppStore::find_workspace_by_id(self, workspace_id, None).await
+    }
+
+    async fn create_provisioner_job(
+        &self,
+        input: coder_core::CreateProvisionerJobInput,
+    ) -> Result<coder_core::template::ProvisionerJobRecord, StorageError> {
+        AppStore::create_provisioner_job(self, input).await
     }
 
     async fn insert_workspace_build(
@@ -1606,6 +1632,27 @@ async fn trigger_workspace_start<S: LifecycleStore>(
         .await?
         .ok_or_else(|| StorageError::not_found("no build found for workspace"))?;
 
+    let workspace = store
+        .find_workspace_by_id(ws.id)
+        .await?
+        .ok_or_else(|| StorageError::not_found("workspace not found"))?;
+
+    let job_id = uuid::Uuid::new_v4();
+    let _job = store
+        .create_provisioner_job(coder_core::CreateProvisionerJobInput {
+            id: job_id,
+            created_at: now,
+            updated_at: now,
+            organization_id: workspace.organization_id,
+            initiator_id: ws.owner_id,
+            provisioner: "echo".to_owned(),
+            file_id: None,
+            job_type: "workspace_build".to_owned(),
+            input: serde_json::json!({}),
+            tags: std::collections::HashMap::new(),
+        })
+        .await?;
+
     let input = coder_core::ports::CreateWorkspaceBuildInput {
         id: uuid::Uuid::new_v4(),
         workspace_id: ws.id,
@@ -1613,7 +1660,7 @@ async fn trigger_workspace_start<S: LifecycleStore>(
         build_number: 0, // DB auto-computes the next build number on insert.
         transition: "start".to_owned(),
         initiator_id: ws.owner_id,
-        job_id: latest_build.job_id,
+        job_id,
         reason: "autostart".to_owned(),
         deadline: None,
         max_deadline: None,
@@ -1641,6 +1688,27 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
         .await?
         .ok_or_else(|| StorageError::not_found("no build found for workspace"))?;
 
+    let workspace = store
+        .find_workspace_by_id(ws.id)
+        .await?
+        .ok_or_else(|| StorageError::not_found("workspace not found"))?;
+
+    let job_id = uuid::Uuid::new_v4();
+    let _job = store
+        .create_provisioner_job(coder_core::CreateProvisionerJobInput {
+            id: job_id,
+            created_at: now,
+            updated_at: now,
+            organization_id: workspace.organization_id,
+            initiator_id: ws.owner_id,
+            provisioner: "echo".to_owned(),
+            file_id: None,
+            job_type: "workspace_build".to_owned(),
+            input: serde_json::json!({}),
+            tags: std::collections::HashMap::new(),
+        })
+        .await?;
+
     let input = coder_core::ports::CreateWorkspaceBuildInput {
         id: uuid::Uuid::new_v4(),
         workspace_id: ws.id,
@@ -1648,7 +1716,7 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
         build_number: 0, // DB auto-computes the next build number on insert.
         transition: "stop".to_owned(),
         initiator_id: ws.owner_id,
-        job_id: latest_build.job_id,
+        job_id,
         reason: reason.to_owned(),
         deadline: None,
         max_deadline: None,
@@ -3376,6 +3444,55 @@ mod tests {
             _workspace_id: uuid::Uuid,
         ) -> Result<Option<coder_core::ports::WorkspaceBuildRecord>, StorageError> {
             Ok(self.latest_build.clone())
+        }
+
+        async fn find_workspace_by_id(
+            &self,
+            workspace_id: uuid::Uuid,
+        ) -> Result<Option<WorkspaceRecord>, StorageError> {
+            let ws = self.workspaces.iter().find(|w| w.id == workspace_id);
+            Ok(ws.map(|w| WorkspaceRecord {
+                id: w.id,
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                deleted: false,
+                owner_id: w.owner_id,
+                organization_id: uuid::Uuid::new_v4(),
+                template_id: w.template_id,
+                name: w.name.clone(),
+                autostart_schedule: w.autostart_schedule.clone(),
+                ttl_ns: w.ttl_ns,
+                last_used_at: w.last_used_at,
+                dormant_at: w.dormant_at,
+                deleting_at: w.deleting_at,
+                automatic_updates: "never".to_owned(),
+                favorite: false,
+                next_start_at: None,
+            }))
+        }
+
+        async fn create_provisioner_job(
+            &self,
+            input: coder_core::CreateProvisionerJobInput,
+        ) -> Result<coder_core::template::ProvisionerJobRecord, StorageError> {
+            Ok(coder_core::template::ProvisionerJobRecord {
+                id: input.id,
+                created_at: input.created_at,
+                updated_at: input.updated_at,
+                started_at: None,
+                canceled_at: None,
+                completed_at: None,
+                error: String::new(),
+                organization_id: input.organization_id,
+                initiator_id: input.initiator_id,
+                provisioner: input.provisioner,
+                job_status: "pending".to_owned(),
+                file_id: input.file_id,
+                tags: std::collections::HashMap::new(),
+                worker_id: None,
+                input: input.input,
+                job_type: input.job_type,
+            })
         }
 
         async fn insert_workspace_build(

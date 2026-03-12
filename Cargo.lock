@@ -812,6 +812,7 @@ dependencies = [
  "chrono-tz",
  "coder-core",
  "cron",
+ "serde_json",
  "thiserror 2.0.18",
  "time",
  "tokio",
