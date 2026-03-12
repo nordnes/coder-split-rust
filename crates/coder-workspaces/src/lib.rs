@@ -1938,7 +1938,7 @@ mod tests {
         async fn batch_update_workspace_last_used_at(
             &self,
             _ids: &[uuid::Uuid],
-            _last_used_at: time::OffsetDateTime,
+            _last_used_at: OffsetDateTime,
         ) -> Result<u64, StorageError> {
             Err(StorageError::unavailable("not implemented in mock"))
         }
