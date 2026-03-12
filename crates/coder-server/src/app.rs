@@ -58,6 +58,7 @@ use crate::handlers::mcp::*;
 use crate::handlers::notifications::*;
 use crate::handlers::oauth2::*;
 use crate::handlers::organizations::*;
+use crate::handlers::scim::*;
 use crate::handlers::tasks::*;
 use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
@@ -269,6 +270,17 @@ pub fn build_router(
         .route(
             "/gitauth/{externalauth}/callback",
             get(get_external_auth_callback_by_id),
+        )
+        // SCIM 2.0 user provisioning endpoints.
+        .route(
+            "/scim/v2/Users",
+            get(scim_get_users).post(scim_post_user),
+        )
+        .route(
+            "/scim/v2/Users/{id}",
+            get(scim_get_user)
+                .patch(scim_patch_user)
+                .put(scim_put_user),
         )
         .nest(
             "/api/v2",
