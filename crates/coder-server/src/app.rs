@@ -1333,9 +1333,9 @@ pub(crate) mod tests {
     use coder_core::{
         AcquireProvisionerJobInput, ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord,
         AppStore, AuditLog, AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
-        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatFileRecord,
-        ChatInputPart, ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord,
-        ChatStatus, CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
+        CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatInputPart,
+        ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
+        CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
         CreateFirstUserRequest, CreateFirstUserStoreError, CreateGroupInput,
         CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
@@ -32152,7 +32152,7 @@ pub(crate) mod tests {
         assert_eq!(chat_file.name, "readme.md");
         assert_eq!(chat_file.data, b"# Hello");
 
-        // Different owner should not find the chat file
+        // Non-existent ID should not find any chat file
         let not_found = store.find_chat_file_by_id(Uuid::new_v4()).await?;
         assert!(
             not_found.is_none(),
