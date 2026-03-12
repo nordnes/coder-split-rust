@@ -1083,6 +1083,12 @@ pub struct WorkspaceTransitionRow {
     pub template_time_til_dormant_autodelete: i64,
     /// Owner's account status (e.g. "active", "suspended").
     pub owner_status: String,
+    /// Latest build identifier.
+    pub build_id: Uuid,
+    /// Latest build max deadline.
+    pub max_deadline: Option<OffsetDateTime>,
+    /// Template: activity bump duration (ns).
+    pub activity_bump_ns: i64,
 }
 
 /// Errors surfaced by storage backends.

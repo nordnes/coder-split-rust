@@ -68,6 +68,8 @@ pub struct ServerConfig {
     pub healthcheck: HealthcheckConfig,
     /// Workspace default settings.
     pub workspace: WorkspaceConfig,
+    /// Background worker interval settings.
+    pub worker: WorkerConfig,
     /// Whether the Swagger API docs endpoint is enabled.
     pub swagger_enabled: bool,
     /// Whether to periodically check for Coder updates.
@@ -555,6 +557,31 @@ impl ServerConfig {
                 env: "CODER_ALLOW_WORKSPACE_RENAMES",
                 default: Some("false"),
                 description: "Whether workspace renames are allowed.",
+            },
+            // -- Worker Intervals --
+            ConfigOption {
+                name: "notification-dispatch-interval",
+                env: "CODER_NOTIFICATION_DISPATCH_INTERVAL",
+                default: Some("10"),
+                description: "Poll interval in seconds for the notification dispatch worker.",
+            },
+            ConfigOption {
+                name: "activity-bump-interval",
+                env: "CODER_ACTIVITY_BUMP_INTERVAL",
+                default: Some("10"),
+                description: "Poll interval in seconds for the activity bump worker.",
+            },
+            ConfigOption {
+                name: "dormancy-check-interval",
+                env: "CODER_DORMANCY_CHECK_INTERVAL",
+                default: Some("60"),
+                description: "Poll interval in seconds for the dormancy checker worker.",
+            },
+            ConfigOption {
+                name: "telemetry-flush-interval",
+                env: "CODER_TELEMETRY_FLUSH_INTERVAL",
+                default: Some("1800"),
+                description: "Flush interval in seconds for the telemetry batching worker.",
             },
             // -- Security --
             ConfigOption {
@@ -1060,6 +1087,30 @@ impl Default for WorkspaceConfig {
     }
 }
 
+/// Background worker interval configuration.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkerConfig {
+    /// Poll interval in seconds for the notification dispatch worker.
+    pub notification_dispatch_interval_secs: u64,
+    /// Poll interval in seconds for the activity bump worker.
+    pub activity_bump_interval_secs: u64,
+    /// Poll interval in seconds for the dormancy checker worker.
+    pub dormancy_check_interval_secs: u64,
+    /// Flush interval in seconds for the telemetry batching worker.
+    pub telemetry_flush_interval_secs: u64,
+}
+
+impl Default for WorkerConfig {
+    fn default() -> Self {
+        Self {
+            notification_dispatch_interval_secs: 10,
+            activity_bump_interval_secs: 10,
+            dormancy_check_interval_secs: 60,
+            telemetry_flush_interval_secs: 1800,
+        }
+    }
+}
+
 // -- Public (redacted) configuration types --
 
 /// Redacted deployment configuration exposed over HTTP.
@@ -1226,6 +1277,7 @@ mod tests {
             dangerous: DangerousConfig::default(),
             healthcheck: HealthcheckConfig::default(),
             workspace: WorkspaceConfig::default(),
+            worker: WorkerConfig::default(),
             swagger_enabled: true,
             update_check: false,
             ssh_keygen_algorithm: "ed25519".to_owned(),
