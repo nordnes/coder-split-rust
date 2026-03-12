@@ -2,6 +2,7 @@
 
 use super::*;
 
+/// GET /api/v2/chats — list chats owned by the authenticated user.
 pub(crate) async fn list_chats(
     State(state): State<AppState>,
     Query(query): Query<ChatsQuery>,
@@ -21,6 +22,7 @@ pub(crate) async fn list_chats(
     Ok(Json(chat_responses).into_response())
 }
 
+/// POST /api/v2/chats — create a new chat conversation.
 pub(crate) async fn create_chat(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -88,6 +90,7 @@ pub(crate) async fn create_chat(
         .into_response())
 }
 
+/// GET /api/v2/chats/:id — return a single chat by ID.
 pub(crate) async fn get_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
@@ -125,6 +128,7 @@ pub(crate) async fn get_chat(
     .into_response())
 }
 
+/// DELETE /api/v2/chats/:id — delete a chat conversation.
 pub(crate) async fn delete_chat(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
@@ -163,6 +167,7 @@ pub(crate) async fn delete_chat(
     Ok((StatusCode::OK, Json(ApiResponse::ok("Chat archived."))).into_response())
 }
 
+/// POST /api/v2/chats/:id/messages — append a message to a chat.
 pub(crate) async fn post_chat_message(
     State(state): State<AppState>,
     Path(chat_id): Path<Uuid>,
@@ -1284,6 +1289,7 @@ fn chat_model_config_response_from_record(
 // GET /api/v2/chats/providers
 // ---------------------------------------------------------------------------
 
+/// GET /api/v2/chats/providers — list configured chat provider backends.
 pub(crate) async fn list_chat_providers(
     State(state): State<AppState>,
     headers: HeaderMap,

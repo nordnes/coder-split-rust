@@ -70,7 +70,7 @@ pub struct TelemetryWorker {
     config: TelemetryConfig,
     counters: Arc<Counters>,
     /// Handle to the background task — dropping it cancels the worker.
-    _task: Option<tokio::task::JoinHandle<()>>,
+    task: Option<tokio::task::JoinHandle<()>>,
     /// Shutdown signal sender.
     shutdown_tx: Option<mpsc::Sender<()>>,
 }
@@ -90,7 +90,7 @@ impl TelemetryWorker {
                 Self {
                     config,
                     counters,
-                    _task: None,
+                    task: None,
                     shutdown_tx: None,
                 },
                 reporter,
@@ -118,7 +118,7 @@ impl TelemetryWorker {
             Self {
                 config,
                 counters,
-                _task: Some(task),
+                task: Some(task),
                 shutdown_tx: Some(shutdown_tx),
             },
             reporter,
@@ -126,6 +126,7 @@ impl TelemetryWorker {
     }
 
     /// Returns the current telemetry status.
+    #[must_use]
     pub fn status(&self) -> TelemetryStatus {
         TelemetryStatus {
             enabled: self.config.enabled,
@@ -144,7 +145,7 @@ impl TelemetryWorker {
             // Signal shutdown — the worker will drain remaining events.
             drop(tx);
         }
-        if let Some(task) = self._task.take() {
+        if let Some(task) = self.task.take() {
             if let Err(e) = task.await {
                 warn!(error = %e, "telemetry worker task panicked during shutdown");
             }
@@ -171,22 +172,19 @@ async fn run_worker(
         tokio::select! {
             // Receive a new event.
             maybe_event = event_rx.recv() => {
-                match maybe_event {
-                    Some(event) => {
-                        counters.events_collected.fetch_add(1, Ordering::Relaxed);
-                        buffer.push(event);
+                if let Some(event) = maybe_event {
+                    counters.events_collected.fetch_add(1, Ordering::Relaxed);
+                    buffer.push(event);
 
-                        // Force-flush when the buffer is full.
-                        if buffer.len() >= config.max_batch_size {
-                            flush_batch(&client, &config, &counters, &mut buffer).await;
-                        }
-                    }
-                    None => {
-                        // All senders dropped — drain and exit.
-                        debug!("telemetry event channel closed, flushing remaining events");
+                    // Force-flush when the buffer is full.
+                    if buffer.len() >= config.max_batch_size {
                         flush_batch(&client, &config, &counters, &mut buffer).await;
-                        return;
                     }
+                } else {
+                    // All senders dropped — drain and exit.
+                    debug!("telemetry event channel closed, flushing remaining events");
+                    flush_batch(&client, &config, &counters, &mut buffer).await;
+                    return;
                 }
             }
 
@@ -223,7 +221,7 @@ async fn flush_batch(
         return;
     }
 
-    let events: Vec<TelemetryEvent> = buffer.drain(..).collect();
+    let events: Vec<TelemetryEvent> = std::mem::take(buffer);
     let count = events.len() as u64;
 
     let snapshot = TelemetrySnapshot {
@@ -316,6 +314,7 @@ mod tests {
             endpoint: None,
             flush_interval: Duration::from_millis(50),
             max_batch_size: 10,
+            max_buffer_size: 8192,
             channel_capacity: 64,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
@@ -350,6 +349,7 @@ mod tests {
             // Long interval so periodic flush doesn't trigger.
             flush_interval: Duration::from_secs(3600),
             max_batch_size: 1000,
+            max_buffer_size: 8192,
             channel_capacity: 64,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);
@@ -385,6 +385,7 @@ mod tests {
             endpoint: None,
             flush_interval: Duration::from_secs(3600),
             max_batch_size: 5,
+            max_buffer_size: 8192,
             channel_capacity: 64,
         };
         let (mut worker, reporter) = TelemetryWorker::start(config);

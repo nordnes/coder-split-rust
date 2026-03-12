@@ -47,10 +47,7 @@ impl RetryStrategy {
                 max_delay,
                 ..
             } => {
-                let multiplier = match 1u64.checked_shl(attempt.min(31) as u32) {
-                    Some(v) => v,
-                    None => u64::MAX,
-                };
+                let multiplier = 1u64.checked_shl(attempt.min(31) as u32).unwrap_or(u64::MAX);
                 let base = initial_delay
                     .as_millis()
                     .saturating_mul(u128::from(multiplier));
@@ -129,9 +126,10 @@ where
 
     // This branch is only reachable when max_attempts is 0, which max(1)
     // prevents.  Still, satisfy the type checker.
+    #[allow(clippy::empty_loop)]
     Err(last_error.ok_or_else(|| {
         // SAFETY: unreachable because max_attempts >= 1.
-        // But we cannot panic (clippy::panic is denied), so we loop once.
+        // But we cannot panic (clippy::panic is denied), so we spin.
         // The for-loop above always returns.
         loop {}
     })?)

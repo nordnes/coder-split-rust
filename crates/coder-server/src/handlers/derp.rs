@@ -88,6 +88,7 @@ impl DerpRelay {
     ///
     /// Returns `true` if the frame was successfully queued, `false` if the
     /// destination peer is not connected or its buffer is full.
+    #[cfg_attr(not(test), allow(dead_code))] // Used in tests for targeted forwarding.
     async fn forward_to(&self, dest: &PeerId, frame: DerpFrame) -> bool {
         let peers = self.peers.read().await;
         if let Some(tx) = peers.get(dest) {
@@ -109,6 +110,7 @@ impl DerpRelay {
     }
 
     /// Returns the number of currently connected peers.
+    #[cfg_attr(not(test), allow(dead_code))] // Used in tests for assertions.
     async fn peer_count(&self) -> usize {
         let peers = self.peers.read().await;
         peers.len()

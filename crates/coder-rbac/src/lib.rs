@@ -149,7 +149,7 @@ pub enum ResourceType {
     Group,
     /// Group members.
     GroupMember,
-    /// IdP sync settings.
+    /// `IdP` sync settings.
     IdpsyncSettings,
     /// Inbox notifications.
     InboxNotification,
@@ -161,11 +161,11 @@ pub enum ResourceType {
     NotificationPreference,
     /// Notification templates.
     NotificationTemplate,
-    /// OAuth2 applications.
+    /// `OAuth2` applications.
     Oauth2App,
-    /// OAuth2 app code tokens.
+    /// `OAuth2` app code tokens.
     Oauth2AppCodeToken,
-    /// OAuth2 app secrets.
+    /// `OAuth2` app secrets.
     Oauth2AppSecret,
     /// Organizations.
     Organization,
@@ -331,7 +331,7 @@ pub const ALL_RESOURCE_TYPES: &[ResourceType] = &[
 
 /// Normalized resource kinds used by the Rust authorization and audit layers.
 ///
-/// Covers all variants from the PostgreSQL `resource_type` enum plus
+/// Covers all variants from the `PostgreSQL` `resource_type` enum plus
 /// Rust-only variants (`Authentication`, `ExternalAuth`) that are used in
 /// the authorization layer but do not appear in the database enum.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -367,9 +367,9 @@ pub enum ResourceKind {
     ConvertLogin,
     /// Deployment health settings.
     HealthSettings,
-    /// An OAuth2 provider application.
+    /// An `OAuth2` provider application.
     Oauth2ProviderApp,
-    /// An OAuth2 provider application secret.
+    /// An `OAuth2` provider application secret.
     Oauth2ProviderAppSecret,
     /// A custom role.
     CustomRole,
@@ -410,11 +410,11 @@ pub struct Object {
     pub org_id: Option<Uuid>,
     /// Optional resource ID.
     pub id: Option<Uuid>,
-    /// Whether this matches any org (disregards org_id).
+    /// Whether this matches any org (disregards `org_id`).
     pub any_org: bool,
-    /// Per-user ACL: user_id -> list of allowed actions.
+    /// Per-user ACL: `user_id` -> list of allowed actions.
     pub acl_user_list: HashMap<String, Vec<Action>>,
-    /// Per-group ACL: group_id -> list of allowed actions.
+    /// Per-group ACL: `group_id` -> list of allowed actions.
     pub acl_group_list: HashMap<String, Vec<Action>>,
 }
 
@@ -448,7 +448,7 @@ impl Object {
         self
     }
 
-    /// Sets any_org to true.
+    /// Sets `any_org` to true.
     #[must_use]
     pub fn any_organization(mut self) -> Self {
         self.org_id = None;
@@ -631,7 +631,7 @@ impl Scope {
         }
     }
 
-    /// Returns the built-in "application_connect" scope.
+    /// Returns the built-in `application_connect` scope.
     #[must_use]
     pub fn scope_application_connect() -> Self {
         Self {
@@ -1398,6 +1398,10 @@ impl Authorizer {
     /// 3. Check deny (negative) overrides first
     /// 4. Check positive permissions from roles
     /// 5. Check ACL lists
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Forbidden`] if the actor lacks the required permission.
     pub fn authorize(
         &self,
         actor: &Actor,
