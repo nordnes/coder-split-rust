@@ -1314,6 +1314,7 @@ pub(crate) mod tests {
         response::IntoResponse,
         routing::{get, post},
     };
+    use base64::Engine as _;
     use coder_audit::{AuditEvent, AuditSink};
     use coder_auth::{
         OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_TOKEN_HEADER,
@@ -32243,6 +32244,188 @@ pub(crate) mod tests {
             body.get("deployment_id").is_some(),
             "response should include 'deployment_id' field"
         );
+        Ok(())
+    }
+    // =====================================================================
+    // License & Entitlements handler tests
+    // =====================================================================
+
+    #[tokio::test]
+    async fn list_licenses_returns_empty_when_none() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/licenses", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let licenses = body.as_array().ok_or("expected array")?;
+        assert!(licenses.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_licenses_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::GET, "/api/v2/licenses")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_license_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/licenses",
+                &serde_json::json!({ "license": "fake" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_license_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::DELETE, "/api/v2/licenses/1")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_license_rejects_empty_body() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/licenses",
+                &session_token,
+                &serde_json::json!({ "license": "" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_license_stores_valid_jwt_format() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Create a minimal JWT with valid structure (header.payload.signature)
+        let header = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"alg":"HS256","typ":"JWT"}"#);
+        let payload = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .encode(r#"{"version":3,"account_id":"test"}"#);
+        let fake_jwt = format!("{}.{}.fakesig", header, payload);
+
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/licenses",
+                &session_token,
+                &serde_json::json!({ "license": fake_jwt }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        // Verify the license is now listed
+        let list_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/licenses", &session_token)?,
+        )
+        .await?;
+        let body = response_json(list_response).await?;
+        let licenses = body.as_array().ok_or("expected array")?;
+        assert_eq!(licenses.len(), 1);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_license_removes_stored_license() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Insert a license directly via the store
+        let claims = serde_json::json!({"version": 3, "account_id": "test"});
+        let record = store.insert_license("fake.jwt.token", &claims).await?;
+
+        // Delete it via the API
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/licenses/{}", record.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Verify it's gone
+        let list_response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/licenses", &session_token)?,
+        )
+        .await?;
+        let body = response_json(list_response).await?;
+        let licenses = body.as_array().ok_or("expected array")?;
+        assert!(licenses.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_license_returns_404_for_missing() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::DELETE, "/api/v2/licenses/999", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_entitlements_returns_unlicensed() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/entitlements", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("has_license").and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_entitlements_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::GET, "/api/v2/entitlements")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }
     #[tokio::test]

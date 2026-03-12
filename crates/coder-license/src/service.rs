@@ -269,7 +269,10 @@ impl<S: LicenseStore> LicenseService<S> {
 
             let show_warning_days: i64 = if ents.trial { 7 } else { 30 };
 
-            if days_to_expire > 0 && days_to_expire < show_warning_days {
+            if duration.is_negative() {
+                ents.warnings
+                    .push("Your license has expired. You are in a grace period.".to_owned());
+            } else if days_to_expire < show_warning_days {
                 let day_word = if days_to_expire == 1 { "day" } else { "days" };
                 ents.warnings.push(format!(
                     "Your license expires in {} {}.",
@@ -747,6 +750,108 @@ mod tests {
                 .entitlements()
                 .is_entitled(FeatureName::HighAvailability)
         );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_grace_period_warning_emitted() -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::Mutex;
+
+        struct FakeLicenseStore {
+            licenses: Mutex<Vec<LicenseRecord>>,
+        }
+
+        #[async_trait::async_trait]
+        impl LicenseStore for FakeLicenseStore {
+            async fn list_licenses(&self) -> Result<Vec<LicenseRecord>, coder_core::StorageError> {
+                Ok(self
+                    .licenses
+                    .lock()
+                    .map_err(|_| coder_core::StorageError::unavailable("lock poisoned"))?
+                    .clone())
+            }
+
+            async fn insert_license(
+                &self,
+                jwt: &str,
+                claims: &serde_json::Value,
+            ) -> Result<LicenseRecord, coder_core::StorageError> {
+                let record = LicenseRecord {
+                    id: 1,
+                    uuid: Uuid::new_v4(),
+                    uploaded_at: OffsetDateTime::now_utc(),
+                    jwt: jwt.to_owned(),
+                    claims: claims.clone(),
+                };
+                self.licenses
+                    .lock()
+                    .map_err(|_| coder_core::StorageError::unavailable("lock poisoned"))?
+                    .push(record.clone());
+                Ok(record)
+            }
+
+            async fn delete_license(&self, id: i32) -> Result<bool, coder_core::StorageError> {
+                let mut guard = self
+                    .licenses
+                    .lock()
+                    .map_err(|_| coder_core::StorageError::unavailable("lock poisoned"))?;
+                let before = guard.len();
+                guard.retain(|l| l.id != id);
+                Ok(guard.len() < before)
+            }
+        }
+
+        let secret = b"test-hmac-secret-for-grace-warning";
+        let validator = Arc::new(LicenseValidator::with_hmac_secret(secret));
+        let store = FakeLicenseStore {
+            licenses: Mutex::new(Vec::new()),
+        };
+        let service = LicenseService::new(store, validator);
+
+        // Create a license where license_expires is 5 days in the past
+        // but exp (JWT expiry / grace period end) is 25 days in the future.
+        let now = OffsetDateTime::now_utc();
+        let claims = LicenseClaims {
+            iss: "test".into(),
+            sub: "svc-test".into(),
+            aud: serde_json::Value::Null,
+            exp: (now + time::Duration::days(25)).unix_timestamp(),
+            nbf: (now - time::Duration::days(1)).unix_timestamp(),
+            iat: (now - time::Duration::days(1)).unix_timestamp(),
+            jti: "jti-grace-warn".into(),
+            license_expires: (now - time::Duration::days(5)).unix_timestamp(),
+            account_type: "salesforce".into(),
+            account_id: "acct-grace".into(),
+            trial: false,
+            feature_set: FeatureSet::Enterprise,
+            all_features: false,
+            version: CURRENT_VERSION,
+            features: HashMap::new(),
+            require_telemetry: false,
+            deployment_ids: Vec::new(),
+        };
+
+        let encoding_key = jsonwebtoken::EncodingKey::from_secret(secret);
+        let header = jsonwebtoken::Header {
+            alg: jsonwebtoken::Algorithm::HS256,
+            kid: Some("development".into()),
+            ..Default::default()
+        };
+        let token = jsonwebtoken::encode(&header, &claims, &encoding_key)?;
+
+        service.add_license(&token).await?;
+
+        // The license is in grace period — warnings should include the grace message.
+        let ents = service.entitlements();
+        let warnings = ents.warnings();
+        assert!(
+            warnings
+                .iter()
+                .any(|w| w.contains("Your license has expired")),
+            "Expected grace period warning, got: {:?}",
+            warnings,
+        );
+
         Ok(())
     }
 }
