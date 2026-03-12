@@ -7191,12 +7191,16 @@ pub(crate) mod tests {
             }
 
             // Look up the template to compute deleting_at.
+            // The SQL uses FROM templates ... AND templates.id = workspaces.template_id,
+            // so if the template is missing, no row is updated. Mirror that here.
             let templates = self
                 .templates
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            let template = templates.get(&ws.template_id);
-            let time_til_dormant_autodelete = template.map_or(0, |t| t.time_til_dormant_autodelete);
+            let Some(template) = templates.get(&ws.template_id) else {
+                return Ok(None);
+            };
+            let time_til_dormant_autodelete = template.time_til_dormant_autodelete;
 
             ws.dormant_at = dormant_at;
 

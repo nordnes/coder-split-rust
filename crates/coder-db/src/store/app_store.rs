@@ -5651,7 +5651,7 @@ impl AppStore for PostgresStore {
                 SET
                     dormant_at = $2,
                     last_used_at = CASE WHEN $2::timestamptz IS NULL THEN
-                        now() at time zone 'utc'
+                        now()
                     ELSE
                         last_used_at
                     END,
