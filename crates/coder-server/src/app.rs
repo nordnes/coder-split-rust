@@ -7278,8 +7278,20 @@ pub(crate) mod tests {
                         && build.transition == "start"
                         && (owner_status == "suspended"
                             || (build.deadline.is_some()
-                                && build.deadline
-                                    != Some(time::OffsetDateTime::UNIX_EPOCH)
+                                && {
+                                    // Go zero time: 0001-01-01 00:00:00 UTC
+                                    let go_zero = time::PrimitiveDateTime::new(
+                                        time::Date::from_calendar_date(
+                                            1,
+                                            time::Month::January,
+                                            1,
+                                        )
+                                        .unwrap_or(time::Date::MIN),
+                                        time::Time::MIDNIGHT,
+                                    )
+                                    .assume_utc();
+                                    build.deadline != Some(go_zero)
+                                }
                                 && build.deadline < Some(now))))
                     ||
                     // Autostart
