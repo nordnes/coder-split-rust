@@ -5224,22 +5224,6 @@ where
     ) -> Result<bool, StorageError> {
         AppStore::increment_notification_message_attempt_count(self, message_id).await
     }
-
-    async fn acquire_pending_notification_messages(
-        &self,
-        limit: u32,
-        max_attempt_count: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        AppStore::acquire_pending_notification_messages(self, limit, max_attempt_count).await
-    }
-
-    async fn update_notification_message_status(
-        &self,
-        message_id: Uuid,
-        status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        AppStore::update_notification_message_status(self, message_id, status).await
-    }
 }
 
 #[async_trait]
@@ -5791,26 +5775,6 @@ where
             .increment_notification_message_attempt_count(message_id)
             .await
     }
-
-    async fn acquire_pending_notification_messages(
-        &self,
-        limit: u32,
-        max_attempt_count: u32,
-    ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
-        (**self)
-            .acquire_pending_notification_messages(limit, max_attempt_count)
-            .await
-    }
-
-    async fn update_notification_message_status(
-        &self,
-        message_id: Uuid,
-        status: crate::identity::NotificationMessageStatus,
-    ) -> Result<bool, StorageError> {
-        (**self)
-            .update_notification_message_status(message_id, status)
-            .await
-    }
 }
 
 #[async_trait]
@@ -5954,21 +5918,6 @@ where
 
     async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
         AppStore::delete_file(self, file_id).await
-    }
-
-    async fn batch_insert_workspace_build_parameters(
-        &self,
-        params: Vec<WorkspaceBuildParameterRecord>,
-    ) -> Result<(), StorageError> {
-        AppStore::batch_insert_workspace_build_parameters(self, params).await
-    }
-
-    async fn batch_update_workspace_last_used_at(
-        &self,
-        ids: &[Uuid],
-        last_used_at: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
-        AppStore::batch_update_workspace_last_used_at(self, ids, last_used_at).await
     }
 
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
@@ -6125,25 +6074,6 @@ where
 
     async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError> {
         (**self).delete_file(file_id).await
-    }
-
-    async fn batch_insert_workspace_build_parameters(
-        &self,
-        params: Vec<WorkspaceBuildParameterRecord>,
-    ) -> Result<(), StorageError> {
-        (**self)
-            .batch_insert_workspace_build_parameters(params)
-            .await
-    }
-
-    async fn batch_update_workspace_last_used_at(
-        &self,
-        ids: &[Uuid],
-        last_used_at: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
-        (**self)
-            .batch_update_workspace_last_used_at(ids, last_used_at)
-            .await
     }
 
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
