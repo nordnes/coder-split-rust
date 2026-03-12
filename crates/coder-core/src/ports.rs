@@ -5836,6 +5836,21 @@ where
         AppStore::batch_insert_audit_logs(self, logs).await
     }
 
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        AppStore::batch_insert_workspace_build_parameters(self, params).await
+    }
+
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        AppStore::batch_update_workspace_last_used_at(self, ids, last_used_at).await
+    }
+
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         AppStore::health_settings(self).await
     }
@@ -5982,6 +5997,25 @@ where
         logs: Vec<PersistAuditLogInput>,
     ) -> Result<(), StorageError> {
         (**self).batch_insert_audit_logs(logs).await
+    }
+
+    async fn batch_insert_workspace_build_parameters(
+        &self,
+        params: Vec<WorkspaceBuildParameterRecord>,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .batch_insert_workspace_build_parameters(params)
+            .await
+    }
+
+    async fn batch_update_workspace_last_used_at(
+        &self,
+        ids: &[Uuid],
+        last_used_at: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        (**self)
+            .batch_update_workspace_last_used_at(ids, last_used_at)
+            .await
     }
 
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {

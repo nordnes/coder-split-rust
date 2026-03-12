@@ -33679,6 +33679,183 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Direct store tests: batch workspace build parameters
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_batch_insert_workspace_build_parameters() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let build_id = Uuid::new_v4();
+        let params = vec![
+            WorkspaceBuildParameterRecord {
+                workspace_build_id: build_id,
+                name: "region".to_owned(),
+                value: "us-east-1".to_owned(),
+            },
+            WorkspaceBuildParameterRecord {
+                workspace_build_id: build_id,
+                name: "instance_type".to_owned(),
+                value: "t3.micro".to_owned(),
+            },
+        ];
+        store
+            .batch_insert_workspace_build_parameters(params)
+            .await?;
+
+        let fetched = store.list_workspace_build_parameters(build_id).await?;
+        assert_eq!(fetched.len(), 2);
+        let names: Vec<&str> = fetched.iter().map(|p| p.name.as_str()).collect();
+        assert!(names.contains(&"region"));
+        assert!(names.contains(&"instance_type"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn store_batch_insert_workspace_build_parameters_empty() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+        store
+            .batch_insert_workspace_build_parameters(vec![])
+            .await?;
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct store tests: batch update workspace last_used_at
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_batch_update_workspace_last_used_at() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        let ws1_id = Uuid::new_v4();
+        let ws2_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let owner_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let earlier = now - time::Duration::hours(1);
+
+        store.insert_workspace(WorkspaceRecord {
+            id: ws1_id,
+            created_at: earlier,
+            updated_at: earlier,
+            owner_id,
+            organization_id: org_id,
+            template_id: Uuid::new_v4(),
+            deleted: false,
+            name: "ws1".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: earlier,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+        store.insert_workspace(WorkspaceRecord {
+            id: ws2_id,
+            created_at: earlier,
+            updated_at: earlier,
+            owner_id,
+            organization_id: org_id,
+            template_id: Uuid::new_v4(),
+            deleted: false,
+            name: "ws2".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: earlier,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        })?;
+
+        let updated = store
+            .batch_update_workspace_last_used_at(&[ws1_id, ws2_id], now)
+            .await?;
+        assert_eq!(updated, 2);
+
+        // Non-existent workspace should not count
+        let updated = store
+            .batch_update_workspace_last_used_at(&[Uuid::new_v4()], now)
+            .await?;
+        assert_eq!(updated, 0);
+
+        // Empty list
+        let updated = store.batch_update_workspace_last_used_at(&[], now).await?;
+        assert_eq!(updated, 0);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Direct store tests: workspace proxy health
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn store_workspace_proxy_health_upsert_and_list() -> Result<(), Box<dyn Error>> {
+        let (_state, store) = test_state_with_store(true)?;
+
+        // Initially empty
+        let proxies = store.list_workspace_proxies_for_health().await?;
+        assert!(proxies.is_empty(), "expected no proxies initially");
+
+        let proxy_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        store
+            .upsert_workspace_proxy_for_health(&WorkspaceProxyHealthInput {
+                id: proxy_id,
+                name: "proxy-us".to_owned(),
+                display_name: "US Proxy".to_owned(),
+                icon_url: String::new(),
+                path_app_url: "https://proxy-us.example.com".to_owned(),
+                wildcard_hostname: "*.proxy-us.example.com".to_owned(),
+                derp_enabled: true,
+                derp_only: false,
+                created_at: now,
+                updated_at: now,
+                deleted: false,
+                version: "1.0.0".to_owned(),
+            })
+            .await?;
+
+        let proxies = store.list_workspace_proxies_for_health().await?;
+        assert_eq!(proxies.len(), 1);
+        assert_eq!(proxies[0].id, proxy_id);
+        assert_eq!(proxies[0].name, "proxy-us");
+        assert_eq!(proxies[0].display_name, "US Proxy");
+        assert!(proxies[0].derp_enabled);
+
+        // Upsert same proxy with updated name
+        store
+            .upsert_workspace_proxy_for_health(&WorkspaceProxyHealthInput {
+                id: proxy_id,
+                name: "proxy-us-updated".to_owned(),
+                display_name: "US Proxy Updated".to_owned(),
+                icon_url: String::new(),
+                path_app_url: "https://proxy-us.example.com".to_owned(),
+                wildcard_hostname: "*.proxy-us.example.com".to_owned(),
+                derp_enabled: false,
+                derp_only: true,
+                created_at: now,
+                updated_at: now,
+                deleted: false,
+                version: "2.0.0".to_owned(),
+            })
+            .await?;
+
+        let proxies = store.list_workspace_proxies_for_health().await?;
+        assert_eq!(proxies.len(), 1, "upsert should not create a second entry");
+        assert_eq!(proxies[0].name, "proxy-us-updated");
+        assert!(!proxies[0].derp_enabled);
+
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Enterprise store method tests (licenses, VAPID keys, webpush bulk delete)
     // -----------------------------------------------------------------------
 
