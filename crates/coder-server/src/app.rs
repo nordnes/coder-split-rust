@@ -21297,6 +21297,605 @@ pub(crate) mod tests {
         Ok(())
     }
 
+
+
+    // -----------------------------------------------------------------------
+    // OAuth2 FakeStore direct unit tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fake_store_oauth2_app_crud() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+
+        // Create app
+        let input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Test App".to_owned(),
+            icon: "https://example.com/icon.png".to_owned(),
+            callback_url: "https://example.com/callback".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&input).await?;
+        assert_eq!(app.name, "Test App");
+        assert_eq!(app.callback_url, "https://example.com/callback");
+        assert_eq!(app.created_by, Some(user_id));
+
+        // Find by ID
+        let found = store.find_oauth2_provider_app_by_id(app.id).await?;
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().map(|a| a.name.as_str()), Some("Test App"));
+
+        // Find non-existent
+        let not_found = store.find_oauth2_provider_app_by_id(Uuid::new_v4()).await?;
+        assert!(not_found.is_none());
+
+        // List
+        let apps = store.list_oauth2_provider_apps().await?;
+        assert_eq!(apps.len(), 1);
+
+        // Update
+        let update_input = coder_core::identity::UpdateOAuth2ProviderAppInput {
+            id: app.id,
+            name: "Updated App".to_owned(),
+            icon: "https://example.com/new-icon.png".to_owned(),
+            callback_url: "https://example.com/updated".to_owned(),
+            redirect_uris: vec!["https://alt.example.com".to_owned()],
+        };
+        let updated = store.update_oauth2_provider_app(&update_input).await?;
+        assert!(updated.is_some());
+        let updated = updated.ok_or("expected updated app")?;
+        assert_eq!(updated.name, "Updated App");
+        assert_eq!(updated.callback_url, "https://example.com/updated");
+        assert_eq!(updated.redirect_uris, vec!["https://alt.example.com"]);
+
+        // Update non-existent
+        let update_missing = coder_core::identity::UpdateOAuth2ProviderAppInput {
+            id: Uuid::new_v4(),
+            name: "Ghost".to_owned(),
+            icon: String::new(),
+            callback_url: "https://ghost.example.com".to_owned(),
+            redirect_uris: vec![],
+        };
+        let missing = store.update_oauth2_provider_app(&update_missing).await?;
+        assert!(missing.is_none());
+
+        // Delete
+        let deleted = store.delete_oauth2_provider_app(app.id).await?;
+        assert!(deleted);
+        let after_delete = store.list_oauth2_provider_apps().await?;
+        assert!(after_delete.is_empty());
+
+        // Delete non-existent
+        let not_deleted = store.delete_oauth2_provider_app(Uuid::new_v4()).await?;
+        assert!(!not_deleted);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_oauth2_secret_crud() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+
+        // Create app first
+        let app_input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Secret App".to_owned(),
+            icon: String::new(),
+            callback_url: "https://example.com/cb".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&app_input).await?;
+
+        // Create secret
+        let prefix = b"prefix123";
+        let hashed = b"hashed_secret_bytes";
+        let display = "sec_****xyz";
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, prefix, hashed, display)
+            .await?;
+        assert_eq!(secret.app_id, app.id);
+        assert_eq!(secret.secret_prefix, prefix);
+        assert_eq!(secret.hashed_secret, hashed);
+        assert_eq!(secret.display_secret, display);
+        assert!(secret.last_used_at.is_none());
+
+        // Find by ID
+        let found = store
+            .find_oauth2_provider_app_secret_by_id(secret.id)
+            .await?;
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().map(|s| s.id), Some(secret.id));
+
+        // Find by prefix
+        let found_prefix = store
+            .find_oauth2_provider_app_secret_by_prefix(prefix)
+            .await?;
+        assert!(found_prefix.is_some());
+        assert_eq!(found_prefix.as_ref().map(|s| s.id), Some(secret.id));
+
+        // Find by non-existent prefix
+        let not_found = store
+            .find_oauth2_provider_app_secret_by_prefix(b"nonexistent")
+            .await?;
+        assert!(not_found.is_none());
+
+        // List secrets for app
+        let secrets = store.list_oauth2_provider_app_secrets(app.id).await?;
+        assert_eq!(secrets.len(), 1);
+
+        // List secrets for non-existent app
+        let empty = store
+            .list_oauth2_provider_app_secrets(Uuid::new_v4())
+            .await?;
+        assert!(empty.is_empty());
+
+        // Update last used
+        let updated = store
+            .update_oauth2_provider_app_secret_last_used(secret.id)
+            .await?;
+        assert!(updated.is_some());
+        let updated = updated.ok_or("expected updated secret")?;
+        assert!(updated.last_used_at.is_some());
+
+        // Update last used for non-existent
+        let missing = store
+            .update_oauth2_provider_app_secret_last_used(Uuid::new_v4())
+            .await?;
+        assert!(missing.is_none());
+
+        // Delete secret
+        let deleted = store.delete_oauth2_provider_app_secret(secret.id).await?;
+        assert!(deleted);
+        let after = store.list_oauth2_provider_app_secrets(app.id).await?;
+        assert!(after.is_empty());
+
+        // Delete non-existent secret
+        let not_deleted = store
+            .delete_oauth2_provider_app_secret(Uuid::new_v4())
+            .await?;
+        assert!(!not_deleted);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_oauth2_code_crud() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+
+        // Create app
+        let app_input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Code App".to_owned(),
+            icon: String::new(),
+            callback_url: "https://example.com/cb".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&app_input).await?;
+
+        // Create code
+        let prefix = b"codeprefix";
+        let hashed = b"codehashed";
+        let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        let code = store
+            .create_oauth2_provider_app_code(
+                app.id,
+                user_id,
+                prefix,
+                hashed,
+                expires,
+                "https://example.com/resource",
+                "challenge_value",
+                "S256",
+                Some("state_hash_value"),
+                Some("https://example.com/redirect"),
+            )
+            .await?;
+        assert_eq!(code.app_id, app.id);
+        assert_eq!(code.user_id, user_id);
+        assert_eq!(code.secret_prefix, prefix);
+        assert_eq!(code.resource_uri, "https://example.com/resource");
+        assert_eq!(code.code_challenge, "challenge_value");
+        assert_eq!(code.code_challenge_method, "S256");
+        assert_eq!(code.state_hash.as_deref(), Some("state_hash_value"));
+        assert_eq!(
+            code.redirect_uri.as_deref(),
+            Some("https://example.com/redirect")
+        );
+
+        // Find by ID
+        let found = store.find_oauth2_provider_app_code_by_id(code.id).await?;
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().map(|c| c.id), Some(code.id));
+
+        // Find non-existent
+        let not_found = store
+            .find_oauth2_provider_app_code_by_id(Uuid::new_v4())
+            .await?;
+        assert!(not_found.is_none());
+
+        // Find by prefix
+        let found_prefix = store
+            .find_oauth2_provider_app_code_by_prefix(prefix)
+            .await?;
+        assert!(found_prefix.is_some());
+        assert_eq!(found_prefix.as_ref().map(|c| c.id), Some(code.id));
+
+        // Find by non-existent prefix
+        let not_found_prefix = store
+            .find_oauth2_provider_app_code_by_prefix(b"nope")
+            .await?;
+        assert!(not_found_prefix.is_none());
+
+        // Delete code
+        let deleted = store.delete_oauth2_provider_app_code(code.id).await?;
+        assert!(deleted);
+        let after = store.find_oauth2_provider_app_code_by_id(code.id).await?;
+        assert!(after.is_none());
+
+        // Delete non-existent
+        let not_deleted = store
+            .delete_oauth2_provider_app_code(Uuid::new_v4())
+            .await?;
+        assert!(!not_deleted);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_oauth2_code_delete_by_app_and_user() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+
+        let app_input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Code Cleanup App".to_owned(),
+            icon: String::new(),
+            callback_url: "https://example.com/cb".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&app_input).await?;
+        let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
+
+        // Create 2 codes for user_id and 1 for other_user_id
+        store
+            .create_oauth2_provider_app_code(
+                app.id,
+                user_id,
+                b"p1",
+                b"h1",
+                expires,
+                "res",
+                "ch",
+                "S256",
+                None,
+                None,
+            )
+            .await?;
+        store
+            .create_oauth2_provider_app_code(
+                app.id,
+                user_id,
+                b"p2",
+                b"h2",
+                expires,
+                "res",
+                "ch",
+                "S256",
+                None,
+                None,
+            )
+            .await?;
+        store
+            .create_oauth2_provider_app_code(
+                app.id,
+                other_user_id,
+                b"p3",
+                b"h3",
+                expires,
+                "res",
+                "ch",
+                "S256",
+                None,
+                None,
+            )
+            .await?;
+
+        // Delete codes for user_id only
+        let removed = store
+            .delete_oauth2_provider_app_codes_by_app_and_user(app.id, user_id)
+            .await?;
+        assert_eq!(removed, 2);
+
+        // Other user's code should remain
+        let remaining = store
+            .find_oauth2_provider_app_code_by_prefix(b"p3")
+            .await?;
+        assert!(remaining.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_oauth2_token_crud() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+
+        // Create app and secret
+        let app_input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Token App".to_owned(),
+            icon: String::new(),
+            callback_url: "https://example.com/cb".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&app_input).await?;
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, b"sp", b"sh", "disp")
+            .await?;
+
+        // Create token
+        let token_input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+            hash_prefix: b"tokprefix".to_vec(),
+            refresh_hash: b"refreshhash".to_vec(),
+            app_secret_id: secret.id,
+            api_key_id: "api-key-123".to_owned(),
+            expires_at: OffsetDateTime::now_utc() + time::Duration::hours(1),
+            audience: "https://api.example.com".to_owned(),
+            user_id,
+        };
+        let token = store.create_oauth2_provider_app_token(&token_input).await?;
+        assert_eq!(token.app_secret_id, secret.id);
+        assert_eq!(token.api_key_id, "api-key-123");
+        assert_eq!(token.hash_prefix, b"tokprefix");
+        assert_eq!(token.refresh_hash, b"refreshhash");
+        assert_eq!(token.audience, "https://api.example.com");
+        assert_eq!(token.user_id, user_id);
+
+        // Find by prefix
+        let found = store
+            .find_oauth2_provider_app_token_by_prefix(b"tokprefix")
+            .await?;
+        assert!(found.is_some());
+        assert_eq!(found.as_ref().map(|t| t.id), Some(token.id));
+
+        // Find by non-existent prefix
+        let not_found = store
+            .find_oauth2_provider_app_token_by_prefix(b"nope")
+            .await?;
+        assert!(not_found.is_none());
+
+        // Find by API key ID
+        let found_api = store
+            .find_oauth2_provider_app_token_by_api_key_id("api-key-123")
+            .await?;
+        assert!(found_api.is_some());
+        assert_eq!(found_api.as_ref().map(|t| t.id), Some(token.id));
+
+        // Find by non-existent API key ID
+        let not_found_api = store
+            .find_oauth2_provider_app_token_by_api_key_id("nope")
+            .await?;
+        assert!(not_found_api.is_none());
+
+        // Find by refresh hash
+        let found_refresh = store
+            .find_oauth2_provider_app_token_by_refresh_hash(b"refreshhash")
+            .await?;
+        assert!(found_refresh.is_some());
+        assert_eq!(found_refresh.as_ref().map(|t| t.id), Some(token.id));
+
+        // Find by non-existent refresh hash
+        let not_found_refresh = store
+            .find_oauth2_provider_app_token_by_refresh_hash(b"nope")
+            .await?;
+        assert!(not_found_refresh.is_none());
+
+        // Delete
+        let deleted = store.delete_oauth2_provider_app_token(token.id).await?;
+        assert!(deleted);
+        let after = store
+            .find_oauth2_provider_app_token_by_prefix(b"tokprefix")
+            .await?;
+        assert!(after.is_none());
+
+        // Delete non-existent
+        let not_deleted = store
+            .delete_oauth2_provider_app_token(Uuid::new_v4())
+            .await?;
+        assert!(!not_deleted);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_oauth2_token_list_and_delete_by_app_and_user() -> Result<(), Box<dyn Error>>
+    {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+        let other_user_id = Uuid::new_v4();
+
+        // Create app and secret
+        let app_input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Token List App".to_owned(),
+            icon: String::new(),
+            callback_url: "https://example.com/cb".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&app_input).await?;
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, b"sp", b"sh", "disp")
+            .await?;
+
+        let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
+
+        // Create 2 tokens for user_id
+        let t1_input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+            hash_prefix: b"hp1".to_vec(),
+            refresh_hash: b"rh1".to_vec(),
+            app_secret_id: secret.id,
+            api_key_id: "ak1".to_owned(),
+            expires_at: expires,
+            audience: "aud".to_owned(),
+            user_id,
+        };
+        store.create_oauth2_provider_app_token(&t1_input).await?;
+
+        let t2_input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+            hash_prefix: b"hp2".to_vec(),
+            refresh_hash: b"rh2".to_vec(),
+            app_secret_id: secret.id,
+            api_key_id: "ak2".to_owned(),
+            expires_at: expires,
+            audience: "aud".to_owned(),
+            user_id,
+        };
+        store.create_oauth2_provider_app_token(&t2_input).await?;
+
+        // Create 1 token for other_user_id
+        let t3_input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+            hash_prefix: b"hp3".to_vec(),
+            refresh_hash: b"rh3".to_vec(),
+            app_secret_id: secret.id,
+            api_key_id: "ak3".to_owned(),
+            expires_at: expires,
+            audience: "aud".to_owned(),
+            user_id: other_user_id,
+        };
+        store.create_oauth2_provider_app_token(&t3_input).await?;
+
+        // List tokens for user_id
+        let user_tokens = store
+            .list_oauth2_provider_app_tokens_by_app_and_user(app.id, user_id)
+            .await?;
+        assert_eq!(user_tokens.len(), 2);
+
+        // List tokens for other_user_id
+        let other_tokens = store
+            .list_oauth2_provider_app_tokens_by_app_and_user(app.id, other_user_id)
+            .await?;
+        assert_eq!(other_tokens.len(), 1);
+
+        // List tokens for non-existent user
+        let empty = store
+            .list_oauth2_provider_app_tokens_by_app_and_user(app.id, Uuid::new_v4())
+            .await?;
+        assert!(empty.is_empty());
+
+        // Delete tokens for user_id
+        let removed = store
+            .delete_oauth2_provider_app_tokens_by_app_and_user(app.id, user_id)
+            .await?;
+        assert_eq!(removed, 2);
+
+        // Verify user_id tokens gone
+        let after = store
+            .list_oauth2_provider_app_tokens_by_app_and_user(app.id, user_id)
+            .await?;
+        assert!(after.is_empty());
+
+        // Other user's token should remain
+        let other_after = store
+            .list_oauth2_provider_app_tokens_by_app_and_user(app.id, other_user_id)
+            .await?;
+        assert_eq!(other_after.len(), 1);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_oauth2_cascade_delete_app() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+
+        // Create app, secret, code, and token
+        let app_input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Cascade App".to_owned(),
+            icon: String::new(),
+            callback_url: "https://example.com/cb".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&app_input).await?;
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, b"sp", b"sh", "disp")
+            .await?;
+        let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        let code = store
+            .create_oauth2_provider_app_code(
+                app.id, user_id, b"cp", b"ch", expires, "res", "chal", "S256", None, None,
+            )
+            .await?;
+        let token_input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+            hash_prefix: b"tp".to_vec(),
+            refresh_hash: b"rh".to_vec(),
+            app_secret_id: secret.id,
+            api_key_id: "ak".to_owned(),
+            expires_at: expires,
+            audience: "aud".to_owned(),
+            user_id,
+        };
+        let token = store.create_oauth2_provider_app_token(&token_input).await?;
+
+        // Delete the app — should cascade to secrets, codes, and tokens
+        let deleted = store.delete_oauth2_provider_app(app.id).await?;
+        assert!(deleted);
+
+        // All related entities should be gone
+        let secret_after = store
+            .find_oauth2_provider_app_secret_by_id(secret.id)
+            .await?;
+        assert!(secret_after.is_none());
+        let code_after = store.find_oauth2_provider_app_code_by_id(code.id).await?;
+        assert!(code_after.is_none());
+        let token_after = store
+            .find_oauth2_provider_app_token_by_prefix(&token.hash_prefix)
+            .await?;
+        assert!(token_after.is_none());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn fake_store_oauth2_cascade_delete_secret() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let user_id = Uuid::new_v4();
+
+        let app_input = coder_core::identity::CreateOAuth2ProviderAppInput {
+            name: "Cascade Secret App".to_owned(),
+            icon: String::new(),
+            callback_url: "https://example.com/cb".to_owned(),
+            created_by: Some(user_id),
+        };
+        let app = store.create_oauth2_provider_app(&app_input).await?;
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, b"sp", b"sh", "disp")
+            .await?;
+        let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
+        let token_input = coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+            hash_prefix: b"tp".to_vec(),
+            refresh_hash: b"rh".to_vec(),
+            app_secret_id: secret.id,
+            api_key_id: "ak".to_owned(),
+            expires_at: expires,
+            audience: "aud".to_owned(),
+            user_id,
+        };
+        store.create_oauth2_provider_app_token(&token_input).await?;
+
+        // Delete the secret — should cascade to tokens
+        let deleted = store.delete_oauth2_provider_app_secret(secret.id).await?;
+        assert!(deleted);
+
+        // Token should be gone
+        let token_after = store
+            .find_oauth2_provider_app_token_by_prefix(b"tp")
+            .await?;
+        assert!(token_after.is_none());
+
+        // App should remain
+        let app_after = store.find_oauth2_provider_app_by_id(app.id).await?;
+        assert!(app_after.is_some());
+
+        Ok(())
+    }
     // =====================================================================
     // OAuth2 RFC Compliance Tests (8414, 9728, 7591, 7592, 7009)
     // =====================================================================
