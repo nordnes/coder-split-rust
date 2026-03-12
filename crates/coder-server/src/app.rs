@@ -7183,6 +7183,12 @@ pub(crate) mod tests {
             if ws.deleted {
                 return Ok(None);
             }
+            // Exclude prebuilds system user workspaces (mirrors SQL).
+            let prebuilds_system_user =
+                Uuid::parse_str("c42fdf75-3097-471c-8c33-fb52454d81c0").unwrap_or_default();
+            if ws.owner_id == prebuilds_system_user {
+                return Ok(None);
+            }
 
             // Look up the template to compute deleting_at.
             let templates = self
@@ -7327,7 +7333,7 @@ pub(crate) mod tests {
                                 let finish = job.canceled_at.or(job.completed_at);
                                 match finish {
                                     Some(t) => {
-                                        (now - t).whole_hours() >= 24
+                                        (now - t).whole_hours() > 24
                                     }
                                     None => false,
                                 }

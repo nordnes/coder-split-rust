@@ -5665,6 +5665,7 @@ impl AppStore for PostgresStore {
                     templates
                 WHERE
                     workspaces.id = $1
+                    AND workspaces.deleted = false
                     AND templates.id = workspaces.template_id
                     AND owner_id != 'c42fdf75-3097-471c-8c33-fb52454d81c0'::UUID
                 RETURNING workspaces.*
