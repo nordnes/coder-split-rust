@@ -494,7 +494,7 @@ pub fn build_router(
                     "/chats/model-configs/{modelConfig}",
                     patch(update_chat_model_config).delete(delete_chat_model_config),
                 )
-                // TODO: Add handler-level tests for chat CRUD, provider, and model-config routes
+
                 // Notifications domain
                 .route(
                     "/notifications/settings",
@@ -31893,6 +31893,296 @@ pub(crate) mod tests {
         assert!(
             body.get("deployment_id").is_some(),
             "response should include 'deployment_id' field"
+        );
+        Ok(())
+    }
+
+    // ── Chat CRUD handler-level tests ──────────────────────────────────
+
+    #[tokio::test]
+    async fn create_chat_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "hello".into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_and_list_chats() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // Create a chat.
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "hello world".into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let chat_id = body
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .expect("chat.id should be present");
+        assert!(!chat_id.is_empty());
+
+        // List chats — should contain the one we just created.
+        let list_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/chats", &token)?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let chats = list_body.as_array().expect("should be an array");
+        assert_eq!(chats.len(), 1);
+        assert_eq!(
+            chats[0].get("id").and_then(Value::as_str),
+            Some(chat_id)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_chat_returns_messages() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // Create a chat.
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "first message".into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let chat_id = body
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .expect("chat.id should be present");
+
+        // GET the chat.
+        let get_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{chat_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = response_json(get_resp).await?;
+        assert!(
+            get_body.get("chat").is_some(),
+            "response should include chat object"
+        );
+        assert!(
+            get_body.get("messages").is_some(),
+            "response should include messages array"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_chat_not_found_returns_404() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let fake_id = Uuid::new_v4();
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/chats/{fake_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_chat_archives_it() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // Create a chat.
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "to be deleted".into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let chat_id = body
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .expect("chat.id should be present");
+
+        // Delete (archive) the chat.
+        let del_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/chats/{chat_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(del_resp.status(), StatusCode::OK);
+
+        // After deletion, list should be empty (non-archived only).
+        let list_resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats", &token)?,
+        )
+        .await?;
+        assert_eq!(list_resp.status(), StatusCode::OK);
+        let list_body = response_json(list_resp).await?;
+        let chats = list_body.as_array().expect("should be an array");
+        assert_eq!(chats.len(), 0, "archived chat should not appear in default list");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_chat_message_to_existing_chat() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // Create a chat first.
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                &token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "initial".into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let chat_id = body
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .expect("chat.id should be present");
+
+        // Post a follow-up message.
+        let msg_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/chats/{chat_id}/messages"),
+                &token,
+                &CreateChatMessageRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: "follow-up".into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(msg_resp.status(), StatusCode::OK);
+        let msg_body = response_json(msg_resp).await?;
+        // The response includes either message or queued_message, and a queued flag.
+        assert!(
+            msg_body.get("queued").is_some(),
+            "response should include queued flag"
         );
         Ok(())
     }

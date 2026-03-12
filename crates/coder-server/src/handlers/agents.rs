@@ -1312,9 +1312,6 @@ pub(crate) async fn get_workspace_agent_external_auth(
         return Ok(unauthorized_response("Missing or invalid agent token."));
     };
 
-    // TODO: when query.listen is true, Go long-polls until the token is
-    // available (workspaceAgentsExternalAuth).  Implement long-polling support.
-
     // Validate that the provider id is provided.
     if query.id.is_empty() {
         return Ok((
@@ -1346,52 +1343,65 @@ pub(crate) async fn get_workspace_agent_external_auth(
         }
     };
 
-    // Check whether the workspace owner has linked this external auth provider.
-    let link = state
-        .store
-        .find_external_auth_link(owner_id, &query.id)
-        .await?;
+    // Long-poll loop: when query.listen is true, Go's
+    // `workspaceAgentsExternalAuth` keeps polling until the token becomes
+    // available or the request is cancelled.  We mirror that by polling at a
+    // short interval until the link is authenticated.
+    const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+    const POLL_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(120);
 
-    let authenticated = link
-        .as_ref()
-        .map(|l| {
-            l.authenticated && l.validate_error.is_empty() && l.expires > OffsetDateTime::now_utc()
-        })
-        .unwrap_or(false);
+    let deadline = tokio::time::Instant::now() + POLL_TIMEOUT;
 
-    // Build the agent-facing response (WorkspaceAgentExternalAuthResponse),
-    // NOT the user-facing ExternalAuthResponse.  Agents need the access_token
-    // and credential fields to perform git operations.
-    let resp = coder_core::api::WorkspaceAgentExternalAuthResponse {
-        access_token: link
+    loop {
+        // Check whether the workspace owner has linked this external auth provider.
+        let link = state
+            .store
+            .find_external_auth_link(owner_id, &query.id)
+            .await?;
+
+        let authenticated = link
             .as_ref()
-            .filter(|_| authenticated)
-            .map(|l| l.access_token.clone())
-            .unwrap_or_default(),
-        // When not authenticated, provide the user-facing redirect URL through
-        // the Coder server so the agent can tell the user where to authenticate
-        // (matching Go's pattern: `{access_url}/external-auth/{provider_id}`).
-        // When already authenticated the URL is left empty.
-        url: if authenticated {
-            String::new()
-        } else {
-            state
-                .config
-                .access_url
-                .join(&format!("external-auth/{}", query.id))
-                .map_err(|e| AppError::InternalError {
-                    message: "Failed to construct external auth redirect URL.".into(),
-                    detail: e.to_string(),
-                })?
-                .to_string()
-        },
-        auth_type: provider_config.provider_type.clone(),
-        authenticated,
-        username: None,
-        password: None,
-    };
+            .map(|l| {
+                l.authenticated
+                    && l.validate_error.is_empty()
+                    && l.expires > OffsetDateTime::now_utc()
+            })
+            .unwrap_or(false);
 
-    Ok((StatusCode::OK, Json(resp)).into_response())
+        // If not listening, or already authenticated, or we've exceeded the
+        // deadline, return the current state immediately.
+        if !query.listen || authenticated || tokio::time::Instant::now() >= deadline {
+            let resp = coder_core::api::WorkspaceAgentExternalAuthResponse {
+                access_token: link
+                    .as_ref()
+                    .filter(|_| authenticated)
+                    .map(|l| l.access_token.clone())
+                    .unwrap_or_default(),
+                url: if authenticated {
+                    String::new()
+                } else {
+                    state
+                        .config
+                        .access_url
+                        .join(&format!("external-auth/{}", query.id))
+                        .map_err(|e| AppError::InternalError {
+                            message: "Failed to construct external auth redirect URL.".into(),
+                            detail: e.to_string(),
+                        })?
+                        .to_string()
+                },
+                auth_type: provider_config.provider_type.clone(),
+                authenticated,
+                username: None,
+                password: None,
+            };
+
+            return Ok((StatusCode::OK, Json(resp)).into_response());
+        }
+
+        // Wait before polling again.
+        tokio::time::sleep(POLL_INTERVAL).await;
+    }
 }
 
 /// POST /api/v2/workspaceagents/me/log-source — create agent log source.

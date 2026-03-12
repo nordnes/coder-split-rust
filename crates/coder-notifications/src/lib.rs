@@ -137,7 +137,7 @@ where
                 // If this was the last allowed attempt, mark as permanent
                 // failure so the message is no longer eligible for retry.
                 if message.attempt_count + 1 >= MAX_DISPATCH_ATTEMPTS as i32 {
-                    NotificationMessageStatus::Failed
+                    NotificationMessageStatus::PermanentFailure
                 } else {
                     NotificationMessageStatus::TemporaryFailure
                 }
@@ -972,7 +972,7 @@ mod tests {
                 NotificationMessageStatus::TemporaryFailure,
                 r#""temporary_failure""#,
             ),
-            (NotificationMessageStatus::Failed, r#""permanent_failure""#),
+            (NotificationMessageStatus::PermanentFailure, r#""permanent_failure""#),
         ];
         for (variant, expected_json) in &variants {
             let serialized = serde_json::to_string(variant)
@@ -1167,7 +1167,7 @@ mod tests {
             .clone();
         assert_eq!(updates.len(), 1);
         assert_eq!(updates[0].0, msg_id);
-        assert_eq!(updates[0].1, NotificationMessageStatus::Failed);
+        assert_eq!(updates[0].1, NotificationMessageStatus::PermanentFailure);
     }
 
     // ── 12. Webhook without endpoint URL records failure ────
@@ -1299,7 +1299,7 @@ mod tests {
         );
         assert_ne!(
             NotificationMessageStatus::Leased,
-            NotificationMessageStatus::Failed
+            NotificationMessageStatus::PermanentFailure
         );
     }
 

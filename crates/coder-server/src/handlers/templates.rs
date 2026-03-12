@@ -1487,8 +1487,7 @@ pub(crate) async fn post_template_version_dynamic_parameters_evaluate(
                 name: p.name.clone(),
                 display_name: p.display_name.clone(),
                 description: p.description.clone(),
-                // TODO: strip Markdown from description for description_plaintext
-                description_plaintext: p.description.clone(),
+                description_plaintext: strip_markdown(&p.description),
                 param_type: p.param_type.clone(),
                 form_type: p.form_type.clone(),
                 mutable: p.mutable,
@@ -1731,8 +1730,7 @@ pub(crate) async fn get_template_version_rich_parameters_impl(
                 name: p.name.clone(),
                 display_name: p.display_name.clone(),
                 description: p.description.clone(),
-                // TODO: strip Markdown from description for description_plaintext
-                description_plaintext: p.description.clone(),
+                description_plaintext: strip_markdown(&p.description),
                 param_type: p.param_type.clone(),
                 form_type: p.form_type.clone(),
                 mutable: p.mutable,

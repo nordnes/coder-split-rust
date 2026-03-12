@@ -502,17 +502,31 @@ pub(crate) async fn get_oidc_callback(
     let redirect_uri =
         cookie_from_headers(&headers, OAUTH2_REDIRECT_COOKIE).unwrap_or_else(|| "/".to_owned());
 
-    // Discover the OIDC endpoints.
-    // TODO(perf): Cache the OIDC discovery document instead of fetching it on
-    // every callback. The document rarely changes and fetching it adds latency
-    // to every login. Consider storing it in AppState with a TTL-based refresh.
-    let discovery =
-        coder_auth::oauth_login::oidc_discover(&state.http_client, &oidc_config.issuer_url)
-            .await
-            .map_err(|e| {
-                tracing::error!("OIDC discovery failed: {e}");
-                AppError::from(StorageError::unavailable(e.to_string()))
-            })?;
+    // Discover the OIDC endpoints.  Uses a process-wide cache with a 5-minute
+    // TTL so we avoid fetching the rarely-changing discovery document on every
+    // single login callback.
+    let discovery = {
+        use std::sync::OnceLock;
+        use tokio::sync::Mutex;
+
+        static CACHE: OnceLock<Mutex<Option<OidcDiscoveryCacheEntry>>> = OnceLock::new();
+        const TTL: std::time::Duration = std::time::Duration::from_secs(300);
+
+        let cache = CACHE.get_or_init(|| Mutex::new(None));
+        let mut guard = cache.lock().await;
+
+        let now = std::time::Instant::now();
+        if let Some(ref cached) = *guard {
+            if now.duration_since(cached.fetched_at) < TTL {
+                cached.doc.clone()
+            } else {
+                // TTL expired, refetch below.
+                drop_cache_and_fetch(&state, oidc_config, &mut guard, now).await?
+            }
+        } else {
+            drop_cache_and_fetch(&state, oidc_config, &mut guard, now).await?
+        }
+    };
 
     // Build the callback redirect URI for the token exchange.
     let callback_redirect = format!(
@@ -534,15 +548,24 @@ pub(crate) async fn get_oidc_callback(
         AppError::from(StorageError::unavailable(e.to_string()))
     })?;
 
-    // Decode and validate the ID token claims.
-    let claims = coder_auth::oauth_login::decode_id_token_claims(&token_response.id_token)
+    // Fetch the JWKS for cryptographic verification of the ID token.
+    let jwks = coder_auth::oauth_login::fetch_jwks(&state.http_client, &discovery.jwks_uri)
+        .await
         .map_err(|e| {
-            tracing::error!("OIDC ID token decode failed: {e}");
+            tracing::error!("JWKS fetch failed: {e}");
             AppError::from(StorageError::unavailable(e.to_string()))
         })?;
 
-    coder_auth::oauth_login::validate_oidc_claims(&claims, oidc_config).map_err(|e| {
-        tracing::error!("OIDC claims validation failed: {e}");
+    // Decode AND cryptographically verify the ID token claims using the
+    // provider's JWKS.  This replaces the previous insecure base64-only
+    // decode and also validates issuer, audience, and expiry.
+    let claims = coder_auth::oauth_login::decode_id_token_claims(
+        &token_response.id_token,
+        &jwks,
+        oidc_config,
+    )
+    .map_err(|e| {
+        tracing::error!("OIDC ID token verification failed: {e}");
         AppError::from(StorageError::unavailable(e.to_string()))
     })?;
 
@@ -656,6 +679,40 @@ pub(crate) async fn get_oidc_callback(
         &sanitize_redirect_uri(&redirect_uri),
         is_https,
     ))
+}
+
+// ---------------------------------------------------------------------------
+// OIDC discovery cache helper
+// ---------------------------------------------------------------------------
+
+/// Fetches the OIDC discovery document and stores it in the cache.
+///
+/// This is extracted as a helper to avoid code duplication in the cache-miss
+/// and TTL-expired branches of `get_oidc_callback`.
+async fn drop_cache_and_fetch(
+    state: &AppState,
+    oidc_config: &coder_core::config::OidcConfig,
+    guard: &mut Option<OidcDiscoveryCacheEntry>,
+    now: std::time::Instant,
+) -> Result<coder_auth::oauth_login::OidcDiscovery, AppError> {
+    let doc =
+        coder_auth::oauth_login::oidc_discover(&state.http_client, &oidc_config.issuer_url)
+            .await
+            .map_err(|e| {
+                tracing::error!("OIDC discovery failed: {e}");
+                AppError::from(StorageError::unavailable(e.to_string()))
+            })?;
+    *guard = Some(OidcDiscoveryCacheEntry {
+        doc: doc.clone(),
+        fetched_at: now,
+    });
+    Ok(doc)
+}
+
+/// Cache entry for the OIDC discovery document.
+struct OidcDiscoveryCacheEntry {
+    doc: coder_auth::oauth_login::OidcDiscovery,
+    fetched_at: std::time::Instant,
 }
 
 // ---------------------------------------------------------------------------

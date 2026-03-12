@@ -16,6 +16,7 @@ base64.workspace = true
 coder-core = { path = "../coder-core" }
 coder-rbac = { path = "../coder-rbac" }
 http.workspace = true
+jsonwebtoken.workspace = true
 metrics.workspace = true
 rand.workspace = true
 reqwest.workspace = true
