@@ -1083,7 +1083,12 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
             display_order: m.display_order,
         })
         .collect();
-    let initial_payload = serde_json::to_string(&initial_metadata).unwrap_or_default();
+    let initial_payload = serde_json::to_string(&initial_metadata).map_err(|e| {
+        AppError::InternalError {
+            message: "failed to serialize initial agent metadata".to_owned(),
+            detail: e.to_string(),
+        }
+    })?;
 
     tokio::spawn(async move {
         // Send initial snapshot (multiline-safe per SSE spec).
@@ -1102,7 +1107,13 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
                 msg = subscription.recv() => {
                     match msg {
                         Ok(bytes) => {
-                            let data = String::from_utf8_lossy(&bytes);
+                            let data = match String::from_utf8(bytes.to_vec()) {
+                                Ok(s) => s,
+                                Err(_) => {
+                                    // Skip invalid UTF-8 payloads to avoid sending corrupted SSE data.
+                                    continue;
+                                }
+                            };
                             let sse = data
                                 .lines()
                                 .map(|line| format!("data: {line}\n"))
@@ -2027,7 +2038,7 @@ pub(crate) async fn handle_auth_instance_id(
 mod tests {
     use super::*;
     use crate::app::tests::{create_and_login, test_state_with_store};
-    use crate::app::{build_router, AppState};
+    use crate::app::build_router;
     use axum::Router;
     use coder_core::WorkspaceAgentRow;
     use futures_util::{SinkExt, StreamExt};
@@ -2476,22 +2487,36 @@ mod tests {
             "expected text/event-stream, got: {content_type}"
         );
 
-        // Read the initial chunk via chunk() which returns Option<Bytes>.
+        // Buffer chunks until we have a complete SSE frame (terminated by \n\n).
         let mut resp = resp;
-        let chunk = tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await?;
-        if let Ok(Some(bytes)) = chunk {
-            let text = String::from_utf8_lossy(&bytes);
-            assert!(
-                text.starts_with("data: "),
-                "expected SSE data prefix, got: {text}"
-            );
-            // The data should be a JSON array (empty metadata).
-            let json_str = text.trim_start_matches("data: ").trim();
-            let parsed: serde_json::Value = serde_json::from_str(json_str)?;
-            assert!(parsed.is_array(), "expected JSON array");
-        } else {
-            return Err("expected SSE chunk with initial metadata".into());
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err("timeout waiting for initial SSE metadata frame".into());
+            }
+            match tokio::time::timeout(remaining, resp.chunk()).await {
+                Ok(Ok(Some(bytes))) => {
+                    buffer.extend_from_slice(&bytes);
+                    if buffer.windows(2).any(|w| w == b"\n\n") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
         }
+        let text = String::from_utf8_lossy(&buffer);
+        // Find the first complete SSE frame.
+        let frame = text.split("\n\n").next().unwrap_or_default();
+        assert!(
+            frame.starts_with("data: "),
+            "expected SSE data prefix, got: {frame}"
+        );
+        // The data should be a JSON array (empty metadata).
+        let json_str = frame.trim_start_matches("data: ").trim();
+        let parsed: serde_json::Value = serde_json::from_str(json_str)?;
+        assert!(parsed.is_array(), "expected JSON array");
 
         Ok(())
     }
@@ -2530,15 +2555,26 @@ mod tests {
             .publish(&channel, update.to_string().as_bytes())
             .await?;
 
-        // Verify the update arrives on the SSE stream.
-        let chunk =
-            tokio::time::timeout(Duration::from_secs(2), resp.chunk()).await?;
-        if let Ok(Some(bytes)) = chunk {
-            let text = String::from_utf8_lossy(&bytes);
-            assert!(text.contains("CPU"), "expected metadata update with CPU");
-        } else {
-            return Err("expected SSE chunk with metadata update".into());
+        // Buffer chunks until we have a complete SSE frame containing the update.
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err("timeout waiting for SSE metadata update frame".into());
+            }
+            match tokio::time::timeout(remaining, resp.chunk()).await {
+                Ok(Ok(Some(bytes))) => {
+                    buffer.extend_from_slice(&bytes);
+                    if buffer.windows(2).any(|w| w == b"\n\n") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
         }
+        let text = String::from_utf8_lossy(&buffer);
+        assert!(text.contains("CPU"), "expected metadata update with CPU");
 
         Ok(())
     }
