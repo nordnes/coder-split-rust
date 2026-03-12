@@ -4098,6 +4098,117 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_chat_status(
+        &self,
+        id: Uuid,
+        status: ChatStatus,
+    ) -> Result<ChatRecord, StorageError> {
+        let row: StoredChatRow = sqlx::query_as(
+            "UPDATE chats SET status = $2::chat_status, updated_at = now()
+             WHERE id = $1
+             RETURNING id, owner_id, workspace_id, title, status::text, last_error, parent_chat_id, root_chat_id, last_model_config_id, archived, created_at, updated_at",
+        )
+        .bind(id)
+        .bind(status.as_str())
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error_or_not_found)?;
+
+        chat_record_from_row(row)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_chat_diff_status(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<Option<coder_core::api::ChatDiffStatusResponse>, StorageError> {
+        let row: Option<StoredChatDiffStatusRow> = sqlx::query_as(
+            "SELECT chat_id, url, pull_request_state, changes_requested,
+                    additions, deletions, changed_files, refreshed_at,
+                    stale_at, git_branch, git_remote_origin
+             FROM chat_diff_statuses
+             WHERE chat_id = $1",
+        )
+        .bind(chat_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| coder_core::api::ChatDiffStatusResponse {
+            chat_id: r.chat_id,
+            url: r.url,
+            pull_request_state: r.pull_request_state,
+            changes_requested: r.changes_requested,
+            additions: r.additions,
+            deletions: r.deletions,
+            changed_files: r.changed_files,
+            refreshed_at: r.refreshed_at,
+            stale_at: r.stale_at,
+        }))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_chat_diff_contents(
+        &self,
+        chat_id: Uuid,
+    ) -> Result<coder_core::api::ChatDiffContentsResponse, StorageError> {
+        // The actual diff text is resolved from an external git provider at
+        // the handler layer. We populate branch/remote_origin from the cached
+        // diff status row when available; the diff field stays empty.
+        let row: Option<StoredChatDiffStatusRow> = sqlx::query_as(
+            "SELECT chat_id, url, pull_request_state, changes_requested,
+                    additions, deletions, changed_files, refreshed_at,
+                    stale_at, git_branch, git_remote_origin
+             FROM chat_diff_statuses
+             WHERE chat_id = $1",
+        )
+        .bind(chat_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(match row {
+            Some(r) => coder_core::api::ChatDiffContentsResponse {
+                chat_id,
+                provider: None,
+                remote_origin: if r.git_remote_origin.is_empty() {
+                    None
+                } else {
+                    Some(r.git_remote_origin)
+                },
+                branch: if r.git_branch.is_empty() {
+                    None
+                } else {
+                    Some(r.git_branch)
+                },
+                pull_request_url: r.url,
+                diff: String::new(),
+            },
+            None => coder_core::api::ChatDiffContentsResponse {
+                chat_id,
+                provider: None,
+                remote_origin: None,
+                branch: None,
+                pull_request_url: None,
+                diff: String::new(),
+            },
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_enabled_chat_providers(
+        &self,
+    ) -> Result<Vec<coder_core::api::ChatModelProvider>, StorageError> {
+        // The trait returns `ChatModelProvider` which aggregates provider
+        // availability and model lists from external LLM APIs. The store
+        // layer cannot probe external services, so we return an empty list.
+        // The handler is responsible for calling `list_chat_providers()`,
+        // filtering for enabled providers, and constructing `ChatModelProvider`
+        // objects by probing each provider's API.
+        Ok(Vec::new())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_chat_providers(&self) -> Result<Vec<ChatProviderRecord>, StorageError> {
         let rows: Vec<StoredChatProviderRow> = sqlx::query_as(
             "SELECT id, provider, display_name, api_key, base_url, enabled, created_at, updated_at
