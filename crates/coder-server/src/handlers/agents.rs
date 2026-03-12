@@ -652,17 +652,44 @@ pub(crate) async fn get_workspace_agent_containers_watch(
     }))
 }
 
+/// Shared RBAC helper: resolve the workspace that owns `agent_id` and check
+/// that `actor` is allowed to perform `action` on it.
+///
+/// Returns `Some(response)` when access should be denied (the caller must
+/// return the response immediately).  Returns `None` when authorisation
+/// succeeds and the caller may proceed.
+///
+/// If the workspace chain cannot be resolved (agent exists but resource →
+/// build → workspace linkage is missing) this is treated as "not found" to
+/// avoid falling through to an overly-permissive RBAC object.
+async fn authorize_agent_workspace(
+    state: &AppState,
+    actor: &Actor,
+    agent_id: Uuid,
+    action: Action,
+) -> Result<Option<Response>, AppError> {
+    let Some(workspace) = state.store.find_workspace_by_agent_id(agent_id).await? else {
+        return Ok(Some(resource_not_found_response()));
+    };
+    let authorizer = Authorizer::new();
+    let rbac_obj = Object::new(ResourceType::Workspace)
+        .with_owner(workspace.owner_id)
+        .in_org(workspace.organization_id);
+    if authorizer.authorize(actor, action, &rbac_obj).is_err() {
+        return Ok(Some(resource_not_found_response()));
+    }
+    Ok(None)
+}
+
 /// GET /api/v2/workspaceagents/{agent}/coordinate — WebSocket coordination.
 ///
 /// Implements agent-side coordination protocol.  Registers the agent as a
 /// peer in the [`TailnetCoordinator`] and multiplexes between incoming
 /// WebSocket messages and outgoing coordinator responses.  Also delivers an
-/// initial DERP map snapshot and streams subsequent DERP map changes so the
-/// agent always has up-to-date relay information.
+/// initial DERP map snapshot so the agent has relay information on connect.
 ///
-/// Following the Go reference (`workspaceAgentClientCoordinate`), the handler
-/// performs RBAC authorisation (`Action::Ssh` on the owning workspace) before
-/// accepting the WebSocket upgrade.
+/// The handler performs RBAC authorisation (`Action::Ssh` on the owning
+/// workspace) before accepting the WebSocket upgrade.
 pub(crate) async fn get_workspace_agent_coordinate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -679,19 +706,10 @@ pub(crate) async fn get_workspace_agent_coordinate(
 
     // RBAC: the caller must have SSH access to the workspace that owns this
     // agent, matching the Go reference which checks `policy.ActionSSH`.
-    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
-    let authorizer = Authorizer::new();
-    let rbac_obj = match workspace {
-        Some(ref ws) => Object::new(ResourceType::Workspace)
-            .with_owner(ws.owner_id)
-            .in_org(ws.organization_id),
-        None => Object::new(ResourceType::Workspace),
-    };
-    if authorizer
-        .authorize(&context.actor, Action::Ssh, &rbac_obj)
-        .is_err()
+    if let Some(resp) =
+        authorize_agent_workspace(&state, &context.actor, agent_id, Action::Ssh).await?
     {
-        return Ok(resource_not_found_response());
+        return Ok(resp);
     }
 
     let coordinator = state.coordinator.clone();
@@ -1095,19 +1113,10 @@ pub(crate) async fn get_workspace_agent_watch_metadata(
     };
 
     // RBAC: the caller must have read access to the owning workspace.
-    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
-    let authorizer = Authorizer::new();
-    let rbac_obj = match workspace {
-        Some(ref ws) => Object::new(ResourceType::Workspace)
-            .with_owner(ws.owner_id)
-            .in_org(ws.organization_id),
-        None => Object::new(ResourceType::Workspace),
-    };
-    if authorizer
-        .authorize(&context.actor, Action::Read, &rbac_obj)
-        .is_err()
+    if let Some(resp) =
+        authorize_agent_workspace(&state, &context.actor, agent_id, Action::Read).await?
     {
-        return Ok(resource_not_found_response());
+        return Ok(resp);
     }
 
     let channel = workspace_agent_metadata_channel(agent_id);
@@ -1224,19 +1233,10 @@ pub(crate) async fn get_workspace_agent_watch_metadata_ws(
     };
 
     // RBAC: the caller must have read access to the owning workspace.
-    let workspace = state.store.find_workspace_by_agent_id(agent_id).await?;
-    let authorizer = Authorizer::new();
-    let rbac_obj = match workspace {
-        Some(ref ws) => Object::new(ResourceType::Workspace)
-            .with_owner(ws.owner_id)
-            .in_org(ws.organization_id),
-        None => Object::new(ResourceType::Workspace),
-    };
-    if authorizer
-        .authorize(&context.actor, Action::Read, &rbac_obj)
-        .is_err()
+    if let Some(resp) =
+        authorize_agent_workspace(&state, &context.actor, agent_id, Action::Read).await?
     {
-        return Ok(resource_not_found_response());
+        return Ok(resp);
     }
 
     let pubsub = state.pubsub.clone();
@@ -2189,21 +2189,36 @@ mod tests {
         Ok((url::Url::parse(&format!("http://{address}"))?, handle))
     }
 
-    /// Seed a minimal workspace agent into the FakeStore and return its ID.
+    /// Seed a minimal workspace agent **with full workspace chain** into the
+    /// FakeStore and return its ID.
+    ///
+    /// Creates agent → resource → build → workspace so that
+    /// `find_workspace_by_agent_id` can resolve the owning workspace and the
+    /// RBAC check in `authorize_agent_workspace` succeeds.
     fn seed_agent(store: &crate::app::tests::FakeStore) -> Result<Uuid, Box<dyn Error>> {
+        use coder_core::{WorkspaceBuildRecord, WorkspaceRecord, WorkspaceResourceRecord};
+
+        let now = OffsetDateTime::now_utc();
         let agent_id = Uuid::new_v4();
+        let resource_id = Uuid::new_v4();
+        let job_id = Uuid::new_v4();
+        let build_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let owner_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+
         let row = WorkspaceAgentRow {
             id: agent_id,
             parent_id: None,
-            created_at: OffsetDateTime::now_utc(),
-            updated_at: OffsetDateTime::now_utc(),
-            first_connected_at: Some(OffsetDateTime::now_utc()),
-            last_connected_at: Some(OffsetDateTime::now_utc()),
+            created_at: now,
+            updated_at: now,
+            first_connected_at: Some(now),
+            last_connected_at: Some(now),
             disconnected_at: None,
             started_at: None,
             ready_at: None,
             name: "test-agent".to_owned(),
-            resource_id: Uuid::new_v4(),
+            resource_id,
             auth_token: Uuid::new_v4(),
             auth_instance_id: None,
             architecture: "amd64".to_owned(),
@@ -2225,6 +2240,61 @@ mod tests {
             api_key_scope: "all".to_owned(),
         };
         store.insert_agent(row)?;
+
+        // Resource linked to the agent via resource_id on the agent row.
+        let resource = WorkspaceResourceRecord {
+            id: resource_id,
+            created_at: now,
+            job_id,
+            transition: "start".to_owned(),
+            resource_type: "docker_container".to_owned(),
+            name: "main".to_owned(),
+            hide: false,
+            icon: String::new(),
+            daily_cost: 0,
+        };
+        store.insert_resource(job_id, resource)?;
+
+        // Build linking job_id → workspace_id.
+        let build = WorkspaceBuildRecord {
+            id: build_id,
+            created_at: now,
+            updated_at: now,
+            workspace_id,
+            build_number: 1,
+            transition: "start".to_owned(),
+            job_id,
+            template_version_id: Uuid::new_v4(),
+            initiator_id: owner_id,
+            provisioner_state: None,
+            deadline: None,
+            max_deadline: None,
+            reason: "initiator".to_owned(),
+            daily_cost: 0,
+        };
+        store.insert_build(build)?;
+
+        // Workspace that owns the agent chain.
+        let workspace = WorkspaceRecord {
+            id: workspace_id,
+            created_at: now,
+            updated_at: now,
+            owner_id,
+            organization_id: org_id,
+            template_id: Uuid::new_v4(),
+            deleted: false,
+            name: "test-workspace".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        };
+        store.insert_workspace(workspace)?;
+
         Ok(agent_id)
     }
 

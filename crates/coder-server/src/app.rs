@@ -1646,7 +1646,10 @@ pub(crate) mod tests {
         }
 
         /// Inserts a workspace into the fake store for testing.
-        fn insert_workspace(&self, workspace: WorkspaceRecord) -> Result<(), StorageError> {
+        pub(crate) fn insert_workspace(
+            &self,
+            workspace: WorkspaceRecord,
+        ) -> Result<(), StorageError> {
             self.workspaces
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
@@ -1654,6 +1657,29 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        /// Inserts a workspace build into the fake store for testing.
+        pub(crate) fn insert_build(&self, build: WorkspaceBuildRecord) -> Result<(), StorageError> {
+            self.workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(build.id, build);
+            Ok(())
+        }
+
+        /// Inserts a workspace resource into the fake store for testing.
+        pub(crate) fn insert_resource(
+            &self,
+            job_id: Uuid,
+            resource: WorkspaceResourceRecord,
+        ) -> Result<(), StorageError> {
+            self.workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .entry(job_id)
+                .or_default()
+                .push(resource);
+            Ok(())
+        }
         /// Sets the status of a task in the fake store (for testing state transitions).
         fn set_task_status(&self, task_id: Uuid, status: TaskStatus) -> Result<(), StorageError> {
             let mut tasks = self
