@@ -2589,6 +2589,7 @@ pub enum TaskStatus {
 }
 
 impl TaskStatus {
+    /// Returns the string representation of this task status.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Pending => "pending",
@@ -2751,6 +2752,7 @@ pub enum ChatStatus {
 }
 
 impl ChatStatus {
+    /// Returns the string representation of this chat status.
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Waiting => "waiting",

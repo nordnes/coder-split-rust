@@ -805,6 +805,7 @@ impl Default for SecurityHeadersConfig {
     }
 }
 
+/// Cross-origin resource sharing (CORS) configuration.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CorsConfig {
     /// Allowed origins for cross-origin requests.

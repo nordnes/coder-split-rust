@@ -53,6 +53,7 @@ pub enum AuditAction {
 }
 
 impl AuditAction {
+    /// Returns the string representation of this audit action.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {

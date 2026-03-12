@@ -1060,6 +1060,7 @@ where
     }
 }
 
+/// Converts an authenticated user into an RBAC [`Actor`] for permission checks.
 pub fn actor_from_user(user: &AuthenticatedUser) -> Actor {
     Actor {
         user_id: user.id,
