@@ -1661,5 +1661,29 @@ mod tests {
         assert!(names.contains(&"experiments"));
         assert!(names.contains(&"cache-dir"));
         assert!(names.contains(&"default-quiet-hours-schedule"));
+
+        // Security headers
+        assert!(names.contains(&"x-content-type-options"));
+        assert!(names.contains(&"x-frame-options"));
+        assert!(names.contains(&"referrer-policy"));
+
+        // GitHub OAuth
+        assert!(names.contains(&"github-client-id"));
+        assert!(names.contains(&"github-client-secret"));
+        assert!(names.contains(&"github-allow-signups"));
+        assert!(names.contains(&"github-api-url"));
+
+        // OIDC
+        assert!(names.contains(&"oidc-issuer-url"));
+        assert!(names.contains(&"oidc-client-id"));
+        assert!(names.contains(&"oidc-scopes"));
+        assert!(names.contains(&"oidc-ignore-email-verified"));
+
+        // Rate limiting (additional)
+        assert!(names.contains(&"rate-limit-login-per-minute"));
+        assert!(names.contains(&"rate-limit-unauthenticated-per-minute"));
+
+        // Worker intervals (additional)
+        assert!(names.contains(&"lifecycle-check-interval"));
     }
 }
