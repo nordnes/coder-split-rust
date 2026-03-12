@@ -647,10 +647,12 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use coder_core::identity::{
-        CreateUserStoreError, InsertOrganizationMemberError, NotificationMessageRecord,
+        CreateGroupInput, CreateUserStoreError, CustomRoleRecord, GroupMemberRecord, GroupRecord,
+        InsertOrganizationMemberError, LoginType, NotificationMessageRecord,
         NotificationMessageStatus, NotificationMethod, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, UserAppearanceRecord, UserListFilter,
-        UserPreferenceRecord, UserRecord, UserStatus,
+        OrganizationMemberRecord, OrganizationRecord, UpsertCustomRoleInput, UpsertUserLinkInput,
+        UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter,
+        UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
     };
     use coder_core::{CreateUserInput, IdentityStore, StorageError};
     use std::sync::Mutex;
@@ -884,6 +886,184 @@ mod tests {
         ) -> Result<Option<OrganizationMemberRecord>, StorageError> {
             self.maybe_err()?;
             Ok(None)
+        }
+
+        // ----- User identity supplements (stubs for test mock) -----
+
+        async fn find_user_by_linked_id(
+            &self,
+            _login_type: LoginType,
+            _linked_id: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn find_active_user_by_email_and_login_type(
+            &self,
+            _email: &str,
+            _login_type: LoginType,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn list_user_links(
+            &self,
+            _user_id: Uuid,
+        ) -> Result<Vec<UserLinkRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn upsert_user_link(
+            &self,
+            _user_id: Uuid,
+            _input: &UpsertUserLinkInput,
+        ) -> Result<UserLinkRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_user_link(
+            &self,
+            _user_id: Uuid,
+            _login_type: LoginType,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn get_user_config(
+            &self,
+            _user_id: Uuid,
+            _key: &str,
+        ) -> Result<Option<UserConfigRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn upsert_user_config(
+            &self,
+            _user_id: Uuid,
+            _key: &str,
+            _value: &str,
+        ) -> Result<UserConfigRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_user_config(
+            &self,
+            _user_id: Uuid,
+            _key: &str,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn insert_user_deleted(
+            &self,
+            _user_id: Uuid,
+            _deleted_by: Option<Uuid>,
+            _reason: &str,
+        ) -> Result<UserDeletedRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn insert_user_status_change(
+            &self,
+            _user_id: Uuid,
+            _old_status: UserStatus,
+            _new_status: UserStatus,
+            _changed_by: Option<Uuid>,
+            _reason: &str,
+        ) -> Result<UserStatusChangeRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn list_user_status_changes(
+            &self,
+            _user_id: Uuid,
+        ) -> Result<Vec<UserStatusChangeRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn list_custom_roles(
+            &self,
+            _organization_id: Option<Uuid>,
+        ) -> Result<Vec<CustomRoleRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn upsert_custom_role(
+            &self,
+            _input: &UpsertCustomRoleInput,
+        ) -> Result<CustomRoleRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn delete_custom_role(
+            &self,
+            _name: &str,
+            _organization_id: Option<Uuid>,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn list_groups(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<GroupRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn create_group(
+            &self,
+            _input: &CreateGroupInput,
+        ) -> Result<GroupRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn find_group_by_id(
+            &self,
+            _group_id: Uuid,
+        ) -> Result<Option<GroupRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn delete_group(&self, _group_id: Uuid) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn list_group_members(
+            &self,
+            _group_id: Uuid,
+        ) -> Result<Vec<GroupMemberRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
+        }
+
+        async fn insert_group_member(
+            &self,
+            _group_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<(), StorageError> {
+            self.maybe_err()?;
+            Ok(())
+        }
+
+        async fn delete_group_member(
+            &self,
+            _group_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
         }
 
         // ----- Notification overrides -----

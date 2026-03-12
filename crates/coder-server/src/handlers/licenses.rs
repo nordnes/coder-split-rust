@@ -4,6 +4,7 @@ use base64::Engine as _;
 
 use super::*;
 use coder_core::api::{AddLicenseRequest, LicenseResponse};
+#[allow(unused_imports)] // Scaffolded for enterprise feature guard.
 use coder_license::{EntitlementSet, FeatureName};
 
 /// Converts a [`coder_core::LicenseRecord`] into a [`LicenseResponse`],
@@ -62,7 +63,7 @@ pub(crate) async fn post_license(
     // Decode the JWT payload without signature verification to extract the
     // claims for storage.  Full cryptographic validation is performed by the
     // `LicenseService` when entitlements are refreshed.
-    let claims_value: serde_json::Value = {
+    let claims_value: Value = {
         let parts: Vec<&str> = request.license.split('.').collect();
         if parts.len() != 3 {
             return Ok((
@@ -148,6 +149,7 @@ pub(crate) async fn get_entitlements(
 ///     return Ok(require_enterprise_feature(&feature_name));
 /// }
 /// ```
+#[allow(dead_code)] // Scaffolded for enterprise route handlers.
 pub(crate) fn require_enterprise_feature(feature: &FeatureName) -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -166,6 +168,7 @@ pub(crate) fn require_enterprise_feature(feature: &FeatureName) -> Response {
 ///
 /// Returns `true` when the feature is available (either fully entitled or in
 /// a grace period).  Returns `false` otherwise.
+#[allow(dead_code)] // Scaffolded for enterprise route handlers.
 pub(crate) fn is_feature_entitled(entitlements: &EntitlementSet, feature: FeatureName) -> bool {
     entitlements.is_entitled(feature)
 }
