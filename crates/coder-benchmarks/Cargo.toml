@@ -1,0 +1,43 @@
+[package]
+name = "coder-benchmarks"
+edition.workspace = true
+license.workspace = true
+publish = false
+repository.workspace = true
+rust-version.workspace = true
+version.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+coder-core = { path = "../coder-core" }
+serde_json.workspace = true
+time.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+axum.workspace = true
+coder-audit = { path = "../coder-audit" }
+coder-connectivity = { path = "../coder-connectivity" }
+coder-rbac = { path = "../coder-rbac" }
+coder-server = { path = "../coder-server" }
+coder-telemetry = { path = "../coder-telemetry" }
+criterion = { version = "0.5", features = ["html_reports"] }
+http.workspace = true
+tokio.workspace = true
+tower.workspace = true
+url.workspace = true
+
+[[bench]]
+name = "rbac"
+harness = false
+
+[[bench]]
+name = "store"
+harness = false
+
+[[bench]]
+name = "routing"
+harness = false

@@ -17,6 +17,7 @@ members = [
     "crates/coder-server",
     "crates/coder-telemetry",
     "crates/coder-workspaces",
+    "crates/coder-benchmarks",
 ]
 resolver = "3"
 
