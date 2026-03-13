@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
+use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -79,6 +80,18 @@ impl fmt::Display for ProvisionerType {
     }
 }
 
+impl FromStr for ProvisionerType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "terraform" => Ok(Self::Terraform),
+            "echo" => Ok(Self::Echo),
+            other => Err(format!("unknown provisioner type: {other}")),
+        }
+    }
+}
+
 /// Storage method for provisioner job files.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -130,6 +143,19 @@ impl ProvisionerJobType {
 impl fmt::Display for ProvisionerJobType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+impl FromStr for ProvisionerJobType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "template_version_import" => Ok(Self::TemplateVersionImport),
+            "template_version_dry_run" => Ok(Self::TemplateVersionDryRun),
+            "workspace_build" => Ok(Self::WorkspaceBuild),
+            other => Err(format!("unknown provisioner job type: {other}")),
+        }
     }
 }
 

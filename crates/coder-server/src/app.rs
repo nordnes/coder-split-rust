@@ -1371,8 +1371,8 @@ pub(crate) mod tests {
     use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord, WorkspaceTransitionRow};
     use coder_core::provisioner::{
         LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord, ProvisionerJobStatus,
-        ProvisionerJobTimingRecord as ProvisionerTimingRecord, ProvisionerJobType,
-        ProvisionerStorageMethod, ProvisionerType,
+        ProvisionerJobTimingRecord as ProvisionerTimingRecord, ProvisionerJobTimingStage,
+        ProvisionerJobType, ProvisionerStorageMethod, ProvisionerType,
     };
     use coder_core::template::ProvisionerJobRecord as TemplateProvisionerJobRecord;
     use coder_core::{
@@ -1824,7 +1824,20 @@ pub(crate) mod tests {
             job.started_at = Some(input.started_at);
             job.updated_at = input.started_at;
             job.worker_id = Some(input.worker_id);
-            Ok(Some(job.clone()))
+            let result = job.clone();
+            drop(jobs);
+
+            // Sync acquisition to template-side provisioner_jobs.
+            if let Ok(mut tmpl_jobs) = self.provisioner_jobs.lock() {
+                if let Some(tj) = tmpl_jobs.get_mut(&job_id) {
+                    tj.started_at = Some(input.started_at);
+                    tj.updated_at = input.started_at;
+                    tj.worker_id = Some(input.worker_id);
+                    tj.job_status = "running".to_owned();
+                }
+            }
+
+            Ok(Some(result))
         }
 
         async fn get_provisioner_job_by_id(
@@ -1904,6 +1917,12 @@ pub(crate) mod tests {
             &self,
             input: CompleteProvisionerJobInput,
         ) -> Result<(), StorageError> {
+            let status = if input.error.is_empty() {
+                ProvisionerJobStatus::Succeeded
+            } else {
+                ProvisionerJobStatus::Failed
+            };
+
             let mut jobs = self
                 .prov_jobs
                 .lock()
@@ -1915,11 +1934,19 @@ pub(crate) mod tests {
             job.completed_at = Some(input.completed_at);
             job.error = input.error.clone();
             job.error_code = input.error_code.clone();
-            job.job_status = if input.error.is_empty() {
-                ProvisionerJobStatus::Succeeded
-            } else {
-                ProvisionerJobStatus::Failed
-            };
+            job.job_status = status;
+            drop(jobs);
+
+            // Sync completion to template-side provisioner_jobs.
+            if let Ok(mut tmpl_jobs) = self.provisioner_jobs.lock() {
+                if let Some(tj) = tmpl_jobs.get_mut(&input.id) {
+                    tj.updated_at = input.updated_at;
+                    tj.completed_at = Some(input.completed_at);
+                    tj.error = input.error;
+                    tj.job_status = status.as_str().to_owned();
+                }
+            }
+
             Ok(())
         }
 
@@ -1936,12 +1963,28 @@ pub(crate) mod tests {
                 .ok_or_else(|| StorageError::invalid_data(format!("job {} not found", input.id)))?;
             job.canceled_at = Some(input.canceled_at);
             job.updated_at = input.canceled_at;
-            if let Some(completed_at) = input.completed_at {
+            let status = if let Some(completed_at) = input.completed_at {
                 job.completed_at = Some(completed_at);
                 job.job_status = ProvisionerJobStatus::Canceled;
+                ProvisionerJobStatus::Canceled
             } else {
                 job.job_status = ProvisionerJobStatus::Canceling;
+                ProvisionerJobStatus::Canceling
+            };
+            drop(jobs);
+
+            // Sync cancellation to template-side provisioner_jobs.
+            if let Ok(mut tmpl_jobs) = self.provisioner_jobs.lock() {
+                if let Some(tj) = tmpl_jobs.get_mut(&input.id) {
+                    tj.canceled_at = Some(input.canceled_at);
+                    tj.updated_at = input.canceled_at;
+                    if let Some(completed_at) = input.completed_at {
+                        tj.completed_at = Some(completed_at);
+                    }
+                    tj.job_status = status.as_str().to_owned();
+                }
             }
+
             Ok(())
         }
 
@@ -5518,10 +5561,20 @@ pub(crate) mod tests {
             &self,
             input: CreateProvisionerJobInput,
         ) -> Result<TemplateProvisionerJobRecord, StorageError> {
-            let mut jobs = self
-                .provisioner_jobs
-                .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            // Parse string-based provisioner and job_type into typed enums
+            // for the daemon-side record. This mirrors PostgresStore where
+            // both template-side and daemon-side views share a single table.
+            let provisioner_type: ProvisionerType = input
+                .provisioner
+                .parse()
+                .map_err(|e: String| StorageError::invalid_data(e))?;
+            let job_type_enum: ProvisionerJobType = input
+                .job_type
+                .parse()
+                .map_err(|e: String| StorageError::invalid_data(e))?;
+            let tags_json = serde_json::to_value(&input.tags)
+                .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+
             let record = TemplateProvisionerJobRecord {
                 id: input.id,
                 created_at: input.created_at,
@@ -5536,11 +5589,49 @@ pub(crate) mod tests {
                 job_status: "pending".to_owned(),
                 file_id: input.file_id,
                 job_type: input.job_type,
-                input: input.input,
+                input: input.input.clone(),
                 worker_id: None,
                 tags: input.tags,
             };
-            jobs.insert(record.id, record.clone());
+
+            // Insert into template-side storage.
+            self.provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(record.id, record.clone());
+
+            // Also insert into daemon-side storage so provisioner daemons
+            // can acquire this job via acquire_provisioner_job. In PostgresStore
+            // both sides share the same provisioner_jobs table, but in FakeStore
+            // the two maps are separate -- this bridge keeps them in sync.
+            let prov_record = ProvisionerJobRecord {
+                id: record.id,
+                created_at: record.created_at,
+                updated_at: record.updated_at,
+                started_at: None,
+                canceled_at: None,
+                completed_at: None,
+                error: String::new(),
+                error_code: String::new(),
+                organization_id: Some(record.organization_id),
+                initiator_id: Some(record.initiator_id),
+                provisioner: provisioner_type,
+                storage_method: ProvisionerStorageMethod::File,
+                file_id: record.file_id,
+                job_type: job_type_enum,
+                input: input.input,
+                tags: tags_json,
+                trace_metadata: serde_json::Value::Object(serde_json::Map::new()),
+                worker_id: None,
+                job_status: ProvisionerJobStatus::Pending,
+                logs_overflowed: false,
+                logs_length: 0,
+            };
+            self.prov_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(prov_record.id, prov_record);
+
             Ok(record)
         }
 
@@ -5552,34 +5643,79 @@ pub(crate) mod tests {
                 .provisioner_jobs
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(jobs.get(&job_id).cloned())
+            let Some(mut record) = jobs.get(&job_id).cloned() else {
+                return Ok(None);
+            };
+            drop(jobs);
+
+            // Derive live status from daemon-side prov_jobs if available,
+            // mirroring the PostgresStore CASE expression that computes
+            // job_status from started_at/completed_at/canceled_at/error.
+            if let Ok(prov_jobs) = self.prov_jobs.lock() {
+                if let Some(pj) = prov_jobs.get(&job_id) {
+                    record.started_at = pj.started_at;
+                    record.canceled_at = pj.canceled_at;
+                    record.completed_at = pj.completed_at;
+                    record.error = pj.error.clone();
+                    record.worker_id = pj.worker_id;
+                    record.updated_at = pj.updated_at;
+                    record.job_status = pj.job_status.as_str().to_owned();
+                }
+            }
+
+            Ok(Some(record))
         }
 
         async fn cancel_template_provisioner_job(
             &self,
             job_id: Uuid,
         ) -> Result<bool, StorageError> {
-            let mut jobs = self
-                .provisioner_jobs
-                .lock()
-                .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            match jobs.get_mut(&job_id) {
-                Some(j) if j.canceled_at.is_none() && j.completed_at.is_none() => {
-                    let now = OffsetDateTime::now_utc();
-                    j.canceled_at = Some(now);
-                    // Only complete immediately if no worker has picked up the job
-                    // (matches Go semantics: !job.WorkerID.Valid)
-                    if j.worker_id.is_none() {
-                        j.completed_at = Some(now);
-                        j.job_status = "canceled".to_owned();
-                    } else {
-                        j.job_status = "canceling".to_owned();
+            // Extract cancellation state and drop provisioner_jobs lock
+            // before acquiring prov_jobs, to maintain consistent lock
+            // ordering (prov_jobs → provisioner_jobs) with acquire_provisioner_job.
+            let (canceled, now, worker_is_none) = {
+                let mut jobs = self
+                    .provisioner_jobs
+                    .lock()
+                    .map_err(|e| StorageError::unavailable(e.to_string()))?;
+                match jobs.get_mut(&job_id) {
+                    Some(j) if j.canceled_at.is_none() && j.completed_at.is_none() => {
+                        let now = OffsetDateTime::now_utc();
+                        let worker_is_none = j.worker_id.is_none();
+                        j.canceled_at = Some(now);
+                        // Only complete immediately if no worker has picked up the job
+                        // (matches Go semantics: !job.WorkerID.Valid)
+                        if worker_is_none {
+                            j.completed_at = Some(now);
+                            j.job_status = "canceled".to_owned();
+                        } else {
+                            j.job_status = "canceling".to_owned();
+                        }
+                        j.updated_at = now;
+                        (true, now, worker_is_none)
                     }
-                    j.updated_at = now;
-                    Ok(true)
+                    _ => return Ok(false),
                 }
-                _ => Ok(false),
+            };
+            // provisioner_jobs lock is now dropped.
+
+            // Sync cancellation to daemon-side prov_jobs.
+            if canceled {
+                if let Ok(mut prov_jobs) = self.prov_jobs.lock() {
+                    if let Some(pj) = prov_jobs.get_mut(&job_id) {
+                        pj.canceled_at = Some(now);
+                        pj.updated_at = now;
+                        if worker_is_none {
+                            pj.completed_at = Some(now);
+                            pj.job_status = ProvisionerJobStatus::Canceled;
+                        } else {
+                            pj.job_status = ProvisionerJobStatus::Canceling;
+                        }
+                    }
+                }
             }
+
+            Ok(true)
         }
 
         async fn insert_file(
@@ -6084,6 +6220,7 @@ pub(crate) mod tests {
             job_id: Uuid,
             after: Option<i64>,
         ) -> Result<Vec<PortsJobLogRecord>, StorageError> {
+            // First check template-side logs.
             let logs = self
                 .provisioner_job_logs
                 .lock()
@@ -6095,6 +6232,33 @@ pub(crate) mod tests {
                 .into_iter()
                 .filter(|l| after.is_none_or(|after_id| l.id > after_id))
                 .collect();
+            drop(logs);
+
+            // Also check daemon-side prov_job_logs (inserted via
+            // ProvisionerStore::insert_provisioner_job_logs by daemons).
+            // In PostgresStore both read from the same table.
+            if let Ok(prov_logs) = self.prov_job_logs.lock() {
+                let seen_ids: std::collections::HashSet<i64> =
+                    result.iter().map(|l| l.id).collect();
+                for log in prov_logs.iter().filter(|l| l.job_id == job_id) {
+                    if after.is_some_and(|after_id| log.id <= after_id) {
+                        continue;
+                    }
+                    if seen_ids.contains(&log.id) {
+                        continue;
+                    }
+                    result.push(PortsJobLogRecord {
+                        id: log.id,
+                        job_id: log.job_id,
+                        created_at: log.created_at,
+                        source: log.source.as_str().to_owned(),
+                        level: log.level.as_str().to_owned(),
+                        stage: log.stage.clone(),
+                        output: log.output.clone(),
+                    });
+                }
+            }
+
             // Match PostgresStore: ORDER BY id ASC.
             result.sort_by_key(|l| l.id);
             Ok(result)
@@ -6135,7 +6299,29 @@ pub(crate) mod tests {
                 .provisioner_job_timings
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
-            Ok(timings.get(&job_id).cloned().unwrap_or_default())
+            let mut result: Vec<PortsJobTimingRecord> =
+                timings.get(&job_id).cloned().unwrap_or_default();
+            drop(timings);
+
+            // Also check daemon-side prov_job_timings (inserted via
+            // ProvisionerStore::insert_provisioner_job_timings by daemons).
+            if let Ok(prov_timings) = self.prov_job_timings.lock() {
+                for t in prov_timings.iter().filter(|t| t.job_id == job_id) {
+                    result.push(PortsJobTimingRecord {
+                        job_id: t.job_id,
+                        started_at: t.started_at,
+                        ended_at: t.ended_at,
+                        stage: t.stage.as_str().to_owned(),
+                        source: t.source.clone(),
+                        action: t.action.clone(),
+                        resource: t.resource.clone(),
+                    });
+                }
+            }
+
+            // Match PostgresStore: ORDER BY started_at ASC.
+            result.sort_by_key(|t| t.started_at);
+            Ok(result)
         }
 
         // ---------------------------------------------------------------
@@ -35386,6 +35572,384 @@ pub(crate) mod tests {
         assert_eq!(resources[0]["name"], "dev");
         assert_eq!(resources[0]["type"], "kubernetes_pod");
         assert_eq!(resources[0]["daily_cost"], 5);
+        Ok(())
+    }
+
+    // =======================================================================
+    // Provisioner job lifecycle bridge tests
+    // =======================================================================
+
+    #[tokio::test]
+    async fn lifecycle_create_provisioner_job_bridges_to_prov_jobs() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let user_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        // Create a job via the template-side API.
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: user_id,
+                provisioner: "echo".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({"template_version_id": "abc"}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        assert_eq!(tmpl_job.job_status, "pending");
+
+        // Verify the job also exists in daemon-side prov_jobs.
+        let prov_job = store
+            .get_provisioner_job_by_id(tmpl_job.id)
+            .await?
+            .ok_or("job should exist in prov_jobs")?;
+        assert_eq!(prov_job.id, tmpl_job.id);
+        assert_eq!(prov_job.job_status, ProvisionerJobStatus::Pending);
+        assert_eq!(prov_job.provisioner, ProvisionerType::Echo);
+        assert_eq!(prov_job.job_type, ProvisionerJobType::TemplateVersionImport);
+        assert_eq!(prov_job.organization_id, Some(org_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_daemon_acquire_syncs_to_template_side() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: Uuid::new_v4(),
+                provisioner: "echo".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        // Daemon acquires the job.
+        let worker_id = Uuid::new_v4();
+        let acquired = store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id,
+                started_at: now,
+                organization_id: org_id,
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: json!({}),
+            })
+            .await?
+            .ok_or("expected job to be acquired")?;
+
+        assert_eq!(acquired.id, tmpl_job.id);
+        assert_eq!(acquired.job_status, ProvisionerJobStatus::Running);
+
+        // Verify template-side find_provisioner_job reflects the running state.
+        let found = store
+            .find_provisioner_job(tmpl_job.id)
+            .await?
+            .ok_or("job should be found")?;
+        assert_eq!(found.job_status, "running");
+        assert!(found.started_at.is_some());
+        assert_eq!(found.worker_id, Some(worker_id));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_daemon_complete_syncs_to_template_side() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: Uuid::new_v4(),
+                provisioner: "terraform".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        // Acquire.
+        store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id: Uuid::new_v4(),
+                started_at: now,
+                organization_id: org_id,
+                types: vec![ProvisionerType::Terraform],
+                provisioner_tags: json!({}),
+            })
+            .await?;
+
+        // Complete successfully.
+        let complete_time = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: tmpl_job.id,
+                updated_at: complete_time,
+                completed_at: complete_time,
+                error: String::new(),
+                error_code: String::new(),
+            })
+            .await?;
+
+        // Verify template-side reflects succeeded.
+        let found = store
+            .find_provisioner_job(tmpl_job.id)
+            .await?
+            .ok_or("job should be found")?;
+        assert_eq!(found.job_status, "succeeded");
+        assert!(found.completed_at.is_some());
+        assert!(found.error.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_daemon_failure_syncs_to_template_side() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: Uuid::new_v4(),
+                provisioner: "echo".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        // Acquire.
+        store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id: Uuid::new_v4(),
+                started_at: now,
+                organization_id: org_id,
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: json!({}),
+            })
+            .await?;
+
+        // Complete with error.
+        let complete_time = OffsetDateTime::now_utc();
+        store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: tmpl_job.id,
+                updated_at: complete_time,
+                completed_at: complete_time,
+                error: "terraform plan failed".to_owned(),
+                error_code: "PLAN_FAILURE".to_owned(),
+            })
+            .await?;
+
+        // Verify template-side reflects failed.
+        let found = store
+            .find_provisioner_job(tmpl_job.id)
+            .await?
+            .ok_or("job should be found")?;
+        assert_eq!(found.job_status, "failed");
+        assert_eq!(found.error, "terraform plan failed");
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_template_cancel_syncs_to_prov_jobs() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: Uuid::new_v4(),
+                provisioner: "echo".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        store
+            .acquire_provisioner_job(AcquireProvisionerJobInput {
+                worker_id: Uuid::new_v4(),
+                started_at: now,
+                organization_id: org_id,
+                types: vec![ProvisionerType::Echo],
+                provisioner_tags: json!({}),
+            })
+            .await?;
+
+        // Cancel from template side (worker has picked it up -> canceling).
+        let canceled = store.cancel_template_provisioner_job(tmpl_job.id).await?;
+        assert!(canceled);
+
+        // Daemon-side should see canceling.
+        let prov_job = store
+            .get_provisioner_job_by_id(tmpl_job.id)
+            .await?
+            .ok_or("job should exist")?;
+        assert_eq!(prov_job.job_status, ProvisionerJobStatus::Canceling);
+        assert!(prov_job.canceled_at.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_template_cancel_no_worker_completes() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: Uuid::new_v4(),
+                provisioner: "echo".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        // Cancel from template side (no worker -> canceled immediately).
+        let canceled = store.cancel_template_provisioner_job(tmpl_job.id).await?;
+        assert!(canceled);
+
+        // Daemon-side should see canceled (not canceling).
+        let prov_job = store
+            .get_provisioner_job_by_id(tmpl_job.id)
+            .await?
+            .ok_or("job should exist")?;
+        assert_eq!(prov_job.job_status, ProvisionerJobStatus::Canceled);
+        assert!(prov_job.canceled_at.is_some());
+        assert!(prov_job.completed_at.is_some());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_daemon_logs_visible_via_template_api() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: Uuid::new_v4(),
+                provisioner: "echo".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        // Insert logs via daemon-side ProvisionerStore.
+        store
+            .insert_provisioner_job_logs(InsertProvisionerJobLogsInput {
+                job_id: tmpl_job.id,
+                created_at: vec![now],
+                source: vec![LogSource::Provisioner],
+                level: vec![LogLevel::Info],
+                stage: vec!["plan".to_owned()],
+                output: vec!["Initializing provider...".to_owned()],
+            })
+            .await?;
+
+        // Verify logs are visible via template-side list_provisioner_job_logs.
+        let logs = store.list_provisioner_job_logs(tmpl_job.id, None).await?;
+        assert_eq!(logs.len(), 1);
+        assert_eq!(logs[0].output, "Initializing provider...");
+        assert_eq!(logs[0].source, "provisioner");
+        assert_eq!(logs[0].level, "info");
+
+        // Verify after_id filtering works.
+        let first_id = logs[0].id;
+        let empty = store
+            .list_provisioner_job_logs(tmpl_job.id, Some(first_id))
+            .await?;
+        assert!(empty.is_empty());
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn lifecycle_daemon_timings_visible_via_template_api() -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let org_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let tmpl_job = store
+            .create_provisioner_job(CreateProvisionerJobInput {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                organization_id: org_id,
+                initiator_id: Uuid::new_v4(),
+                provisioner: "echo".to_owned(),
+                file_id: Some(Uuid::new_v4()),
+                job_type: "template_version_import".to_owned(),
+                input: json!({}),
+                tags: std::collections::HashMap::new(),
+            })
+            .await?;
+
+        // Insert timings via daemon-side ProvisionerStore.
+        let end = now + time::Duration::seconds(5);
+        store
+            .insert_provisioner_job_timings(InsertProvisionerJobTimingsInput {
+                job_id: tmpl_job.id,
+                started_at: vec![now],
+                ended_at: vec![end],
+                stage: vec![ProvisionerJobTimingStage::Plan],
+                source: vec!["terraform".to_owned()],
+                action: vec!["plan".to_owned()],
+                resource: vec!["aws_instance.main".to_owned()],
+            })
+            .await?;
+
+        // Verify timings are visible via template-side list_provisioner_job_timings.
+        let timings = store.list_provisioner_job_timings(tmpl_job.id).await?;
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].stage, "plan");
+        assert_eq!(timings[0].resource, "aws_instance.main");
+
         Ok(())
     }
 

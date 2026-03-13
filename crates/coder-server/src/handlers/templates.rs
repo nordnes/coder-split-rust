@@ -584,7 +584,9 @@ pub(crate) async fn post_org_template_version(
     let job_id = Uuid::new_v4();
     let version_id = Uuid::new_v4();
 
-    // Create the provisioner job (stub — stays in pending state).
+    // Create the provisioner job. The store bridges this into both the
+    // template-side and daemon-side storage so that provisioner daemons
+    // can acquire and execute the job through the full lifecycle.
     let provisioner = if body.provisioner.is_empty() {
         "terraform".to_owned()
     } else {
@@ -601,7 +603,9 @@ pub(crate) async fn post_org_template_version(
             provisioner: provisioner.clone(),
             file_id: body.file_id,
             job_type: "template_version_import".to_owned(),
-            input: serde_json::json!({}),
+            input: serde_json::json!({
+                "template_version_id": version_id.to_string(),
+            }),
             tags: body.tags.clone(),
         })
         .await?;
