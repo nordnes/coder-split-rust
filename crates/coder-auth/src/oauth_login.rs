@@ -46,14 +46,14 @@ pub struct GithubUser {
     pub id: i64,
     /// Login.
     pub login: String,
-    #[serde(default)]
     /// Name.
+    #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
     /// Email.
-    pub email: Option<String>,
     #[serde(default)]
+    pub email: Option<String>,
     /// Avatar url.
+    #[serde(default)]
     pub avatar_url: String,
 }
 
@@ -62,11 +62,11 @@ pub struct GithubUser {
 pub struct GithubEmail {
     /// Email.
     pub email: String,
-    #[serde(default)]
     /// Primary.
-    pub primary: bool,
     #[serde(default)]
+    pub primary: bool,
     /// Verified.
+    #[serde(default)]
     pub verified: bool,
 }
 
@@ -96,20 +96,20 @@ pub struct GithubTeamOrg {
 /// GitHub OAuth2 token exchange response.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubTokenResponse {
-    #[serde(default)]
     /// Access token.
+    #[serde(default)]
     pub access_token: String,
-    #[serde(default)]
     /// Token type.
-    pub token_type: String,
     #[serde(default)]
+    pub token_type: String,
     /// Scope.
+    #[serde(default)]
     pub scope: String,
     /// GitHub may return HTTP 200 with an error field instead of a token.
     #[serde(default)]
     pub error: Option<String>,
-    #[serde(default)]
     /// Error description.
+    #[serde(default)]
     pub error_description: Option<String>,
 }
 
@@ -122,11 +122,11 @@ pub struct GithubDeviceResponse {
     pub user_code: String,
     /// Verification uri.
     pub verification_uri: String,
-    #[serde(default)]
     /// Expires in.
-    pub expires_in: u64,
     #[serde(default)]
+    pub expires_in: u64,
     /// Interval.
+    #[serde(default)]
     pub interval: u64,
 }
 
@@ -137,14 +137,14 @@ pub struct OidcTokenResponse {
     pub access_token: String,
     /// Id token.
     pub id_token: String,
-    #[serde(default)]
     /// Token type.
+    #[serde(default)]
     pub token_type: String,
-    #[serde(default)]
     /// Refresh token.
-    pub refresh_token: Option<String>,
     #[serde(default)]
+    pub refresh_token: Option<String>,
     /// Expires in.
+    #[serde(default)]
     pub expires_in: Option<u64>,
 }
 
@@ -166,23 +166,23 @@ pub struct OidcDiscovery {
 /// Claims extracted from an OIDC ID token.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OidcClaims {
-    #[serde(default)]
     /// Sub.
+    #[serde(default)]
     pub sub: String,
-    #[serde(default)]
     /// Email.
+    #[serde(default)]
     pub email: Option<String>,
-    #[serde(default)]
     /// Email verified.
+    #[serde(default)]
     pub email_verified: Option<bool>,
-    #[serde(default)]
     /// Name.
+    #[serde(default)]
     pub name: Option<String>,
-    #[serde(default)]
     /// Preferred username.
-    pub preferred_username: Option<String>,
     #[serde(default)]
+    pub preferred_username: Option<String>,
     /// Groups.
+    #[serde(default)]
     pub groups: Option<Vec<String>>,
     /// All raw claims for storage.
     #[serde(flatten)]
@@ -918,17 +918,17 @@ pub fn build_user_link_claims(claims: &OidcClaims) -> UserLinkClaims {
 /// Query parameters for OAuth2 callback endpoints.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OAuthCallbackQuery {
-    #[serde(default)]
     /// Code.
+    #[serde(default)]
     pub code: String,
-    #[serde(default)]
     /// State.
+    #[serde(default)]
     pub state: String,
-    #[serde(default)]
     /// Error.
-    pub error: Option<String>,
     #[serde(default)]
+    pub error: Option<String>,
     /// Error description.
+    #[serde(default)]
     pub error_description: Option<String>,
 }
 

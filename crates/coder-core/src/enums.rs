@@ -135,17 +135,17 @@ pub enum WorkspaceAppHealth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
 #[sqlx(type_name = "workspace_app_open_in")]
 pub enum WorkspaceAppOpenIn {
+    /// Tab.
     #[serde(rename = "tab")]
     #[sqlx(rename = "tab")]
-    /// Tab.
     Tab,
+    /// Window.
     #[serde(rename = "window")]
     #[sqlx(rename = "window")]
-    /// Window.
     Window,
+    /// SlimWindow.
     #[serde(rename = "slim-window")]
     #[sqlx(rename = "slim-window")]
-    /// SlimWindow.
     SlimWindow,
 }
 
@@ -431,45 +431,45 @@ pub enum ParameterFormType {
     #[serde(rename = "")]
     #[sqlx(rename = "")]
     Default,
+    /// Error.
     #[serde(rename = "error")]
     #[sqlx(rename = "error")]
-    /// Error.
     Error,
+    /// Radio.
     #[serde(rename = "radio")]
     #[sqlx(rename = "radio")]
-    /// Radio.
     Radio,
+    /// Dropdown.
     #[serde(rename = "dropdown")]
     #[sqlx(rename = "dropdown")]
-    /// Dropdown.
     Dropdown,
+    /// Input.
     #[serde(rename = "input")]
     #[sqlx(rename = "input")]
-    /// Input.
     Input,
+    /// Textarea.
     #[serde(rename = "textarea")]
     #[sqlx(rename = "textarea")]
-    /// Textarea.
     Textarea,
+    /// Slider.
     #[serde(rename = "slider")]
     #[sqlx(rename = "slider")]
-    /// Slider.
     Slider,
+    /// Checkbox.
     #[serde(rename = "checkbox")]
     #[sqlx(rename = "checkbox")]
-    /// Checkbox.
     Checkbox,
+    /// Switch.
     #[serde(rename = "switch")]
     #[sqlx(rename = "switch")]
-    /// Switch.
     Switch,
+    /// TagSelect.
     #[serde(rename = "tag-select")]
     #[sqlx(rename = "tag-select")]
-    /// TagSelect.
     TagSelect,
+    /// MultiSelect.
     #[serde(rename = "multi-select")]
     #[sqlx(rename = "multi-select")]
-    /// MultiSelect.
     MultiSelect,
 }
 
@@ -616,13 +616,13 @@ pub enum LogSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
 #[sqlx(type_name = "startup_script_behavior")]
 pub enum StartupScriptBehavior {
+    /// Blocking.
     #[serde(rename = "blocking")]
     #[sqlx(rename = "blocking")]
-    /// Blocking.
     Blocking,
+    /// NonBlocking.
     #[serde(rename = "non-blocking")]
     #[sqlx(rename = "non-blocking")]
-    /// NonBlocking.
     NonBlocking,
 }
 
