@@ -44,10 +44,7 @@ jobs:
           key: ${{ runner.os }}-cargo-clippy-${{ matrix.toolchain }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-clippy-${{ matrix.toolchain }}-
-      # Lint lib and bin targets; workspace lints already deny unwrap_used,
-      # expect_used, panic, todo, and dbg_macro. Test targets are excluded
-      # because test code legitimately uses .unwrap().
-      - run: cargo clippy --workspace --lib --bins
+      - run: cargo clippy --workspace --all-targets
 
   check:
     name: Check (${{ matrix.toolchain }})

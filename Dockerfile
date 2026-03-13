@@ -11,11 +11,11 @@ RUN cargo chef prepare --recipe-path recipe.json
 # ── Stage 3: Build dependencies (cached layer) ───────────────────────
 FROM chef AS builder
 COPY --from=planner /app/recipe.json recipe.json
-RUN cargo chef cook --release --recipe-path recipe.json
+RUN cargo chef cook --release --locked --recipe-path recipe.json
 
 # Build the actual application
 COPY . .
-RUN cargo build --release --bin coderd
+RUN cargo build --release --locked --bin coderd
 
 # ── Stage 4: Minimal runtime ─────────────────────────────────────────
 FROM debian:bookworm-slim AS runtime
