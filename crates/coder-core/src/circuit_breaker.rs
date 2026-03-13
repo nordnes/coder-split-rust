@@ -218,6 +218,13 @@ impl CircuitBreaker {
     /// Use this instead of [`call`] when the operation has already been
     /// executed outside the circuit breaker and you only want to update
     /// the breaker's internal counters.
+    ///
+    /// **Note:** These methods bypass the half-open probe limit enforced by
+    /// [`call`].  In the `HalfOpen` state every reported success counts
+    /// toward closing the breaker, regardless of `half_open_max_probes`.
+    /// This is acceptable for batch-style probes (e.g. workspace proxies,
+    /// provisioner daemons) where the caller already gates on breaker state
+    /// before running the operation.
     pub async fn report_success(&self) {
         let mut inner = self.inner.lock().await;
         self.record_success(&mut inner);
@@ -228,6 +235,9 @@ impl CircuitBreaker {
     /// Use this instead of [`call`] when the operation has already been
     /// executed outside the circuit breaker and you only want to update
     /// the breaker's internal counters.
+    ///
+    /// **Note:** These methods bypass the half-open probe limit enforced by
+    /// [`call`].  See [`report_success`](Self::report_success) for details.
     pub async fn report_failure(&self) {
         let mut inner = self.inner.lock().await;
         self.record_failure(&mut inner);
@@ -250,31 +260,37 @@ impl CircuitBreaker {
                 }
             }
             CircuitBreakerState::Open => {
-                // Should not happen (we reject calls in Open), but reset
-                // defensively.
-                inner.consecutive_failures = 0;
+                // Reachable via `report_success()` when the dependency
+                // recovers while the breaker is still open.  Transition
+                // to HalfOpen so the normal probe-then-close path runs,
+                // cutting recovery latency without skipping validation.
+                inner.state = CircuitBreakerState::HalfOpen;
+                inner.half_open_successes = 1;
             }
         }
     }
 
     /// Records a failed call.
     fn record_failure(&self, inner: &mut Inner) {
-        inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
-        inner.last_failure_time = Some(Instant::now());
-
         match inner.state {
             CircuitBreakerState::Closed => {
+                inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
+                inner.last_failure_time = Some(Instant::now());
                 if inner.consecutive_failures >= self.config.failure_threshold {
                     inner.state = CircuitBreakerState::Open;
                 }
             }
             CircuitBreakerState::HalfOpen => {
                 // Any failure in half-open immediately re-opens the breaker.
+                inner.consecutive_failures = inner.consecutive_failures.saturating_add(1);
+                inner.last_failure_time = Some(Instant::now());
                 inner.state = CircuitBreakerState::Open;
                 inner.half_open_successes = 0;
             }
             CircuitBreakerState::Open => {
-                // Already open — nothing to do.
+                // Already open — do NOT update last_failure_time to avoid
+                // indefinitely extending the reset timeout (e.g. when
+                // report_failure() is called every health-check cycle).
             }
         }
     }
@@ -512,6 +528,53 @@ mod tests {
             assert_eq!(status.state, CircuitBreakerState::Closed);
             assert_eq!(status.consecutive_failures, 0);
         }
+    }
+
+    #[tokio::test]
+    async fn report_failure_while_open_does_not_reset_timeout() {
+        let cb = CircuitBreaker::new("test", fast_config());
+        // Trip the breaker.
+        for _ in 0..3 {
+            let _: Result<(), _> = cb.call(|| async { Err::<(), &str>("fail") }).await;
+        }
+        assert_eq!(cb.state().await, CircuitBreakerState::Open);
+
+        // Wait 30ms (more than half the 50ms reset_timeout).
+        tokio::time::sleep(Duration::from_millis(30)).await;
+
+        // report_failure while Open must NOT reset last_failure_time.
+        cb.report_failure().await;
+
+        // Wait another 25ms — total 55ms since the breaker originally
+        // opened, which exceeds the 50ms reset_timeout.  If
+        // last_failure_time was incorrectly reset by report_failure(),
+        // only 25ms would have elapsed and the breaker would still be Open.
+        tokio::time::sleep(Duration::from_millis(25)).await;
+        assert_eq!(
+            cb.state().await,
+            CircuitBreakerState::HalfOpen,
+            "breaker should transition to HalfOpen based on original failure time"
+        );
+    }
+
+    #[tokio::test]
+    async fn report_success_while_open_transitions_to_half_open() {
+        let cb = CircuitBreaker::new("test", fast_config());
+        // Trip the breaker.
+        for _ in 0..3 {
+            let _: Result<(), _> = cb.call(|| async { Err::<(), &str>("fail") }).await;
+        }
+        assert_eq!(cb.state().await, CircuitBreakerState::Open);
+
+        // report_success while Open should transition to HalfOpen
+        // (counting that success as the first half-open probe).
+        cb.report_success().await;
+        assert_eq!(cb.state().await, CircuitBreakerState::HalfOpen);
+
+        // One more success should close it (half_open_max_probes = 2,
+        // and we already counted 1 from the Open→HalfOpen transition).
+        cb.report_success().await;
+        assert_eq!(cb.state().await, CircuitBreakerState::Closed);
     }
 
     #[tokio::test]
