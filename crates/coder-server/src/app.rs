@@ -1657,11 +1657,38 @@ pub(crate) mod tests {
         }
 
         /// Inserts a workspace into the fake store for testing.
-        fn insert_workspace(&self, workspace: WorkspaceRecord) -> Result<(), StorageError> {
+        pub(crate) fn insert_workspace(
+            &self,
+            workspace: WorkspaceRecord,
+        ) -> Result<(), StorageError> {
             self.workspaces
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(workspace.id, workspace);
+            Ok(())
+        }
+
+        /// Inserts a workspace build into the fake store for testing.
+        pub(crate) fn insert_build(&self, build: WorkspaceBuildRecord) -> Result<(), StorageError> {
+            self.workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(build.id, build);
+            Ok(())
+        }
+
+        /// Inserts a workspace resource into the fake store for testing.
+        pub(crate) fn insert_resource(
+            &self,
+            job_id: Uuid,
+            resource: WorkspaceResourceRecord,
+        ) -> Result<(), StorageError> {
+            self.workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .entry(job_id)
+                .or_default()
+                .push(resource);
             Ok(())
         }
 
@@ -10551,7 +10578,7 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(auth_redirect_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /workspaceagents/me/gitsshkey with auth returns 200 with stub keys ---
+        // --- GET /workspaceagents/me/gitsshkey with user auth returns 400 (agent auth required) ---
         let gitsshkey_response = call(
             app.clone(),
             authenticated_request(
@@ -10561,16 +10588,7 @@ pub(crate) mod tests {
             )?,
         )
         .await?;
-        assert_eq!(gitsshkey_response.status(), StatusCode::OK);
-        let gitsshkey_body = response_json(gitsshkey_response).await?;
-        assert_eq!(
-            gitsshkey_body.get("public_key").and_then(Value::as_str),
-            Some("")
-        );
-        assert_eq!(
-            gitsshkey_body.get("private_key").and_then(Value::as_str),
-            Some("")
-        );
+        assert_eq!(gitsshkey_response.status(), StatusCode::BAD_REQUEST);
 
         // --- GET /workspaceagents/me/gitsshkey without auth returns 401 ---
         let gitsshkey_unauth = call(

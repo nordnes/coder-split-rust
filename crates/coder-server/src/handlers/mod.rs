@@ -93,7 +93,7 @@ use coder_core::{
     WorkspaceListFilter,
 };
 use coder_provisioner::{InitScriptError, render_init_script};
-use coder_rbac::{Action, Authorizer, Object, ResourceKind, ResourceType};
+use coder_rbac::{Action, Actor, Authorizer, Object, ResourceKind, ResourceType};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
