@@ -213,6 +213,26 @@ impl CircuitBreaker {
         result.map_err(CircuitBreakerCallError::Inner)
     }
 
+    /// Records a successful outcome for bookkeeping purposes.
+    ///
+    /// Use this instead of [`call`] when the operation has already been
+    /// executed outside the circuit breaker and you only want to update
+    /// the breaker's internal counters.
+    pub async fn report_success(&self) {
+        let mut inner = self.inner.lock().await;
+        self.record_success(&mut inner);
+    }
+
+    /// Records a failed outcome for bookkeeping purposes.
+    ///
+    /// Use this instead of [`call`] when the operation has already been
+    /// executed outside the circuit breaker and you only want to update
+    /// the breaker's internal counters.
+    pub async fn report_failure(&self) {
+        let mut inner = self.inner.lock().await;
+        self.record_failure(&mut inner);
+    }
+
     /// Records a successful call.
     fn record_success(&self, inner: &mut Inner) {
         match inner.state {

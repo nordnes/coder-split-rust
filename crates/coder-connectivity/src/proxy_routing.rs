@@ -121,11 +121,7 @@ impl ProxyRouter {
     pub async fn record_success(&self, proxy_id: uuid::Uuid) {
         let entries = self.entries.lock().await;
         if let Some(entry) = entries.iter().find(|e| e.record.id == proxy_id) {
-            let _: Result<(), ProxyRouteError> = entry
-                .circuit_breaker
-                .call(|| async { Ok::<(), ProxyRouteError>(()) })
-                .await
-                .map_err(|_| ProxyRouteError::BreakerOpen);
+            entry.circuit_breaker.report_success().await;
         }
     }
 
@@ -133,10 +129,7 @@ impl ProxyRouter {
     pub async fn record_failure(&self, proxy_id: uuid::Uuid) {
         let entries = self.entries.lock().await;
         if let Some(entry) = entries.iter().find(|e| e.record.id == proxy_id) {
-            let _: Result<(), ProxyRoutingCallError> = entry
-                .circuit_breaker
-                .call(|| async { Err::<(), ProxyRouteError>(ProxyRouteError::ProbeFailure) })
-                .await;
+            entry.circuit_breaker.report_failure().await;
         }
     }
 }
@@ -146,20 +139,12 @@ impl ProxyRouter {
 pub enum ProxyRouteError {
     /// All proxies have their circuit breakers open.
     AllProxiesUnhealthy,
-    /// The selected proxy's breaker was open.
-    BreakerOpen,
-    /// A health probe to the proxy failed.
-    ProbeFailure,
 }
-
-type ProxyRoutingCallError = coder_core::CircuitBreakerCallError<ProxyRouteError>;
 
 impl std::fmt::Display for ProxyRouteError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::AllProxiesUnhealthy => f.write_str("all workspace proxies are unhealthy"),
-            Self::BreakerOpen => f.write_str("proxy circuit breaker is open"),
-            Self::ProbeFailure => f.write_str("proxy health probe failed"),
         }
     }
 }

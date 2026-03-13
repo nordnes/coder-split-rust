@@ -372,9 +372,7 @@ where
                     let client = &self.http_client;
                     let url = node.url.clone();
                     match breaker
-                        .call(|| async {
-                            health_probe_get(client, url).await.map_err(|e| e.message)
-                        })
+                        .call(|| async { health_probe_get(client, url).await })
                         .await
                     {
                         Ok(r) => Ok(r),
@@ -385,12 +383,8 @@ where
                                 is_client_error: false,
                             })
                         }
-                        Err(coder_core::CircuitBreakerCallError::Inner(msg)) => {
-                            Err(HealthProbeError {
-                                message: msg,
-                                status_code: 0,
-                                is_client_error: false,
-                            })
+                        Err(coder_core::CircuitBreakerCallError::Inner(probe_err)) => {
+                            Err(probe_err)
                         }
                     }
                 } else {
@@ -512,16 +506,14 @@ where
                     Ok(result) if (200..300).contains(&result.status_code) => {
                         // Record success through breaker.
                         if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
-                            let _ = breaker.call(|| async { Ok::<(), String>(()) }).await;
+                            breaker.report_success().await;
                         }
                         items.push(format!("{}: ok", proxy.name));
                     }
                     Ok(result) => {
                         // Record failure through breaker.
                         if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
-                            let _: Result<(), _> = breaker
-                                .call(|| async { Err::<(), String>("unhealthy".to_owned()) })
-                                .await;
+                            breaker.report_failure().await;
                         }
                         let item_error =
                             format!("{}: unhealthy ({})", proxy.name, result.status_code);
@@ -532,9 +524,7 @@ where
                     Err(probe_error) => {
                         // Record failure through breaker.
                         if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
-                            let _: Result<(), _> = breaker
-                                .call(|| async { Err::<(), String>("unreachable".to_owned()) })
-                                .await;
+                            breaker.report_failure().await;
                         }
                         let item_error =
                             format!("{}: unreachable ({})", proxy.name, probe_error.message);
@@ -597,11 +587,9 @@ where
         // Record provisioner health through the circuit breaker.
         if let Some(breaker) = self.circuit_breakers.get("provisioner_daemons") {
             if any_offline {
-                let _: Result<(), _> = breaker
-                    .call(|| async { Err::<(), String>("offline daemons detected".to_owned()) })
-                    .await;
+                breaker.report_failure().await;
             } else {
-                let _ = breaker.call(|| async { Ok::<(), String>(()) }).await;
+                breaker.report_success().await;
             }
         }
 
