@@ -1,0 +1,13 @@
+target/
+.git/
+.gitignore
+.github/
+.env
+.DS_Store
+.sqlx/
+docs/
+scripts/
+coder/
+*.md
+docker-compose.yml
+Dockerfile

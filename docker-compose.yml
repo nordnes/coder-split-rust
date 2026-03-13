@@ -1,0 +1,33 @@
+services:
+  postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: coder
+      POSTGRES_PASSWORD: coder
+      POSTGRES_DB: coder
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coder"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "3000:3000"
+    environment:
+      CODER_LISTEN_ADDR: "0.0.0.0:3000"
+      CODER_POSTGRES_URL: "postgres://coder:coder@postgres:5432/coder"
+      CODER_ACCESS_URL: "http://localhost:3000"
+
+volumes:
+  postgres_data:
