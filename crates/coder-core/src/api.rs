@@ -2312,12 +2312,12 @@ pub struct InboxNotification {
     pub icon: String,
     /// Actions.
     pub actions: Vec<InboxNotificationAction>,
+    /// Read at.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "time::serde::rfc3339::option"
     )]
-    /// Read at.
     pub read_at: Option<OffsetDateTime>,
     /// Created at.
     #[serde(with = "time::serde::rfc3339")]
@@ -2859,11 +2859,11 @@ pub struct TaskLogsResponse {
     /// Snapshot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub snapshot: bool,
+    /// Snapshot at.
     #[serde(
         skip_serializing_if = "Option::is_none",
         with = "time::serde::rfc3339::option"
     )]
-    /// Snapshot at.
     pub snapshot_at: Option<OffsetDateTime>,
 }
 
@@ -3508,17 +3508,17 @@ pub struct ChatDiffStatusResponse {
     pub deletions: i32,
     /// Changed files.
     pub changed_files: i32,
-    #[serde(
-        skip_serializing_if = "Option::is_none",
-        serialize_with = "serialize_optional_rfc3339"
-    )]
     /// Refreshed at.
-    pub refreshed_at: Option<OffsetDateTime>,
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_optional_rfc3339"
     )]
+    pub refreshed_at: Option<OffsetDateTime>,
     /// Stale at.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        serialize_with = "serialize_optional_rfc3339"
+    )]
     pub stale_at: Option<OffsetDateTime>,
 }
 
