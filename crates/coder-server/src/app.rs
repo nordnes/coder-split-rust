@@ -169,7 +169,7 @@ pub struct AppState {
     pub(crate) deployment_stats: Arc<DeploymentStatsService<Arc<dyn AppStore>>>,
     pub(crate) health: HealthService<Arc<dyn AppStore>>,
     pub(crate) external_auth: ExternalAuthService<Arc<dyn AppStore>>,
-    /// Oauth2 provider.
+    /// OAuth2 provider.
     pub oauth2_provider: OAuth2ProviderService<Arc<dyn AppStore>>,
     /// Telemetry event reporter for submitting events to the background worker.
     pub telemetry_reporter: coder_telemetry::TelemetryReporter,

@@ -103,7 +103,7 @@ pub struct LicenseClaims {
     /// Legacy "all features" flag, superseded by `feature_set`.
     #[serde(default)]
     pub all_features: bool,
-    /// Schema version — must equal `CURRENT_VERSION` (currently 3).
+    /// Schema version — must equal `CURRENT_VERSION`.
     #[serde(default)]
     pub version: u64,
     /// Per-feature numeric values (limits / enablement).

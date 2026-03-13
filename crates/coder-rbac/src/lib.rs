@@ -1384,7 +1384,7 @@ impl std::error::Error for Forbidden {}
 /// # Examples
 ///
 /// ```
-/// use coder_rbac::{Action, Actor, Authorizer, Object, ResourceType, Scope};
+/// use coder_rbac::{Action, Actor, Authorizer, Object, ResourceType};
 /// use uuid::Uuid;
 ///
 /// let authorizer = Authorizer::new();
