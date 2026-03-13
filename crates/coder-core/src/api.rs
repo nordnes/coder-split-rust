@@ -7,6 +7,7 @@ use serde_json::Value;
 use time::OffsetDateTime;
 use uuid::Uuid;
 
+use crate::circuit_breaker::CircuitBreakerStatus;
 use crate::config::PublicDeploymentConfig;
 use crate::identity::{
     ApiKeyRecord, AuthenticatedUser, LoginType, OrganizationMemberRecord, OrganizationRecord,
@@ -748,6 +749,9 @@ pub struct HealthcheckReport {
     pub provisioner_daemons: ProvisionerDaemonsHealthReport,
     /// Version string for the running backend.
     pub coder_version: String,
+    /// Per-dependency circuit breaker statuses.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub circuit_breakers: Vec<CircuitBreakerStatus>,
 }
 
 /// Persisted deployment health UI settings.

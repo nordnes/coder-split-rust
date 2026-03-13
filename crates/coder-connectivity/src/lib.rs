@@ -15,6 +15,7 @@
 
 pub mod agents;
 pub mod derp;
+pub mod proxy_routing;
 pub mod tailnet;
 use std::{
     collections::HashMap,
@@ -23,10 +24,10 @@ use std::{
 };
 
 use coder_core::{
-    AccessUrlHealthReport, BaseHealthReport, BuildMetadata, DatabaseHealthReport, DeploymentStore,
-    DerpHealthReport, HealthSeverity, HealthcheckReport, OperationalStore,
-    ProvisionerDaemonsHealthReport, ServerConfig, WebsocketHealthReport,
-    WorkspaceProxyHealthReport,
+    AccessUrlHealthReport, BaseHealthReport, BuildMetadata, CircuitBreakerRegistry,
+    CircuitBreakerState, DatabaseHealthReport, DeploymentStore, DerpHealthReport, HealthSeverity,
+    HealthcheckReport, OperationalStore, ProvisionerDaemonsHealthReport, ServerConfig,
+    WebsocketHealthReport, WorkspaceProxyHealthReport,
 };
 use ssh_key::{Algorithm, LineEnding, PrivateKey, rand_core::OsRng};
 use thiserror::Error;
@@ -67,14 +68,24 @@ pub struct HealthService<S> {
     http_client: reqwest::Client,
     cache: Arc<Mutex<Option<CachedHealthReport>>>,
     refresh_lock: Arc<Mutex<()>>,
+    circuit_breakers: CircuitBreakerRegistry,
 }
 
 impl<S> HealthService<S>
 where
     S: DeploymentStore + OperationalStore + Clone + Send + Sync + 'static,
 {
-    /// Creates the health service with one shared HTTP client.
+    /// Creates the health service with one shared HTTP client and default
+    /// circuit breakers for all external dependencies.
     pub fn new(store: S) -> Result<Self, reqwest::Error> {
+        Self::with_circuit_breakers(store, CircuitBreakerRegistry::with_defaults())
+    }
+
+    /// Creates the health service with the given circuit breaker registry.
+    pub fn with_circuit_breakers(
+        store: S,
+        circuit_breakers: CircuitBreakerRegistry,
+    ) -> Result<Self, reqwest::Error> {
         Ok(Self {
             store,
             http_client: reqwest::Client::builder()
@@ -82,7 +93,14 @@ where
                 .build()?,
             cache: Arc::new(Mutex::new(None)),
             refresh_lock: Arc::new(Mutex::new(())),
+            circuit_breakers,
         })
+    }
+
+    /// Returns a reference to the circuit breaker registry.
+    #[must_use]
+    pub fn circuit_breakers(&self) -> &CircuitBreakerRegistry {
+        &self.circuit_breakers
     }
 
     /// Returns the cached report unless a forced refresh is requested.
@@ -160,6 +178,20 @@ where
         .into_iter()
         .fold(HealthSeverity::Ok, max_severity);
 
+        let cb_statuses = self.circuit_breakers.all_statuses().await;
+
+        // Factor circuit breaker states into overall severity: any open
+        // breaker raises severity to at least Warning.
+        let cb_severity = if cb_statuses
+            .iter()
+            .any(|s| s.state == CircuitBreakerState::Open)
+        {
+            HealthSeverity::Warning
+        } else {
+            HealthSeverity::Ok
+        };
+        let severity = max_severity(severity, cb_severity);
+
         Ok(HealthcheckReport {
             time: OffsetDateTime::now_utc(),
             healthy: !matches!(severity, HealthSeverity::Error),
@@ -171,6 +203,7 @@ where
             workspace_proxy: workspace_proxy_report,
             provisioner_daemons: provisioner_report,
             coder_version: build_metadata.version.clone(),
+            circuit_breakers: cb_statuses,
         })
     }
 
@@ -325,13 +358,46 @@ where
         let mut warnings = Vec::new();
         let mut error = None;
 
+        let derp_breaker = self.circuit_breakers.get("derp_mesh");
+
         for region in &config.derp_regions {
             let mut healthy_nodes = 0usize;
             let mut total_nodes = 0usize;
 
             for node in &region.nodes {
                 total_nodes = total_nodes.saturating_add(1);
-                match health_probe_get(&self.http_client, node.url.clone()).await {
+
+                // Wrap the HTTP probe through the DERP circuit breaker.
+                let probe_result = if let Some(breaker) = derp_breaker {
+                    let client = &self.http_client;
+                    let url = node.url.clone();
+                    match breaker
+                        .call(|| async {
+                            health_probe_get(client, url).await.map_err(|e| e.message)
+                        })
+                        .await
+                    {
+                        Ok(r) => Ok(r),
+                        Err(coder_core::CircuitBreakerCallError::BreakerOpen(open)) => {
+                            Err(HealthProbeError {
+                                message: format!("circuit breaker open: {open}"),
+                                status_code: 0,
+                                is_client_error: false,
+                            })
+                        }
+                        Err(coder_core::CircuitBreakerCallError::Inner(msg)) => {
+                            Err(HealthProbeError {
+                                message: msg,
+                                status_code: 0,
+                                is_client_error: false,
+                            })
+                        }
+                    }
+                } else {
+                    health_probe_get(&self.http_client, node.url.clone()).await
+                };
+
+                match probe_result {
                     Ok(result) if (200..300).contains(&result.status_code) => {
                         healthy_nodes = healthy_nodes.saturating_add(1);
                         logs.push(format!(
@@ -403,6 +469,20 @@ where
         let mut severity = HealthSeverity::Ok;
         let mut error = None;
 
+        // Check if the workspace-proxy circuit breaker is open — if so, skip
+        // all HTTP probes and report a degraded status immediately.
+        let proxy_breaker_open =
+            if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
+                breaker.state().await == CircuitBreakerState::Open
+            } else {
+                false
+            };
+
+        if proxy_breaker_open {
+            warnings.push("workspace proxy circuit breaker is open; skipping probes".to_owned());
+            severity = max_severity(severity, HealthSeverity::Warning);
+        }
+
         for proxy in self.store.list_workspace_proxies_for_health().await? {
             if proxy.deleted {
                 continue;
@@ -417,6 +497,12 @@ where
                 continue;
             }
 
+            // Skip HTTP probes when the circuit breaker is open.
+            if proxy_breaker_open {
+                items.push(format!("{}: skipped (circuit breaker open)", proxy.name));
+                continue;
+            }
+
             let healthz_url = reqwest::Url::parse(&proxy.path_app_url)
                 .and_then(|url| url.join("/healthz"))
                 .ok();
@@ -424,9 +510,19 @@ where
             match healthz_url {
                 Some(url) => match health_probe_get(&self.http_client, url).await {
                     Ok(result) if (200..300).contains(&result.status_code) => {
+                        // Record success through breaker.
+                        if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
+                            let _ = breaker.call(|| async { Ok::<(), String>(()) }).await;
+                        }
                         items.push(format!("{}: ok", proxy.name));
                     }
                     Ok(result) => {
+                        // Record failure through breaker.
+                        if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
+                            let _: Result<(), _> = breaker
+                                .call(|| async { Err::<(), String>("unhealthy".to_owned()) })
+                                .await;
+                        }
                         let item_error =
                             format!("{}: unhealthy ({})", proxy.name, result.status_code);
                         items.push(item_error.clone());
@@ -434,6 +530,12 @@ where
                         severity = HealthSeverity::Error;
                     }
                     Err(probe_error) => {
+                        // Record failure through breaker.
+                        if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
+                            let _: Result<(), _> = breaker
+                                .call(|| async { Err::<(), String>("unreachable".to_owned()) })
+                                .await;
+                        }
                         let item_error =
                             format!("{}: unreachable ({})", proxy.name, probe_error.message);
                         items.push(item_error.clone());
@@ -469,6 +571,8 @@ where
         let mut items = Vec::new();
         let mut severity = HealthSeverity::Ok;
 
+        let mut any_offline = false;
+
         for daemon in self.store.list_provisioner_daemons_for_health().await? {
             let status = daemon.status.clone().unwrap_or_else(|| {
                 if daemon.last_seen_at.is_some_and(|last_seen| {
@@ -484,9 +588,21 @@ where
             if status == "offline" {
                 warnings.push(format!("provisioner daemon {} is offline", daemon.name));
                 severity = max_severity(severity, HealthSeverity::Warning);
+                any_offline = true;
             }
 
             items.push(format!("{}: {}", daemon.name, status));
+        }
+
+        // Record provisioner health through the circuit breaker.
+        if let Some(breaker) = self.circuit_breakers.get("provisioner_daemons") {
+            if any_offline {
+                let _: Result<(), _> = breaker
+                    .call(|| async { Err::<(), String>("offline daemons detected".to_owned()) })
+                    .await;
+            } else {
+                let _ = breaker.call(|| async { Ok::<(), String>(()) }).await;
+            }
         }
 
         Ok(ProvisionerDaemonsHealthReport {
@@ -1449,6 +1565,119 @@ mod tests {
         assert_eq!(
             max_severity(HealthSeverity::Ok, HealthSeverity::Ok),
             HealthSeverity::Ok
+        );
+    }
+
+    // ── Circuit breaker health aggregation tests ──────────────
+
+    #[tokio::test]
+    async fn health_report_includes_circuit_breaker_statuses() {
+        let store = MockStore::healthy();
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        // Default registry has 5 breakers, all should be Closed.
+        assert_eq!(report.circuit_breakers.len(), 5);
+        for cb in &report.circuit_breakers {
+            assert_eq!(cb.state, CircuitBreakerState::Closed);
+            assert_eq!(cb.consecutive_failures, 0);
+        }
+    }
+
+    #[tokio::test]
+    async fn health_report_severity_elevated_when_breaker_open() {
+        use coder_core::{CircuitBreaker, CircuitBreakerConfig, CircuitBreakerRegistry};
+
+        let fast = CircuitBreakerConfig {
+            failure_threshold: 1,
+            reset_timeout: Duration::from_secs(300),
+            half_open_max_probes: 1,
+        };
+        let breaker = CircuitBreaker::new("test_dep", fast);
+
+        // Trip the breaker.
+        let _: Result<(), _> = breaker.call(|| async { Err::<(), &str>("boom") }).await;
+        assert_eq!(breaker.state().await, CircuitBreakerState::Open);
+
+        let registry = CircuitBreakerRegistry::new(vec![breaker]);
+        let store = MockStore::healthy();
+        let svc = HealthService::with_circuit_breakers(store, registry)
+            .unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        // An open breaker should raise severity to at least Warning.
+        assert!(
+            report.severity == HealthSeverity::Warning || report.severity == HealthSeverity::Error,
+            "severity should be at least Warning when a breaker is open, got {:?}",
+            report.severity
+        );
+        assert_eq!(report.circuit_breakers.len(), 1);
+        assert_eq!(report.circuit_breakers[0].state, CircuitBreakerState::Open);
+    }
+
+    #[tokio::test]
+    async fn health_report_with_custom_registry_no_defaults() {
+        let registry = CircuitBreakerRegistry::new(vec![]);
+        let store = MockStore::healthy();
+        let svc = HealthService::with_circuit_breakers(store, registry)
+            .unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        // Empty registry → no circuit breaker statuses in report.
+        assert!(report.circuit_breakers.is_empty());
+    }
+
+    #[tokio::test]
+    async fn provisioner_offline_records_breaker_failure() {
+        let old_daemon = ProvisionerDaemonHealthRecord {
+            id: uuid::Uuid::new_v4(),
+            organization_id: uuid::Uuid::new_v4(),
+            created_at: OffsetDateTime::now_utc() - time::Duration::hours(1),
+            last_seen_at: Some(OffsetDateTime::now_utc() - time::Duration::minutes(10)),
+            name: "stale-daemon".to_owned(),
+            version: "1.0.0".to_owned(),
+            api_version: "1.0".to_owned(),
+            provisioners: vec!["terraform".to_owned()],
+            tags: HashMap::new(),
+            status: None,
+        };
+
+        let store = MockStore::with_daemons(vec![old_daemon]);
+        let svc = HealthService::new(store).unwrap_or_else(|_| unreachable!());
+        let config = test_config();
+        let meta = test_build_metadata();
+
+        let report = svc.report(&config, &meta, true).await;
+        assert!(report.is_ok());
+        let report = report.unwrap_or_else(|_| unreachable!());
+
+        // The provisioner_daemons breaker should have recorded at least
+        // one failure.
+        let prov_cb = report
+            .circuit_breakers
+            .iter()
+            .find(|s| s.name == "provisioner_daemons");
+        assert!(prov_cb.is_some(), "provisioner breaker should be in report");
+        let prov_cb = prov_cb.unwrap_or_else(|| unreachable!());
+        assert!(
+            prov_cb.consecutive_failures >= 1,
+            "provisioner breaker should have recorded at least one failure, got {}",
+            prov_cb.consecutive_failures
         );
     }
 
