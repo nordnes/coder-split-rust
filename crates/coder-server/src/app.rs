@@ -1041,6 +1041,7 @@ pub fn build_router(
         )
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(NormalizePathLayer::trim_trailing_slash())
         .with_state(state)
 }
@@ -35385,6 +35386,191 @@ pub(crate) mod tests {
         assert_eq!(resources[0]["name"], "dev");
         assert_eq!(resources[0]["type"], "kubernetes_pod");
         assert_eq!(resources[0]["daily_cost"], 5);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Security audit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pagination_clamp_caps_at_max() {
+        use crate::handlers::users::clamp_pagination_limit;
+
+        // Values within range pass through unchanged.
+        assert_eq!(clamp_pagination_limit(0), 0);
+        assert_eq!(clamp_pagination_limit(50), 50);
+        assert_eq!(clamp_pagination_limit(999), 999);
+        assert_eq!(clamp_pagination_limit(1_000), 1_000);
+
+        // Values above the cap are reduced.
+        assert_eq!(clamp_pagination_limit(1_001), 1_000);
+        assert_eq!(clamp_pagination_limit(u32::MAX), 1_000);
+    }
+
+    #[tokio::test]
+    async fn list_users_clamps_large_pagination_limit() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // A very large limit should still succeed (server clamps internally).
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users?limit=999999&offset=0", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_audit_logs_clamps_large_pagination_limit() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/audit?limit=999999&offset=0", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_org_members_clamps_large_pagination_limit() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/api/v2/organizations/{}/members?limit=999999&offset=0",
+                    org_id
+                ),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_settings_require_admin_rbac() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let owner_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &owner_token).await?;
+
+        // Create a regular member user (no owner or admin roles).
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &owner_token,
+                &CreateUserRequestWithOrgs {
+                    email: "member@example.com".to_owned(),
+                    username: "member".to_owned(),
+                    name: "Member User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![org_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        // Log in as the regular member.
+        let member_login = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "member@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(member_login.status(), StatusCode::CREATED);
+        let member_token = response_json(member_login)
+            .await?
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing member session token")?
+            .to_owned();
+
+        // Non-admin should be forbidden from reading notification settings.
+        let settings_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/notifications/settings", &member_token)?,
+        )
+        .await?;
+        assert_eq!(settings_resp.status(), StatusCode::FORBIDDEN);
+
+        // Non-admin should be forbidden from reading system notification templates.
+        let sys_tpl_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/system",
+                &member_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(sys_tpl_resp.status(), StatusCode::FORBIDDEN);
+
+        // Non-admin should be forbidden from reading custom notification templates.
+        let custom_tpl_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/custom",
+                &member_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(custom_tpl_resp.status(), StatusCode::FORBIDDEN);
+
+        // Admin (owner) should succeed for notification settings.
+        let admin_settings = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/notifications/settings", &owner_token)?,
+        )
+        .await?;
+        assert_eq!(admin_settings.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn global_body_size_limit_rejects_oversized_requests() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // Build a request body larger than 2 MB.
+        let oversized = vec![b'x'; 3 * 1024 * 1024];
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/users")
+            .header(CONTENT_TYPE, "application/json")
+            .header(SESSION_TOKEN_HEADER, &*token)
+            .body(Body::from(oversized))?;
+
+        let response: Response<Body> = call(app, req).await?;
+        // Axum's DefaultBodyLimit rejects oversized bodies with a 4xx error.
+        assert!(
+            response.status().is_client_error(),
+            "expected 4xx for oversized body, got {}",
+            response.status()
+        );
         Ok(())
     }
 }
