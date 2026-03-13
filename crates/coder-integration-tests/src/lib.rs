@@ -257,6 +257,9 @@ mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                    [0u8; 32],
+                )),
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             )?;
@@ -2034,6 +2037,9 @@ mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?;

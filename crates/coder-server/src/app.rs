@@ -23,6 +23,7 @@ use coder_auth::{AuthService, ExternalAuthService, OAuth2ProviderService};
 use coder_connectivity::{
     HealthService,
     agents::{AgentConnection, AgentError, AgentProvider},
+    derp::DerpServer,
     tailnet::{DerpTrafficTracker, TailnetCoordinator},
 };
 use coder_core::pubsub::PubSub;
@@ -159,6 +160,8 @@ pub struct AppState {
     pub coordinator: Arc<dyn TailnetCoordinator>,
     /// DERP relay traffic tracker.
     pub derp_tracker: Arc<DerpTrafficTracker>,
+    /// DERP relay server for Tailscale-compatible packet routing.
+    pub derp_server: Arc<DerpServer>,
     /// Optional Prometheus metrics handle for rendering metrics.
     pub prometheus_handle: Option<PrometheusHandle>,
     pub(crate) auth: AuthService<Arc<dyn AppStore>>,
@@ -186,6 +189,7 @@ impl AppState {
         agent_provider: Arc<dyn AgentProvider>,
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
+        derp_server: Arc<DerpServer>,
         prometheus_handle: Option<PrometheusHandle>,
         telemetry_reporter: coder_telemetry::TelemetryReporter,
     ) -> Result<Self, reqwest::Error> {
@@ -215,6 +219,7 @@ impl AppState {
             agent_provider,
             coordinator,
             derp_tracker,
+            derp_server,
             prometheus_handle,
             telemetry_reporter,
             auth,
@@ -256,6 +261,7 @@ pub fn build_router(
         .route("/latency-check", get(latency_check))
         .route("/derp", get(derp_websocket))
         .route("/derp/latency-check", get(derp_latency_check))
+        .route("/api/v2/derp/latency-check", get(api_derp_latency_check))
         .route("/metrics", get(get_prometheus_metrics))
         // Workspace app path-based proxying.
         .route(
@@ -8144,6 +8150,9 @@ pub(crate) mod tests {
             Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
         let coordinator = InMemoryCoordinator::new(Default::default());
         let derp_tracker = DerpTrafficTracker::new();
+        let derp_server = coder_connectivity::derp::DerpServer::new(
+            coder_connectivity::derp::NodeKey::new([0u8; 32]),
+        );
 
         Ok((
             AppState::new(
@@ -8156,6 +8165,7 @@ pub(crate) mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                derp_server,
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             )?,
@@ -32260,6 +32270,9 @@ pub(crate) mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
@@ -32302,6 +32315,9 @@ pub(crate) mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
@@ -32461,6 +32477,9 @@ pub(crate) mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
@@ -32940,6 +32959,9 @@ pub(crate) mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                    [0u8; 32],
+                )),
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             )?
