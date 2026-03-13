@@ -2,12 +2,14 @@
 //!
 //! These benchmarks build the full production router (256+ registered routes)
 //! and measure request dispatch latency for common endpoint patterns.
+//! Request construction is separated from the timed dispatch via `iter_batched`
+//! so that only `app.clone().oneshot(req)` is measured.
 
 use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::body::Body;
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use criterion::{BatchSize, Criterion, black_box, criterion_group, criterion_main};
 use http::Request;
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -117,6 +119,16 @@ fn bench_app_state() -> AppState {
     .unwrap_or_else(|_| std::process::abort())
 }
 
+/// Helper to build a GET request for the given URI.
+/// Aborts on failure to satisfy workspace `unwrap_used`/`expect_used` deny lints.
+fn build_get_request(uri: &str) -> Request<Body> {
+    Request::builder()
+        .method("GET")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap_or_else(|_| std::process::abort())
+}
+
 fn bench_router_build(c: &mut Criterion) {
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -142,17 +154,16 @@ fn bench_route_match_buildinfo(c: &mut Criterion) {
     let app = build_router(state, None);
 
     c.bench_function("routing/match_api_v2_buildinfo", |b| {
-        b.iter(|| {
-            let req = Request::builder()
-                .method("GET")
-                .uri("/api/v2/buildinfo")
-                .body(Body::empty())
-                .unwrap_or_else(|_| std::process::abort());
-            rt.block_on(async {
-                let app = app.clone();
-                let _ = app.oneshot(black_box(req)).await;
-            });
-        });
+        b.iter_batched(
+            || build_get_request("/api/v2/buildinfo"),
+            |req| {
+                rt.block_on(async {
+                    let app = app.clone();
+                    let _ = app.oneshot(black_box(req)).await;
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -166,17 +177,16 @@ fn bench_route_match_users_me(c: &mut Criterion) {
     let app = build_router(state, None);
 
     c.bench_function("routing/match_api_v2_users_me", |b| {
-        b.iter(|| {
-            let req = Request::builder()
-                .method("GET")
-                .uri("/api/v2/users/me")
-                .body(Body::empty())
-                .unwrap_or_else(|_| std::process::abort());
-            rt.block_on(async {
-                let app = app.clone();
-                let _ = app.oneshot(black_box(req)).await;
-            });
-        });
+        b.iter_batched(
+            || build_get_request("/api/v2/users/me"),
+            |req| {
+                rt.block_on(async {
+                    let app = app.clone();
+                    let _ = app.oneshot(black_box(req)).await;
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -189,20 +199,19 @@ fn bench_route_match_template_versions(c: &mut Criterion) {
     let state = rt.block_on(async { bench_app_state() });
     let app = build_router(state, None);
     let tv_id = Uuid::new_v4();
+    let uri = format!("/api/v2/templateversions/{tv_id}/parameters");
 
     c.bench_function("routing/match_templateversions_params", |b| {
-        b.iter(|| {
-            let uri = format!("/api/v2/templateversions/{tv_id}/parameters");
-            let req = Request::builder()
-                .method("GET")
-                .uri(uri.as_str())
-                .body(Body::empty())
-                .unwrap_or_else(|_| std::process::abort());
-            rt.block_on(async {
-                let app = app.clone();
-                let _ = app.oneshot(black_box(req)).await;
-            });
-        });
+        b.iter_batched(
+            || build_get_request(&uri),
+            |req| {
+                rt.block_on(async {
+                    let app = app.clone();
+                    let _ = app.oneshot(black_box(req)).await;
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -215,20 +224,19 @@ fn bench_route_match_workspace_builds(c: &mut Criterion) {
     let state = rt.block_on(async { bench_app_state() });
     let app = build_router(state, None);
     let ws_id = Uuid::new_v4();
+    let uri = format!("/api/v2/workspaces/{ws_id}/builds");
 
     c.bench_function("routing/match_workspace_builds", |b| {
-        b.iter(|| {
-            let uri = format!("/api/v2/workspaces/{ws_id}/builds");
-            let req = Request::builder()
-                .method("GET")
-                .uri(uri.as_str())
-                .body(Body::empty())
-                .unwrap_or_else(|_| std::process::abort());
-            rt.block_on(async {
-                let app = app.clone();
-                let _ = app.oneshot(black_box(req)).await;
-            });
-        });
+        b.iter_batched(
+            || build_get_request(&uri),
+            |req| {
+                rt.block_on(async {
+                    let app = app.clone();
+                    let _ = app.oneshot(black_box(req)).await;
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -242,17 +250,16 @@ fn bench_route_match_healthz(c: &mut Criterion) {
     let app = build_router(state, None);
 
     c.bench_function("routing/match_healthz", |b| {
-        b.iter(|| {
-            let req = Request::builder()
-                .method("GET")
-                .uri("/healthz")
-                .body(Body::empty())
-                .unwrap_or_else(|_| std::process::abort());
-            rt.block_on(async {
-                let app = app.clone();
-                let _ = app.oneshot(black_box(req)).await;
-            });
-        });
+        b.iter_batched(
+            || build_get_request("/healthz"),
+            |req| {
+                rt.block_on(async {
+                    let app = app.clone();
+                    let _ = app.oneshot(black_box(req)).await;
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -265,20 +272,19 @@ fn bench_route_match_org_templates(c: &mut Criterion) {
     let state = rt.block_on(async { bench_app_state() });
     let app = build_router(state, None);
     let org_id = Uuid::new_v4();
+    let uri = format!("/api/v2/organizations/{org_id}/templates");
 
     c.bench_function("routing/match_org_templates", |b| {
-        b.iter(|| {
-            let uri = format!("/api/v2/organizations/{org_id}/templates");
-            let req = Request::builder()
-                .method("GET")
-                .uri(uri.as_str())
-                .body(Body::empty())
-                .unwrap_or_else(|_| std::process::abort());
-            rt.block_on(async {
-                let app = app.clone();
-                let _ = app.oneshot(black_box(req)).await;
-            });
-        });
+        b.iter_batched(
+            || build_get_request(&uri),
+            |req| {
+                rt.block_on(async {
+                    let app = app.clone();
+                    let _ = app.oneshot(black_box(req)).await;
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
@@ -292,17 +298,16 @@ fn bench_route_no_match(c: &mut Criterion) {
     let app = build_router(state, None);
 
     c.bench_function("routing/no_match_404", |b| {
-        b.iter(|| {
-            let req = Request::builder()
-                .method("GET")
-                .uri("/api/v2/nonexistent/route/that/does/not/exist")
-                .body(Body::empty())
-                .unwrap_or_else(|_| std::process::abort());
-            rt.block_on(async {
-                let app = app.clone();
-                let _ = app.oneshot(black_box(req)).await;
-            });
-        });
+        b.iter_batched(
+            || build_get_request("/api/v2/nonexistent/route/that/does/not/exist"),
+            |req| {
+                rt.block_on(async {
+                    let app = app.clone();
+                    let _ = app.oneshot(black_box(req)).await;
+                });
+            },
+            BatchSize::SmallInput,
+        );
     });
 }
 
