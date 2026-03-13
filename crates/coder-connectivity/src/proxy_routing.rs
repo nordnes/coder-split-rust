@@ -61,7 +61,7 @@ impl ProxyRouter {
     /// preserved for proxies that still exist (matched by id); new proxies
     /// get fresh breakers.
     pub async fn refresh(&self, proxies: Vec<WorkspaceProxyHealthRecord>) {
-        let new_entries = {
+        {
             let mut entries = self.entries.lock().await;
             // Index old breakers by proxy id for O(n) lookup.
             let old_breakers: HashMap<uuid::Uuid, CircuitBreaker> = entries
@@ -86,11 +86,9 @@ impl ProxyRouter {
                     circuit_breaker: breaker,
                 });
             }
-            *entries = new.clone();
-            new
-        };
+            *entries = new;
+        }
         // entries lock is dropped here before acquiring last_refresh.
-        let _ = new_entries; // ensure we moved out of the lock scope
         *self.last_refresh.lock().await = Some(Instant::now());
     }
 

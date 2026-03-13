@@ -520,6 +520,13 @@ where
                         items.push(item_error.clone());
                         error = Some(item_error);
                         severity = HealthSeverity::Error;
+                        // Re-check breaker state; if it just tripped Open,
+                        // skip remaining proxy probes.
+                        if let Some(breaker) = proxy_breaker {
+                            if breaker.state().await == CircuitBreakerState::Open {
+                                proxy_breaker_open = true;
+                            }
+                        }
                     }
                     Err(probe_error) => {
                         // Record failure through breaker.
@@ -592,6 +599,9 @@ where
         }
 
         // Record provisioner health through the circuit breaker.
+        // TODO: consider a ratio-based threshold (e.g. >50% offline) instead
+        // of treating any single offline daemon as a failure, which can be too
+        // aggressive during rolling updates of large fleets.
         if let Some(breaker) = self.circuit_breakers.get("provisioner_daemons") {
             if any_offline {
                 breaker.report_failure().await;
