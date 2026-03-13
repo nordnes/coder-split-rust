@@ -275,7 +275,7 @@ impl AppStore for BenchStore {
 
     async fn list_users(
         &self,
-        filter: UserListFilter,
+        _filter: UserListFilter,
     ) -> Result<(Vec<UserRecord>, usize), StorageError> {
         let guard = self
             .users
@@ -383,7 +383,11 @@ impl AppStore for BenchStore {
             .organizations
             .lock()
             .map_err(|_| StorageError::unavailable("lock poisoned"))?;
-        Ok(guard.values().cloned().collect())
+        Ok(guard
+            .values()
+            .filter(|org| organization_ids.is_empty() || organization_ids.contains(&org.id))
+            .cloned()
+            .collect())
     }
 
     async fn find_organization_by_id(
@@ -1063,7 +1067,7 @@ impl AppStore for BenchStore {
 
     async fn list_templates(
         &self,
-        filter: TemplateListFilter,
+        _filter: TemplateListFilter,
     ) -> Result<Vec<TemplateRecord>, StorageError> {
         let guard = self
             .templates
