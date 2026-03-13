@@ -266,6 +266,12 @@ impl CircuitBreaker {
                 // cutting recovery latency without skipping validation.
                 inner.state = CircuitBreakerState::HalfOpen;
                 inner.half_open_successes = 1;
+                if inner.half_open_successes >= self.config.half_open_max_probes {
+                    inner.state = CircuitBreakerState::Closed;
+                    inner.consecutive_failures = 0;
+                    inner.half_open_successes = 0;
+                    inner.last_failure_time = None;
+                }
             }
         }
     }
@@ -573,6 +579,25 @@ mod tests {
 
         // One more success should close it (half_open_max_probes = 2,
         // and we already counted 1 from the Open→HalfOpen transition).
+        cb.report_success().await;
+        assert_eq!(cb.state().await, CircuitBreakerState::Closed);
+    }
+
+    #[tokio::test]
+    async fn report_success_while_open_closes_when_max_probes_is_one() {
+        let config = CircuitBreakerConfig {
+            failure_threshold: 2,
+            reset_timeout: Duration::from_millis(50),
+            half_open_max_probes: 1,
+        };
+        let cb = CircuitBreaker::new("test", config);
+        // Trip the breaker.
+        cb.report_failure().await;
+        cb.report_failure().await;
+        assert_eq!(cb.state().await, CircuitBreakerState::Open);
+
+        // A single report_success while Open should close immediately
+        // since half_open_max_probes = 1 and the success counts as probe #1.
         cb.report_success().await;
         assert_eq!(cb.state().await, CircuitBreakerState::Closed);
     }
