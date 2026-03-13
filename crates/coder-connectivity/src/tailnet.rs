@@ -221,7 +221,7 @@ pub trait TailnetCoordinator: Send + Sync {
     /// Close a coordination session, notifying tunnel peers that this peer
     /// was lost and cleaning up all associated state.
     ///
-    /// The `session_id` must match the value returned by [`coordinate`] so
+    /// The `session_id` must match the value returned by [`TailnetCoordinator::coordinate`] so
     /// that an old (overwritten) session does not accidentally remove a
     /// newer session's state.
     fn close_coordination(&self, peer_id: Uuid, session_id: Uuid);

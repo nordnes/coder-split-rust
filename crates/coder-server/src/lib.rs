@@ -28,6 +28,7 @@
 //! axum::serve(listener, router).await?;
 //! ```
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 mod app;
 pub(crate) mod auth_middleware;

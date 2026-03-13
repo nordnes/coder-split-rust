@@ -18,6 +18,7 @@
 //! constructed by the `role_*` helper functions and registered in
 //! [`site_builtin_roles`] / [`organization_builtin_roles`].
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use std::collections::HashMap;
 
@@ -1379,6 +1380,30 @@ impl std::fmt::Display for Forbidden {
 impl std::error::Error for Forbidden {}
 
 /// The RBAC authorizer evaluates whether a subject can perform an action on an object.
+///
+/// # Examples
+///
+/// ```
+/// use coder_rbac::{Action, Actor, Authorizer, Object, ResourceType, Scope};
+/// use uuid::Uuid;
+///
+/// let authorizer = Authorizer::new();
+///
+/// // Build an actor with the "owner" site role.
+/// let actor = Actor {
+///     user_id: Uuid::new_v4(),
+///     username: "admin".to_owned(),
+///     site_roles: vec!["owner".to_owned()],
+///     org_roles: Vec::new(),
+///     organization_ids: Vec::new(),
+///     groups: Vec::new(),
+///     scope: None,
+/// };
+///
+/// // Check whether the actor can read a user resource.
+/// let object = Object::new(ResourceType::User);
+/// assert!(authorizer.authorize(&actor, Action::Read, &object).is_ok());
+/// ```
 #[derive(Clone, Debug, Default)]
 pub struct Authorizer;
 

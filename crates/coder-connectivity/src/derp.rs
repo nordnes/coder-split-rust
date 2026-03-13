@@ -226,11 +226,18 @@ pub enum FrameError {
     PayloadTooLarge(u32),
     /// Frame payload is incomplete (buffer doesn't contain full payload).
     #[error("incomplete frame: expected {expected} payload bytes, got {actual}")]
-    IncompletePayload { expected: u32, actual: usize },
+    IncompletePayload {
+        /// Expected number of payload bytes.
+        expected: u32,
+        /// Actual number of payload bytes available.
+        actual: usize,
+    },
     /// Invalid payload for the given frame type.
     #[error("invalid payload for {frame_type:?}: {reason}")]
     InvalidPayload {
+        /// Frame type.
         frame_type: FrameType,
+        /// Reason.
         reason: String,
     },
 }

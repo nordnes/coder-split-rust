@@ -12,6 +12,7 @@
 //! | [`batched_sink::BatchedAuditSink`] | Buffers events and flushes in batches to an inner sink |
 //! | `PersistingAuditSink` (in `coderd`) | Writes events to PostgreSQL via `coder_core::AppStore` |
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod batched_sink;
 

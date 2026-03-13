@@ -4,6 +4,7 @@
 //! request -> handler -> store -> database -> response pipeline
 //! using a real PostgreSQL database.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used)]

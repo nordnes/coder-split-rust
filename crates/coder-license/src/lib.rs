@@ -3,6 +3,7 @@
 //! This crate provides JWT-based license validation, feature entitlement
 //! checking, and grace period handling for enterprise deployments.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 mod entitlements;
 mod features;

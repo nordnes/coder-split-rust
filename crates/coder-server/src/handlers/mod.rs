@@ -39,7 +39,7 @@ use coder_core::api::{
     TemplateExample, TemplateFilter, TemplateResponse, TemplateVersionExternalAuth,
     TemplateVersionParameter, TemplateVersionPreset, TemplateVersionPresetParameter,
     TemplateVersionResponse, TemplateVersionVariable, UpdateActiveTemplateVersionRequest,
-    UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceResource, WorkspaceResourceMetadata,
+    UpdateTemplateMeta, WorkspaceBuildParameter, WorkspaceResourceMetadata,
     WorkspaceResourceResponse,
 };
 use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};

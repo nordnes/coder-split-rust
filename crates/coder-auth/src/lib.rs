@@ -15,6 +15,7 @@
 //! The crate is generic over any store that implements [`coder_core::AuthStore`],
 //! making it easy to test with a mock or in-memory store implementation.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod oauth_login;
 pub mod session_cache;
@@ -134,30 +135,46 @@ pub enum AuthServiceError {
     Storage(#[from] StorageError),
     /// The caller is not authenticated.
     #[error("{message}")]
-    Unauthorized { message: String },
+    Unauthorized {
+        /// Human-readable error description.
+        message: String,
+    },
     /// The caller is authenticated but not allowed to perform the action.
     #[error("{message}")]
-    Forbidden { message: String },
+    Forbidden {
+        /// Human-readable error description.
+        message: String,
+    },
     /// The requested resource does not exist.
     #[error("{message}")]
-    NotFound { message: String },
+    NotFound {
+        /// Human-readable error description.
+        message: String,
+    },
     /// The request is invalid but not field-scoped.
     #[error("{message}")]
     BadRequest {
+        /// Message.
         message: String,
+        /// Detail.
         detail: Option<String>,
     },
     /// The request failed field-scoped validation.
     #[error("{message}")]
     Validation {
+        /// Message.
         message: String,
+        /// Validations.
         validations: Vec<ValidationError>,
     },
     /// The request conflicted with existing state.
     #[error("{message}")]
     Conflict {
+        /// Message.
         message: String,
+        /// Detail.
         detail: Option<String>,
+        /// Validations.
         validations: Vec<ValidationError>,
     },
 }
@@ -2089,13 +2106,22 @@ pub enum OAuth2ProviderError {
     Storage(#[from] StorageError),
     /// The request is invalid.
     #[error("{message}")]
-    BadRequest { message: String },
+    BadRequest {
+        /// Human-readable error description.
+        message: String,
+    },
     /// The resource was not found.
     #[error("{message}")]
-    NotFound { message: String },
+    NotFound {
+        /// Human-readable error description.
+        message: String,
+    },
     /// The caller is not authorized.
     #[error("{message}")]
-    Unauthorized { message: String },
+    Unauthorized {
+        /// Human-readable error description.
+        message: String,
+    },
 }
 
 impl OAuth2ProviderError {

@@ -8,6 +8,20 @@ use url::Url;
 use crate::api::{ConfigOption, ExternalAuthLinkProvider};
 
 /// Server configuration used by the Rust `coderd` binary.
+///
+/// # Examples
+///
+/// ```
+/// use coder_core::ServerConfig;
+///
+/// // List all supported configuration options and their environment variables.
+/// let options = ServerConfig::supported_options();
+/// assert!(!options.is_empty());
+///
+/// // Each option exposes its env-var name for 12-factor config.
+/// let first = &options[0];
+/// assert!(!first.env.is_empty());
+/// ```
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ServerConfig {
     /// Bind address for the HTTP server.

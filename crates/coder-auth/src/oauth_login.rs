@@ -42,42 +42,54 @@ pub enum OAuthLoginError {
 /// GitHub user profile from `/user`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubUser {
+    /// Id.
     pub id: i64,
+    /// Login.
     pub login: String,
     #[serde(default)]
+    /// Name.
     pub name: Option<String>,
     #[serde(default)]
+    /// Email.
     pub email: Option<String>,
     #[serde(default)]
+    /// Avatar url.
     pub avatar_url: String,
 }
 
 /// GitHub email from `/user/emails`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubEmail {
+    /// Email.
     pub email: String,
     #[serde(default)]
+    /// Primary.
     pub primary: bool,
     #[serde(default)]
+    /// Verified.
     pub verified: bool,
 }
 
 /// GitHub organization from `/user/orgs`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubOrganization {
+    /// Login.
     pub login: String,
 }
 
 /// GitHub team from `/user/teams`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubTeam {
+    /// Slug.
     pub slug: String,
+    /// Organization.
     pub organization: GithubTeamOrg,
 }
 
 /// Nested org inside a team response.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubTeamOrg {
+    /// Login.
     pub login: String,
 }
 
@@ -85,50 +97,69 @@ pub struct GithubTeamOrg {
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubTokenResponse {
     #[serde(default)]
+    /// Access token.
     pub access_token: String,
     #[serde(default)]
+    /// Token type.
     pub token_type: String,
     #[serde(default)]
+    /// Scope.
     pub scope: String,
     /// GitHub may return HTTP 200 with an error field instead of a token.
     #[serde(default)]
     pub error: Option<String>,
     #[serde(default)]
+    /// Error description.
     pub error_description: Option<String>,
 }
 
 /// GitHub device authorization response.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubDeviceResponse {
+    /// Device code.
     pub device_code: String,
+    /// User code.
     pub user_code: String,
+    /// Verification uri.
     pub verification_uri: String,
     #[serde(default)]
+    /// Expires in.
     pub expires_in: u64,
     #[serde(default)]
+    /// Interval.
     pub interval: u64,
 }
 
 /// OIDC token endpoint response.
 #[derive(Clone, Debug, Deserialize)]
 pub struct OidcTokenResponse {
+    /// Access token.
     pub access_token: String,
+    /// Id token.
     pub id_token: String,
     #[serde(default)]
+    /// Token type.
     pub token_type: String,
     #[serde(default)]
+    /// Refresh token.
     pub refresh_token: Option<String>,
     #[serde(default)]
+    /// Expires in.
     pub expires_in: Option<u64>,
 }
 
 /// Minimal OIDC discovery document fields we need.
 #[derive(Clone, Debug, Deserialize)]
 pub struct OidcDiscovery {
+    /// Authorization endpoint.
     pub authorization_endpoint: String,
+    /// Token endpoint.
     pub token_endpoint: String,
+    /// Userinfo endpoint.
     pub userinfo_endpoint: Option<String>,
+    /// Jwks uri.
     pub jwks_uri: String,
+    /// Issuer.
     pub issuer: String,
 }
 
@@ -136,16 +167,22 @@ pub struct OidcDiscovery {
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OidcClaims {
     #[serde(default)]
+    /// Sub.
     pub sub: String,
     #[serde(default)]
+    /// Email.
     pub email: Option<String>,
     #[serde(default)]
+    /// Email verified.
     pub email_verified: Option<bool>,
     #[serde(default)]
+    /// Name.
     pub name: Option<String>,
     #[serde(default)]
+    /// Preferred username.
     pub preferred_username: Option<String>,
     #[serde(default)]
+    /// Groups.
     pub groups: Option<Vec<String>>,
     /// All raw claims for storage.
     #[serde(flatten)]
@@ -882,12 +919,16 @@ pub fn build_user_link_claims(claims: &OidcClaims) -> UserLinkClaims {
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OAuthCallbackQuery {
     #[serde(default)]
+    /// Code.
     pub code: String,
     #[serde(default)]
+    /// State.
     pub state: String,
     #[serde(default)]
+    /// Error.
     pub error: Option<String>,
     #[serde(default)]
+    /// Error description.
     pub error_description: Option<String>,
 }
 

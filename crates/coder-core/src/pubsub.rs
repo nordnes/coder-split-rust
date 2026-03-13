@@ -19,7 +19,10 @@ const BROADCAST_CAPACITY: usize = 2048;
 pub enum PubSubError {
     /// The pub/sub backend is unavailable or encountered an error.
     #[error("pubsub unavailable: {message}")]
-    Unavailable { message: String },
+    Unavailable {
+        /// Human-readable error description.
+        message: String,
+    },
     /// The pub/sub system has been closed.
     #[error("pubsub closed")]
     Closed,
