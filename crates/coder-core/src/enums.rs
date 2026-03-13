@@ -16,14 +16,23 @@
     rename_all = "snake_case"
 )]
 pub enum WorkspaceAgentLifecycleState {
+    /// Created.
     Created,
+    /// Starting.
     Starting,
+    /// StartTimeout.
     StartTimeout,
+    /// StartError.
     StartError,
+    /// Ready.
     Ready,
+    /// ShuttingDown.
     ShuttingDown,
+    /// ShutdownTimeout.
     ShutdownTimeout,
+    /// ShutdownError.
     ShutdownError,
+    /// Off.
     Off,
 }
 
@@ -49,8 +58,11 @@ pub enum WorkspaceAgentMonitorState {
     rename_all = "snake_case"
 )]
 pub enum WorkspaceAgentScriptTimingStage {
+    /// Start.
     Start,
+    /// Stop.
     Stop,
+    /// Cron.
     Cron,
 }
 
@@ -62,9 +74,13 @@ pub enum WorkspaceAgentScriptTimingStage {
     rename_all = "snake_case"
 )]
 pub enum WorkspaceAgentScriptTimingStatus {
+    /// Ok.
     Ok,
+    /// ExitFailure.
     ExitFailure,
+    /// TimedOut.
     TimedOut,
+    /// PipesLeftOpen.
     PipesLeftOpen,
 }
 
@@ -73,9 +89,13 @@ pub enum WorkspaceAgentScriptTimingStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "workspace_agent_subsystem", rename_all = "snake_case")]
 pub enum WorkspaceAgentSubsystem {
+    /// Envbuilder.
     Envbuilder,
+    /// Envbox.
     Envbox,
+    /// None.
     None,
+    /// Exectrace.
     Exectrace,
 }
 
@@ -88,8 +108,11 @@ pub enum WorkspaceAgentSubsystem {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "workspace_transition", rename_all = "snake_case")]
 pub enum WorkspaceTransition {
+    /// Start.
     Start,
+    /// Stop.
     Stop,
+    /// Delete.
     Delete,
 }
 
@@ -98,9 +121,13 @@ pub enum WorkspaceTransition {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "workspace_app_health", rename_all = "snake_case")]
 pub enum WorkspaceAppHealth {
+    /// Disabled.
     Disabled,
+    /// Initializing.
     Initializing,
+    /// Healthy.
     Healthy,
+    /// Unhealthy.
     Unhealthy,
 }
 
@@ -108,12 +135,15 @@ pub enum WorkspaceAppHealth {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
 #[sqlx(type_name = "workspace_app_open_in")]
 pub enum WorkspaceAppOpenIn {
+    /// Tab.
     #[serde(rename = "tab")]
     #[sqlx(rename = "tab")]
     Tab,
+    /// Window.
     #[serde(rename = "window")]
     #[sqlx(rename = "window")]
     Window,
+    /// SlimWindow.
     #[serde(rename = "slim-window")]
     #[sqlx(rename = "slim-window")]
     SlimWindow,
@@ -124,9 +154,13 @@ pub enum WorkspaceAppOpenIn {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "workspace_app_status_state", rename_all = "snake_case")]
 pub enum WorkspaceAppStatusState {
+    /// Working.
     Working,
+    /// Complete.
     Complete,
+    /// Failure.
     Failure,
+    /// Idle.
     Idle,
 }
 
@@ -135,7 +169,9 @@ pub enum WorkspaceAppStatusState {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "automatic_updates", rename_all = "snake_case")]
 pub enum AutomaticUpdates {
+    /// Always.
     Always,
+    /// Never.
     Never,
 }
 
@@ -144,9 +180,13 @@ pub enum AutomaticUpdates {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "app_sharing_level", rename_all = "snake_case")]
 pub enum AppSharingLevel {
+    /// Owner.
     Owner,
+    /// Authenticated.
     Authenticated,
+    /// Organization.
     Organization,
+    /// Public.
     Public,
 }
 
@@ -159,7 +199,9 @@ pub enum AppSharingLevel {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "provisioner_type", rename_all = "snake_case")]
 pub enum ProvisionerType {
+    /// Echo.
     Echo,
+    /// Terraform.
     Terraform,
 }
 
@@ -168,6 +210,7 @@ pub enum ProvisionerType {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "provisioner_storage_method", rename_all = "snake_case")]
 pub enum ProvisionerStorageMethod {
+    /// File.
     File,
 }
 
@@ -176,8 +219,11 @@ pub enum ProvisionerStorageMethod {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "provisioner_job_type", rename_all = "snake_case")]
 pub enum ProvisionerJobType {
+    /// TemplateVersionImport.
     TemplateVersionImport,
+    /// WorkspaceBuild.
     WorkspaceBuild,
+    /// TemplateVersionDryRun.
     TemplateVersionDryRun,
 }
 
@@ -186,12 +232,19 @@ pub enum ProvisionerJobType {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "provisioner_job_status", rename_all = "snake_case")]
 pub enum ProvisionerJobStatus {
+    /// Pending.
     Pending,
+    /// Running.
     Running,
+    /// Succeeded.
     Succeeded,
+    /// Canceling.
     Canceling,
+    /// Canceled.
     Canceled,
+    /// Failed.
     Failed,
+    /// Unknown.
     Unknown,
 }
 
@@ -200,9 +253,13 @@ pub enum ProvisionerJobStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "provisioner_job_timing_stage", rename_all = "snake_case")]
 pub enum ProvisionerJobTimingStage {
+    /// Init.
     Init,
+    /// Plan.
     Plan,
+    /// Graph.
     Graph,
+    /// Apply.
     Apply,
 }
 
@@ -211,8 +268,11 @@ pub enum ProvisionerJobTimingStage {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "provisioner_daemon_status", rename_all = "snake_case")]
 pub enum ProvisionerDaemonStatus {
+    /// Offline.
     Offline,
+    /// Idle.
     Idle,
+    /// Busy.
     Busy,
 }
 
@@ -225,19 +285,33 @@ pub enum ProvisionerDaemonStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "build_reason", rename_all = "snake_case")]
 pub enum BuildReason {
+    /// Initiator.
     Initiator,
+    /// Autostart.
     Autostart,
+    /// Autostop.
     Autostop,
+    /// Dormancy.
     Dormancy,
+    /// Failedstop.
     Failedstop,
+    /// Autodelete.
     Autodelete,
+    /// Dashboard.
     Dashboard,
+    /// Cli.
     Cli,
+    /// SshConnection.
     SshConnection,
+    /// VscodeConnection.
     VscodeConnection,
+    /// JetbrainsConnection.
     JetbrainsConnection,
+    /// TaskAutoPause.
     TaskAutoPause,
+    /// TaskManualPause.
     TaskManualPause,
+    /// TaskResume.
     TaskResume,
 }
 
@@ -250,7 +324,9 @@ pub enum BuildReason {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "agent_key_scope_enum", rename_all = "snake_case")]
 pub enum AgentKeyScopeEnum {
+    /// All.
     All,
+    /// NoUserData.
     NoUserData,
 }
 
@@ -274,12 +350,19 @@ pub enum AgentKeyScopeEnum {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "notification_message_status", rename_all = "snake_case")]
 pub enum NotificationMessageStatus {
+    /// Pending.
     Pending,
+    /// Leased.
     Leased,
+    /// Sent.
     Sent,
+    /// PermanentFailure.
     PermanentFailure,
+    /// TemporaryFailure.
     TemporaryFailure,
+    /// Unknown.
     Unknown,
+    /// Inhibited.
     Inhibited,
 }
 
@@ -288,8 +371,11 @@ pub enum NotificationMessageStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "notification_method", rename_all = "snake_case")]
 pub enum NotificationMethod {
+    /// Smtp.
     Smtp,
+    /// Webhook.
     Webhook,
+    /// Inbox.
     Inbox,
 }
 
@@ -298,7 +384,9 @@ pub enum NotificationMethod {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "notification_template_kind", rename_all = "snake_case")]
 pub enum NotificationTemplateKind {
+    /// System.
     System,
+    /// Custom.
     Custom,
 }
 
@@ -310,8 +398,11 @@ pub enum NotificationTemplateKind {
     rename_all = "snake_case"
 )]
 pub enum InboxNotificationReadStatus {
+    /// All.
     All,
+    /// Unread.
     Unread,
+    /// Read.
     Read,
 }
 
@@ -324,8 +415,11 @@ pub enum InboxNotificationReadStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "parameter_destination_scheme", rename_all = "snake_case")]
 pub enum ParameterDestinationScheme {
+    /// None.
     None,
+    /// EnvironmentVariable.
     EnvironmentVariable,
+    /// ProvisionerVariable.
     ProvisionerVariable,
 }
 
@@ -337,33 +431,43 @@ pub enum ParameterFormType {
     #[serde(rename = "")]
     #[sqlx(rename = "")]
     Default,
+    /// Error.
     #[serde(rename = "error")]
     #[sqlx(rename = "error")]
     Error,
+    /// Radio.
     #[serde(rename = "radio")]
     #[sqlx(rename = "radio")]
     Radio,
+    /// Dropdown.
     #[serde(rename = "dropdown")]
     #[sqlx(rename = "dropdown")]
     Dropdown,
+    /// Input.
     #[serde(rename = "input")]
     #[sqlx(rename = "input")]
     Input,
+    /// Textarea.
     #[serde(rename = "textarea")]
     #[sqlx(rename = "textarea")]
     Textarea,
+    /// Slider.
     #[serde(rename = "slider")]
     #[sqlx(rename = "slider")]
     Slider,
+    /// Checkbox.
     #[serde(rename = "checkbox")]
     #[sqlx(rename = "checkbox")]
     Checkbox,
+    /// Switch.
     #[serde(rename = "switch")]
     #[sqlx(rename = "switch")]
     Switch,
+    /// TagSelect.
     #[serde(rename = "tag-select")]
     #[sqlx(rename = "tag-select")]
     TagSelect,
+    /// MultiSelect.
     #[serde(rename = "multi-select")]
     #[sqlx(rename = "multi-select")]
     MultiSelect,
@@ -374,8 +478,11 @@ pub enum ParameterFormType {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "parameter_scope", rename_all = "snake_case")]
 pub enum ParameterScope {
+    /// Template.
     Template,
+    /// ImportJob.
     ImportJob,
+    /// Workspace.
     Workspace,
 }
 
@@ -384,7 +491,9 @@ pub enum ParameterScope {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "parameter_source_scheme", rename_all = "snake_case")]
 pub enum ParameterSourceScheme {
+    /// None.
     None,
+    /// Data.
     Data,
 }
 
@@ -393,7 +502,9 @@ pub enum ParameterSourceScheme {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "parameter_type_system", rename_all = "snake_case")]
 pub enum ParameterTypeSystem {
+    /// None.
     None,
+    /// Hcl.
     Hcl,
 }
 
@@ -406,8 +517,11 @@ pub enum ParameterTypeSystem {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "chat_message_visibility", rename_all = "snake_case")]
 pub enum ChatMessageVisibility {
+    /// User.
     User,
+    /// Model.
     Model,
+    /// Both.
     Both,
 }
 
@@ -416,11 +530,17 @@ pub enum ChatMessageVisibility {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "chat_status", rename_all = "snake_case")]
 pub enum ChatStatus {
+    /// Waiting.
     Waiting,
+    /// Pending.
     Pending,
+    /// Running.
     Running,
+    /// Paused.
     Paused,
+    /// Completed.
     Completed,
+    /// Error.
     Error,
 }
 
@@ -429,11 +549,17 @@ pub enum ChatStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "task_status", rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// Pending.
     Pending,
+    /// Initializing.
     Initializing,
+    /// Active.
     Active,
+    /// Paused.
     Paused,
+    /// Unknown.
     Unknown,
+    /// Error.
     Error,
 }
 
@@ -446,10 +572,15 @@ pub enum TaskStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "display_app", rename_all = "snake_case")]
 pub enum DisplayApp {
+    /// Vscode.
     Vscode,
+    /// VscodeInsiders.
     VscodeInsiders,
+    /// WebTerminal.
     WebTerminal,
+    /// SshHelper.
     SshHelper,
+    /// PortForwardingHelper.
     PortForwardingHelper,
 }
 
@@ -458,10 +589,15 @@ pub enum DisplayApp {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "log_level", rename_all = "snake_case")]
 pub enum LogLevel {
+    /// Trace.
     Trace,
+    /// Debug.
     Debug,
+    /// Info.
     Info,
+    /// Warn.
     Warn,
+    /// Error.
     Error,
 }
 
@@ -470,7 +606,9 @@ pub enum LogLevel {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "log_source", rename_all = "snake_case")]
 pub enum LogSource {
+    /// ProvisionerDaemon.
     ProvisionerDaemon,
+    /// Provisioner.
     Provisioner,
 }
 
@@ -478,9 +616,11 @@ pub enum LogSource {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
 #[sqlx(type_name = "startup_script_behavior")]
 pub enum StartupScriptBehavior {
+    /// Blocking.
     #[serde(rename = "blocking")]
     #[sqlx(rename = "blocking")]
     Blocking,
+    /// NonBlocking.
     #[serde(rename = "non-blocking")]
     #[sqlx(rename = "non-blocking")]
     NonBlocking,
@@ -495,7 +635,9 @@ pub enum StartupScriptBehavior {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "connection_status", rename_all = "snake_case")]
 pub enum ConnectionStatus {
+    /// Connected.
     Connected,
+    /// Disconnected.
     Disconnected,
 }
 
@@ -504,11 +646,17 @@ pub enum ConnectionStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "connection_type", rename_all = "snake_case")]
 pub enum ConnectionType {
+    /// Ssh.
     Ssh,
+    /// Vscode.
     Vscode,
+    /// Jetbrains.
     Jetbrains,
+    /// ReconnectingPty.
     ReconnectingPty,
+    /// WorkspaceApp.
     WorkspaceApp,
+    /// PortForwarding.
     PortForwarding,
 }
 
@@ -517,7 +665,9 @@ pub enum ConnectionType {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "cors_behavior", rename_all = "snake_case")]
 pub enum CorsBehavior {
+    /// Simple.
     Simple,
+    /// Passthru.
     Passthru,
 }
 
@@ -526,7 +676,9 @@ pub enum CorsBehavior {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "tailnet_status", rename_all = "snake_case")]
 pub enum TailnetStatus {
+    /// Ok.
     Ok,
+    /// Lost.
     Lost,
 }
 
@@ -535,7 +687,9 @@ pub enum TailnetStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "port_share_protocol", rename_all = "snake_case")]
 pub enum PortShareProtocol {
+    /// Http.
     Http,
+    /// Https.
     Https,
 }
 
@@ -548,7 +702,9 @@ pub enum PortShareProtocol {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "group_source", rename_all = "snake_case")]
 pub enum GroupSource {
+    /// User.
     User,
+    /// Oidc.
     Oidc,
 }
 
@@ -557,8 +713,11 @@ pub enum GroupSource {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "prebuild_status", rename_all = "snake_case")]
 pub enum PrebuildStatus {
+    /// Healthy.
     Healthy,
+    /// HardLimited.
     HardLimited,
+    /// ValidationFailed.
     ValidationFailed,
 }
 
@@ -577,7 +736,7 @@ pub enum PrebuildStatus {
 /// `resource_type` PostgreSQL enum.  Use this type when reading/writing
 /// `resource_type` columns via `sqlx`.
 ///
-/// See also [`coder_rbac::ResourceKind`], which extends this set with
+/// See also `coder_rbac::ResourceKind`, which extends this set with
 /// Rust-only variants (`Authentication`, `ExternalAuth`) used in the
 /// authorization layer.  `ResourceKind` intentionally does **not** derive
 /// `sqlx::Type` because those extra variants have no database counterpart.
@@ -585,31 +744,57 @@ pub enum PrebuildStatus {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "resource_type", rename_all = "snake_case")]
 pub enum ResourceType {
+    /// Organization.
     Organization,
+    /// Template.
     Template,
+    /// TemplateVersion.
     TemplateVersion,
+    /// User.
     User,
+    /// Workspace.
     Workspace,
+    /// GitSshKey.
     GitSshKey,
+    /// ApiKey.
     ApiKey,
+    /// Group.
     Group,
+    /// WorkspaceBuild.
     WorkspaceBuild,
+    /// License.
     License,
+    /// WorkspaceProxy.
     WorkspaceProxy,
+    /// ConvertLogin.
     ConvertLogin,
+    /// HealthSettings.
     HealthSettings,
+    /// Oauth2ProviderApp.
     Oauth2ProviderApp,
+    /// Oauth2ProviderAppSecret.
     Oauth2ProviderAppSecret,
+    /// CustomRole.
     CustomRole,
+    /// OrganizationMember.
     OrganizationMember,
+    /// NotificationsSettings.
     NotificationsSettings,
+    /// NotificationTemplate.
     NotificationTemplate,
+    /// IdpSyncSettingsOrganization.
     IdpSyncSettingsOrganization,
+    /// IdpSyncSettingsGroup.
     IdpSyncSettingsGroup,
+    /// IdpSyncSettingsRole.
     IdpSyncSettingsRole,
+    /// WorkspaceAgent.
     WorkspaceAgent,
+    /// WorkspaceApp.
     WorkspaceApp,
+    /// PrebuildsSettings.
     PrebuildsSettings,
+    /// Task.
     Task,
 }
 
@@ -622,8 +807,12 @@ pub enum ResourceType {
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "crypto_key_feature", rename_all = "snake_case")]
 pub enum CryptoKeyFeature {
+    /// WorkspaceAppsToken.
     WorkspaceAppsToken,
+    /// WorkspaceAppsApiKey.
     WorkspaceAppsApiKey,
+    /// OidcConvert.
     OidcConvert,
+    /// TailnetResume.
     TailnetResume,
 }

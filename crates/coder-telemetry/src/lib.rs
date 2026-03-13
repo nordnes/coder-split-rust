@@ -4,6 +4,7 @@
 //! and graceful shutdown support.  Events are collected via an mpsc channel
 //! and periodically flushed to a configurable HTTP endpoint.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 mod events;
 mod reporter;

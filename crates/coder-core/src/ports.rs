@@ -64,157 +64,249 @@ use crate::template::{
 /// A task record as stored in the database.
 #[derive(Clone, Debug)]
 pub struct TaskRecord {
+    /// Id.
     pub id: Uuid,
+    /// Organization id.
     pub organization_id: Uuid,
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Name.
     pub name: String,
+    /// Display name.
     pub display_name: String,
+    /// Workspace id.
     pub workspace_id: Option<Uuid>,
+    /// Template version id.
     pub template_version_id: Uuid,
+    /// Template parameters.
     pub template_parameters: Value,
+    /// Prompt.
     pub prompt: String,
+    /// Status.
     pub status: TaskStatus,
+    /// Created at.
     pub created_at: OffsetDateTime,
+    /// Deleted at.
     pub deleted_at: Option<OffsetDateTime>,
 }
 
 /// Input for creating a new task.
 #[derive(Clone, Debug)]
 pub struct InsertTaskInput {
+    /// Id.
     pub id: Uuid,
+    /// Organization id.
     pub organization_id: Uuid,
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Name.
     pub name: String,
+    /// Display name.
     pub display_name: String,
+    /// Template version id.
     pub template_version_id: Uuid,
+    /// Template parameters.
     pub template_parameters: Value,
+    /// Prompt.
     pub prompt: String,
+    /// Created at.
     pub created_at: OffsetDateTime,
 }
 
 /// Filter for listing tasks.
 #[derive(Clone, Debug, Default)]
 pub struct TaskListFilter {
+    /// Owner id.
     pub owner_id: Option<Uuid>,
+    /// Organization id.
     pub organization_id: Option<Uuid>,
+    /// Status.
     pub status: Option<TaskStatus>,
 }
 
 /// A task log snapshot record.
 #[derive(Clone, Debug)]
 pub struct TaskSnapshotRecord {
+    /// Task id.
     pub task_id: Uuid,
+    /// Log snapshot.
     pub log_snapshot: Value,
+    /// Log snapshot created at.
     pub log_snapshot_created_at: OffsetDateTime,
 }
 
 /// A chat record as stored in the database.
 #[derive(Clone, Debug)]
 pub struct ChatRecord {
+    /// Id.
     pub id: Uuid,
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Workspace id.
     pub workspace_id: Option<Uuid>,
+    /// Title.
     pub title: String,
+    /// Status.
     pub status: ChatStatus,
+    /// Last error.
     pub last_error: Option<String>,
+    /// Parent chat id.
     pub parent_chat_id: Option<Uuid>,
+    /// Root chat id.
     pub root_chat_id: Option<Uuid>,
+    /// Last model config id.
     pub last_model_config_id: Uuid,
+    /// Archived.
     pub archived: bool,
+    /// Created at.
     pub created_at: OffsetDateTime,
+    /// Updated at.
     pub updated_at: OffsetDateTime,
 }
 
 /// Input for creating a new chat.
 #[derive(Clone, Debug)]
 pub struct InsertChatInput {
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Workspace id.
     pub workspace_id: Option<Uuid>,
+    /// Parent chat id.
     pub parent_chat_id: Option<Uuid>,
+    /// Root chat id.
     pub root_chat_id: Option<Uuid>,
+    /// Last model config id.
     pub last_model_config_id: Uuid,
+    /// Title.
     pub title: String,
 }
 
 /// A chat message record as stored in the database.
 #[derive(Clone, Debug)]
 pub struct ChatMessageRecord {
+    /// Id.
     pub id: i64,
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Model config id.
     pub model_config_id: Option<Uuid>,
+    /// Created at.
     pub created_at: OffsetDateTime,
+    /// Role.
     pub role: String,
+    /// Content.
     pub content: Option<Value>,
+    /// Visibility.
     pub visibility: ChatMessageVisibility,
+    /// Input tokens.
     pub input_tokens: Option<i64>,
+    /// Output tokens.
     pub output_tokens: Option<i64>,
+    /// Total tokens.
     pub total_tokens: Option<i64>,
+    /// Reasoning tokens.
     pub reasoning_tokens: Option<i64>,
+    /// Cache creation tokens.
     pub cache_creation_tokens: Option<i64>,
+    /// Cache read tokens.
     pub cache_read_tokens: Option<i64>,
+    /// Context limit.
     pub context_limit: Option<i64>,
+    /// Compressed.
     pub compressed: bool,
 }
 
 /// Input for inserting a chat message.
 #[derive(Clone, Debug)]
 pub struct InsertChatMessageInput {
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Model config id.
     pub model_config_id: Option<Uuid>,
+    /// Role.
     pub role: String,
+    /// Content.
     pub content: Option<Value>,
+    /// Visibility.
     pub visibility: ChatMessageVisibility,
 }
 
 /// A chat queued message record.
 #[derive(Clone, Debug)]
 pub struct ChatQueuedMessageRecord {
+    /// Id.
     pub id: i64,
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Content.
     pub content: Value,
+    /// Created at.
     pub created_at: OffsetDateTime,
 }
 
 /// A chat file record as stored in the database.
 #[derive(Clone, Debug)]
 pub struct ChatFileRecord {
+    /// Id.
     pub id: Uuid,
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Organization id.
     pub organization_id: Uuid,
+    /// Created at.
     pub created_at: OffsetDateTime,
+    /// Name.
     pub name: String,
+    /// Mimetype.
     pub mimetype: String,
+    /// Data.
     pub data: Vec<u8>,
 }
 
 /// Input for inserting a new chat file.
 #[derive(Clone, Debug)]
 pub struct InsertChatFileInput {
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Organization id.
     pub organization_id: Uuid,
+    /// Name.
     pub name: String,
+    /// Mimetype.
     pub mimetype: String,
+    /// Data.
     pub data: Vec<u8>,
 }
 
 /// Input for updating a chat message's content.
 #[derive(Clone, Debug)]
 pub struct UpdateChatMessageContentInput {
+    /// Message id.
     pub message_id: i64,
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Content.
     pub content: Option<Value>,
 }
 
 /// A chat provider record as stored in the database.
 #[derive(Clone)]
 pub struct ChatProviderRecord {
+    /// Id.
     pub id: Uuid,
+    /// Provider.
     pub provider: String,
+    /// Display name.
     pub display_name: String,
+    /// Api key.
     pub api_key: String,
+    /// Base url.
     pub base_url: String,
+    /// Enabled.
     pub enabled: bool,
+    /// Created at.
     pub created_at: OffsetDateTime,
+    /// Updated at.
     pub updated_at: OffsetDateTime,
 }
 
@@ -238,21 +330,32 @@ impl std::fmt::Debug for ChatProviderRecord {
 /// Input for inserting a new chat provider.
 #[derive(Clone)]
 pub struct InsertChatProviderInput {
+    /// Provider.
     pub provider: String,
+    /// Display name.
     pub display_name: String,
+    /// Api key.
     pub api_key: String,
+    /// Base url.
     pub base_url: String,
+    /// Enabled.
     pub enabled: bool,
+    /// Created by.
     pub created_by: Option<Uuid>,
 }
 
 /// Input for updating a chat provider.
 #[derive(Clone)]
 pub struct UpdateChatProviderInput {
+    /// Id.
     pub id: Uuid,
+    /// Display name.
     pub display_name: String,
+    /// Api key.
     pub api_key: String,
+    /// Base url.
     pub base_url: String,
+    /// Enabled.
     pub enabled: bool,
 }
 
@@ -284,45 +387,75 @@ impl std::fmt::Debug for UpdateChatProviderInput {
 /// A chat model config record as stored in the database.
 #[derive(Clone, Debug)]
 pub struct ChatModelConfigRecord {
+    /// Id.
     pub id: Uuid,
+    /// Provider.
     pub provider: String,
+    /// Model.
     pub model: String,
+    /// Display name.
     pub display_name: String,
+    /// Enabled.
     pub enabled: bool,
+    /// Is default.
     pub is_default: bool,
+    /// Context limit.
     pub context_limit: i64,
+    /// Compression threshold.
     pub compression_threshold: i32,
+    /// Options.
     pub options: Value,
+    /// Created at.
     pub created_at: OffsetDateTime,
+    /// Updated at.
     pub updated_at: OffsetDateTime,
 }
 
 /// Input for inserting a new chat model config.
 #[derive(Clone, Debug)]
 pub struct InsertChatModelConfigInput {
+    /// Provider.
     pub provider: String,
+    /// Model.
     pub model: String,
+    /// Display name.
     pub display_name: String,
+    /// Enabled.
     pub enabled: bool,
+    /// Is default.
     pub is_default: bool,
+    /// Context limit.
     pub context_limit: i64,
+    /// Compression threshold.
     pub compression_threshold: i32,
+    /// Options.
     pub options: Value,
+    /// Created by.
     pub created_by: Option<Uuid>,
 }
 
 /// Input for updating a chat model config.
 #[derive(Clone, Debug)]
 pub struct UpdateChatModelConfigInput {
+    /// Id.
     pub id: Uuid,
+    /// Provider.
     pub provider: String,
+    /// Model.
     pub model: String,
+    /// Display name.
     pub display_name: String,
+    /// Enabled.
     pub enabled: bool,
+    /// Is default.
     pub is_default: bool,
+    /// Context limit.
     pub context_limit: i64,
+    /// Compression threshold.
     pub compression_threshold: i32,
+    /// Options.
     pub options: Value,
+    /// Updated by.
     pub updated_by: Option<Uuid>,
 }
 
@@ -1092,17 +1225,38 @@ pub struct WorkspaceTransitionRow {
 }
 
 /// Errors surfaced by storage backends.
+///
+/// # Examples
+///
+/// ```
+/// use coder_core::StorageError;
+///
+/// let err = StorageError::not_found("user 42 does not exist");
+/// assert!(err.to_string().contains("not found"));
+///
+/// let err = StorageError::unavailable("connection refused");
+/// assert!(err.to_string().contains("unavailable"));
+/// ```
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum StorageError {
     /// The backing store is unavailable.
     #[error("storage unavailable: {message}")]
-    Unavailable { message: String },
+    Unavailable {
+        /// Human-readable error description.
+        message: String,
+    },
     /// The requested row/entity was not found.
     #[error("not found: {message}")]
-    NotFound { message: String },
+    NotFound {
+        /// Human-readable error description.
+        message: String,
+    },
     /// Stored data exists but is invalid.
     #[error("stored data is invalid: {message}")]
-    InvalidData { message: String },
+    InvalidData {
+        /// Human-readable error description.
+        message: String,
+    },
 }
 
 impl StorageError {
@@ -2206,6 +2360,21 @@ pub trait TemplateStore: Send + Sync {
 }
 
 /// Aggregate store contract used by the current Rust backend slice.
+///
+/// `AppStore` composes every domain-specific sub-trait into a single
+/// object-safe super-trait so that handler code can accept one
+/// `Arc<dyn AppStore>` and call any storage method.
+///
+/// # Examples
+///
+/// ```ignore
+/// use std::sync::Arc;
+/// use coder_core::AppStore;
+///
+/// async fn healthcheck(store: Arc<dyn AppStore>) -> bool {
+///     store.ping().await.is_ok()
+/// }
+/// ```
 #[allow(clippy::too_many_arguments)]
 #[async_trait]
 pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
@@ -3788,11 +3957,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 /// Stored webpush subscription record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WebpushSubscriptionRecord {
+    /// Id.
     pub id: Uuid,
+    /// User id.
     pub user_id: Uuid,
+    /// Created at.
     pub created_at: OffsetDateTime,
+    /// Endpoint.
     pub endpoint: String,
+    /// Endpoint p256dh key.
     pub endpoint_p256dh_key: String,
+    /// Endpoint auth key.
     pub endpoint_auth_key: String,
 }
 

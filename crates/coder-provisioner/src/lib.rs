@@ -11,6 +11,7 @@
 //! The crate also exposes [`render_init_script`] for generating OS/arch-specific
 //! agent bootstrap scripts with SHA-256 content digests.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod server;
 
@@ -49,7 +50,12 @@ pub struct RenderedInitScript {
 pub enum InitScriptError {
     /// The operating system and architecture combination is unsupported.
     #[error("unknown os/arch: {os}/{arch}")]
-    UnknownTarget { os: String, arch: String },
+    UnknownTarget {
+        /// Operating system name.
+        os: String,
+        /// CPU architecture name.
+        arch: String,
+    },
 }
 
 /// Renders the agent bootstrap script for one operating-system and architecture pair.

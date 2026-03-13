@@ -13,6 +13,7 @@
 //! Every public method on [`IdentityService`] enforces RBAC checks via the
 //! [`coder_rbac::Actor`] before touching the store.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use std::collections::{HashMap, HashSet};
 
@@ -55,27 +56,40 @@ pub enum IdentityServiceError {
     Storage(#[from] StorageError),
     /// Resource not found.
     #[error("{message}")]
-    NotFound { message: String },
+    NotFound {
+        /// Human-readable error description.
+        message: String,
+    },
     /// Action is forbidden.
     #[error("{message}")]
-    Forbidden { message: String },
+    Forbidden {
+        /// Human-readable error description.
+        message: String,
+    },
     /// Request is syntactically valid but rejected by domain rules.
     #[error("{message}")]
     BadRequest {
+        /// Message.
         message: String,
+        /// Detail.
         detail: Option<String>,
     },
     /// Request failed field validation.
     #[error("{message}")]
     Validation {
+        /// Message.
         message: String,
+        /// Validations.
         validations: Vec<ValidationError>,
     },
     /// Request conflicts with existing state.
     #[error("{message}")]
     Conflict {
+        /// Message.
         message: String,
+        /// Detail.
         detail: Option<String>,
+        /// Validations.
         validations: Vec<ValidationError>,
     },
 }

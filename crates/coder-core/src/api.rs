@@ -1777,7 +1777,7 @@ impl OAuth2ClientRegistrationRequest {
     /// Apply RFC 7591 defaults for missing fields.
     ///
     /// **Ordering note:** This method sets `client_name` to a default when
-    /// empty, which means a subsequent call to [`generate_client_name()`] will
+    /// empty, which means a subsequent call to `generate_client_name()` will
     /// see a non-empty name and skip the URI-derived fallback logic. This
     /// matches Go's `ApplyDefaults()` → `GenerateClientName()` ordering, where
     /// the same behavior occurs intentionally.
@@ -2158,6 +2158,7 @@ pub struct ProvisionerDaemonResponse {
 /// Global notification dispatch settings.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct NotificationsSettings {
+    /// Notifier paused.
     #[serde(default)]
     pub notifier_paused: bool,
 }
@@ -2165,32 +2166,46 @@ pub struct NotificationsSettings {
 /// A single notification template row.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NotificationTemplate {
+    /// Id.
     pub id: Uuid,
+    /// Name.
     pub name: String,
+    /// Title template.
     pub title_template: String,
+    /// Body template.
     pub body_template: String,
+    /// Actions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actions: Option<Value>,
+    /// Group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<String>,
+    /// Method.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub method: Option<String>,
+    /// Kind.
     pub kind: String,
+    /// Enabled by default.
     pub enabled_by_default: bool,
 }
 
 /// Response listing available and default dispatch methods.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NotificationMethodsResponse {
+    /// Available.
     pub available: Vec<String>,
+    /// Default.
     pub default: String,
 }
 
 /// A single per-user notification preference.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NotificationPreference {
+    /// Id.
     pub id: Uuid,
+    /// Disabled.
     pub disabled: bool,
+    /// Updated at.
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -2198,6 +2213,7 @@ pub struct NotificationPreference {
 /// Request body for PUT notification template method.
 #[derive(Clone, Debug, Deserialize)]
 pub struct UpdateNotificationTemplateMethod {
+    /// Method.
     #[serde(default)]
     pub method: Option<String>,
 }
@@ -2205,20 +2221,25 @@ pub struct UpdateNotificationTemplateMethod {
 /// Request body for PUT user notification preferences.
 #[derive(Clone, Debug, Deserialize)]
 pub struct UpdateUserNotificationPreferences {
+    /// Template disabled map.
     pub template_disabled_map: HashMap<String, bool>,
 }
 
 /// A web push subscription registration.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WebpushSubscription {
+    /// Endpoint.
     pub endpoint: String,
+    /// Auth key.
     pub auth_key: String,
+    /// P256dh key.
     pub p256dh_key: String,
 }
 
 /// Request body for DELETE web push subscription.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct DeleteWebpushSubscription {
+    /// Endpoint.
     pub endpoint: String,
 }
 
@@ -2266,27 +2287,39 @@ pub struct VapidKeyPair {
 /// An action inside an inbox notification.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InboxNotificationAction {
+    /// Label.
     pub label: String,
+    /// Url.
     pub url: String,
 }
 
 /// A single inbox notification.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct InboxNotification {
+    /// Id.
     pub id: Uuid,
+    /// User id.
     pub user_id: Uuid,
+    /// Template id.
     pub template_id: Uuid,
+    /// Targets.
     pub targets: Vec<Uuid>,
+    /// Title.
     pub title: String,
+    /// Content.
     pub content: String,
+    /// Icon.
     pub icon: String,
+    /// Actions.
     pub actions: Vec<InboxNotificationAction>,
+    /// Read at.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         with = "time::serde::rfc3339::option"
     )]
     pub read_at: Option<OffsetDateTime>,
+    /// Created at.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -2294,27 +2327,34 @@ pub struct InboxNotification {
 /// Response for listing inbox notifications.
 #[derive(Clone, Debug, Serialize)]
 pub struct ListInboxNotificationsResponse {
+    /// Notifications.
     pub notifications: Vec<InboxNotification>,
+    /// Unread count.
     pub unread_count: i64,
 }
 
 /// Request body for updating inbox notification read status.
 #[derive(Clone, Debug, Deserialize)]
 pub struct UpdateInboxNotificationReadStatusRequest {
+    /// Is read.
     pub is_read: bool,
 }
 
 /// Response for updating inbox notification read status.
 #[derive(Clone, Debug, Serialize)]
 pub struct UpdateInboxNotificationReadStatusResponse {
+    /// Notification.
     pub notification: InboxNotification,
+    /// Unread count.
     pub unread_count: i64,
 }
 
 /// Response for the watch endpoint (single notification + unread count).
 #[derive(Clone, Debug, Serialize)]
 pub struct GetInboxNotificationResponse {
+    /// Notification.
     pub notification: InboxNotification,
+    /// Unread count.
     pub unread_count: i64,
 }
 
@@ -2339,8 +2379,10 @@ impl fmt::Display for ApiAllowListTarget {
 /// The interval of time over which to generate a smaller insights report.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum InsightsReportInterval {
+    /// Day.
     #[serde(rename = "day")]
     Day,
+    /// Week.
     #[serde(rename = "week")]
     Week,
 }
@@ -2359,8 +2401,10 @@ impl InsightsReportInterval {
 /// Section to include in the template insights response.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TemplateInsightsSection {
+    /// IntervalReports.
     #[serde(rename = "interval_reports")]
     IntervalReports,
+    /// Report.
     #[serde(rename = "report")]
     Report,
 }
@@ -2368,8 +2412,10 @@ pub enum TemplateInsightsSection {
 /// Type of app reported in template insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum TemplateAppsType {
+    /// Builtin.
     #[serde(rename = "builtin")]
     Builtin,
+    /// App.
     #[serde(rename = "app")]
     App,
 }
@@ -2377,88 +2423,121 @@ pub enum TemplateAppsType {
 /// Connection latency percentiles.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct ConnectionLatency {
+    /// P50.
     pub p50: f64,
+    /// P95.
     pub p95: f64,
 }
 
 /// A single DAU entry.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DAUEntry {
+    /// Date.
     pub date: String,
+    /// Amount.
     pub amount: i64,
 }
 
 /// Response from the DAU endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DAUsResponse {
+    /// Tz hour offset.
     pub tz_hour_offset: i32,
+    /// Entries.
     pub entries: Vec<DAUEntry>,
 }
 
 /// Per-user latency data.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct UserLatency {
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// User id.
     pub user_id: Uuid,
+    /// Username.
     pub username: String,
+    /// Avatar url.
     pub avatar_url: String,
+    /// Latency ms.
     pub latency_ms: ConnectionLatency,
 }
 
 /// Report for user latency insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct UserLatencyInsightsReport {
+    /// Start time.
     #[serde(with = "time::serde::rfc3339")]
     pub start_time: OffsetDateTime,
+    /// End time.
     #[serde(with = "time::serde::rfc3339")]
     pub end_time: OffsetDateTime,
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// Users.
     pub users: Vec<UserLatency>,
 }
 
 /// Response for user latency insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct UserLatencyInsightsResponse {
+    /// Report.
     pub report: UserLatencyInsightsReport,
 }
 
 /// Per-user activity data.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserActivity {
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// User id.
     pub user_id: Uuid,
+    /// Username.
     pub username: String,
+    /// Avatar url.
     pub avatar_url: String,
+    /// Seconds.
     pub seconds: i64,
 }
 
 /// Report for user activity insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserActivityInsightsReport {
+    /// Start time.
     #[serde(with = "time::serde::rfc3339")]
     pub start_time: OffsetDateTime,
+    /// End time.
     #[serde(with = "time::serde::rfc3339")]
     pub end_time: OffsetDateTime,
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// Users.
     pub users: Vec<UserActivity>,
 }
 
 /// Response for user activity insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserActivityInsightsResponse {
+    /// Report.
     pub report: UserActivityInsightsReport,
 }
 
 /// App usage entry for template insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TemplateAppUsage {
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// App type.
     #[serde(rename = "type")]
     pub app_type: TemplateAppsType,
+    /// Display name.
     pub display_name: String,
+    /// Slug.
     pub slug: String,
+    /// Icon.
     pub icon: String,
+    /// Seconds.
     pub seconds: i64,
+    /// Times used.
     #[serde(default)]
     pub times_used: i64,
 }
@@ -2466,54 +2545,76 @@ pub struct TemplateAppUsage {
 /// Parameter value usage entry.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TemplateParameterValue {
+    /// Value.
     pub value: String,
+    /// Count.
     pub count: i64,
 }
 
 /// Parameter usage entry for template insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TemplateParameterUsage {
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// Display name.
     pub display_name: String,
+    /// Name.
     pub name: String,
+    /// Param type.
     #[serde(rename = "type")]
     pub param_type: String,
+    /// Description.
     pub description: String,
+    /// Options.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub options: Vec<Value>,
+    /// Values.
     pub values: Vec<TemplateParameterValue>,
 }
 
 /// Full report for template insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TemplateInsightsReport {
+    /// Start time.
     #[serde(with = "time::serde::rfc3339")]
     pub start_time: OffsetDateTime,
+    /// End time.
     #[serde(with = "time::serde::rfc3339")]
     pub end_time: OffsetDateTime,
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// Active users.
     pub active_users: i64,
+    /// Apps usage.
     pub apps_usage: Vec<TemplateAppUsage>,
+    /// Parameters usage.
     pub parameters_usage: Vec<TemplateParameterUsage>,
 }
 
 /// Per-interval report for template insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TemplateInsightsIntervalReport {
+    /// Start time.
     #[serde(with = "time::serde::rfc3339")]
     pub start_time: OffsetDateTime,
+    /// End time.
     #[serde(with = "time::serde::rfc3339")]
     pub end_time: OffsetDateTime,
+    /// Template ids.
     pub template_ids: Vec<Uuid>,
+    /// Interval.
     pub interval: InsightsReportInterval,
+    /// Active users.
     pub active_users: i64,
 }
 
 /// Response for template insights.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct TemplateInsightsResponse {
+    /// Report.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub report: Option<TemplateInsightsReport>,
+    /// Interval reports.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub interval_reports: Vec<TemplateInsightsIntervalReport>,
 }
@@ -2521,14 +2622,17 @@ pub struct TemplateInsightsResponse {
 /// Count of users in a given status at a specific date.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct UserStatusChangeCount {
+    /// Date.
     #[serde(with = "time::serde::rfc3339")]
     pub date: OffsetDateTime,
+    /// Count.
     pub count: i64,
 }
 
 /// Response for user status counts over time.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct GetUserStatusCountsResponse {
+    /// Status counts.
     pub status_counts: HashMap<String, Vec<UserStatusChangeCount>>,
 }
 
@@ -2539,36 +2643,42 @@ pub struct GetUserStatusCountsResponse {
 /// Response from the debug coordinator endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugCoordinatorResponse {
+    /// Message.
     pub message: String,
 }
 
 /// Response from the debug tailnet endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugTailnetResponse {
+    /// Message.
     pub message: String,
 }
 
 /// Response from the debug DERP traffic endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugDerpTrafficResponse {
+    /// Message.
     pub message: String,
 }
 
 /// Response from the debug expvar endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugExpvarResponse {
+    /// Vars.
     pub vars: HashMap<String, Value>,
 }
 
 /// Response from the debug websocket test endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugWebsocketResponse {
+    /// Message.
     pub message: String,
 }
 
 /// Response from the debug pprof endpoint.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DebugPprofResponse {
+    /// Message.
     pub message: String,
 }
 
@@ -2580,11 +2690,17 @@ pub struct DebugPprofResponse {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskStatus {
+    /// Pending.
     Pending,
+    /// Initializing.
     Initializing,
+    /// Active.
     Active,
+    /// Paused.
     Paused,
+    /// Unknown.
     Unknown,
+    /// Error.
     Error,
 }
 
@@ -2612,19 +2728,27 @@ impl fmt::Display for TaskStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskState {
+    /// Working.
     Working,
+    /// Idle.
     Idle,
+    /// Complete.
     Complete,
+    /// Failed.
     Failed,
 }
 
 /// TaskStateEntry represents a single entry in the task's state history.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskStateEntry {
+    /// Timestamp.
     #[serde(with = "time::serde::rfc3339")]
     pub timestamp: OffsetDateTime,
+    /// State.
     pub state: TaskState,
+    /// Message.
     pub message: String,
+    /// Uri.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub uri: String,
 }
@@ -2632,21 +2756,34 @@ pub struct TaskStateEntry {
 /// Task represents a task.
 #[derive(Clone, Debug, Serialize)]
 pub struct TaskResponse {
+    /// Id.
     pub id: Uuid,
+    /// Organization id.
     pub organization_id: Uuid,
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Owner name.
     pub owner_name: String,
+    /// Owner avatar url.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub owner_avatar_url: String,
+    /// Name.
     pub name: String,
+    /// Display name.
     pub display_name: String,
+    /// Template version id.
     pub template_version_id: Uuid,
+    /// Workspace id.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<Uuid>,
+    /// Initial prompt.
     pub initial_prompt: String,
+    /// Status.
     pub status: TaskStatus,
+    /// Current state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_state: Option<TaskStateEntry>,
+    /// Created at.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -2654,17 +2791,23 @@ pub struct TaskResponse {
 /// TasksListResponse is the response for the task list endpoint.
 #[derive(Clone, Debug, Serialize)]
 pub struct TasksListResponse {
+    /// Tasks.
     pub tasks: Vec<TaskResponse>,
+    /// Count.
     pub count: usize,
 }
 
 /// CreateTaskRequest is the request to create a new task.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateTaskRequest {
+    /// Template version id.
     pub template_version_id: Uuid,
+    /// Input.
     pub input: String,
+    /// Name.
     #[serde(default)]
     pub name: Option<String>,
+    /// Display name.
     #[serde(default)]
     pub display_name: Option<String>,
 }
@@ -2672,12 +2815,14 @@ pub struct CreateTaskRequest {
 /// UpdateTaskInputRequest is used to update a task's input.
 #[derive(Clone, Debug, Deserialize)]
 pub struct UpdateTaskInputRequest {
+    /// Input.
     pub input: String,
 }
 
 /// TaskSendRequest is used to send task input to the tasks sidebar app.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TaskSendRequest {
+    /// Input.
     pub input: String,
 }
 
@@ -2685,17 +2830,23 @@ pub struct TaskSendRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum TaskLogType {
+    /// Input.
     Input,
+    /// Output.
     Output,
 }
 
 /// TaskLogEntry represents a single log entry for a task.
 #[derive(Clone, Debug, Serialize)]
 pub struct TaskLogEntry {
+    /// Id.
     pub id: i32,
+    /// Content.
     pub content: String,
+    /// Log type.
     #[serde(rename = "type")]
     pub log_type: TaskLogType,
+    /// Time.
     #[serde(with = "time::serde::rfc3339")]
     pub time: OffsetDateTime,
 }
@@ -2703,9 +2854,12 @@ pub struct TaskLogEntry {
 /// TaskLogsResponse contains task logs and metadata.
 #[derive(Clone, Debug, Serialize)]
 pub struct TaskLogsResponse {
+    /// Logs.
     pub logs: Vec<TaskLogEntry>,
+    /// Snapshot.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub snapshot: bool,
+    /// Snapshot at.
     #[serde(
         skip_serializing_if = "Option::is_none",
         with = "time::serde::rfc3339::option"
@@ -2716,6 +2870,7 @@ pub struct TaskLogsResponse {
 /// TaskLogSnapshotEnvelope wraps a task log snapshot posted by an agent.
 #[derive(Clone, Debug, Deserialize)]
 pub struct TaskLogSnapshotEnvelope {
+    /// Log snapshot.
     pub log_snapshot: Value,
 }
 
@@ -2743,11 +2898,17 @@ pub struct ResumeTaskResponse {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatStatus {
+    /// Waiting.
     Waiting,
+    /// Pending.
     Pending,
+    /// Running.
     Running,
+    /// Paused.
     Paused,
+    /// Completed.
     Completed,
+    /// Error.
     Error,
 }
 
@@ -2775,26 +2936,36 @@ impl fmt::Display for ChatStatus {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatMessageVisibility {
+    /// User.
     User,
+    /// Model.
     Model,
+    /// Both.
     Both,
 }
 
 /// ChatMessagePartType represents a structured message part type.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChatMessagePartType {
+    /// Text.
     #[serde(rename = "text")]
     Text,
+    /// Reasoning.
     #[serde(rename = "reasoning")]
     Reasoning,
+    /// ToolCall.
     #[serde(rename = "tool-call")]
     ToolCall,
+    /// ToolResult.
     #[serde(rename = "tool-result")]
     ToolResult,
+    /// Source.
     #[serde(rename = "source")]
     Source,
+    /// File.
     #[serde(rename = "file")]
     File,
+    /// FileReference.
     #[serde(rename = "file-reference")]
     FileReference,
 }
@@ -2802,42 +2973,61 @@ pub enum ChatMessagePartType {
 /// ChatMessagePart is a structured chunk of a chat message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessagePart {
+    /// Part type.
     #[serde(rename = "type")]
     pub part_type: ChatMessagePartType,
+    /// Text.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub text: String,
+    /// Signature.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub signature: String,
+    /// Tool call id.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_call_id: String,
+    /// Tool name.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub tool_name: String,
+    /// Args.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub args: Option<Value>,
+    /// Args delta.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub args_delta: String,
+    /// Result.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result: Option<Value>,
+    /// Result delta.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub result_delta: String,
+    /// Is error.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub is_error: bool,
+    /// Source id.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source_id: String,
+    /// Url.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub url: String,
+    /// Title.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub title: String,
+    /// Media type.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub media_type: String,
+    /// File id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub file_id: Option<Uuid>,
+    /// File name.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub file_name: String,
+    /// Start line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_line: Option<i32>,
+    /// End line.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub end_line: Option<i32>,
+    /// Content.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub content: String,
 }
@@ -2845,18 +3035,25 @@ pub struct ChatMessagePart {
 /// ChatMessageUsage contains token usage information for a chat message.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessageUsage {
+    /// Input tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub input_tokens: Option<i64>,
+    /// Output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub output_tokens: Option<i64>,
+    /// Total tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub total_tokens: Option<i64>,
+    /// Reasoning tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reasoning_tokens: Option<i64>,
+    /// Cache creation tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_creation_tokens: Option<i64>,
+    /// Cache read tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cache_read_tokens: Option<i64>,
+    /// Context limit.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_limit: Option<i64>,
 }
@@ -2864,15 +3061,22 @@ pub struct ChatMessageUsage {
 /// ChatMessage represents a single message in a chat.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessageResponse {
+    /// Id.
     pub id: i64,
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Model config id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model_config_id: Option<Uuid>,
+    /// Created at.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Role.
     pub role: String,
+    /// Content.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub content: Vec<ChatMessagePart>,
+    /// Usage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usage: Option<ChatMessageUsage>,
 }
@@ -2880,32 +3084,48 @@ pub struct ChatMessageResponse {
 /// Chat represents a chat session.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatResponse {
+    /// Id.
     pub id: Uuid,
+    /// Owner id.
     pub owner_id: Uuid,
+    /// Workspace id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub workspace_id: Option<Uuid>,
+    /// Parent chat id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_chat_id: Option<Uuid>,
+    /// Root chat id.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub root_chat_id: Option<Uuid>,
+    /// Last model config id.
     pub last_model_config_id: Uuid,
+    /// Title.
     pub title: String,
+    /// Status.
     pub status: ChatStatus,
+    /// Last error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_error: Option<String>,
+    /// Created at.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Updated at.
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
+    /// Archived.
     pub archived: bool,
 }
 
 /// ChatQueuedMessage represents a queued message waiting to be processed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatQueuedMessageResponse {
+    /// Id.
     pub id: i64,
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Content.
     pub content: Vec<ChatMessagePart>,
+    /// Created at.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
 }
@@ -2913,8 +3133,11 @@ pub struct ChatQueuedMessageResponse {
 /// ChatWithMessages is a chat along with its messages.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatWithMessagesResponse {
+    /// Chat.
     pub chat: ChatResponse,
+    /// Messages.
     pub messages: Vec<ChatMessageResponse>,
+    /// Queued messages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_messages: Vec<ChatQueuedMessageResponse>,
 }
@@ -2922,10 +3145,13 @@ pub struct ChatWithMessagesResponse {
 /// ChatInputPartType represents an input part type for user chat input.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ChatInputPartType {
+    /// Text.
     #[serde(rename = "text")]
     Text,
+    /// File.
     #[serde(rename = "file")]
     File,
+    /// FileReference.
     #[serde(rename = "file-reference")]
     FileReference,
 }
@@ -2933,18 +3159,25 @@ pub enum ChatInputPartType {
 /// ChatInputPart is a single user input part for creating a chat.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatInputPart {
+    /// Part type.
     #[serde(rename = "type")]
     pub part_type: ChatInputPartType,
+    /// Text.
     #[serde(default)]
     pub text: String,
+    /// File id.
     #[serde(default)]
     pub file_id: Option<Uuid>,
+    /// File name.
     #[serde(default)]
     pub file_name: String,
+    /// Start line.
     #[serde(default)]
     pub start_line: Option<i32>,
+    /// End line.
     #[serde(default)]
     pub end_line: Option<i32>,
+    /// Content.
     #[serde(default)]
     pub content: String,
 }
@@ -2952,9 +3185,12 @@ pub struct ChatInputPart {
 /// CreateChatRequest is the request to create a new chat.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateChatRequest {
+    /// Content.
     pub content: Vec<ChatInputPart>,
+    /// Workspace id.
     #[serde(default)]
     pub workspace_id: Option<Uuid>,
+    /// Model config id.
     #[serde(default)]
     pub model_config_id: Option<Uuid>,
 }
@@ -2962,7 +3198,9 @@ pub struct CreateChatRequest {
 /// CreateChatMessageRequest is the request to add a message to a chat.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CreateChatMessageRequest {
+    /// Content.
     pub content: Vec<ChatInputPart>,
+    /// Model config id.
     #[serde(default)]
     pub model_config_id: Option<Uuid>,
 }
@@ -2970,22 +3208,27 @@ pub struct CreateChatMessageRequest {
 /// CreateChatMessageResponse is the response from adding a message.
 #[derive(Clone, Debug, Serialize)]
 pub struct CreateChatMessageApiResponse {
+    /// Message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<ChatMessageResponse>,
+    /// Queued message.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub queued_message: Option<ChatQueuedMessageResponse>,
+    /// Queued.
     pub queued: bool,
 }
 
 /// UploadChatFileResponse is the response from uploading a chat file.
 #[derive(Clone, Debug, Serialize)]
 pub struct UploadChatFileResponse {
+    /// Id.
     pub id: Uuid,
 }
 
 /// EditChatMessageRequest is the request to edit a user message in a chat.
 #[derive(Clone, Debug, Deserialize)]
 pub struct EditChatMessageRequest {
+    /// Content.
     pub content: Vec<ChatInputPart>,
 }
 
@@ -2993,24 +3236,36 @@ pub struct EditChatMessageRequest {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatProviderConfigSource {
+    /// Database.
     Database,
+    /// EnvPreset.
     EnvPreset,
+    /// Supported.
     Supported,
 }
 
 /// ChatProviderConfigResponse is an admin-managed provider configuration.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatProviderConfigResponse {
+    /// Id.
     pub id: Uuid,
+    /// Provider.
     pub provider: String,
+    /// Display name.
     pub display_name: String,
+    /// Enabled.
     pub enabled: bool,
+    /// Has api key.
     pub has_api_key: bool,
+    /// Base url.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub base_url: String,
+    /// Source.
     pub source: ChatProviderConfigSource,
+    /// Created at.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Updated at.
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -3018,13 +3273,18 @@ pub struct ChatProviderConfigResponse {
 /// CreateChatProviderConfigRequest creates a chat provider config.
 #[derive(Clone, Deserialize)]
 pub struct CreateChatProviderConfigRequest {
+    /// Provider.
     pub provider: String,
+    /// Display name.
     #[serde(default)]
     pub display_name: String,
+    /// Api key.
     #[serde(default)]
     pub api_key: String,
+    /// Base url.
     #[serde(default)]
     pub base_url: String,
+    /// Enabled.
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -3044,12 +3304,16 @@ impl fmt::Debug for CreateChatProviderConfigRequest {
 /// UpdateChatProviderConfigRequest updates a chat provider config.
 #[derive(Clone, Deserialize)]
 pub struct UpdateChatProviderConfigRequest {
+    /// Display name.
     #[serde(default)]
     pub display_name: String,
+    /// Api key.
     #[serde(default)]
     pub api_key: Option<String>,
+    /// Base url.
     #[serde(default)]
     pub base_url: Option<String>,
+    /// Enabled.
     #[serde(default)]
     pub enabled: Option<bool>,
 }
@@ -3068,18 +3332,25 @@ impl fmt::Debug for UpdateChatProviderConfigRequest {
 /// ChatModelCallConfig configures per-call model behavior defaults.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatModelCallConfig {
+    /// Max output tokens.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_output_tokens: Option<i64>,
+    /// Temperature.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub temperature: Option<f64>,
+    /// Top p.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_p: Option<f64>,
+    /// Top k.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub top_k: Option<i64>,
+    /// Presence penalty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub presence_penalty: Option<f64>,
+    /// Frequency penalty.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub frequency_penalty: Option<f64>,
+    /// Provider options.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider_options: Option<Value>,
 }
@@ -3087,18 +3358,29 @@ pub struct ChatModelCallConfig {
 /// ChatModelConfigResponse is an admin-managed model configuration.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatModelConfigResponse {
+    /// Id.
     pub id: Uuid,
+    /// Provider.
     pub provider: String,
+    /// Model.
     pub model: String,
+    /// Display name.
     pub display_name: String,
+    /// Enabled.
     pub enabled: bool,
+    /// Is default.
     pub is_default: bool,
+    /// Context limit.
     pub context_limit: i64,
+    /// Compression threshold.
     pub compression_threshold: i32,
+    /// Model config.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub model_config: Option<ChatModelCallConfig>,
+    /// Created at.
     #[serde(with = "time::serde::rfc3339")]
     pub created_at: OffsetDateTime,
+    /// Updated at.
     #[serde(with = "time::serde::rfc3339")]
     pub updated_at: OffsetDateTime,
 }
@@ -3106,18 +3388,26 @@ pub struct ChatModelConfigResponse {
 /// CreateChatModelConfigRequest creates a chat model config.
 #[derive(Clone, Debug, Deserialize)]
 pub struct CreateChatModelConfigRequest {
+    /// Provider.
     pub provider: String,
+    /// Model.
     pub model: String,
+    /// Display name.
     #[serde(default)]
     pub display_name: String,
+    /// Enabled.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Is default.
     #[serde(default)]
     pub is_default: Option<bool>,
+    /// Context limit.
     #[serde(default)]
     pub context_limit: Option<i64>,
+    /// Compression threshold.
     #[serde(default)]
     pub compression_threshold: Option<i32>,
+    /// Model config.
     #[serde(default)]
     pub model_config: Option<ChatModelCallConfig>,
 }
@@ -3125,20 +3415,28 @@ pub struct CreateChatModelConfigRequest {
 /// UpdateChatModelConfigRequest updates a chat model config.
 #[derive(Clone, Debug, Deserialize)]
 pub struct UpdateChatModelConfigRequest {
+    /// Provider.
     #[serde(default)]
     pub provider: String,
+    /// Model.
     #[serde(default)]
     pub model: String,
+    /// Display name.
     #[serde(default)]
     pub display_name: String,
+    /// Enabled.
     #[serde(default)]
     pub enabled: Option<bool>,
+    /// Is default.
     #[serde(default)]
     pub is_default: Option<bool>,
+    /// Context limit.
     #[serde(default)]
     pub context_limit: Option<i64>,
+    /// Compression threshold.
     #[serde(default)]
     pub compression_threshold: Option<i32>,
+    /// Model config.
     #[serde(default)]
     pub model_config: Option<ChatModelCallConfig>,
 }
@@ -3150,9 +3448,13 @@ pub struct UpdateChatModelConfigRequest {
 /// ChatModel represents a model in the chat model catalog.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatModel {
+    /// Id.
     pub id: String,
+    /// Provider.
     pub provider: String,
+    /// Model.
     pub model: String,
+    /// Display name.
     pub display_name: String,
 }
 
@@ -3160,43 +3462,59 @@ pub struct ChatModel {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatModelProviderUnavailableReason {
+    /// MissingApiKey.
     MissingApiKey,
+    /// FetchFailed.
     FetchFailed,
 }
 
 /// ChatModelProvider represents provider availability and model results.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatModelProvider {
+    /// Provider.
     pub provider: String,
+    /// Available.
     pub available: bool,
+    /// Unavailable reason.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub unavailable_reason: Option<ChatModelProviderUnavailableReason>,
+    /// Models.
     pub models: Vec<ChatModel>,
 }
 
 /// ChatModelsResponse is the catalog returned from chat model discovery.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatModelsResponse {
+    /// Providers.
     pub providers: Vec<ChatModelProvider>,
 }
 
 /// ChatDiffStatusResponse represents cached diff status for a chat.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatDiffStatusResponse {
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Url.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
+    /// Pull request state.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_state: Option<String>,
+    /// Changes requested.
     pub changes_requested: bool,
+    /// Additions.
     pub additions: i32,
+    /// Deletions.
     pub deletions: i32,
+    /// Changed files.
     pub changed_files: i32,
+    /// Refreshed at.
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_optional_rfc3339"
     )]
     pub refreshed_at: Option<OffsetDateTime>,
+    /// Stale at.
     #[serde(
         skip_serializing_if = "Option::is_none",
         serialize_with = "serialize_optional_rfc3339"
@@ -3207,15 +3525,21 @@ pub struct ChatDiffStatusResponse {
 /// ChatDiffContentsResponse represents the resolved diff text for a chat.
 #[derive(Clone, Debug, Serialize)]
 pub struct ChatDiffContentsResponse {
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Provider.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Remote origin.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub remote_origin: Option<String>,
+    /// Branch.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// Pull request url.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pull_request_url: Option<String>,
+    /// Diff.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub diff: String,
 }
@@ -3228,40 +3552,54 @@ pub struct ChatDiffContentsResponse {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatStreamEventType {
+    /// MessagePart.
     MessagePart,
+    /// Message.
     Message,
+    /// Status.
     Status,
+    /// Error.
     Error,
+    /// QueueUpdate.
     QueueUpdate,
+    /// Retry.
     Retry,
 }
 
 /// ChatStreamMessagePart is a streamed message part update.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatStreamMessagePart {
+    /// Role.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub role: String,
+    /// Part.
     pub part: ChatMessagePart,
 }
 
 /// ChatStreamStatus represents an updated chat status.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatStreamStatus {
+    /// Status.
     pub status: ChatStatus,
 }
 
 /// ChatStreamError represents an error event in the stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatStreamError {
+    /// Message.
     pub message: String,
 }
 
 /// ChatStreamRetry represents an auto-retry status event in the stream.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatStreamRetry {
+    /// Attempt.
     pub attempt: i32,
+    /// Delay ms.
     pub delay_ms: i64,
+    /// Error.
     pub error: String,
+    /// Retrying at.
     #[serde(with = "time::serde::rfc3339")]
     pub retrying_at: OffsetDateTime,
 }
@@ -3269,19 +3607,27 @@ pub struct ChatStreamRetry {
 /// ChatStreamEvent represents a real-time update for chat streaming.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatStreamEvent {
+    /// Event type.
     #[serde(rename = "type")]
     pub event_type: ChatStreamEventType,
+    /// Chat id.
     pub chat_id: Uuid,
+    /// Message.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<ChatMessageResponse>,
+    /// Message part.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message_part: Option<ChatStreamMessagePart>,
+    /// Status.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub status: Option<ChatStreamStatus>,
+    /// Error.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<ChatStreamError>,
+    /// Retry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<ChatStreamRetry>,
+    /// Queued messages.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queued_messages: Vec<ChatQueuedMessageResponse>,
 }
@@ -3294,17 +3640,24 @@ pub struct ChatStreamEvent {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ChatEventKind {
+    /// StatusChange.
     StatusChange,
+    /// TitleChange.
     TitleChange,
+    /// Created.
     Created,
+    /// Deleted.
     Deleted,
+    /// DiffStatusChange.
     DiffStatusChange,
 }
 
 /// ChatEvent is a pub/sub event payload for chat updates.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatEvent {
+    /// Kind.
     pub kind: ChatEventKind,
+    /// Chat.
     pub chat: ChatResponse,
 }
 
@@ -3312,16 +3665,21 @@ pub struct ChatEvent {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub enum ServerSentEventType {
+    /// Ping.
     Ping,
+    /// Data.
     Data,
+    /// Error.
     Error,
 }
 
 /// ServerSentEvent is a generic server-sent event envelope.
 #[derive(Clone, Debug, Serialize)]
 pub struct ServerSentEvent<T: Serialize> {
+    /// Event type.
     #[serde(rename = "type")]
     pub event_type: ServerSentEventType,
+    /// Data.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub data: Option<T>,
 }
@@ -5519,6 +5877,7 @@ pub struct Region {
 /// Response containing a list of regions.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RegionsResponse {
+    /// Regions.
     pub regions: Vec<Region>,
 }
 
@@ -5529,13 +5888,16 @@ pub struct RegionsResponse {
 /// Content payload for a custom notification.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomNotificationContent {
+    /// Title.
     pub title: String,
+    /// Message.
     pub message: String,
 }
 
 /// Request to send a custom notification.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CustomNotificationRequest {
+    /// Content.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<CustomNotificationContent>,
 }

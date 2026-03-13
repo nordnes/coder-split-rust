@@ -18,6 +18,7 @@
 //! The crate re-exports the key types so consumers only need
 //! `use coder_db::{PostgresStore, run_migrations, …};`.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub(crate) mod migrations;
 pub mod pubsub;

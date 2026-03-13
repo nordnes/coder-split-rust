@@ -12,6 +12,7 @@
 //! * [`agents`] — in-memory agent connection provider
 //! * [`tailnet`] — DERP map construction and in-memory coordinator
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod agents;
 pub mod derp;

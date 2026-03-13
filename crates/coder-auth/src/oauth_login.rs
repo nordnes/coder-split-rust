@@ -42,12 +42,17 @@ pub enum OAuthLoginError {
 /// GitHub user profile from `/user`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubUser {
+    /// Id.
     pub id: i64,
+    /// Login.
     pub login: String,
+    /// Name.
     #[serde(default)]
     pub name: Option<String>,
+    /// Email.
     #[serde(default)]
     pub email: Option<String>,
+    /// Avatar url.
     #[serde(default)]
     pub avatar_url: String,
 }
@@ -55,9 +60,12 @@ pub struct GithubUser {
 /// GitHub email from `/user/emails`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubEmail {
+    /// Email.
     pub email: String,
+    /// Primary.
     #[serde(default)]
     pub primary: bool,
+    /// Verified.
     #[serde(default)]
     pub verified: bool,
 }
@@ -65,34 +73,42 @@ pub struct GithubEmail {
 /// GitHub organization from `/user/orgs`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubOrganization {
+    /// Login.
     pub login: String,
 }
 
 /// GitHub team from `/user/teams`.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubTeam {
+    /// Slug.
     pub slug: String,
+    /// Organization.
     pub organization: GithubTeamOrg,
 }
 
 /// Nested org inside a team response.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubTeamOrg {
+    /// Login.
     pub login: String,
 }
 
 /// GitHub OAuth2 token exchange response.
 #[derive(Clone, Debug, Deserialize)]
 pub struct GithubTokenResponse {
+    /// Access token.
     #[serde(default)]
     pub access_token: String,
+    /// Token type.
     #[serde(default)]
     pub token_type: String,
+    /// Scope.
     #[serde(default)]
     pub scope: String,
     /// GitHub may return HTTP 200 with an error field instead of a token.
     #[serde(default)]
     pub error: Option<String>,
+    /// Error description.
     #[serde(default)]
     pub error_description: Option<String>,
 }
@@ -100,11 +116,16 @@ pub struct GithubTokenResponse {
 /// GitHub device authorization response.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub struct GithubDeviceResponse {
+    /// Device code.
     pub device_code: String,
+    /// User code.
     pub user_code: String,
+    /// Verification uri.
     pub verification_uri: String,
+    /// Expires in.
     #[serde(default)]
     pub expires_in: u64,
+    /// Interval.
     #[serde(default)]
     pub interval: u64,
 }
@@ -112,12 +133,17 @@ pub struct GithubDeviceResponse {
 /// OIDC token endpoint response.
 #[derive(Clone, Debug, Deserialize)]
 pub struct OidcTokenResponse {
+    /// Access token.
     pub access_token: String,
+    /// Id token.
     pub id_token: String,
+    /// Token type.
     #[serde(default)]
     pub token_type: String,
+    /// Refresh token.
     #[serde(default)]
     pub refresh_token: Option<String>,
+    /// Expires in.
     #[serde(default)]
     pub expires_in: Option<u64>,
 }
@@ -125,26 +151,37 @@ pub struct OidcTokenResponse {
 /// Minimal OIDC discovery document fields we need.
 #[derive(Clone, Debug, Deserialize)]
 pub struct OidcDiscovery {
+    /// Authorization endpoint.
     pub authorization_endpoint: String,
+    /// Token endpoint.
     pub token_endpoint: String,
+    /// Userinfo endpoint.
     pub userinfo_endpoint: Option<String>,
+    /// Jwks uri.
     pub jwks_uri: String,
+    /// Issuer.
     pub issuer: String,
 }
 
 /// Claims extracted from an OIDC ID token.
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct OidcClaims {
+    /// Sub.
     #[serde(default)]
     pub sub: String,
+    /// Email.
     #[serde(default)]
     pub email: Option<String>,
+    /// Email verified.
     #[serde(default)]
     pub email_verified: Option<bool>,
+    /// Name.
     #[serde(default)]
     pub name: Option<String>,
+    /// Preferred username.
     #[serde(default)]
     pub preferred_username: Option<String>,
+    /// Groups.
     #[serde(default)]
     pub groups: Option<Vec<String>>,
     /// All raw claims for storage.
@@ -881,12 +918,16 @@ pub fn build_user_link_claims(claims: &OidcClaims) -> UserLinkClaims {
 /// Query parameters for OAuth2 callback endpoints.
 #[derive(Clone, Debug, Default, Deserialize)]
 pub struct OAuthCallbackQuery {
+    /// Code.
     #[serde(default)]
     pub code: String,
+    /// State.
     #[serde(default)]
     pub state: String,
+    /// Error.
     #[serde(default)]
     pub error: Option<String>,
+    /// Error description.
     #[serde(default)]
     pub error_description: Option<String>,
 }

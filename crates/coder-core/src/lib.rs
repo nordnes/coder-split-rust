@@ -33,6 +33,7 @@
 //! * **Go parity** — types mirror the original Go SDK (`codersdk/`) so that
 //!   HTTP responses are byte-for-byte compatible.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 pub mod api;
 pub mod build_info;

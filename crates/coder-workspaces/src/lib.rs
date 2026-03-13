@@ -20,6 +20,7 @@
 //! * [`compute_extended_deadline`] — deadline extension with optional max clamp
 //! * [`evaluate_dormancy`] — idle-days threshold check
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
@@ -321,7 +322,7 @@ const QUIET_HOURS_WINDOW_DURATION: u8 = 6;
 /// with start/end hours expressed in UTC.
 ///
 /// The schedule is expected to fire at a specific hour in the given timezone;
-/// the quiet window spans from that hour to [`QUIET_HOURS_WINDOW_DURATION`]
+/// the quiet window spans from that hour to `QUIET_HOURS_WINDOW_DURATION`
 /// hours later, both converted to UTC.  Returns `None` when the schedule is
 /// empty or cannot be parsed.
 pub fn parse_quiet_hours_schedule(schedule: &str) -> Option<QuietHoursWindow> {
@@ -515,7 +516,7 @@ pub struct AutobuildStats {
 /// deadlines, dormancy rules, and auto-delete policies.
 ///
 /// Mirrors Go's `autobuild.Executor` with a concurrent worker pool
-/// limited to [`MAX_CONCURRENT_TRANSITIONS`] workers to avoid
+/// limited to `MAX_CONCURRENT_TRANSITIONS` workers to avoid
 /// overloading the database.
 pub struct AutobuildExecutor<S> {
     store: S,
@@ -565,7 +566,7 @@ where
     /// Evaluates one tick of the autobuild loop.
     ///
     /// Queries all workspaces eligible for a transition and evaluates each
-    /// one concurrently (up to [`MAX_CONCURRENT_TRANSITIONS`] at a time).
+    /// one concurrently (up to `MAX_CONCURRENT_TRANSITIONS` at a time).
     /// Returns statistics about the tick.
     pub async fn evaluate_once(&self) -> Result<AutobuildStats, StorageError> {
         // Truncate to the nearest minute to match Go's `t.Truncate(time.Minute)`.

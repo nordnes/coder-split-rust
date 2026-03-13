@@ -18,6 +18,7 @@
 //! Email dispatch is currently stubbed (requires `lettre` wiring); webhook
 //! and inbox delivery are fully implemented.
 #![forbid(unsafe_code)]
+#![warn(missing_docs)]
 
 use std::sync::{Arc, Weak};
 

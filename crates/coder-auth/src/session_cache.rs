@@ -33,8 +33,8 @@ pub struct CachedSession {
 ///
 /// Expired entries are swept lazily during [`insert`](Self::insert) using
 /// a probabilistic approach: a full `retain()` scan only runs once every
-/// [`SWEEP_INTERVAL`] inserts **or** when the map exceeds
-/// [`SWEEP_SIZE_THRESHOLD`] entries.  This keeps the amortised cost of
+/// `SWEEP_INTERVAL` inserts **or** when the map exceeds
+/// `SWEEP_SIZE_THRESHOLD` entries.  This keeps the amortised cost of
 /// `insert` at O(1) for the common case while still bounding memory
 /// growth.
 ///
@@ -98,8 +98,8 @@ impl SessionCache {
     /// Inserts or replaces a cached session entry.
     ///
     /// Expired entries are swept probabilistically: a full `retain()` scan
-    /// runs once every [`SWEEP_INTERVAL`] inserts or when the map size
-    /// exceeds [`SWEEP_SIZE_THRESHOLD`].  This keeps the common-case cost
+    /// runs once every `SWEEP_INTERVAL` inserts or when the map size
+    /// exceeds `SWEEP_SIZE_THRESHOLD`.  This keeps the common-case cost
     /// at O(1) rather than O(n) on every write.
     #[instrument(skip(self, token_hash, user))]
     pub async fn insert(&self, token_hash: Vec<u8>, user: AuthenticatedUser) {
