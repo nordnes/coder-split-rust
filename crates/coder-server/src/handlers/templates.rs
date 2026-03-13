@@ -1,5 +1,6 @@
 //! Template and template version handlers.
 
+use super::users::clamp_pagination_limit;
 use super::workspaces::workspace_transition_from_str;
 use super::*;
 
@@ -949,7 +950,7 @@ pub(crate) async fn list_template_versions(
         .list_template_versions(TemplateVersionListFilter {
             template_id,
             include_archived: query.include_archived.unwrap_or(false),
-            limit: query.limit.unwrap_or(50),
+            limit: clamp_pagination_limit(query.limit.unwrap_or(50)),
             offset: query.offset.unwrap_or(0),
         })
         .await?;

@@ -23,6 +23,7 @@ use coder_auth::{AuthService, ExternalAuthService, OAuth2ProviderService};
 use coder_connectivity::{
     HealthService,
     agents::{AgentConnection, AgentError, AgentProvider},
+    derp::DerpServer,
     tailnet::{DerpTrafficTracker, TailnetCoordinator},
 };
 use coder_core::pubsub::PubSub;
@@ -63,7 +64,7 @@ use crate::handlers::tasks::*;
 use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
 use crate::handlers::users::*;
-use crate::handlers::workspace_apps::workspace_apps_proxy_path;
+use crate::handlers::workspace_apps::{workspace_apps_proxy_path, workspace_port_forward};
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
@@ -159,6 +160,8 @@ pub struct AppState {
     pub coordinator: Arc<dyn TailnetCoordinator>,
     /// DERP relay traffic tracker.
     pub derp_tracker: Arc<DerpTrafficTracker>,
+    /// DERP relay server for Tailscale-compatible packet routing.
+    pub derp_server: Arc<DerpServer>,
     /// Optional Prometheus metrics handle for rendering metrics.
     pub prometheus_handle: Option<PrometheusHandle>,
     pub(crate) auth: AuthService<Arc<dyn AppStore>>,
@@ -186,6 +189,7 @@ impl AppState {
         agent_provider: Arc<dyn AgentProvider>,
         coordinator: Arc<dyn TailnetCoordinator>,
         derp_tracker: Arc<DerpTrafficTracker>,
+        derp_server: Arc<DerpServer>,
         prometheus_handle: Option<PrometheusHandle>,
         telemetry_reporter: coder_telemetry::TelemetryReporter,
     ) -> Result<Self, reqwest::Error> {
@@ -215,6 +219,7 @@ impl AppState {
             agent_provider,
             coordinator,
             derp_tracker,
+            derp_server,
             prometheus_handle,
             telemetry_reporter,
             auth,
@@ -256,11 +261,17 @@ pub fn build_router(
         .route("/latency-check", get(latency_check))
         .route("/derp", get(derp_websocket))
         .route("/derp/latency-check", get(derp_latency_check))
+        .route("/api/v2/derp/latency-check", get(api_derp_latency_check))
         .route("/metrics", get(get_prometheus_metrics))
         // Workspace app path-based proxying.
         .route(
             "/@{user}/{workspace_and_agent}/apps/{workspaceapp}/{*rest}",
             axum::routing::any(workspace_apps_proxy_path),
+        )
+        // Workspace port forwarding.
+        .route(
+            "/@{user}/{workspace_and_agent}/port/{port}/{*rest}",
+            axum::routing::any(workspace_port_forward),
         )
         .route("/mcp/http", post(mcp_http_handler))
         .route(
@@ -1030,6 +1041,7 @@ pub fn build_router(
         )
         .layer(PropagateRequestIdLayer::new(request_id_header.clone()))
         .layer(SetRequestIdLayer::new(request_id_header, MakeRequestUuid))
+        .layer(DefaultBodyLimit::max(2 * 1024 * 1024))
         .layer(NormalizePathLayer::trim_trailing_slash())
         .with_state(state)
 }
@@ -1646,11 +1658,38 @@ pub(crate) mod tests {
         }
 
         /// Inserts a workspace into the fake store for testing.
-        fn insert_workspace(&self, workspace: WorkspaceRecord) -> Result<(), StorageError> {
+        pub(crate) fn insert_workspace(
+            &self,
+            workspace: WorkspaceRecord,
+        ) -> Result<(), StorageError> {
             self.workspaces
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(workspace.id, workspace);
+            Ok(())
+        }
+
+        /// Inserts a workspace build into the fake store for testing.
+        pub(crate) fn insert_build(&self, build: WorkspaceBuildRecord) -> Result<(), StorageError> {
+            self.workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(build.id, build);
+            Ok(())
+        }
+
+        /// Inserts a workspace resource into the fake store for testing.
+        pub(crate) fn insert_resource(
+            &self,
+            job_id: Uuid,
+            resource: WorkspaceResourceRecord,
+        ) -> Result<(), StorageError> {
+            self.workspace_resources
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .entry(job_id)
+                .or_default()
+                .push(resource);
             Ok(())
         }
 
@@ -8330,6 +8369,9 @@ pub(crate) mod tests {
             Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
         let coordinator = InMemoryCoordinator::new(Default::default());
         let derp_tracker = DerpTrafficTracker::new();
+        let derp_server = coder_connectivity::derp::DerpServer::new(
+            coder_connectivity::derp::NodeKey::new([0u8; 32]),
+        );
 
         Ok((
             AppState::new(
@@ -8342,6 +8384,7 @@ pub(crate) mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                derp_server,
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             )?,
@@ -10722,7 +10765,7 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(auth_redirect_unauth.status(), StatusCode::UNAUTHORIZED);
 
-        // --- GET /workspaceagents/me/gitsshkey with auth returns 200 with stub keys ---
+        // --- GET /workspaceagents/me/gitsshkey with user auth returns 400 (agent auth required) ---
         let gitsshkey_response = call(
             app.clone(),
             authenticated_request(
@@ -10732,16 +10775,7 @@ pub(crate) mod tests {
             )?,
         )
         .await?;
-        assert_eq!(gitsshkey_response.status(), StatusCode::OK);
-        let gitsshkey_body = response_json(gitsshkey_response).await?;
-        assert_eq!(
-            gitsshkey_body.get("public_key").and_then(Value::as_str),
-            Some("")
-        );
-        assert_eq!(
-            gitsshkey_body.get("private_key").and_then(Value::as_str),
-            Some("")
-        );
+        assert_eq!(gitsshkey_response.status(), StatusCode::BAD_REQUEST);
 
         // --- GET /workspaceagents/me/gitsshkey without auth returns 401 ---
         let gitsshkey_unauth = call(
@@ -32446,6 +32480,9 @@ pub(crate) mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
@@ -32488,6 +32525,9 @@ pub(crate) mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
@@ -32647,6 +32687,9 @@ pub(crate) mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?)
@@ -33126,6 +33169,9 @@ pub(crate) mod tests {
                 agent_provider,
                 coordinator,
                 derp_tracker,
+                coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                    [0u8; 32],
+                )),
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             )?
@@ -35904,6 +35950,191 @@ pub(crate) mod tests {
         assert_eq!(timings[0].stage, "plan");
         assert_eq!(timings[0].resource, "aws_instance.main");
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Security audit tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn pagination_clamp_caps_at_max() {
+        use crate::handlers::users::clamp_pagination_limit;
+
+        // Values within range pass through unchanged.
+        assert_eq!(clamp_pagination_limit(0), 0);
+        assert_eq!(clamp_pagination_limit(50), 50);
+        assert_eq!(clamp_pagination_limit(999), 999);
+        assert_eq!(clamp_pagination_limit(1_000), 1_000);
+
+        // Values above the cap are reduced.
+        assert_eq!(clamp_pagination_limit(1_001), 1_000);
+        assert_eq!(clamp_pagination_limit(u32::MAX), 1_000);
+    }
+
+    #[tokio::test]
+    async fn list_users_clamps_large_pagination_limit() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // A very large limit should still succeed (server clamps internally).
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users?limit=999999&offset=0", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_audit_logs_clamps_large_pagination_limit() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/audit?limit=999999&offset=0", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_org_members_clamps_large_pagination_limit() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!(
+                    "/api/v2/organizations/{}/members?limit=999999&offset=0",
+                    org_id
+                ),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_settings_require_admin_rbac() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let owner_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &owner_token).await?;
+
+        // Create a regular member user (no owner or admin roles).
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &owner_token,
+                &CreateUserRequestWithOrgs {
+                    email: "member@example.com".to_owned(),
+                    username: "member".to_owned(),
+                    name: "Member User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![org_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+
+        // Log in as the regular member.
+        let member_login = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "member@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(member_login.status(), StatusCode::CREATED);
+        let member_token = response_json(member_login)
+            .await?
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing member session token")?
+            .to_owned();
+
+        // Non-admin should be forbidden from reading notification settings.
+        let settings_resp = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/notifications/settings", &member_token)?,
+        )
+        .await?;
+        assert_eq!(settings_resp.status(), StatusCode::FORBIDDEN);
+
+        // Non-admin should be forbidden from reading system notification templates.
+        let sys_tpl_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/system",
+                &member_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(sys_tpl_resp.status(), StatusCode::FORBIDDEN);
+
+        // Non-admin should be forbidden from reading custom notification templates.
+        let custom_tpl_resp = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                "/api/v2/notifications/templates/custom",
+                &member_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(custom_tpl_resp.status(), StatusCode::FORBIDDEN);
+
+        // Admin (owner) should succeed for notification settings.
+        let admin_settings = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/notifications/settings", &owner_token)?,
+        )
+        .await?;
+        assert_eq!(admin_settings.status(), StatusCode::OK);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn global_body_size_limit_rejects_oversized_requests() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        // Build a request body larger than 2 MB.
+        let oversized = vec![b'x'; 3 * 1024 * 1024];
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/users")
+            .header(CONTENT_TYPE, "application/json")
+            .header(SESSION_TOKEN_HEADER, &*token)
+            .body(Body::from(oversized))?;
+
+        let response: Response<Body> = call(app, req).await?;
+        // Axum's DefaultBodyLimit rejects oversized bodies with a 4xx error.
+        assert!(
+            response.status().is_client_error(),
+            "expected 4xx for oversized body, got {}",
+            response.status()
+        );
         Ok(())
     }
 }

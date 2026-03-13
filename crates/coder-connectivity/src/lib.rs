@@ -14,6 +14,7 @@
 #![forbid(unsafe_code)]
 
 pub mod agents;
+pub mod derp;
 pub mod tailnet;
 use std::{
     collections::HashMap,

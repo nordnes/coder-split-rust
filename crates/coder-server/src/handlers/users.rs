@@ -2,6 +2,20 @@
 
 use super::*;
 
+/// Maximum number of rows a single paginated request may return.
+///
+/// This prevents clients from requesting unbounded result sets that could
+/// exhaust server memory or cause excessive database load.
+const MAX_PAGE_LIMIT: u32 = 1_000;
+
+/// Clamps a caller-supplied pagination limit to `[0, MAX_PAGE_LIMIT]`.
+///
+/// A value of `0` is left as-is so the downstream layer can apply its own
+/// default.  Values above `MAX_PAGE_LIMIT` are silently reduced.
+pub(crate) fn clamp_pagination_limit(raw: u32) -> u32 {
+    raw.min(MAX_PAGE_LIMIT)
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct UsersQuery {
     #[serde(default)]
@@ -44,7 +58,7 @@ pub(crate) async fn list_users(
             UserListFilter {
                 search: query.q,
                 status,
-                limit: query.limit.unwrap_or_default(),
+                limit: clamp_pagination_limit(query.limit.unwrap_or_default()),
                 offset: query.offset.unwrap_or_default(),
             },
         )

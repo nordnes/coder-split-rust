@@ -1,6 +1,7 @@
 //! Organization and membership handlers.
 
 use super::templates::resolve_organization;
+use super::users::clamp_pagination_limit;
 use super::*;
 
 #[derive(Debug, Default, Deserialize)]
@@ -96,7 +97,7 @@ pub(crate) async fn list_organization_members(
             &context.actor,
             &organization,
             query.q,
-            query.limit.unwrap_or_default(),
+            clamp_pagination_limit(query.limit.unwrap_or_default()),
             query.offset.unwrap_or_default(),
         )
         .await
@@ -132,7 +133,7 @@ pub(crate) async fn list_paginated_organization_members(
             &context.actor,
             &organization,
             query.q,
-            query.limit.unwrap_or_default(),
+            clamp_pagination_limit(query.limit.unwrap_or_default()),
             query.offset.unwrap_or_default(),
         )
         .await

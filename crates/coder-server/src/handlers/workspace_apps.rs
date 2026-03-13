@@ -5,7 +5,9 @@
 //! `coder/coderd/workspaceapps/`.
 
 use super::*;
+use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::middleware::Next;
+use futures_util::{SinkExt, StreamExt as FuturesStreamExt};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1112,6 +1114,7 @@ pub(crate) async fn workspace_apps_proxy_path(
         body,
         app_path,
         original_uri.query().unwrap_or(""),
+        false,
     )
     .await
 }
@@ -1271,6 +1274,7 @@ pub(crate) async fn subdomain_app_middleware(
         body,
         &app_path,
         &app_query,
+        false,
     )
     .await
     {
@@ -1356,6 +1360,7 @@ async fn proxy_workspace_app(
     body: axum::body::Body,
     app_path: &str,
     app_query: &str,
+    slug_is_port: bool,
 ) -> Result<Response, WorkspaceAppError> {
     // For now, workspace app proxying requires authentication.
     // Public apps would be handled here with sharing level checks.
@@ -1366,7 +1371,7 @@ async fn proxy_workspace_app(
     // Resolve the target URL for the app.
     // In a full implementation, this would look up the workspace, agent, and
     // app in the database. For now, we build a reasonable proxy target.
-    let app_url = resolve_app_url(state, app_request).await?;
+    let app_url = resolve_app_url(state, app_request, slug_is_port).await?;
 
     // Validate port.
     if let Some(port_str) = app_url.port() {
@@ -1488,6 +1493,7 @@ async fn proxy_workspace_app(
 async fn resolve_app_url(
     state: &AppState,
     request: &AppRequest,
+    slug_is_port: bool,
 ) -> Result<url::Url, WorkspaceAppError> {
     let slug = &request.app_slug_or_port;
 
@@ -1513,6 +1519,11 @@ async fn resolve_app_url(
         &agent.name
     };
 
+    // Check if the slug is a port number. The appurl::PORT_REGEX only matches
+    // 4-5 digit numbers (with optional trailing 's' for HTTPS), but port
+    // forwarding accepts any valid u16 >= AGENT_MINIMUM_LISTENING_PORT. Handle
+    // both the regex-style format (e.g. "8080s" for HTTPS) and plain numeric
+    // ports (e.g. "80", "443").
     if appurl::PORT_REGEX.is_match(slug) {
         let (port_str, protocol) = if slug.ends_with('s') {
             (&slug[..slug.len() - 1], "https")
@@ -1522,6 +1533,15 @@ async fn resolve_app_url(
 
         if let Ok(port) = port_str.parse::<u16>() {
             let url_str = format!("{protocol}://{agent_host}:{port}");
+            return url::Url::parse(&url_str)
+                .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
+        }
+    } else if slug_is_port {
+        // The caller (port forwarding handler) has already validated this is a
+        // port number. Parse it as u16 — this covers 1-3 digit ports like 80,
+        // 443 that don't match PORT_REGEX (which only matches 4-5 digits).
+        if let Ok(port) = slug.parse::<u16>() {
+            let url_str = format!("http://{agent_host}:{port}");
             return url::Url::parse(&url_str)
                 .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")));
         }
@@ -1552,12 +1572,8 @@ async fn resolve_app_url(
 /// Resolves the workspace agent ID from the app request.
 ///
 /// Tries to parse `agent_name_or_id` as a UUID first; otherwise looks up the
-/// workspace by name and finds its agent.
-///
-/// **Limitation**: Name-based agent resolution is not yet implemented.
-/// When `agent_name_or_id` is not a valid UUID, this function validates
-/// that the workspace exists but returns `NotFound` because there is no
-/// store method to look up agents by name within a workspace yet.
+/// workspace by owner username + workspace name, retrieves the agents for the
+/// latest build, and matches the agent by name.
 async fn resolve_workspace_agent_id(
     state: &AppState,
     request: &AppRequest,
@@ -1567,30 +1583,91 @@ async fn resolve_workspace_agent_id(
         return Ok(id);
     }
 
-    // Name-based agent lookup requires the workspace ID first.
-    let workspace_id: Uuid = request.workspace_name_or_id.parse().map_err(|_| {
-        WorkspaceAppError::NotFound(format!(
-            "workspace {:?} not found (name-based lookup not yet supported)",
-            request.workspace_name_or_id
-        ))
-    })?;
+    // Name-based agent lookup: user → workspace → build → resources → agents.
+    // Step 1: Look up the user by username.
+    let user = state
+        .store
+        .find_user_by_username(&request.username_or_id)
+        .await
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up user: {e}")))?
+        .ok_or_else(|| {
+            WorkspaceAppError::NotFound(format!("user {:?} not found", request.username_or_id))
+        })?;
 
-    // Verify the workspace exists before returning the agent-not-found error.
+    // Step 2: Look up the workspace by owner + name.
     let workspace = state
         .store
-        .find_workspace_by_id(workspace_id, None)
+        .find_workspace_by_owner_and_name(user.id, &request.workspace_name_or_id, None)
         .await
-        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up workspace: {e}")))?;
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up workspace: {e}")))?
+        .ok_or_else(|| {
+            WorkspaceAppError::NotFound(format!(
+                "workspace {:?} not found for user {:?}",
+                request.workspace_name_or_id, request.username_or_id
+            ))
+        })?;
 
-    if workspace.is_none() {
-        return Err(WorkspaceAppError::NotFound(format!(
-            "workspace {workspace_id} not found"
-        )));
+    // Step 3: Get the latest build for this workspace.
+    let build = state
+        .store
+        .find_latest_workspace_build(workspace.id)
+        .await
+        .map_err(|e| {
+            WorkspaceAppError::Internal(format!("failed to look up workspace build: {e}"))
+        })?
+        .ok_or_else(|| {
+            WorkspaceAppError::NotFound(format!(
+                "no build found for workspace {:?}",
+                request.workspace_name_or_id
+            ))
+        })?;
+
+    // Step 4: Get resources for this build.
+    let resources = state
+        .store
+        .list_workspace_resources_by_job(build.job_id)
+        .await
+        .map_err(|e| {
+            WorkspaceAppError::Internal(format!("failed to list workspace resources: {e}"))
+        })?;
+
+    let resource_ids: Vec<Uuid> = resources.iter().map(|r| r.id).collect();
+
+    // Step 5: Get agents for these resources.
+    let agents = state
+        .store
+        .list_workspace_agents_by_resource_ids(&resource_ids)
+        .await
+        .map_err(|e| {
+            WorkspaceAppError::Internal(format!("failed to list workspace agents: {e}"))
+        })?;
+
+    // Step 6: If agent_name_or_id is empty and there's exactly one agent,
+    // use it. Otherwise match by name.
+    if request.agent_name_or_id.is_empty() {
+        if agents.len() == 1 {
+            if let Some(agent) = agents.first() {
+                return Ok(agent.id);
+            }
+        }
+        if agents.is_empty() {
+            return Err(WorkspaceAppError::NotFound(
+                "no agents found for workspace".into(),
+            ));
+        }
+        return Err(WorkspaceAppError::NotFound(
+            "workspace has multiple agents; specify an agent name".into(),
+        ));
+    }
+
+    for agent in &agents {
+        if agent.name == request.agent_name_or_id {
+            return Ok(agent.id);
+        }
     }
 
     Err(WorkspaceAppError::NotFound(format!(
-        "name-based agent resolution is not yet implemented; \
-         agent {:?} for workspace {:?} could not be resolved",
+        "agent {:?} not found in workspace {:?}",
         request.agent_name_or_id, request.workspace_name_or_id
     )))
 }
@@ -1601,18 +1678,30 @@ async fn resolve_workspace_agent_id(
 
 /// Builds a [`WorkspaceAppServer`] from the application state.
 ///
-/// Reads the access URL from config and uses it as both the dashboard and
-/// access URL. The wildcard hostname is currently not configured (subdomain
-/// apps disabled by default).
+/// Reads the access URL and wildcard hostname from config. If the wildcard
+/// hostname is configured (e.g. `*.apps.example.com`), subdomain-based app
+/// routing is enabled. Otherwise only path-based apps are available.
 fn build_workspace_app_server(state: &AppState) -> WorkspaceAppServer {
     let access_url = state.config.access_url.clone();
-    WorkspaceAppServer {
-        dashboard_url: access_url.clone(),
-        access_url,
-        hostname: String::new(), // Subdomain apps disabled unless configured
-        hostname_regex: None,
-        disable_path_apps: false,
-        cookies: AppCookies::new(""),
+    let hostname = state.config.wildcard_access_url.clone();
+
+    // Try to build with the configured hostname pattern.
+    // If the pattern is invalid or empty, fall back to subdomain-disabled mode.
+    match WorkspaceAppServer::new(
+        access_url.clone(),
+        access_url.clone(),
+        hostname,
+        state.config.disable_path_apps,
+    ) {
+        Ok(server) => server,
+        Err(_) => WorkspaceAppServer {
+            dashboard_url: access_url.clone(),
+            access_url,
+            hostname: String::new(),
+            hostname_regex: None,
+            disable_path_apps: state.config.disable_path_apps,
+            cookies: AppCookies::new(""),
+        },
     }
 }
 
@@ -1645,6 +1734,451 @@ pub(crate) fn strip_coder_cookies(cookie_header: &str) -> String {
         })
         .collect::<Vec<&str>>()
         .join("; ")
+}
+
+// ---------------------------------------------------------------------------
+// Signed app token exchange
+// ---------------------------------------------------------------------------
+
+/// JWT claims for a signed workspace app token.
+///
+/// Matches the Go `SignedToken` structure from `coderd/workspaceapps/token.go`.
+/// These tokens are short-lived (5 minutes) and scoped to a specific app
+/// request, preventing reuse across different apps or workspaces.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct SignedAppTokenClaims {
+    /// The access method used (path, subdomain, terminal).
+    pub access_method: String,
+    /// Username or ID of the workspace owner.
+    pub username_or_id: String,
+    /// Workspace name or ID.
+    pub workspace_name_or_id: String,
+    /// Agent name or ID.
+    pub agent_name_or_id: String,
+    /// App slug or port number.
+    pub app_slug_or_port: String,
+    /// Authenticated user ID.
+    pub user_id: String,
+    /// Issued-at timestamp (Unix seconds).
+    pub iat: i64,
+    /// Expiry timestamp (Unix seconds).
+    pub exp: i64,
+}
+
+/// Default signed token lifetime: 5 minutes.
+const SIGNED_APP_TOKEN_LIFETIME_SECS: i64 = 300;
+
+/// Creates a signed app token for the given request and user.
+///
+/// The token is a JWT signed with HMAC-SHA256 using the deployment's signing
+/// key. It encodes the app request details and the authenticated user, and
+/// expires after [`SIGNED_APP_TOKEN_LIFETIME_SECS`].
+pub(crate) fn create_signed_app_token(
+    signing_key: &[u8],
+    request: &AppRequest,
+    user_id: Uuid,
+) -> Result<String, WorkspaceAppError> {
+    let now = OffsetDateTime::now_utc().unix_timestamp();
+    let claims = SignedAppTokenClaims {
+        access_method: request.access_method.to_string(),
+        username_or_id: request.username_or_id.clone(),
+        workspace_name_or_id: request.workspace_name_or_id.clone(),
+        agent_name_or_id: request.agent_name_or_id.clone(),
+        app_slug_or_port: request.app_slug_or_port.clone(),
+        user_id: user_id.to_string(),
+        iat: now,
+        exp: now + SIGNED_APP_TOKEN_LIFETIME_SECS,
+    };
+
+    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+    let key = jsonwebtoken::EncodingKey::from_secret(signing_key);
+    jsonwebtoken::encode(&header, &claims, &key)
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to create signed app token: {e}")))
+}
+
+/// Validates a signed app token and checks it matches the given request.
+///
+/// Returns the claims if the token is valid, not expired, and matches the
+/// request parameters (access method, workspace, agent, app).
+pub(crate) fn validate_signed_app_token(
+    signing_key: &[u8],
+    token: &str,
+    request: &AppRequest,
+) -> Result<SignedAppTokenClaims, WorkspaceAppError> {
+    let key = jsonwebtoken::DecodingKey::from_secret(signing_key);
+    let mut validation = jsonwebtoken::Validation::new(jsonwebtoken::Algorithm::HS256);
+    validation.required_spec_claims.clear();
+    validation.set_required_spec_claims(&["exp"]);
+
+    let token_data = jsonwebtoken::decode::<SignedAppTokenClaims>(token, &key, &validation)
+        .map_err(|_e| WorkspaceAppError::Unauthorized)?;
+
+    let claims = token_data.claims;
+
+    // Verify the token matches the current request.
+    if claims.access_method != request.access_method.to_string()
+        || claims.username_or_id != request.username_or_id
+        || claims.workspace_name_or_id != request.workspace_name_or_id
+        || claims.agent_name_or_id != request.agent_name_or_id
+        || claims.app_slug_or_port != request.app_slug_or_port
+    {
+        return Err(WorkspaceAppError::Unauthorized);
+    }
+
+    Ok(claims)
+}
+
+/// Simple percent-decoding for query parameter values.
+///
+/// Uses `application/x-www-form-urlencoded` semantics where `+` is decoded
+/// as a space character. This is intentional for query string values but
+/// would be incorrect for path segments where `+` is literal.
+///
+/// JWT tokens only contain base64url characters (`A-Z`, `a-z`, `0-9`, `-`,
+/// `_`, `.`) which are not percent-encoded, so this handles the common case
+/// of `%2B` (+), `%2F` (/), `%3D` (=) from standard base64.
+fn percent_decode_str(input: &str) -> String {
+    let mut result = String::with_capacity(input.len());
+    let mut chars = input.as_bytes().iter();
+    while let Some(&b) = chars.next() {
+        if b == b'%' {
+            let hi = match chars.next().copied() {
+                Some(v) => v,
+                None => {
+                    result.push('%');
+                    continue;
+                }
+            };
+            let lo = match chars.next().copied() {
+                Some(v) => v,
+                None => {
+                    result.push('%');
+                    result.push(hi as char);
+                    continue;
+                }
+            };
+            let hex = [hi, lo];
+            if let Ok(s) = std::str::from_utf8(&hex) {
+                if let Ok(byte) = u8::from_str_radix(s, 16) {
+                    result.push(byte as char);
+                    continue;
+                }
+            }
+            result.push('%');
+            result.push(hi as char);
+            result.push(lo as char);
+        } else if b == b'+' {
+            result.push(' ');
+        } else {
+            result.push(b as char);
+        }
+    }
+    result
+}
+
+/// Extracts a signed app token from the request (cookie or query parameter).
+fn extract_signed_app_token(headers: &HeaderMap, uri: &http::Uri) -> Option<String> {
+    // Check query parameter first.
+    if let Some(query) = uri.query() {
+        for pair in query.split('&') {
+            if let Some(value) = pair.strip_prefix(&format!("{SIGNED_APP_TOKEN_QUERY}=")) {
+                // Percent-decode the token value. JWT tokens may contain
+                // characters that are percent-encoded in query strings.
+                let decoded = percent_decode_str(value);
+                if !decoded.is_empty() {
+                    return Some(decoded);
+                }
+            }
+        }
+    }
+
+    // Check cookie.
+    if let Some(cookie_header) = headers.get(http::header::COOKIE) {
+        if let Ok(cookies) = cookie_header.to_str() {
+            for cookie in cookies.split(';') {
+                let trimmed = cookie.trim();
+                if let Some(value) = trimmed.strip_prefix(&format!("{SIGNED_APP_TOKEN_COOKIE}=")) {
+                    if !value.is_empty() {
+                        return Some(value.to_owned());
+                    }
+                }
+            }
+        }
+    }
+
+    None
+}
+
+// ---------------------------------------------------------------------------
+// WebSocket upgrade support
+// ---------------------------------------------------------------------------
+
+/// Checks whether the given headers indicate a WebSocket upgrade request.
+fn is_websocket_upgrade(headers: &HeaderMap) -> bool {
+    headers
+        .get(http::header::UPGRADE)
+        .and_then(|v| v.to_str().ok())
+        .is_some_and(|v| v.eq_ignore_ascii_case("websocket"))
+}
+
+/// Proxies a WebSocket connection to the upstream app.
+///
+/// Uses axum's `WebSocketUpgrade` to accept the client connection, then
+/// opens a WebSocket to the upstream URL and bidirectionally pipes messages
+/// between the client and upstream sockets.
+async fn proxy_websocket(
+    _state: &AppState,
+    ws: WebSocketUpgrade,
+    target_url: url::Url,
+    original_headers: &HeaderMap,
+) -> Result<Response, WorkspaceAppError> {
+    // Convert http:// to ws:// and https:// to wss://.
+    let ws_url = match target_url.scheme() {
+        "https" => {
+            let mut u = target_url.clone();
+            let _ = u.set_scheme("wss");
+            u
+        }
+        _ => {
+            let mut u = target_url.clone();
+            let _ = u.set_scheme("ws");
+            u
+        }
+    };
+
+    // Build the upstream connector request with forwarded headers.
+    let mut ws_request = http::Request::builder()
+        .uri(ws_url.as_str())
+        .body(())
+        .map_err(|e| WorkspaceAppError::ProxyError(format!("failed to build WS request: {e}")))?;
+
+    // Forward select headers to upstream.
+    for (key, value) in original_headers {
+        let name = key.as_str();
+        if name == "host"
+            || name == "connection"
+            || name == "upgrade"
+            || name.starts_with("sec-websocket-")
+        {
+            continue;
+        }
+        if name == "cookie" {
+            let cleaned = strip_coder_cookies(value.to_str().unwrap_or(""));
+            if !cleaned.is_empty() {
+                if let Ok(val) = HeaderValue::from_str(&cleaned) {
+                    ws_request.headers_mut().insert(
+                        HeaderName::from_bytes(key.as_str().as_bytes()).map_err(|e| {
+                            WorkspaceAppError::ProxyError(format!("invalid header name: {e}"))
+                        })?,
+                        val,
+                    );
+                }
+                continue;
+            }
+            continue;
+        }
+        if let Ok(val) = HeaderValue::from_bytes(value.as_bytes()) {
+            if let Ok(header_name) = HeaderName::from_bytes(key.as_str().as_bytes()) {
+                ws_request.headers_mut().insert(header_name, val);
+            }
+        }
+    }
+
+    let response = ws.on_upgrade(move |client_socket| async move {
+        // Connect to the upstream WebSocket using the request with forwarded headers.
+        let upstream_result = tokio_tungstenite::connect_async(ws_request).await;
+
+        let (upstream_socket, _response) = match upstream_result {
+            Ok(pair) => pair,
+            Err(e) => {
+                tracing::error!("failed to connect upstream WebSocket: {e}");
+                return;
+            }
+        };
+
+        // Split both sockets and pipe bidirectionally.
+        let (mut client_sink, mut client_stream) = client_socket.split();
+        let (mut upstream_sink, mut upstream_stream) = upstream_socket.split();
+
+        // Client → upstream task.
+        let mut client_to_upstream = tokio::spawn(async move {
+            while let Some(msg) = client_stream.next().await {
+                match msg {
+                    Ok(Message::Text(text)) => {
+                        let s: String = text.to_string();
+                        if upstream_sink
+                            .send(tokio_tungstenite::tungstenite::Message::Text(s.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(Message::Binary(data)) => {
+                        let bytes: Vec<u8> = data.to_vec();
+                        if upstream_sink
+                            .send(tokio_tungstenite::tungstenite::Message::Binary(
+                                bytes.into(),
+                            ))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+            let _ = upstream_sink.close().await;
+        });
+
+        // Upstream → client task.
+        let mut upstream_to_client = tokio::spawn(async move {
+            while let Some(msg) = upstream_stream.next().await {
+                match msg {
+                    Ok(tokio_tungstenite::tungstenite::Message::Text(text)) => {
+                        let s: String = text.to_string();
+                        if client_sink.send(Message::Text(s.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Binary(data)) => {
+                        let bytes: Vec<u8> = data.to_vec();
+                        if client_sink
+                            .send(Message::Binary(bytes.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
+                        }
+                    }
+                    Ok(tokio_tungstenite::tungstenite::Message::Close(_)) | Err(_) => break,
+                    _ => {}
+                }
+            }
+            let _ = client_sink.close().await;
+        });
+
+        // Wait for either direction to finish, then abort the other to prevent
+        // task leaks.
+        tokio::select! {
+            _ = &mut client_to_upstream => {
+                upstream_to_client.abort();
+            },
+            _ = &mut upstream_to_client => {
+                client_to_upstream.abort();
+            },
+        };
+    });
+
+    Ok(response)
+}
+
+// ---------------------------------------------------------------------------
+// Port forwarding
+// ---------------------------------------------------------------------------
+
+/// Path parameters for port forwarding routes.
+///
+/// Route pattern: `/@{user}/{workspace_and_agent}/port/{port}/{*rest}`
+#[derive(Debug, Deserialize)]
+pub(crate) struct PortForwardParams {
+    pub user: String,
+    pub workspace_and_agent: String,
+    pub port: String,
+}
+
+/// Handles port forwarding requests.
+///
+/// Port forwarding provides direct TCP port access to workspace agents via
+/// `/@{user}/{workspace}.{agent}/port/{port}/` URL patterns.
+///
+/// The port must be >= [`AGENT_MINIMUM_LISTENING_PORT`] (9) to prevent
+/// access to internal agent ports.
+pub(crate) async fn workspace_port_forward(
+    State(state): State<AppState>,
+    method: http::Method,
+    headers: HeaderMap,
+    Path(params): Path<PortForwardParams>,
+    OriginalUri(original_uri): OriginalUri,
+    body: axum::body::Body,
+) -> Result<Response, WorkspaceAppError> {
+    let server = build_workspace_app_server(&state);
+
+    // Check if path apps are disabled (port forwarding uses path-based URLs).
+    if server.disable_path_apps {
+        return Err(WorkspaceAppError::PathAppsDisabled);
+    }
+
+    // Reject @me.
+    if params.user == "me" {
+        return Err(WorkspaceAppError::NotFound(
+            "Port forwarding must use the full username, not @me.".to_owned(),
+        ));
+    }
+
+    // Validate port number.
+    let port: u16 = params.port.parse().map_err(|_| {
+        WorkspaceAppError::BadRequest(format!("invalid port number: {:?}", params.port))
+    })?;
+
+    if port < AGENT_MINIMUM_LISTENING_PORT {
+        return Err(WorkspaceAppError::BadRequest(format!(
+            "Port {} is not permitted. Coder reserves ports less than {} for internal use.",
+            port, AGENT_MINIMUM_LISTENING_PORT,
+        )));
+    }
+
+    // Determine the real path after the port base.
+    let full_path = original_uri.path();
+    let base_path = format!(
+        "/@{}/{}/port/{}/",
+        params.user, params.workspace_and_agent, params.port
+    );
+    let app_path = full_path
+        .strip_prefix(base_path.trim_end_matches('/'))
+        .unwrap_or("/");
+    let app_path = if app_path.is_empty() { "/" } else { app_path };
+
+    // Build the app request using the port as the app slug.
+    let app_request = AppRequest {
+        access_method: AccessMethod::Path,
+        base_path: base_path.clone(),
+        prefix: String::new(),
+        username_or_id: params.user.clone(),
+        workspace_and_agent: params.workspace_and_agent.clone(),
+        workspace_name_or_id: String::new(),
+        agent_name_or_id: String::new(),
+        app_slug_or_port: params.port.clone(),
+    }
+    .normalize();
+
+    if let Err(e) = app_request.check() {
+        return Err(WorkspaceAppError::BadRequest(e.to_string()));
+    }
+
+    // Authenticate the user.
+    let session_token = server
+        .cookies
+        .token_from_request(&headers, &app_request.access_method);
+
+    let auth_context = authenticate_app_request(&state, &headers, session_token.as_deref()).await?;
+
+    // Proxy the request to the agent.
+    proxy_workspace_app(
+        &state,
+        &server,
+        &auth_context,
+        &app_request,
+        method,
+        &headers,
+        body,
+        app_path,
+        original_uri.query().unwrap_or(""),
+        true,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1996,5 +2530,350 @@ mod tests {
         assert!(server.is_ok());
         let server = server.expect("test: parsing should succeed");
         assert!(server.hostname_regex.is_some());
+    }
+
+    // -- Signed app token tests --
+
+    fn test_app_request() -> AppRequest {
+        AppRequest {
+            access_method: AccessMethod::Path,
+            base_path: "/@dean/dev.main/apps/code-server/".to_owned(),
+            prefix: String::new(),
+            username_or_id: "dean".to_owned(),
+            workspace_and_agent: String::new(),
+            workspace_name_or_id: "dev".to_owned(),
+            agent_name_or_id: "main".to_owned(),
+            app_slug_or_port: "code-server".to_owned(),
+        }
+    }
+
+    #[test]
+    fn signed_app_token_create_and_validate() {
+        let signing_key = b"test-signing-key-at-least-32-bytes-long!!";
+        let request = test_app_request();
+        let user_id =
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("test: valid UUID");
+
+        let token =
+            create_signed_app_token(signing_key, &request, user_id).expect("test: token creation");
+        assert!(!token.is_empty());
+
+        let claims = validate_signed_app_token(signing_key, &token, &request)
+            .expect("test: token validation");
+        assert_eq!(claims.access_method, "path");
+        assert_eq!(claims.username_or_id, "dean");
+        assert_eq!(claims.workspace_name_or_id, "dev");
+        assert_eq!(claims.agent_name_or_id, "main");
+        assert_eq!(claims.app_slug_or_port, "code-server");
+        assert_eq!(claims.user_id, user_id.to_string());
+    }
+
+    #[test]
+    fn signed_app_token_wrong_key_fails() {
+        let signing_key = b"test-signing-key-at-least-32-bytes-long!!";
+        let wrong_key = b"wrong-signing-key-at-least-32-bytes-long!";
+        let request = test_app_request();
+        let user_id =
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("test: valid UUID");
+
+        let token =
+            create_signed_app_token(signing_key, &request, user_id).expect("test: token creation");
+
+        let result = validate_signed_app_token(wrong_key, &token, &request);
+        assert!(result.is_err(), "validation with wrong key should fail");
+    }
+
+    #[test]
+    fn signed_app_token_mismatched_request_fails() {
+        let signing_key = b"test-signing-key-at-least-32-bytes-long!!";
+        let request = test_app_request();
+        let user_id =
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("test: valid UUID");
+
+        let token =
+            create_signed_app_token(signing_key, &request, user_id).expect("test: token creation");
+
+        // Different app slug.
+        let mut wrong_request = test_app_request();
+        wrong_request.app_slug_or_port = "different-app".to_owned();
+
+        let result = validate_signed_app_token(signing_key, &token, &wrong_request);
+        assert!(
+            result.is_err(),
+            "validation with different app slug should fail"
+        );
+    }
+
+    #[test]
+    fn signed_app_token_mismatched_workspace_fails() {
+        let signing_key = b"test-signing-key-at-least-32-bytes-long!!";
+        let request = test_app_request();
+        let user_id =
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("test: valid UUID");
+
+        let token =
+            create_signed_app_token(signing_key, &request, user_id).expect("test: token creation");
+
+        let mut wrong_request = test_app_request();
+        wrong_request.workspace_name_or_id = "other-workspace".to_owned();
+
+        let result = validate_signed_app_token(signing_key, &token, &wrong_request);
+        assert!(
+            result.is_err(),
+            "validation with different workspace should fail"
+        );
+    }
+
+    #[test]
+    fn signed_app_token_mismatched_access_method_fails() {
+        let signing_key = b"test-signing-key-at-least-32-bytes-long!!";
+        let request = test_app_request();
+        let user_id =
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("test: valid UUID");
+
+        let token =
+            create_signed_app_token(signing_key, &request, user_id).expect("test: token creation");
+
+        let mut wrong_request = test_app_request();
+        wrong_request.access_method = AccessMethod::Subdomain;
+
+        let result = validate_signed_app_token(signing_key, &token, &wrong_request);
+        assert!(
+            result.is_err(),
+            "validation with different access method should fail"
+        );
+    }
+
+    #[test]
+    fn signed_app_token_expired_fails() {
+        let signing_key = b"test-signing-key-at-least-32-bytes-long!!";
+        let request = test_app_request();
+
+        // Manually build an expired token.
+        let now = OffsetDateTime::now_utc().unix_timestamp();
+        let claims = SignedAppTokenClaims {
+            access_method: request.access_method.to_string(),
+            username_or_id: request.username_or_id.clone(),
+            workspace_name_or_id: request.workspace_name_or_id.clone(),
+            agent_name_or_id: request.agent_name_or_id.clone(),
+            app_slug_or_port: request.app_slug_or_port.clone(),
+            user_id: "550e8400-e29b-41d4-a716-446655440000".to_owned(),
+            iat: now - 600,
+            exp: now - 300, // expired 5 minutes ago
+        };
+
+        let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::HS256);
+        let key = jsonwebtoken::EncodingKey::from_secret(signing_key);
+        let token = jsonwebtoken::encode(&header, &claims, &key).expect("test: encode");
+
+        let result = validate_signed_app_token(signing_key, &token, &request);
+        assert!(result.is_err(), "expired token should fail validation");
+    }
+
+    #[test]
+    fn signed_app_token_claims_contain_correct_lifetime() {
+        let signing_key = b"test-signing-key-at-least-32-bytes-long!!";
+        let request = test_app_request();
+        let user_id =
+            Uuid::parse_str("550e8400-e29b-41d4-a716-446655440000").expect("test: valid UUID");
+
+        let token =
+            create_signed_app_token(signing_key, &request, user_id).expect("test: token creation");
+        let claims = validate_signed_app_token(signing_key, &token, &request)
+            .expect("test: token validation");
+
+        let lifetime = claims.exp - claims.iat;
+        assert_eq!(
+            lifetime, SIGNED_APP_TOKEN_LIFETIME_SECS,
+            "token lifetime should be {SIGNED_APP_TOKEN_LIFETIME_SECS} seconds"
+        );
+    }
+
+    // -- WebSocket upgrade detection tests --
+
+    #[test]
+    fn is_websocket_upgrade_true() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::UPGRADE, HeaderValue::from_static("websocket"));
+        assert!(is_websocket_upgrade(&headers));
+    }
+
+    #[test]
+    fn is_websocket_upgrade_case_insensitive() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::UPGRADE, HeaderValue::from_static("WebSocket"));
+        assert!(is_websocket_upgrade(&headers));
+    }
+
+    #[test]
+    fn is_websocket_upgrade_false_missing_header() {
+        let headers = HeaderMap::new();
+        assert!(!is_websocket_upgrade(&headers));
+    }
+
+    #[test]
+    fn is_websocket_upgrade_false_other_value() {
+        let mut headers = HeaderMap::new();
+        headers.insert(http::header::UPGRADE, HeaderValue::from_static("h2c"));
+        assert!(!is_websocket_upgrade(&headers));
+    }
+
+    // -- percent_decode_str tests --
+
+    #[test]
+    fn percent_decode_simple() {
+        assert_eq!(percent_decode_str("hello"), "hello");
+    }
+
+    #[test]
+    fn percent_decode_encoded_chars() {
+        assert_eq!(percent_decode_str("hello%20world"), "hello world");
+        assert_eq!(percent_decode_str("a%2Bb%2Fc%3D"), "a+b/c=");
+    }
+
+    #[test]
+    fn percent_decode_plus_as_space() {
+        assert_eq!(percent_decode_str("hello+world"), "hello world");
+    }
+
+    #[test]
+    fn percent_decode_empty() {
+        assert_eq!(percent_decode_str(""), "");
+    }
+
+    #[test]
+    fn percent_decode_jwt_token_passthrough() {
+        // JWT tokens use base64url characters which should pass through unchanged.
+        let jwt = "eyJhbGciOiJIUzI1NiJ9.eyJ0ZXN0IjoxfQ.signature_here-ok";
+        assert_eq!(percent_decode_str(jwt), jwt);
+    }
+
+    // -- extract_signed_app_token tests --
+
+    #[test]
+    fn extract_signed_app_token_from_query() {
+        let uri: http::Uri = format!("/path?{SIGNED_APP_TOKEN_QUERY}=my-token-value")
+            .parse()
+            .expect("test: valid URI");
+        let headers = HeaderMap::new();
+        let result = extract_signed_app_token(&headers, &uri);
+        assert_eq!(result, Some("my-token-value".to_owned()));
+    }
+
+    #[test]
+    fn extract_signed_app_token_from_cookie() {
+        let uri: http::Uri = "/path".parse().expect("test: valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            HeaderValue::from_str(&format!("{SIGNED_APP_TOKEN_COOKIE}=cookie-token-value"))
+                .expect("test: valid header"),
+        );
+        let result = extract_signed_app_token(&headers, &uri);
+        assert_eq!(result, Some("cookie-token-value".to_owned()));
+    }
+
+    #[test]
+    fn extract_signed_app_token_query_takes_precedence() {
+        let uri: http::Uri = format!("/path?{SIGNED_APP_TOKEN_QUERY}=query-token")
+            .parse()
+            .expect("test: valid URI");
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            http::header::COOKIE,
+            HeaderValue::from_str(&format!("{SIGNED_APP_TOKEN_COOKIE}=cookie-token"))
+                .expect("test: valid header"),
+        );
+        let result = extract_signed_app_token(&headers, &uri);
+        assert_eq!(
+            result,
+            Some("query-token".to_owned()),
+            "query param should take precedence over cookie"
+        );
+    }
+
+    #[test]
+    fn extract_signed_app_token_none_when_absent() {
+        let uri: http::Uri = "/path".parse().expect("test: valid URI");
+        let headers = HeaderMap::new();
+        let result = extract_signed_app_token(&headers, &uri);
+        assert!(result.is_none());
+    }
+
+    // -- Port forwarding validation tests --
+
+    #[test]
+    fn port_forwarding_minimum_port() {
+        // Port 9 is the minimum allowed.
+        let min_port = AGENT_MINIMUM_LISTENING_PORT;
+        assert!(min_port <= 9);
+    }
+
+    #[test]
+    fn port_forwarding_port_validation_accepts_valid() {
+        let port: u16 = 8080;
+        assert!(port >= AGENT_MINIMUM_LISTENING_PORT);
+    }
+
+    #[test]
+    fn port_forwarding_port_validation_rejects_low() {
+        let port: u16 = 1;
+        assert!(port < AGENT_MINIMUM_LISTENING_PORT);
+    }
+
+    #[test]
+    fn port_forwarding_request_normalize() {
+        let req = AppRequest {
+            access_method: AccessMethod::Path,
+            base_path: "/@dean/dev.main/port/8080/".to_owned(),
+            prefix: String::new(),
+            username_or_id: "dean".to_owned(),
+            workspace_and_agent: "dev.main".to_owned(),
+            workspace_name_or_id: String::new(),
+            agent_name_or_id: String::new(),
+            app_slug_or_port: "8080".to_owned(),
+        }
+        .normalize();
+
+        assert_eq!(req.workspace_name_or_id, "dev");
+        assert_eq!(req.agent_name_or_id, "main");
+        assert_eq!(req.app_slug_or_port, "8080");
+    }
+
+    // -- WorkspaceAppError response tests --
+
+    #[test]
+    fn workspace_app_error_unauthorized_status() {
+        let err = WorkspaceAppError::Unauthorized;
+        let response = err.into_response();
+        assert_eq!(response.status(), http::StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn workspace_app_error_not_found_status() {
+        let err = WorkspaceAppError::NotFound("test".to_owned());
+        let response = err.into_response();
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn workspace_app_error_bad_request_status() {
+        let err = WorkspaceAppError::BadRequest("test".to_owned());
+        let response = err.into_response();
+        assert_eq!(response.status(), http::StatusCode::BAD_REQUEST);
+    }
+
+    #[test]
+    fn workspace_app_error_internal_status() {
+        let err = WorkspaceAppError::Internal("test".to_owned());
+        let response = err.into_response();
+        assert_eq!(response.status(), http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    #[test]
+    fn workspace_app_error_proxy_error_status() {
+        let err = WorkspaceAppError::ProxyError("test".to_owned());
+        let response = err.into_response();
+        assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
     }
 }
