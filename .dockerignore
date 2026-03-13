@@ -9,5 +9,6 @@ docs/
 scripts/
 coder/
 *.md
+rust-toolchain.toml
 docker-compose.yml
 Dockerfile

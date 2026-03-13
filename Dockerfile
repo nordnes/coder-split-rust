@@ -22,6 +22,7 @@ FROM debian:bookworm-slim AS runtime
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates \
+        curl \
         libssl3 \
     && rm -rf /var/lib/apt/lists/*
 
@@ -36,7 +37,7 @@ USER coderd
 EXPOSE 3000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
-    CMD ["coderd", "--help"]
+    CMD curl -f http://localhost:3000/healthz || exit 1
 
 ENTRYPOINT ["coderd"]
 CMD ["server", "--listen-addr", "0.0.0.0:3000"]
