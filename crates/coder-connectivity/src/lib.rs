@@ -379,7 +379,7 @@ where
                         Err(coder_core::CircuitBreakerCallError::BreakerOpen(open)) => {
                             Err(HealthProbeError {
                                 message: format!("circuit breaker open: {open}"),
-                                status_code: 0,
+                                status_code: 503,
                                 is_client_error: false,
                             })
                         }
@@ -465,12 +465,12 @@ where
 
         // Check if the workspace-proxy circuit breaker is open — if so, skip
         // all HTTP probes and report a degraded status immediately.
-        let proxy_breaker_open =
-            if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
-                breaker.state().await == CircuitBreakerState::Open
-            } else {
-                false
-            };
+        let proxy_breaker = self.circuit_breakers.get("workspace_proxies");
+        let mut proxy_breaker_open = if let Some(breaker) = proxy_breaker {
+            breaker.state().await == CircuitBreakerState::Open
+        } else {
+            false
+        };
 
         if proxy_breaker_open {
             warnings.push("workspace proxy circuit breaker is open; skipping probes".to_owned());
@@ -505,14 +505,14 @@ where
                 Some(url) => match health_probe_get(&self.http_client, url).await {
                     Ok(result) if (200..300).contains(&result.status_code) => {
                         // Record success through breaker.
-                        if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
+                        if let Some(breaker) = proxy_breaker {
                             breaker.report_success().await;
                         }
                         items.push(format!("{}: ok", proxy.name));
                     }
                     Ok(result) => {
                         // Record failure through breaker.
-                        if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
+                        if let Some(breaker) = proxy_breaker {
                             breaker.report_failure().await;
                         }
                         let item_error =
@@ -523,7 +523,7 @@ where
                     }
                     Err(probe_error) => {
                         // Record failure through breaker.
-                        if let Some(breaker) = self.circuit_breakers.get("workspace_proxies") {
+                        if let Some(breaker) = proxy_breaker {
                             breaker.report_failure().await;
                         }
                         let item_error =
@@ -531,6 +531,13 @@ where
                         items.push(item_error.clone());
                         error = Some(item_error);
                         severity = HealthSeverity::Error;
+                        // Re-check breaker state; if it just tripped Open,
+                        // skip remaining proxy probes.
+                        if let Some(breaker) = proxy_breaker {
+                            if breaker.state().await == CircuitBreakerState::Open {
+                                proxy_breaker_open = true;
+                            }
+                        }
                     }
                 },
                 None => {

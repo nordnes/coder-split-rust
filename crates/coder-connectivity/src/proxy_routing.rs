@@ -4,6 +4,7 @@
 //! proxies for request routing.  Unhealthy proxies (those that fail health
 //! probes or whose circuit breaker is open) are skipped automatically.
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -60,32 +61,36 @@ impl ProxyRouter {
     /// preserved for proxies that still exist (matched by id); new proxies
     /// get fresh breakers.
     pub async fn refresh(&self, proxies: Vec<WorkspaceProxyHealthRecord>) {
-        let mut entries = self.entries.lock().await;
-        let old_entries: Vec<ProxyEntry> = entries.drain(..).collect();
+        let new_entries = {
+            let mut entries = self.entries.lock().await;
+            // Index old breakers by proxy id for O(n) lookup.
+            let old_breakers: HashMap<uuid::Uuid, CircuitBreaker> = entries
+                .drain(..)
+                .map(|e| (e.record.id, e.circuit_breaker))
+                .collect();
 
-        for proxy in proxies {
-            if proxy.deleted {
-                continue;
-            }
-            // Try to find an existing entry with the same id to preserve
-            // its circuit breaker state.
-            let breaker = old_entries
-                .iter()
-                .find(|e| e.record.id == proxy.id)
-                .map(|e| e.circuit_breaker.clone())
-                .unwrap_or_else(|| {
+            let mut new = Vec::with_capacity(proxies.len());
+            for proxy in proxies {
+                if proxy.deleted {
+                    continue;
+                }
+                let breaker = old_breakers.get(&proxy.id).cloned().unwrap_or_else(|| {
                     CircuitBreaker::new(
                         format!("proxy_{}", proxy.name),
                         self.breaker_config.clone(),
                     )
                 });
 
-            entries.push(ProxyEntry {
-                record: proxy,
-                circuit_breaker: breaker,
-            });
-        }
-
+                new.push(ProxyEntry {
+                    record: proxy,
+                    circuit_breaker: breaker,
+                });
+            }
+            *entries = new.clone();
+            new
+        };
+        // entries lock is dropped here before acquiring last_refresh.
+        let _ = new_entries; // ensure we moved out of the lock scope
         *self.last_refresh.lock().await = Some(Instant::now());
     }
 
@@ -106,9 +111,12 @@ impl ProxyRouter {
     /// Returns only healthy proxies — those whose circuit breaker is not
     /// in the **Open** state.
     pub async fn select_healthy_proxies(&self) -> Vec<ProxyEntry> {
-        let entries = self.entries.lock().await;
-        let mut healthy = Vec::with_capacity(entries.len());
-        for entry in entries.iter() {
+        // Clone entries under the lock, then drop the guard before
+        // awaiting breaker state checks to avoid holding entries across
+        // .await points.
+        let snapshot: Vec<ProxyEntry> = self.entries.lock().await.clone();
+        let mut healthy = Vec::with_capacity(snapshot.len());
+        for entry in &snapshot {
             let state = entry.circuit_breaker.state().await;
             if state != CircuitBreakerState::Open {
                 healthy.push(entry.clone());
@@ -119,17 +127,31 @@ impl ProxyRouter {
 
     /// Records a successful request to the given proxy (by id).
     pub async fn record_success(&self, proxy_id: uuid::Uuid) {
-        let entries = self.entries.lock().await;
-        if let Some(entry) = entries.iter().find(|e| e.record.id == proxy_id) {
-            entry.circuit_breaker.report_success().await;
+        // Clone the breaker under the lock, then drop the guard before
+        // awaiting the breaker update.
+        let breaker = {
+            let entries = self.entries.lock().await;
+            entries
+                .iter()
+                .find(|e| e.record.id == proxy_id)
+                .map(|e| e.circuit_breaker.clone())
+        };
+        if let Some(b) = breaker {
+            b.report_success().await;
         }
     }
 
     /// Records a failed request to the given proxy (by id).
     pub async fn record_failure(&self, proxy_id: uuid::Uuid) {
-        let entries = self.entries.lock().await;
-        if let Some(entry) = entries.iter().find(|e| e.record.id == proxy_id) {
-            entry.circuit_breaker.report_failure().await;
+        let breaker = {
+            let entries = self.entries.lock().await;
+            entries
+                .iter()
+                .find(|e| e.record.id == proxy_id)
+                .map(|e| e.circuit_breaker.clone())
+        };
+        if let Some(b) = breaker {
+            b.report_failure().await;
         }
     }
 }
