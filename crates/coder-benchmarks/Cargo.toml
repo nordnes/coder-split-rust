@@ -24,7 +24,7 @@ coder-connectivity = { path = "../coder-connectivity" }
 coder-rbac = { path = "../coder-rbac" }
 coder-server = { path = "../coder-server" }
 coder-telemetry = { path = "../coder-telemetry" }
-criterion = { version = "0.5", features = ["html_reports"] }
+criterion.workspace = true
 http.workspace = true
 tokio.workspace = true
 tower.workspace = true
