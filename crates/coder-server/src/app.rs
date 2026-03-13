@@ -1341,6 +1341,7 @@ impl AgentConnection for WebSocketAgentConnection {
 // Middleware
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 pub(crate) mod tests {
     use std::{
@@ -36140,6 +36141,7 @@ pub(crate) mod tests {
     }
 }
 
+#[allow(clippy::unwrap_used, clippy::expect_used)]
 #[cfg(test)]
 mod store_method_tests {
     use std::error::Error;

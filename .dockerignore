@@ -1,0 +1,14 @@
+target/
+.git/
+.gitignore
+.github/
+.env
+.DS_Store
+.sqlx/
+docs/
+scripts/
+coder/
+*.md
+rust-toolchain.toml
+docker-compose.yml
+Dockerfile
