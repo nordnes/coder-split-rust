@@ -37,6 +37,7 @@
 
 pub mod api;
 pub mod build_info;
+pub mod circuit_breaker;
 pub mod config;
 pub mod enums;
 pub mod identity;
@@ -111,6 +112,10 @@ pub use api::{
     UpdateNotificationTemplateMethod, UpdateUserNotificationPreferences, WebpushSubscription,
 };
 pub use build_info::BuildMetadata;
+pub use circuit_breaker::{
+    CircuitBreaker, CircuitBreakerCallError, CircuitBreakerConfig, CircuitBreakerOpen,
+    CircuitBreakerRegistry, CircuitBreakerState, CircuitBreakerStatus,
+};
 pub use config::{
     CorsConfig, DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, OtelConfig,
     PublicDatabaseConfig, PublicDeploymentConfig, PublicProvisionerConfig, PublicTelemetryConfig,
