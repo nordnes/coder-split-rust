@@ -17,6 +17,7 @@ members = [
     "crates/coder-server",
     "crates/coder-telemetry",
     "crates/coder-workspaces",
+    "crates/coder-benchmarks",
 ]
 resolver = "3"
 
@@ -70,6 +71,7 @@ url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.8", features = ["serde", "v4"] }
 p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"] }
 web-push = "0.11"
+criterion = { version = "0.5", features = ["html_reports"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
