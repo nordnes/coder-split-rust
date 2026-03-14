@@ -653,7 +653,7 @@ pub(crate) async fn watch_chats(
         };
         match serde_json::to_string(&ping) {
             Ok(json) => {
-                yield Ok::<_, Infallible>(Event::default().data(json));
+                yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_DURATION));
             }
             Err(e) => {
                 tracing::debug!(error = %e, "failed to serialize watch_chats ping event");
@@ -813,6 +813,7 @@ pub(crate) async fn stream_chat(
         // Send snapshot in batches (up to 256 events per SSE message).
         // The batch size of 256 matches the Go reference `chatStreamBatchSize`.
         const BATCH_SIZE: usize = 256;
+        let mut first_event = true;
         for chunk in snapshot.chunks(BATCH_SIZE) {
             let sse = coder_core::api::ServerSentEvent {
                 event_type: coder_core::api::ServerSentEventType::Data,
@@ -820,7 +821,15 @@ pub(crate) async fn stream_chat(
             };
             match serde_json::to_string(&sse) {
                 Ok(json) => {
-                    yield Ok::<_, Infallible>(Event::default().data(json));
+                    let event = Event::default().data(json);
+                    // Include `retry:` hint in the first event so clients
+                    // know how long to wait before reconnecting.
+                    if first_event {
+                        first_event = false;
+                        yield Ok::<_, Infallible>(event.retry(SSE_RETRY_DURATION));
+                    } else {
+                        yield Ok::<_, Infallible>(event);
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "failed to serialize stream_chat snapshot batch");
