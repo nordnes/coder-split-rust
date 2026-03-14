@@ -1909,7 +1909,7 @@ pub struct EnqueueNotificationMessageInput {
     /// Target entity identifiers.
     pub targets: Vec<Uuid>,
     /// Identifier of the actor who created the message.
-    pub created_by: String,
+    pub created_by: Uuid,
 }
 
 /// Narrow storage contract for operational and deployment-owned state.

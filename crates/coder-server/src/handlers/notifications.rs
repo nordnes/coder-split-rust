@@ -729,6 +729,19 @@ pub(crate) async fn post_custom_notification(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Block system users from sending custom notifications.
+    // Checked early (before input validation) to match Go handler ordering.
+    if context.user.is_system {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::error(
+                "Forbidden",
+                "System users cannot send custom notifications.",
+            )),
+        )
+            .into_response());
+    }
+
     // RBAC: verify the actor can create notification messages.
     // In Go, postCustomNotification checks policy.ActionCreate on
     // rbac.ResourceNotificationMessage at site level. Only the owner role
@@ -810,18 +823,6 @@ pub(crate) async fn post_custom_notification(
             .into_response());
     }
 
-    // Block system users from sending custom notifications.
-    if context.user.is_system {
-        return Ok((
-            StatusCode::FORBIDDEN,
-            Json(ApiResponse::error(
-                "Forbidden",
-                "System users cannot send custom notifications.",
-            )),
-        )
-            .into_response());
-    }
-
     // Custom notification template UUID (matches Go's TemplateCustomNotification).
     let template_id = Uuid::parse_str("39b1e189-c857-4b0c-877a-511144c18516").unwrap_or_default();
 
@@ -851,7 +852,7 @@ pub(crate) async fn post_custom_notification(
         method: NotificationMethod::Inbox,
         payload: payload.to_string(),
         targets: vec![user_id],
-        created_by: user_id.to_string(),
+        created_by: user_id,
     };
     state
         .store
