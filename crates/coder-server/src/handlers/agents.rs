@@ -836,10 +836,10 @@ pub(crate) async fn get_workspace_agent_listening_ports(
         return Ok(resource_not_found_response());
     };
 
-    // Listening ports are reported by the agent in real-time; return empty for now.
+    let ports = state.agent_provider.get_listening_ports(agent_id).await;
     Ok((
         StatusCode::OK,
-        Json(WorkspaceAgentListeningPortsResponse { ports: Vec::new() }),
+        Json(WorkspaceAgentListeningPortsResponse { ports }),
     )
         .into_response())
 }
@@ -1834,7 +1834,7 @@ pub(crate) async fn handle_agent_rpc_socket(
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_agent_message(&store, agent_id, &text).await;
+                        handle_agent_message(&store, &provider, agent_id, &text).await;
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
@@ -1889,12 +1889,30 @@ pub(crate) async fn handle_agent_rpc_socket(
 }
 
 /// Processes a single inbound text message from the agent.
-pub(crate) async fn handle_agent_message(_store: &Arc<dyn AppStore>, agent_id: Uuid, text: &str) {
+pub(crate) async fn handle_agent_message(
+    _store: &Arc<dyn AppStore>,
+    provider: &Arc<dyn AgentProvider>,
+    agent_id: Uuid,
+    text: &str,
+) {
     let Ok(msg) = serde_json::from_str::<Value>(text) else {
         return;
     };
     let msg_type = msg.get("type").and_then(Value::as_str).unwrap_or_default();
     match msg_type {
+        "report_listening_ports" => {
+            if let Some(ports_val) = msg.get("ports") {
+                if let Ok(ports) = serde_json::from_value::<
+                    Vec<coder_core::WorkspaceAgentListeningPort>,
+                >(ports_val.clone())
+                {
+                    provider.set_listening_ports(agent_id, ports).await;
+                    debug!(agent_id = %agent_id, "updated listening ports");
+                } else {
+                    debug!(agent_id = %agent_id, "failed to parse listening ports payload");
+                }
+            }
+        }
         "report_stats" | "report_lifecycle" | "update_metadata" | "push_logs" => {
             // These message types will be fully handled once the dRPC service
             // layer is ported.  For now we log the receipt.
@@ -2979,5 +2997,208 @@ mod tests {
         fn connected_at(&self) -> OffsetDateTime {
             self.connected_at
         }
+    }
+
+    // =========================================================================
+    // handle_agent_message + listening-ports endpoint tests
+    // =========================================================================
+
+    #[tokio::test]
+    async fn handle_agent_message_stores_listening_ports() -> TestResult {
+        let provider: Arc<dyn AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        let msg = serde_json::json!({
+            "type": "report_listening_ports",
+            "ports": [
+                {"port": 8080, "network": "tcp", "process_name": "node"},
+                {"port": 3000, "network": "tcp"}
+            ]
+        });
+
+        handle_agent_message(
+            &(state.store.clone()),
+            &provider,
+            agent_id,
+            &msg.to_string(),
+        )
+        .await;
+
+        let ports = provider.get_listening_ports(agent_id).await;
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].port, 8080);
+        assert_eq!(ports[0].network, "tcp");
+        assert_eq!(ports[0].process_name, "node");
+        assert_eq!(ports[1].port, 3000);
+        assert_eq!(ports[1].network, "tcp");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handle_agent_message_replaces_ports_on_new_report() -> TestResult {
+        let provider: Arc<dyn AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        let msg1 = serde_json::json!({
+            "type": "report_listening_ports",
+            "ports": [{"port": 8080, "network": "tcp"}]
+        });
+        handle_agent_message(&state.store, &provider, agent_id, &msg1.to_string()).await;
+        assert_eq!(provider.get_listening_ports(agent_id).await.len(), 1);
+
+        let msg2 = serde_json::json!({
+            "type": "report_listening_ports",
+            "ports": [
+                {"port": 9090, "network": "udp", "process_name": "python"},
+                {"port": 4000, "network": "tcp", "process_name": "go"}
+            ]
+        });
+        handle_agent_message(&state.store, &provider, agent_id, &msg2.to_string()).await;
+
+        let ports = provider.get_listening_ports(agent_id).await;
+        assert_eq!(ports.len(), 2);
+        assert_eq!(ports[0].port, 9090);
+        assert_eq!(ports[1].port, 4000);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handle_agent_message_ignores_invalid_ports_payload() -> TestResult {
+        let provider: Arc<dyn AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        // ports field is not an array — should be silently ignored.
+        let msg = serde_json::json!({
+            "type": "report_listening_ports",
+            "ports": "not-an-array"
+        });
+        handle_agent_message(&state.store, &provider, agent_id, &msg.to_string()).await;
+        assert!(provider.get_listening_ports(agent_id).await.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn handle_agent_message_ignores_missing_ports_field() -> TestResult {
+        let provider: Arc<dyn AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        let msg = serde_json::json!({"type": "report_listening_ports"});
+        handle_agent_message(&state.store, &provider, agent_id, &msg.to_string()).await;
+        assert!(provider.get_listening_ports(agent_id).await.is_empty());
+        Ok(())
+    }
+
+    use axum::body::Body;
+    use http::Request;
+    use tower::ServiceExt;
+
+    async fn oneshot_call(
+        app: Router,
+        req: Request<Body>,
+    ) -> Result<axum::response::Response, Box<dyn Error>> {
+        Ok(app.oneshot(req).await.map_err(|e| -> Box<dyn Error> {
+            format!("oneshot failed: {e:?}").into()
+        })?)
+    }
+
+    async fn json_body(response: axum::response::Response) -> Result<Value, Box<dyn Error>> {
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        Ok(serde_json::from_slice(&bytes)?)
+    }
+
+    #[tokio::test]
+    async fn listening_ports_endpoint_returns_stored_ports() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        // Pre-populate listening ports via the provider.
+        state
+            .agent_provider
+            .set_listening_ports(
+                agent_id,
+                vec![coder_core::WorkspaceAgentListeningPort {
+                    port: 8080,
+                    network: "tcp".to_owned(),
+                    process_name: "node".to_owned(),
+                }],
+            )
+            .await;
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri(&format!(
+                "/api/v2/workspaceagents/{agent_id}/listening-ports"
+            ))
+            .header("Coder-Session-Token", &session_token)
+            .body(Body::empty())?;
+
+        let response = oneshot_call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = json_body(response).await?;
+        let ports = body["ports"]
+            .as_array()
+            .ok_or("ports should be an array")?;
+        assert_eq!(ports.len(), 1);
+        assert_eq!(ports[0]["port"], 8080);
+        assert_eq!(ports[0]["network"], "tcp");
+        assert_eq!(ports[0]["process_name"], "node");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listening_ports_endpoint_returns_empty_when_no_report() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri(&format!(
+                "/api/v2/workspaceagents/{agent_id}/listening-ports"
+            ))
+            .header("Coder-Session-Token", &session_token)
+            .body(Body::empty())?;
+
+        let response = oneshot_call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let body = json_body(response).await?;
+        let ports = body["ports"]
+            .as_array()
+            .ok_or("ports should be an array")?;
+        assert!(ports.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn listening_ports_endpoint_requires_auth() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+        let app = build_router(state, None);
+
+        let req = Request::builder()
+            .method(http::Method::GET)
+            .uri(&format!(
+                "/api/v2/workspaceagents/{agent_id}/listening-ports"
+            ))
+            .body(Body::empty())?;
+
+        let response = oneshot_call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
     }
 }
