@@ -345,14 +345,24 @@ async fn validate_api_key(
         })?
         .ok_or_else(|| unauthorized_json("API key is invalid."))?;
 
-    // NOTE: `AuthenticatedUser::from(UserRecord)` produces empty `org_roles`.
-    // This means API-key-authenticated requests currently lack organisation
-    // role information for RBAC.  The session-auth path populates org_roles
-    // via `list_user_memberships` in the identity service.  Populating them
-    // here would require an additional DB query per API-key request; this is
-    // left as a known limitation during porting and will be addressed when
-    // the handler migration to extension-based auth is complete.
-    let auth_user = AuthenticatedUser::from(user);
+    // Populate org_roles from organization memberships, matching the
+    // session-auth path behaviour.
+    let mut auth_user = AuthenticatedUser::from(user);
+    let memberships = state
+        .store
+        .list_user_memberships(auth_user.id)
+        .await
+        .map_err(|e| {
+            warn!(error = %e, "store error listing user memberships for API key");
+            internal_error_json("A database error occurred.", &e.to_string())
+        })?;
+    for member in &memberships {
+        for role in &member.roles {
+            auth_user
+                .org_roles
+                .push(format!("{}:{}", role.name, member.organization_id));
+        }
+    }
     let actor = coder_auth::actor_from_user(&auth_user);
 
     Ok(AuthenticatedContext {
@@ -952,6 +962,119 @@ mod integration_tests {
         // middleware itself accepted the API key.  Full end-to-end protected
         // route support requires handlers to read from extensions (tracked
         // as future migration work).
+        Ok(())
+    }
+
+    /// Verify that the API key auth path populates `org_roles` on the
+    /// `AuthenticatedContext`, matching the session-auth behaviour.
+    ///
+    /// The test seeds an API key and an organization membership with a role,
+    /// then calls `validate_api_key` directly and asserts that the returned
+    /// `AuthenticatedContext.user.org_roles` contains the expected entries.
+    #[tokio::test]
+    async fn api_key_auth_populates_org_roles() -> Result<(), Box<dyn Error>> {
+        use coder_core::LoginType;
+        use sha2::{Digest, Sha256};
+        use time::OffsetDateTime;
+
+        let state = crate::app::tests::test_state(true)?;
+
+        // Create first user + login so there is a user with org membership.
+        let app = build_router(state.clone(), None);
+        let _session_token = create_and_login(&app).await?;
+
+        // Resolve the "owner" user.
+        let user = state
+            .store
+            .find_user_by_username("owner")
+            .await
+            .map_err(|e| format!("store error: {e}"))?
+            .ok_or("owner user not found")?;
+
+        // Add an org-scoped role to the member so org_roles is non-empty.
+        let org_id = user
+            .organization_ids
+            .first()
+            .copied()
+            .ok_or("user has no organization_ids")?;
+        state
+            .store
+            .update_organization_member_roles(
+                org_id,
+                user.id,
+                vec!["organization-admin".to_owned()],
+            )
+            .await
+            .map_err(|e| format!("update_organization_member_roles error: {e}"))?;
+
+        // Seed an API key.
+        let key_id = "orgroltest"; // 10 chars
+        let key_secret = "abcdefghijklmnopqrstuv"; // 22 chars
+
+        let mut hasher = Sha256::new();
+        hasher.update(key_secret.as_bytes());
+        let hashed_secret: Vec<u8> = hasher.finalize().to_vec();
+
+        let now = OffsetDateTime::now_utc();
+        let expires_at = now + time::Duration::hours(24);
+
+        state
+            .store
+            .create_api_key(coder_core::CreateApiKeyInput {
+                id: key_id.to_owned(),
+                hashed_secret,
+                user_id: user.id,
+                last_used: now,
+                expires_at,
+                created_at: now,
+                updated_at: now,
+                login_type: LoginType::Password,
+                scopes: vec!["all".to_owned()],
+                token_name: String::new(),
+                lifetime_seconds: 86400,
+                allow_list: Vec::new(),
+            })
+            .await
+            .map_err(|e| format!("create_api_key error: {e}"))?;
+
+        // Call validate_api_key directly and inspect the result.
+        let ctx = super::validate_api_key(&state, key_id, key_secret)
+            .await
+            .map_err(|_| "validate_api_key returned an error response")?;
+
+        // org_roles should contain the "organization-admin" role we assigned.
+        assert!(
+            !ctx.user.org_roles.is_empty(),
+            "expected org_roles to be populated for API key auth, got: {:?}",
+            ctx.user.org_roles
+        );
+
+        // Verify the format is "role_name:org_id".
+        for entry in &ctx.user.org_roles {
+            assert!(
+                entry.contains(':'),
+                "org_role entry should be in 'role_name:org_id' format, got: {entry}"
+            );
+        }
+
+        // Verify org_roles match what session auth would produce via
+        // list_user_memberships.
+        let memberships = state
+            .store
+            .list_user_memberships(user.id)
+            .await
+            .map_err(|e| format!("list_user_memberships error: {e}"))?;
+        let mut expected_roles: Vec<String> = Vec::new();
+        for member in &memberships {
+            for role in &member.roles {
+                expected_roles.push(format!("{}:{}", role.name, member.organization_id));
+            }
+        }
+        assert_eq!(
+            ctx.user.org_roles, expected_roles,
+            "API key org_roles should match session auth org_roles"
+        );
+
         Ok(())
     }
 }

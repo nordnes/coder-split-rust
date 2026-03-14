@@ -238,6 +238,12 @@ pub fn workspace_agent_pty_output_channel(agent_id: Uuid) -> String {
     format!("workspace_agent_pty_output:{agent_id}")
 }
 
+/// Returns the pub/sub channel name for inbox notification events for the given user.
+#[must_use]
+pub fn inbox_notification_channel(user_id: Uuid) -> String {
+    format!("inbox_notification:owner:{user_id}")
+}
+
 /// The kind of workspace event broadcast over the pub/sub channel.
 ///
 /// String representations match the Go `wspubsub.WorkspaceEventKind` constants.

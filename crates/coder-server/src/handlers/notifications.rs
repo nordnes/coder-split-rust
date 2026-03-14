@@ -484,6 +484,10 @@ pub(crate) async fn put_mark_all_inbox_notifications_read(
         .mark_all_inbox_notifications_as_read(context.user.id, OffsetDateTime::now_utc())
         .await?;
 
+    // Notify SSE subscribers that the inbox changed.
+    let channel = coder_core::pubsub::inbox_notification_channel(context.user.id);
+    let _ = state.pubsub.publish(&channel, b"read_all").await;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -491,29 +495,113 @@ pub(crate) async fn watch_inbox_notifications(
     State(state): State<AppState>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
+    use axum::response::sse::{Event, KeepAlive, Sse};
+    use std::convert::Infallible;
+
     let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Return initial state. Real-time push requires pub/sub infrastructure not yet available.
-    let notifications = state
-        .store
-        .get_filtered_inbox_notifications(context.user.id, None, None, "all", None)
-        .await?;
+    // RBAC: verify the actor can read their own notifications.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::InboxNotification).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read inbox notifications.",
+        ));
+    }
 
-    let unread_count = state
-        .store
-        .count_unread_inbox_notifications(context.user.id)
-        .await?;
+    let channel = coder_core::pubsub::inbox_notification_channel(context.user.id);
+    let subscription = state
+        .pubsub
+        .subscribe(&channel)
+        .await
+        .map_err(|e| StorageError::unavailable(e.to_string()))?;
 
-    Ok((
-        StatusCode::OK,
-        Json(coder_core::ListInboxNotificationsResponse {
-            notifications,
-            unread_count,
-        }),
-    )
+    let user_id = context.user.id;
+    let store = state.store.clone();
+
+    let stream = async_stream::stream! {
+        // Send the initial inbox snapshot as the first SSE event.
+        let initial = fetch_inbox_snapshot(&*store, user_id).await;
+        match initial {
+            Ok(response) => {
+                let sse = coder_core::api::ServerSentEvent {
+                    event_type: coder_core::api::ServerSentEventType::Data,
+                    data: Some(response),
+                };
+                match serde_json::to_string(&sse) {
+                    Ok(json) => {
+                        yield Ok::<_, Infallible>(Event::default().data(json));
+                    }
+                    Err(e) => {
+                        tracing::debug!(error = %e, "failed to serialize initial inbox SSE event");
+                    }
+                }
+            }
+            Err(e) => {
+                tracing::debug!(error = %e, "failed to fetch initial inbox snapshot");
+                let err_sse = coder_core::api::ServerSentEvent::<coder_core::ListInboxNotificationsResponse> {
+                    event_type: coder_core::api::ServerSentEventType::Error,
+                    data: None,
+                };
+                if let Ok(json) = serde_json::to_string(&err_sse) {
+                    yield Ok::<_, Infallible>(Event::default().data(json));
+                }
+            }
+        }
+
+        // Stream inbox updates from pub/sub.
+        let mut sub = subscription;
+        while let Ok(_message) = sub.recv().await {
+            // On each pub/sub event, re-query the current inbox state.
+            match fetch_inbox_snapshot(&*store, user_id).await {
+                Ok(response) => {
+                    let sse = coder_core::api::ServerSentEvent {
+                        event_type: coder_core::api::ServerSentEventType::Data,
+                        data: Some(response),
+                    };
+                    match serde_json::to_string(&sse) {
+                        Ok(json) => {
+                            yield Ok::<_, Infallible>(Event::default().data(json));
+                        }
+                        Err(e) => {
+                            tracing::debug!(error = %e, "failed to serialize inbox SSE event");
+                        }
+                    }
+                }
+                Err(e) => {
+                    tracing::debug!(error = %e, "failed to fetch inbox snapshot on pub/sub event");
+                    continue;
+                }
+            }
+        }
+    };
+
+    Ok(Sse::new(stream)
+        .keep_alive(KeepAlive::default())
         .into_response())
+}
+
+/// Fetches the current inbox snapshot for the given user.
+async fn fetch_inbox_snapshot(
+    store: &dyn AppStore,
+    user_id: Uuid,
+) -> Result<coder_core::ListInboxNotificationsResponse, AppError> {
+    let notifications = store
+        .get_filtered_inbox_notifications(user_id, None, None, "all", None)
+        .await?;
+    let unread_count = store.count_unread_inbox_notifications(user_id).await?;
+    Ok(coder_core::ListInboxNotificationsResponse {
+        notifications,
+        unread_count,
+    })
 }
 
 pub(crate) async fn put_inbox_notification_read_status(
@@ -570,6 +658,10 @@ pub(crate) async fn put_inbox_notification_read_status(
         .store
         .update_inbox_notification_read_status(id, read_at)
         .await?;
+
+    // Notify SSE subscribers that the inbox changed.
+    let channel = coder_core::pubsub::inbox_notification_channel(context.user.id);
+    let _ = state.pubsub.publish(&channel, b"read_status").await;
 
     let updated = state.store.get_inbox_notification_by_id(id).await?;
     let unread_count = state
@@ -860,5 +952,185 @@ pub(crate) async fn post_custom_notification(
         .await
         .map_err(AppError::from)?;
 
+    // TODO: publish to `inbox_notification_channel(user_id)` so SSE
+    // subscribers are notified of new notifications in real time.
     Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::app::tests::{create_and_login, test_state_with_store};
+    use crate::build_router;
+    use axum::Router;
+    use serde_json::Value;
+    use std::error::Error;
+    use std::time::Duration;
+
+    type TestResult = Result<(), Box<dyn Error>>;
+
+    /// Spin up a test HTTP server on a random port and return its base URL.
+    async fn spawn_test_server(
+        router: Router,
+    ) -> Result<(url::Url, tokio::task::JoinHandle<()>), Box<dyn Error>> {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await?;
+        let address = listener.local_addr()?;
+        let handle = tokio::spawn(async move {
+            let _ = axum::serve(listener, router.into_make_service()).await;
+        });
+        Ok((url::Url::parse(&format!("http://{address}"))?, handle))
+    }
+
+    /// Read SSE chunks from the response until a complete frame (double newline) is received
+    /// or the deadline expires.
+    async fn read_sse_frame(
+        resp: &mut reqwest::Response,
+        timeout_secs: u64,
+    ) -> Result<String, Box<dyn Error>> {
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout_secs);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, resp.chunk()).await {
+                Ok(Ok(Some(bytes))) => {
+                    buffer.extend_from_slice(&bytes);
+                    if buffer.windows(2).any(|w| w == b"\n\n") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        Ok(String::from_utf8_lossy(&buffer).into_owned())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_returns_sse_content_type() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!("{base_url}api/v2/notifications/inbox/watch");
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        assert_eq!(resp.status(), StatusCode::OK);
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(
+            content_type.contains("text/event-stream"),
+            "expected text/event-stream, got: {content_type}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_sends_initial_snapshot() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!("{base_url}api/v2/notifications/inbox/watch");
+        let client = reqwest::Client::new();
+        let mut resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        let text = read_sse_frame(&mut resp, 2).await?;
+        assert!(
+            text.contains("\"type\":\"data\""),
+            "expected initial SSE data event, got: {text}"
+        );
+        assert!(
+            text.contains("\"notifications\""),
+            "expected notifications field in SSE data, got: {text}"
+        );
+        assert!(
+            text.contains("\"unread_count\""),
+            "expected unread_count field in SSE data, got: {text}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_streams_pubsub_updates() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!("{base_url}api/v2/notifications/inbox/watch");
+        let client = reqwest::Client::new();
+        let mut resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        // Consume the initial snapshot event.
+        let _ = read_sse_frame(&mut resp, 2).await?;
+
+        // Look up the authenticated user's ID to publish on the right channel.
+        let me_resp = client
+            .get(format!("{base_url}api/v2/users/me"))
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+        let me_body: Value = me_resp.json().await?;
+        let user_id_str = me_body
+            .get("id")
+            .and_then(|v| v.as_str())
+            .ok_or("missing user id")?;
+        let user_id = Uuid::from_str(user_id_str)?;
+
+        // Publish a notification event via pub/sub.
+        let channel = coder_core::pubsub::inbox_notification_channel(user_id);
+        pubsub.publish(&channel, b"new_notification").await?;
+
+        // Read the next SSE event triggered by the pub/sub message.
+        let text = read_sse_frame(&mut resp, 2).await?;
+        assert!(
+            !text.is_empty(),
+            "expected SSE event after pub/sub publish, got empty"
+        );
+        assert!(
+            text.contains("\"type\":\"data\""),
+            "expected SSE data event after pub/sub publish, got: {text}"
+        );
+        assert!(
+            text.contains("\"notifications\""),
+            "expected notifications in SSE update, got: {text}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_rejects_unauthenticated() -> TestResult {
+        let state = crate::app::tests::test_state(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .get(format!("{base_url}api/v2/notifications/inbox/watch"))
+            .send()
+            .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
 }
