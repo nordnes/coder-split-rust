@@ -1415,6 +1415,7 @@ mod tests {
             worker: coder_core::config::WorkerConfig::default(),
             verify_instance_identity: false,
             aws_instance_identity_certs_dir: None,
+            vapid_sub: String::new(),
         }
     }
 

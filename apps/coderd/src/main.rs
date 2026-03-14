@@ -700,6 +700,13 @@ struct ServerArgs {
     /// is not sent, even if this flag is true.
     #[arg(long, env = "CODER_CORS_ALLOW_CREDENTIALS", default_value_t = false)]
     cors_allow_credentials: bool,
+
+    /// VAPID subscriber contact for web push notifications.
+    ///
+    /// Should be a `mailto:` URI per RFC 8292 (e.g. `mailto:admin@example.com`).
+    /// Used as the `sub` claim in VAPID signatures sent to push services.
+    #[arg(long, env = "CODER_VAPID_SUB", default_value = "")]
+    vapid_sub: String,
 }
 
 #[derive(Debug, Error)]
@@ -966,6 +973,30 @@ async fn run() -> Result<(), MainError> {
     )
     .await
     .map_err(|error| MainError::Config(format!("start replica manager: {error}")))?;
+    // --- Startup VAPID validation (issue #7) ---
+    // If VAPID keys exist in the database, validate them. Log a warning if
+    // `vapid_sub` is not configured.
+    if config.vapid_sub.is_empty() {
+        warn!("vapid_sub is not set; web push VAPID signatures will use an empty sub claim");
+    }
+    let webpusher = match coder_notifications::Webpusher::new(
+        store.clone() as Arc<dyn coder_core::AppStore>,
+        config.vapid_sub.clone(),
+    )
+    .await
+    {
+        Ok(wp) => {
+            info!(
+                vapid_public_key = %wp.public_key(),
+                "web push dispatcher initialized"
+            );
+            Some(Arc::new(wp))
+        }
+        Err(err) => {
+            warn!(error = %err, "web push dispatcher unavailable; push notifications disabled");
+            None
+        }
+    };
 
     let state = AppState::new(
         config.clone(),
@@ -983,6 +1014,7 @@ async fn run() -> Result<(), MainError> {
         Some(prometheus_handle),
         telemetry_reporter,
         std::sync::Arc::new(coder_license::EntitlementSet::new()),
+        webpusher,
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
@@ -1356,6 +1388,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         cli_upgrade_message: args.cli_upgrade_message,
         verify_instance_identity: args.verify_instance_identity,
         aws_instance_identity_certs_dir: args.aws_instance_identity_certs_dir,
+        vapid_sub: args.vapid_sub,
     })
 }
 
