@@ -34580,8 +34580,7 @@ pub(crate) mod tests {
     // list_chats archived-filter tests
     // -----------------------------------------------------------------
 
-    /// Helper: create a chat via the API, then optionally archive it directly
-    /// in the FakeStore so we have both archived and non-archived chats.
+    /// Helper: create a chat via the API and return its ID.
     async fn create_chat_helper(
         app: &Router,
         token: &str,
@@ -34593,9 +34592,19 @@ pub(crate) mod tests {
                 Method::POST,
                 "/api/v2/chats",
                 token,
-                &json!({
-                    "content": [{"type": "text", "text": text}]
-                }),
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: text.into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
             )?,
         )
         .await?;
