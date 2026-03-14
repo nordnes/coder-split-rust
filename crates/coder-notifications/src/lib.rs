@@ -46,7 +46,8 @@ const DISPATCH_BATCH_SIZE: u32 = 50;
 const MAX_DISPATCH_ATTEMPTS: u32 = 3;
 
 /// TLS mode for the SMTP connection.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SmtpTlsMode {
     /// No encryption (plain text). Not recommended for production.
     None,
@@ -149,9 +150,25 @@ where
 
         let count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
 
+        // Build the SMTP transport once per batch so that all email messages
+        // in this dispatch cycle share a single connection (connection pooling).
+        let smtp_transport = if !self.config.smtp_host.is_empty() {
+            match build_smtp_transport(&self.config) {
+                Ok(t) => Some(t),
+                Err(e) => {
+                    warn!(error = %e, "failed to build SMTP transport for batch");
+                    Option::<AsyncSmtpTransport<Tokio1Executor>>::None
+                }
+            }
+        } else {
+            Option::<AsyncSmtpTransport<Tokio1Executor>>::None
+        };
+
         for message in messages {
             let result = match message.method {
-                NotificationMethod::Email => self.dispatch_email(&message).await,
+                NotificationMethod::Email => {
+                    self.dispatch_email(&message, smtp_transport.as_ref()).await
+                }
                 NotificationMethod::Webhook => self.dispatch_webhook(&message).await,
                 NotificationMethod::Inbox => self.dispatch_inbox(&message).await,
             };
@@ -194,15 +211,15 @@ where
     async fn dispatch_email(
         &self,
         message: &coder_core::identity::NotificationMessageRecord,
+        transport: Option<&AsyncSmtpTransport<Tokio1Executor>>,
     ) -> Result<(), NotificationDispatchError> {
-        if self.config.smtp_host.is_empty() {
-            return Err(NotificationDispatchError::ConfigMissing(
-                "SMTP host is not configured".to_owned(),
-            ));
-        }
+        let transport = transport.ok_or_else(|| {
+            NotificationDispatchError::ConfigMissing(
+                "SMTP host is not configured or transport failed to build".to_owned(),
+            )
+        })?;
 
         let email_msg = build_email_message(&self.config, message)?;
-        let transport = build_smtp_transport(&self.config)?;
 
         transport
             .send(email_msg)

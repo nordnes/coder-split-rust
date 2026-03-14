@@ -39,7 +39,7 @@ use coder_core::{
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
-use coder_notifications::{NotificationConfig, NotificationDispatchService};
+use coder_notifications::{NotificationConfig, NotificationDispatchService, SmtpTlsMode};
 use coder_server::{AppState, build_router};
 use coder_workspaces::{
     ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker, LifecycleScheduler,
@@ -585,6 +585,43 @@ struct ServerArgs {
     referrer_policy: String,
 
     // ----- Worker Intervals -----
+    // ----- SMTP / Notifications -----
+    /// SMTP relay host for email notifications (empty = email disabled).
+    #[arg(long, env = "CODER_NOTIFICATIONS_SMTP_HOST", default_value = "")]
+    smtp_host: String,
+
+    /// SMTP relay port (587 for STARTTLS, 465 for implicit TLS, 25 for plain).
+    #[arg(long, env = "CODER_NOTIFICATIONS_SMTP_PORT", default_value_t = 587)]
+    smtp_port: u16,
+
+    /// Sender email address for outgoing notifications.
+    #[arg(long, env = "CODER_NOTIFICATIONS_SMTP_FROM", default_value = "")]
+    smtp_from: String,
+
+    /// SMTP authentication username (empty = no auth).
+    #[arg(long, env = "CODER_NOTIFICATIONS_SMTP_USERNAME", default_value = "")]
+    smtp_username: String,
+
+    /// SMTP authentication password.
+    #[arg(long, env = "CODER_NOTIFICATIONS_SMTP_PASSWORD", default_value = "")]
+    smtp_password: String,
+
+    /// TLS mode for the SMTP connection (none, tls, start_tls).
+    #[arg(
+        long,
+        env = "CODER_NOTIFICATIONS_SMTP_TLS_MODE",
+        default_value = "start_tls"
+    )]
+    smtp_tls_mode: String,
+
+    /// Timeout in seconds for outgoing webhook notifications.
+    #[arg(
+        long,
+        env = "CODER_NOTIFICATIONS_WEBHOOK_TIMEOUT",
+        default_value_t = 30
+    )]
+    webhook_timeout_secs: u64,
+
     /// Poll interval in seconds for the notification dispatch worker.
     #[arg(
         long,
@@ -784,6 +821,15 @@ async fn run() -> Result<(), MainError> {
 
     let log_format = args.log_format;
     let migrate_only = args.migrate_only;
+    let notification_config = NotificationConfig {
+        smtp_host: args.smtp_host.clone(),
+        smtp_port: args.smtp_port,
+        smtp_from: args.smtp_from.clone(),
+        smtp_username: args.smtp_username.clone(),
+        smtp_password: args.smtp_password.clone(),
+        smtp_tls_mode: parse_smtp_tls_mode(&args.smtp_tls_mode),
+        webhook_timeout_secs: args.webhook_timeout_secs,
+    };
     let config = build_config(args)?;
     let tracer_provider = init_tracing(log_format, &config.otel);
     init_panic_hook();
@@ -851,7 +897,7 @@ async fn run() -> Result<(), MainError> {
     let notification_cancel = CancellationToken::new();
     let (notification_service, notification_handle) = NotificationDispatchService::new(
         store.clone(),
-        NotificationConfig::default(),
+        notification_config,
         config.worker.notification_dispatch_interval_secs,
         notification_cancel.clone(),
     )
@@ -1219,6 +1265,19 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         scim_api_key: args.scim_api_key,
         cli_upgrade_message: args.cli_upgrade_message,
     })
+}
+
+/// Parses a CLI/env string into a [`SmtpTlsMode`].
+///
+/// Accepted values (case-insensitive): `none`, `tls`, `start_tls` / `starttls`.
+/// Falls back to [`SmtpTlsMode::StartTls`] for unrecognised input.
+fn parse_smtp_tls_mode(value: &str) -> SmtpTlsMode {
+    match value.to_ascii_lowercase().as_str() {
+        "none" => SmtpTlsMode::None,
+        "tls" => SmtpTlsMode::Tls,
+        "start_tls" | "starttls" => SmtpTlsMode::StartTls,
+        _ => SmtpTlsMode::StartTls,
+    }
 }
 
 /// Splits a comma-separated string into a `Vec<String>`, trimming whitespace
