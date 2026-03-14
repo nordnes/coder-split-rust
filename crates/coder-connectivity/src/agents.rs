@@ -128,6 +128,9 @@ impl AgentProvider for InMemoryAgentProvider {
 
     async fn register_agent(&self, agent_id: Uuid, conn: Arc<dyn AgentConnection>) {
         self.agents.lock().await.insert(agent_id, conn);
+        // Clear any stale listening-port data from a previous connection so the
+        // endpoint doesn't serve outdated ports until the new agent reports.
+        self.listening_ports.lock().await.remove(&agent_id);
     }
 
     async fn remove_agent(&self, agent_id: Uuid, conn: &Arc<dyn AgentConnection>) {
@@ -521,6 +524,41 @@ mod tests {
         assert!(
             ports.is_empty(),
             "ports should be cleared when agent is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_agent_clears_stale_listening_ports() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let conn_old: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+
+        provider.register_agent(agent_id, conn_old).await;
+        provider
+            .set_listening_ports(
+                agent_id,
+                vec![WorkspaceAgentListeningPort {
+                    port: 8080,
+                    network: "tcp".to_owned(),
+                    process_name: String::new(),
+                }],
+            )
+            .await;
+
+        // Simulate reconnection: register a new connection for the same agent.
+        let conn_new: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        provider.register_agent(agent_id, conn_new).await;
+
+        let ports = provider.get_listening_ports(agent_id).await;
+        assert!(
+            ports.is_empty(),
+            "stale ports should be cleared on reconnection"
         );
     }
 
