@@ -4382,7 +4382,7 @@ pub(crate) mod tests {
             let mut result: Vec<ChatRecord> = chats
                 .values()
                 .filter(|c| c.owner_id == owner_id)
-                .filter(|c| match archived { Some(a) => c.archived == a, None => !c.archived })
+                .filter(|c| archived.is_none() || archived == Some(c.archived))
                 .cloned()
                 .collect();
             // Match PostgresStore: ORDER BY updated_at DESC.
@@ -8353,7 +8353,7 @@ pub(crate) mod tests {
             logging: coder_core::config::LoggingConfig::default(),
             session_cache_ttl_secs: 30,
             audit_batch_flush_interval_ms: 500,
-            audit_batch_max_size: 1,
+            audit_batch_max_size: 50,
             max_concurrent_requests: 1024,
             max_concurrent_db_queries: 40,
             rate_limit: coder_core::config::RateLimitConfig::default(),
@@ -35205,8 +35205,10 @@ pub(crate) mod tests {
             Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
         let coordinator = InMemoryCoordinator::new(Default::default());
         let derp_tracker = DerpTrafficTracker::new();
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
         let state = AppState::new(
-            test_config()?,
+            config,
             BuildMetadata::default(),
             Uuid::nil(),
             store_trait,
