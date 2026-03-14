@@ -8301,6 +8301,7 @@ mod tests {
             "soft-deleted user should have no memberships returned"
         );
 
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
