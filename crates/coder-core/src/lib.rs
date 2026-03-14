@@ -39,6 +39,7 @@ pub mod api;
 pub mod build_info;
 pub mod circuit_breaker;
 pub mod config;
+pub mod constants;
 pub mod enums;
 pub mod identity;
 pub mod password;
@@ -127,6 +128,12 @@ pub use config::{
     CorsConfig, DatabaseConfig, DerpNodeConfig, DerpRegionConfig, LogFormat, OtelConfig,
     PublicDatabaseConfig, PublicDeploymentConfig, PublicProvisionerConfig, PublicTelemetryConfig,
     PublicTlsConfig, ServerConfig, SshConfig,
+};
+pub use constants::{
+    PREBUILDS_SYSTEM_USER_ID, TEMPLATE_CUSTOM_NOTIFICATION, TEMPLATE_TEST_NOTIFICATION,
+    TEMPLATE_WORKSPACE_AUTOBUILD_FAILED, TEMPLATE_WORKSPACE_CREATED, TEMPLATE_WORKSPACE_DELETED,
+    TEMPLATE_WORKSPACE_DORMANT, TEMPLATE_WORKSPACE_MANUALLY_UPDATED,
+    TEMPLATE_WORKSPACE_MARKED_FOR_DELETION,
 };
 pub use identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyScope, ApiKeyWithOwnerRecord, AuthenticatedUser,
