@@ -37106,7 +37106,7 @@ pub(crate) mod tests {
         Ok(())
     }
 
-        // ── Chat CRUD handler-level tests ──────────────────────────────────
+    // ── Chat CRUD handler-level tests ──────────────────────────────────
 
     #[tokio::test]
     async fn create_chat_requires_auth() -> Result<(), Box<dyn Error>> {

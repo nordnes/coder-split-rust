@@ -893,11 +893,11 @@ pub(crate) async fn post_user_webpush_test(
         );
 
         // Build a VAPID signature for this subscription.
-        let vapid_signature = match partial_builder
-            .clone()
-            .add_sub_info(&subscription_info)
-            .build()
-        {
+        // The "sub" claim is required by RFC 8292 and many push services (e.g.
+        // Google FCM) reject messages without it.
+        let mut sig_builder = partial_builder.clone().add_sub_info(&subscription_info);
+        sig_builder.add_claim("sub", state.config.access_url.as_str());
+        let vapid_signature = match sig_builder.build() {
             Ok(sig) => sig,
             Err(err) => {
                 tracing::warn!(
