@@ -798,17 +798,180 @@ pub(crate) async fn post_user_webpush_test(
         ));
     }
 
-    // Verify user has webpush subscriptions
-    let _subscriptions = state
+    // Load VAPID keys from the store.
+    let vapid_keys = match state.store.get_webpush_vapid_keys().await? {
+        Some(keys) => keys,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Web push VAPID keys are not configured.",
+                    "An administrator must configure VAPID keys before sending push notifications.",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Load all subscriptions for the user.
+    let subscriptions = state
         .store
         .get_webpush_subscriptions_by_user_id(target_user.id)
         .await?;
 
-    // Full web push sending requires VAPID key infrastructure not yet available.
-    // Return success to indicate the endpoint is reachable and the user was resolved.
+    if subscriptions.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "No webpush subscriptions found for this user.",
+                "",
+            )),
+        )
+            .into_response());
+    }
+
+    // Build a partial VAPID signature builder from the stored PEM private key.
+    let partial_builder =
+        match web_push::VapidSignatureBuilder::from_pem_no_sub(vapid_keys.private_key.as_bytes())
+        {
+            Ok(builder) => builder,
+            Err(err) => {
+                tracing::warn!(error = %err, "failed to parse VAPID private key");
+                return Ok((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(ApiResponse::error(
+                        "Failed to load VAPID signing key.",
+                        "The stored VAPID private key could not be parsed.",
+                    )),
+                )
+                    .into_response());
+            }
+        };
+
+    // Build the test notification payload.
+    let test_message = coder_core::api::WebpushMessage {
+        icon: String::new(),
+        title: "Coder Web Push Test".to_owned(),
+        body: "This is a test notification from your Coder deployment.".to_owned(),
+        tag: "coder-webpush-test".to_owned(),
+        actions: Vec::new(),
+        data: HashMap::new(),
+    };
+    let payload_bytes = match serde_json::to_vec(&test_message) {
+        Ok(bytes) => bytes,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to serialize webpush payload");
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Failed to build notification payload.", "")),
+            )
+                .into_response());
+        }
+    };
+
+    let client = match web_push::IsahcWebPushClient::new() {
+        Ok(c) => c,
+        Err(err) => {
+            tracing::warn!(error = %err, "failed to create web push client");
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Failed to create web push client.", "")),
+            )
+                .into_response());
+        }
+    };
+
+    let mut success_count: u32 = 0;
+    let mut failure_count: u32 = 0;
+    let mut stale_subscription_ids: Vec<Uuid> = Vec::new();
+
+    for sub in &subscriptions {
+        let subscription_info = web_push::SubscriptionInfo::new(
+            &sub.endpoint,
+            &sub.endpoint_p256dh_key,
+            &sub.endpoint_auth_key,
+        );
+
+        // Build a VAPID signature for this subscription.
+        let vapid_signature = match partial_builder
+            .clone()
+            .add_sub_info(&subscription_info)
+            .build()
+        {
+            Ok(sig) => sig,
+            Err(err) => {
+                tracing::warn!(
+                    endpoint = %sub.endpoint,
+                    error = %err,
+                    "failed to build VAPID signature for subscription"
+                );
+                failure_count = failure_count.saturating_add(1);
+                continue;
+            }
+        };
+
+        // Build the encrypted web push message.
+        let mut builder = web_push::WebPushMessageBuilder::new(&subscription_info);
+        builder.set_payload(web_push::ContentEncoding::Aes128Gcm, &payload_bytes);
+        builder.set_vapid_signature(vapid_signature);
+
+        let message = match builder.build() {
+            Ok(m) => m,
+            Err(err) => {
+                tracing::warn!(
+                    endpoint = %sub.endpoint,
+                    error = %err,
+                    "failed to build web push message"
+                );
+                failure_count = failure_count.saturating_add(1);
+                continue;
+            }
+        };
+
+        // Send the push notification.
+        use web_push::WebPushClient as _;
+        match client.send(message).await {
+            Ok(()) => {
+                success_count = success_count.saturating_add(1);
+            }
+            Err(web_push::WebPushError::EndpointNotValid(_))
+            | Err(web_push::WebPushError::EndpointNotFound(_)) => {
+                tracing::info!(
+                    endpoint = %sub.endpoint,
+                    "removing stale webpush subscription"
+                );
+                stale_subscription_ids.push(sub.id);
+                failure_count = failure_count.saturating_add(1);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    endpoint = %sub.endpoint,
+                    error = %err,
+                    "failed to send web push notification"
+                );
+                failure_count = failure_count.saturating_add(1);
+            }
+        }
+    }
+
+    // Clean up stale subscriptions.
+    if !stale_subscription_ids.is_empty() {
+        if let Err(err) = state
+            .store
+            .delete_webpush_subscriptions(&stale_subscription_ids)
+            .await
+        {
+            tracing::warn!(error = %err, "failed to remove stale webpush subscriptions");
+        }
+    }
+
     Ok((
         StatusCode::OK,
-        Json(ApiResponse::ok("Web push test acknowledged.")),
+        Json(serde_json::json!({
+            "message": "Web push test completed.",
+            "success_count": success_count,
+            "failure_count": failure_count,
+        })),
     )
         .into_response())
 }

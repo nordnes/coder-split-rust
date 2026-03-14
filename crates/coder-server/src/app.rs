@@ -15965,8 +15965,31 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn webpush_test_endpoint() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?, None);
+        let (state, store) = test_state_with_store(true)?;
+
+        // Configure VAPID keys so the handler can sign push messages.
+        let test_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIMwug/U2ds75hkEIeou9s0kj1ziCJETswt5S9ztJ2L5SoAoGCCqGSM49\nAwEHoUQDQgAEyjUeooXqyQxljKSu17126pjAEPTyYNApO6dGQl0PexMn0T7LI3qw\nmU9ZOko2Gn7LYp5LqgA0cX6rfDftsKVvtQ==\n-----END EC PRIVATE KEY-----";
+        store.upsert_webpush_vapid_keys("test_public_key", test_pem).await?;
+
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
+
+        // Register a subscription so the endpoint has something to send to.
+        let sub_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/subscription",
+                &session_token,
+                &serde_json::json!({
+                    "endpoint": "https://push.example.com/sub1",
+                    "p256dh_key": "BLMbF9ffKBiWQLCKvTHb6LO8Nb6dcUh6TItC455vu2kElga6PQvUmaFyCdykxY2nOSSL3yKgfbmFLRTUaGv4yV8",
+                    "auth_key": "xS03Fi5ErfTNH_l9WHE9Ig"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(sub_response.status(), StatusCode::NO_CONTENT);
 
         let response = call(
             app,
@@ -36951,7 +36974,139 @@ pub(crate) mod tests {
         Ok(())
     }
 
-    // ── Chat CRUD handler-level tests ──────────────────────────────────
+    // ── Webpush test endpoint handler-level tests ────────────────────────
+
+    #[tokio::test]
+    async fn webpush_test_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let response = call(app, request(Method::POST, "/api/v2/users/me/webpush/test")?).await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_test_no_vapid_keys() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Register a subscription so we don't hit the "no subscriptions" error first.
+        let sub_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/subscription",
+                &session_token,
+                &serde_json::json!({
+                    "endpoint": "https://push.example.com/sub1",
+                    "p256dh_key": "BLMbF9ffKBiWQLCKvTHb6LO8Nb6dcUh6TItC455vu2kElga6PQvUmaFyCdykxY2nOSSL3yKgfbmFLRTUaGv4yV8",
+                    "auth_key": "xS03Fi5ErfTNH_l9WHE9Ig"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(sub_response.status(), StatusCode::NO_CONTENT);
+
+        // Without VAPID keys configured, the endpoint should return 500.
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/users/me/webpush/test", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = response_json(response).await?;
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("VAPID keys"),
+            "expected error about VAPID keys, got: {body}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_test_no_subscriptions() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+
+        // Configure VAPID keys so we pass that check.
+        // Use a well-formed EC PEM key for the VAPID private key.
+        let test_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIMwug/U2ds75hkEIeou9s0kj1ziCJETswt5S9ztJ2L5SoAoGCCqGSM49\nAwEHoUQDQgAEyjUeooXqyQxljKSu17126pjAEPTyYNApO6dGQl0PexMn0T7LI3qw\nmU9ZOko2Gn7LYp5LqgA0cX6rfDftsKVvtQ==\n-----END EC PRIVATE KEY-----";
+        store.upsert_webpush_vapid_keys("test_public_key", test_pem).await?;
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        // No subscriptions registered, should return 400.
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/users/me/webpush/test", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("No webpush subscriptions"),
+            "expected error about no subscriptions, got: {body}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn webpush_test_sends_with_valid_keys_and_subs() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+
+        // Generate a real EC private key using openssl-compatible PEM.
+        // This key is only for testing; it won't actually deliver to a real push service.
+        let test_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIMwug/U2ds75hkEIeou9s0kj1ziCJETswt5S9ztJ2L5SoAoGCCqGSM49\nAwEHoUQDQgAEyjUeooXqyQxljKSu17126pjAEPTyYNApO6dGQl0PexMn0T7LI3qw\nmU9ZOko2Gn7LYp5LqgA0cX6rfDftsKVvtQ==\n-----END EC PRIVATE KEY-----";
+        store.upsert_webpush_vapid_keys("test_public_key", test_pem).await?;
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Register a subscription with a fake endpoint that will fail delivery.
+        let sub_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/subscription",
+                &session_token,
+                &serde_json::json!({
+                    "endpoint": "https://push.example.com/test-endpoint",
+                    "p256dh_key": "BLMbF9ffKBiWQLCKvTHb6LO8Nb6dcUh6TItC455vu2kElga6PQvUmaFyCdykxY2nOSSL3yKgfbmFLRTUaGv4yV8",
+                    "auth_key": "xS03Fi5ErfTNH_l9WHE9Ig"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(sub_response.status(), StatusCode::NO_CONTENT);
+
+        // Trigger the test endpoint. Since the push endpoint is fake, delivery
+        // will fail but the handler should still return 200 with counts.
+        let response = call(
+            app,
+            authenticated_request(Method::POST, "/api/v2/users/me/webpush/test", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("Web push test completed"),
+            "expected completion message, got: {body}"
+        );
+        // The response should include success_count and failure_count fields.
+        assert!(body.get("success_count").is_some(), "missing success_count in {body}");
+        assert!(body.get("failure_count").is_some(), "missing failure_count in {body}");
+        Ok(())
+    }
+
+        // ── Chat CRUD handler-level tests ──────────────────────────────────
 
     #[tokio::test]
     async fn create_chat_requires_auth() -> Result<(), Box<dyn Error>> {
