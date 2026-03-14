@@ -12,9 +12,12 @@ pub(crate) async fn list_chats(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // Default to non-archived chats when no filter is specified,
+    // matching the Go implementation behavior.
+    let archived_filter = query.archived.or(Some(false));
     let chats = state
         .store
-        .list_chats_by_owner(context.user.id, query.archived)
+        .list_chats_by_owner(context.user.id, archived_filter)
         .await?;
 
     let chat_responses: Vec<ChatResponse> =

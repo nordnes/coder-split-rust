@@ -1451,6 +1451,45 @@ pub(crate) mod tests {
         }
     }
 
+    /// Audit sink that persists events to the FakeStore, bridging the gap
+    /// between `state.audit.record()` and `state.store.list_audit_logs()`.
+    #[derive(Debug)]
+    struct FakeStoreAuditSink {
+        store: Arc<FakeStore>,
+    }
+
+    #[async_trait]
+    impl AuditSink for FakeStoreAuditSink {
+        async fn record(&self, event: AuditEvent) {
+            let input = PersistAuditLogInput {
+                id: Uuid::new_v4(),
+                request_id: Some(Uuid::new_v4()),
+                time: OffsetDateTime::now_utc(),
+                ip: String::new(),
+                user_agent: String::new(),
+                resource_type: serde_json::to_value(event.resource)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                resource_id: event
+                    .target_id
+                    .as_deref()
+                    .and_then(|s| Uuid::try_parse(s).ok()),
+                resource_target: event.target_id.unwrap_or_default(),
+                resource_icon: String::new(),
+                action: event.action.as_str().to_owned(),
+                diff: serde_json::Value::Object(Default::default()),
+                status_code: 200,
+                additional_fields: serde_json::Value::Object(Default::default()),
+                description: event.summary,
+                resource_link: String::new(),
+                is_deleted: false,
+                organization_id: None,
+                user_id: event.actor_user_id,
+            };
+            let _ = self.store.insert_audit_log(input).await;
+        }
+    }
     #[derive(Debug)]
     pub(crate) struct FakeStore {
         health_ok: bool,
@@ -14367,7 +14406,9 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn hsts_header_present_when_https() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?, None);
+        let mut state = test_state(true)?;
+        state.config.strict_transport_security = 31536000;
+        let app = build_router(state, None);
         let req = Request::builder()
             .method(Method::GET)
             .uri("/")
@@ -14504,6 +14545,86 @@ pub(crate) mod tests {
             display_order: 0,
             api_key_scope: "all".to_owned(),
         }
+    }
+
+    /// Helper: insert a connected agent AND the full workspace chain (resource
+    /// → build → workspace) so that `authorize_agent_workspace` /
+    /// `find_workspace_by_agent_id` succeeds.
+    fn insert_agent_with_workspace(
+        store: &FakeStore,
+        agent_id: Uuid,
+        owner_id: Uuid,
+    ) -> Result<(), StorageError> {
+        let agent = make_connected_agent(agent_id);
+        let resource_id = agent.resource_id;
+        store.insert_agent(agent)?;
+
+        let job_id = Uuid::new_v4();
+        let build_id = Uuid::new_v4();
+        let workspace_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+
+        let resource = WorkspaceResourceRecord {
+            id: resource_id,
+            created_at: now,
+            job_id,
+            transition: "start".to_owned(),
+            resource_type: "docker_container".to_owned(),
+            name: "main".to_owned(),
+            hide: false,
+            icon: String::new(),
+            daily_cost: 0,
+        };
+        store
+            .workspace_resources
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .entry(job_id)
+            .or_default()
+            .push(resource);
+
+        let build = WorkspaceBuildRecord {
+            id: build_id,
+            created_at: now,
+            updated_at: now,
+            workspace_id,
+            build_number: 1,
+            transition: "start".to_owned(),
+            job_id,
+            template_version_id: Uuid::new_v4(),
+            initiator_id: owner_id,
+            provisioner_state: None,
+            deadline: None,
+            max_deadline: None,
+            reason: "initiator".to_owned(),
+            daily_cost: 0,
+        };
+        store
+            .workspace_builds
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .insert(build_id, build);
+
+        let workspace = WorkspaceRecord {
+            id: workspace_id,
+            created_at: now,
+            updated_at: now,
+            owner_id,
+            organization_id: Uuid::from_u128(2),
+            template_id: Uuid::new_v4(),
+            deleted: false,
+            name: "test-workspace".to_owned(),
+            autostart_schedule: None,
+            ttl_ns: None,
+            last_used_at: now,
+            dormant_at: None,
+            deleting_at: None,
+            automatic_updates: "never".to_owned(),
+            favorite: false,
+            next_start_at: None,
+        };
+        store.insert_workspace(workspace)?;
+        Ok(())
     }
 
     /// Helper: create a disconnected workspace agent row.
@@ -15011,7 +15132,7 @@ pub(crate) mod tests {
         let token = create_and_login(&app).await?;
 
         let agent_id = Uuid::new_v4();
-        store.insert_agent(make_connected_agent(agent_id))?;
+        insert_agent_with_workspace(&store, agent_id, Uuid::from_u128(1))?;
 
         store
             .workspace_agent_metadata
@@ -15040,8 +15161,16 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
-        let body = response_json(response).await?;
-        let metadata = body.as_array().ok_or("expected array")?;
+        // The watch-metadata handler returns SSE format (data: <json>\n\n),
+        // not plain JSON. Extract the JSON payload from the SSE data lines.
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let sse_text = String::from_utf8(bytes.to_vec())?;
+        let json_str: String = sse_text
+            .lines()
+            .filter_map(|line| line.strip_prefix("data: "))
+            .collect::<Vec<_>>()
+            .join("");
+        let metadata: Vec<Value> = serde_json::from_str(&json_str)?;
         assert_eq!(metadata.len(), 1);
         assert_eq!(metadata[0].get("key").and_then(Value::as_str), Some("cpu"));
         assert_eq!(
@@ -15466,7 +15595,7 @@ pub(crate) mod tests {
         let (state, store) = test_state_with_store(true)?;
         let coordinator = state.coordinator.clone();
         let agent_id = Uuid::new_v4();
-        store.insert_agent(make_connected_agent(agent_id))?;
+        insert_agent_with_workspace(&store, agent_id, Uuid::from_u128(1))?;
         let app = build_router(state, None);
         let token = create_and_login(&app).await?;
         let (base_url, _handle) = spawn_test_server(app).await?;
@@ -15663,7 +15792,7 @@ pub(crate) mod tests {
         let (state, store) = test_state_with_store(true)?;
         let pubsub = state.pubsub.clone();
         let agent_id = Uuid::new_v4();
-        store.insert_agent(make_connected_agent(agent_id))?;
+        insert_agent_with_workspace(&store, agent_id, Uuid::from_u128(1))?;
 
         // Insert metadata so the initial snapshot is non-empty.
         store
@@ -35068,8 +35197,44 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn template_create_generates_audit_entry() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?, None);
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        let store = Arc::new(FakeStore::new(true));
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        // Use FakeStoreAuditSink so audit events recorded via state.audit
+        // are persisted to FakeStore and visible via GET /api/v2/audit.
+        let audit: Arc<dyn AuditSink> = Arc::new(FakeStoreAuditSink {
+            store: store.clone(),
+        });
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
+        let state = AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store_trait,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
+            None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+        )?;
+        let app = build_router(state, None);
         let (session_token, _org_id, _template) = create_test_template(&app).await?;
+
+        // Allow the BatchedAuditSink background task to flush the event.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
 
         let resp = call(
             app,
