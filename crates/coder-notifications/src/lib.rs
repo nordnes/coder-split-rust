@@ -788,12 +788,12 @@ impl Webpusher {
                     let result = self
                         .send_single_with_retry(&payload, &endpoint, &auth_key, &p256dh_key)
                         .await;
-                    (id, result)
+                    (id, endpoint, result)
                 }
             })
             .collect();
 
-        let outcomes: Vec<(Uuid, Result<(), WebpushSendOutcome>)> =
+        let outcomes: Vec<(Uuid, String, Result<(), WebpushSendOutcome>)> =
             futures_util::stream::iter(send_futs)
                 .buffer_unordered(MAX_CONCURRENT_SENDS)
                 .collect()
@@ -801,16 +801,20 @@ impl Webpusher {
 
         let mut stale_ids: Vec<Uuid> = Vec::new();
 
-        for (id, result) in outcomes {
+        for (id, endpoint, result) in outcomes {
             match result {
                 Ok(()) => {}
                 Err(WebpushSendOutcome::Gone) => {
                     stale_ids.push(id);
                 }
-                Err(
-                    WebpushSendOutcome::Retryable(ref err) | WebpushSendOutcome::Failed(ref err),
-                ) => {
-                    warn!(error = %err, "web push send failed");
+                Err(WebpushSendOutcome::Failed(ref err)) => {
+                    warn!(endpoint = %endpoint, error = %err, "web push send failed");
+                }
+                Err(WebpushSendOutcome::Retryable(ref err)) => {
+                    // Unreachable: send_single_with_retry converts Retryable
+                    // to Failed once retries are exhausted, but handle
+                    // defensively.
+                    warn!(endpoint = %endpoint, error = %err, "web push send failed (retryable)");
                 }
             }
         }
@@ -873,12 +877,12 @@ impl Webpusher {
                     let result = self
                         .send_single_with_retry(&payload, &endpoint, &auth_key, &p256dh_key)
                         .await;
-                    (id, result)
+                    (id, endpoint, result)
                 }
             })
             .collect();
 
-        let outcomes: Vec<(Uuid, Result<(), WebpushSendOutcome>)> =
+        let outcomes: Vec<(Uuid, String, Result<(), WebpushSendOutcome>)> =
             futures_util::stream::iter(send_futs)
                 .buffer_unordered(MAX_CONCURRENT_SENDS)
                 .collect()
@@ -888,7 +892,7 @@ impl Webpusher {
         let mut success_count: u32 = 0;
         let mut failure_count: u32 = 0;
 
-        for (id, result) in outcomes {
+        for (id, endpoint, result) in outcomes {
             match result {
                 Ok(()) => {
                     success_count = success_count.saturating_add(1);
@@ -897,10 +901,15 @@ impl Webpusher {
                     stale_ids.push(id);
                     failure_count = failure_count.saturating_add(1);
                 }
-                Err(
-                    WebpushSendOutcome::Retryable(ref err) | WebpushSendOutcome::Failed(ref err),
-                ) => {
-                    warn!(error = %err, "test web push send failed");
+                Err(WebpushSendOutcome::Failed(ref err)) => {
+                    warn!(endpoint = %endpoint, error = %err, "test web push send failed");
+                    failure_count = failure_count.saturating_add(1);
+                }
+                Err(WebpushSendOutcome::Retryable(ref err)) => {
+                    // Unreachable: send_single_with_retry converts Retryable
+                    // to Failed once retries are exhausted, but handle
+                    // defensively.
+                    warn!(endpoint = %endpoint, error = %err, "test web push send failed (retryable)");
                     failure_count = failure_count.saturating_add(1);
                 }
             }

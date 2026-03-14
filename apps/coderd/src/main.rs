@@ -897,16 +897,6 @@ async fn run() -> Result<(), MainError> {
         .map_err(|error| MainError::Config(format!("install prometheus recorder: {error}")))?;
 
     // Start the notification dispatch background worker.
-    //
-    // NOTE: The `Webpusher` is NOT wired into `AppState` yet because the
-    // `AppStore` trait methods it depends on (`get_webpush_vapid_keys`,
-    // `upsert_webpush_vapid_keys`, `get_webpush_subscriptions_by_user_id`,
-    // `delete_webpush_subscription_by_user_and_endpoint`,
-    // `delete_webpush_subscriptions`, `delete_all_webpush_subscriptions`)
-    // currently return `StorageError::unavailable` — the `PostgresStore`
-    // implementations have not been added.  Once those DB methods exist,
-    // instantiate a `Webpusher<Arc<dyn AppStore>>` here and add it as a
-    // field on `AppState` so HTTP handlers can send push notifications.
     let notification_cancel = CancellationToken::new();
     let (notification_service, notification_handle) = NotificationDispatchService::new(
         store.clone(),
