@@ -1855,6 +1855,16 @@ pub trait IdentityStore: Send + Sync {
 
     // ----- Notifications -----
 
+    /// Enqueues a notification message for later dispatch.
+    ///
+    /// Inserts a new row into `notification_messages` with status `pending`.
+    /// The [`crate::identity::NotificationMethod`] in the input determines
+    /// which transport the dispatch loop will use.
+    async fn enqueue_notification_message(
+        &self,
+        input: &EnqueueNotificationMessageInput,
+    ) -> Result<(), StorageError>;
+
     /// Atomically acquires pending notification messages for dispatch.
     ///
     /// Uses `FOR UPDATE SKIP LOCKED` to lease rows, preventing concurrent
@@ -1881,6 +1891,25 @@ pub trait IdentityStore: Send + Sync {
         &self,
         message_id: Uuid,
     ) -> Result<bool, StorageError>;
+}
+
+/// Input for enqueuing a notification message.
+#[derive(Clone, Debug)]
+pub struct EnqueueNotificationMessageInput {
+    /// Unique message identifier (caller-generated).
+    pub id: Uuid,
+    /// Recipient user identifier.
+    pub user_id: Uuid,
+    /// Notification template identifier.
+    pub notification_template_id: Uuid,
+    /// Dispatch method.
+    pub method: crate::identity::NotificationMethod,
+    /// Serialized payload (JSON).
+    pub payload: String,
+    /// Target entity identifiers.
+    pub targets: Vec<Uuid>,
+    /// Identifier of the actor who created the message.
+    pub created_by: String,
 }
 
 /// Narrow storage contract for operational and deployment-owned state.
@@ -3897,6 +3926,12 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     // ----- Notification message dispatch -----
 
+    /// Enqueues a notification message for later dispatch.
+    async fn enqueue_notification_message(
+        &self,
+        input: &EnqueueNotificationMessageInput,
+    ) -> Result<(), StorageError>;
+
     /// Atomically acquires pending notification messages for dispatch.
     ///
     /// Uses `FOR UPDATE SKIP LOCKED` to lease rows, preventing concurrent
@@ -5377,6 +5412,13 @@ where
         AppStore::delete_custom_role(self, name, organization_id).await
     }
 
+    async fn enqueue_notification_message(
+        &self,
+        input: &EnqueueNotificationMessageInput,
+    ) -> Result<(), StorageError> {
+        AppStore::enqueue_notification_message(self, input).await
+    }
+
     async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
@@ -5920,6 +5962,13 @@ where
         organization_id: Option<Uuid>,
     ) -> Result<bool, StorageError> {
         (**self).delete_custom_role(name, organization_id).await
+    }
+
+    async fn enqueue_notification_message(
+        &self,
+        input: &EnqueueNotificationMessageInput,
+    ) -> Result<(), StorageError> {
+        (**self).enqueue_notification_message(input).await
     }
 
     async fn acquire_pending_notification_messages(

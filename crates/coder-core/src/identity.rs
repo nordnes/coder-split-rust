@@ -203,6 +203,8 @@ pub struct AuthenticatedUser {
     pub login_type: LoginType,
     /// Current user status.
     pub status: UserStatus,
+    /// Whether the user is a system account.
+    pub is_system: bool,
 }
 
 impl From<UserRecord> for AuthenticatedUser {
@@ -221,6 +223,7 @@ impl From<UserRecord> for AuthenticatedUser {
             org_roles: vec![],
             login_type: value.login_type,
             status: value.status,
+            is_system: value.is_system,
         }
     }
 }
@@ -912,6 +915,18 @@ pub enum NotificationMethod {
     Webhook,
     /// In-app inbox delivery.
     Inbox,
+}
+
+impl NotificationMethod {
+    /// Returns the database string representation.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Email => "smtp",
+            Self::Webhook => "webhook",
+            Self::Inbox => "inbox",
+        }
+    }
 }
 
 /// Status of a queued notification message.

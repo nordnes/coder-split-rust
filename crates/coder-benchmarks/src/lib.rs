@@ -1836,6 +1836,13 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn enqueue_notification_message(
+        &self,
+        _input: &coder_core::ports::EnqueueNotificationMessageInput,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn acquire_pending_notification_messages(
         &self,
         _limit: u32,

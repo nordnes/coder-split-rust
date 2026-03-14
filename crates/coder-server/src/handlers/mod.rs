@@ -46,6 +46,8 @@ use coder_core::api::{InsightsReportInterval, TemplateInsightsSection};
 use coder_core::api::{
     UpdateWorkspaceACLRequest, WorkspaceACLGroup, WorkspaceACLResponse, WorkspaceACLUser,
 };
+use coder_core::identity::NotificationMethod;
+use coder_core::ports::EnqueueNotificationMessageInput;
 use coder_core::ports::UpdateWorkspaceACLInput;
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,

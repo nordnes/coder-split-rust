@@ -690,6 +690,7 @@ mod tests {
             org_roles: vec![],
             login_type: coder_core::LoginType::Password,
             status: UserStatus::Active,
+            is_system: false,
         }
     }
 

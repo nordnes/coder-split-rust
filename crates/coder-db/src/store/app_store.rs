@@ -4834,6 +4834,29 @@ impl AppStore for PostgresStore {
     // Notification message dispatch
     // -----------------------------------------------------------------------
 
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn enqueue_notification_message(
+        &self,
+        input: &EnqueueNotificationMessageInput,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"INSERT INTO notification_messages
+               (id, notification_template_id, user_id, method, payload, targets, created_by, created_at)
+               VALUES ($1, $2, $3, $4::notification_method, $5::jsonb, $6, $7, NOW())"#,
+        )
+        .bind(input.id)
+        .bind(input.notification_template_id)
+        .bind(input.user_id)
+        .bind(input.method.as_str())
+        .bind(&input.payload)
+        .bind(&input.targets)
+        .bind(&input.created_by)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn acquire_pending_notification_messages(
         &self,

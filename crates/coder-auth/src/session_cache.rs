@@ -183,6 +183,7 @@ mod tests {
             org_roles: vec![],
             login_type: LoginType::Password,
             status: UserStatus::Active,
+            is_system: false,
         }
     }
 

@@ -810,12 +810,54 @@ pub(crate) async fn post_custom_notification(
             .into_response());
     }
 
-    // In Go, system users are blocked from sending custom notifications.
-    // The Rust Actor type does not yet expose an is_system() flag; this
-    // check will be added once the identity layer tracks that attribute.
-    let _ = &context;
+    // Block system users from sending custom notifications.
+    if context.user.is_system {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::error(
+                "Forbidden",
+                "System users cannot send custom notifications.",
+            )),
+        )
+            .into_response());
+    }
 
-    // Full notification dispatch is not yet wired in the Rust backend.
-    // Return 204 No Content to match the Go handler's success response.
+    // Custom notification template UUID (matches Go's TemplateCustomNotification).
+    let template_id = Uuid::parse_str("39b1e189-c857-4b0c-877a-511144c18516").unwrap_or_default();
+
+    // Build the JSON payload matching the Go handler's label map.
+    // Include a minute-bucketed timestamp to bypass per-day deduplication for
+    // self-sends, matching the Go implementation.
+    let now = OffsetDateTime::now_utc();
+    let dedupe_ts = now
+        .replace_second(0)
+        .unwrap_or(now)
+        .replace_nanosecond(0)
+        .unwrap_or(now);
+    let payload = serde_json::json!({
+        "custom_title": content.title,
+        "custom_message": content.message,
+        "dedupe_bypass_ts": dedupe_ts.format(&time::format_description::well_known::Rfc3339).unwrap_or_default(),
+    });
+
+    let user_id = context.user.id;
+
+    // Enqueue the notification for inbox delivery.  The dispatch service will
+    // pick this up on its next poll cycle and deliver it.
+    let input = EnqueueNotificationMessageInput {
+        id: Uuid::new_v4(),
+        user_id,
+        notification_template_id: template_id,
+        method: NotificationMethod::Inbox,
+        payload: payload.to_string(),
+        targets: vec![user_id],
+        created_by: user_id.to_string(),
+    };
+    state
+        .store
+        .enqueue_notification_message(&input)
+        .await
+        .map_err(AppError::from)?;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }

@@ -1366,6 +1366,7 @@ pub(crate) mod tests {
         OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_TOKEN_HEADER,
         hash_password,
     };
+    use coder_core::ports::EnqueueNotificationMessageInput;
     use coder_core::ports::{
         ProvisionerJobLogRecord as PortsJobLogRecord,
         ProvisionerJobTimingRecord as PortsJobTimingRecord,
@@ -7446,6 +7447,31 @@ pub(crate) mod tests {
         // -----------------------------------------------------------------
         // Notification Messages
         // -----------------------------------------------------------------
+
+        async fn enqueue_notification_message(
+            &self,
+            input: &EnqueueNotificationMessageInput,
+        ) -> Result<(), StorageError> {
+            use coder_core::identity::NotificationMessageStatus;
+            let msg = NotificationMessageRecord {
+                id: input.id,
+                user_id: input.user_id,
+                notification_template_id: input.notification_template_id,
+                method: input.method,
+                status: NotificationMessageStatus::Pending,
+                attempt_count: 0,
+                input_json: input.payload.clone(),
+                targets_json: serde_json::to_string(&input.targets)
+                    .unwrap_or_else(|_| "[]".to_owned()),
+                created_at: time::OffsetDateTime::now_utc(),
+                updated_at: time::OffsetDateTime::now_utc(),
+            };
+            self.notification_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(msg);
+            Ok(())
+        }
 
         async fn acquire_pending_notification_messages(
             &self,
@@ -21169,7 +21195,8 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn happy_post_custom_notification() -> Result<(), Box<dyn Error>> {
-        let app = build_router(test_state(true)?, None);
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
 
         let response = call(
@@ -21188,6 +21215,81 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Verify that the notification was actually enqueued in the store.
+        let messages = store
+            .notification_messages
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+        assert_eq!(messages.len(), 1, "expected one enqueued notification");
+        let msg = &messages[0];
+        assert_eq!(
+            msg.notification_template_id,
+            Uuid::parse_str("39b1e189-c857-4b0c-877a-511144c18516")?,
+            "should use TemplateCustomNotification UUID"
+        );
+        assert_eq!(
+            msg.method,
+            coder_core::identity::NotificationMethod::Inbox,
+            "should enqueue as inbox notification"
+        );
+        // Verify the payload contains the custom title and message.
+        let payload: serde_json::Value = serde_json::from_str(&msg.input_json)?;
+        assert_eq!(
+            payload.get("custom_title").and_then(|v| v.as_str()),
+            Some("Test Title")
+        );
+        assert_eq!(
+            payload.get("custom_message").and_then(|v| v.as_str()),
+            Some("Test message body")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn post_custom_notification_rejects_system_user() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Mark all cached sessions as system users so the auth middleware
+        // returns an AuthenticatedUser with is_system == true.
+        {
+            let mut sessions = store
+                .sessions
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            for user in sessions.values_mut() {
+                user.is_system = true;
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &json!({
+                    "content": {
+                        "title": "Blocked",
+                        "message": "Should not reach store"
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Verify nothing was enqueued.
+        let messages = store
+            .notification_messages
+            .lock()
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+        assert!(
+            messages.is_empty(),
+            "system user should not be able to enqueue notifications"
+        );
         Ok(())
     }
 

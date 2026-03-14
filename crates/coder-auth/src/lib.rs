@@ -2919,6 +2919,7 @@ mod tests {
             org_roles: vec![],
             login_type: user.login_type,
             status: user.status,
+            is_system: user.is_system,
         }
     }
 
@@ -3381,6 +3382,7 @@ mod tests {
                 org_roles: vec![],
                 login_type: LoginType::Password,
                 status: UserStatus::Active,
+                is_system: false,
             },
             response: LoginWithPasswordResponse {
                 session_token: String::new(),

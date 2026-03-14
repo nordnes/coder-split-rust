@@ -1097,6 +1097,14 @@ mod tests {
 
         // ----- Notification overrides -----
 
+        async fn enqueue_notification_message(
+            &self,
+            _input: &coder_core::ports::EnqueueNotificationMessageInput,
+        ) -> Result<(), coder_core::ports::StorageError> {
+            self.maybe_err()?;
+            Ok(())
+        }
+
         async fn acquire_pending_notification_messages(
             &self,
             _limit: u32,
