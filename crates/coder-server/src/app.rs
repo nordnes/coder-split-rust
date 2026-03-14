@@ -1451,7 +1451,6 @@ pub(crate) mod tests {
         }
     }
 
-
     /// Audit sink that persists events to the FakeStore, bridging the gap
     /// between `state.audit.record()` and `state.store.list_audit_logs()`.
     #[derive(Debug)]
@@ -1468,8 +1467,14 @@ pub(crate) mod tests {
                 time: OffsetDateTime::now_utc(),
                 ip: String::new(),
                 user_agent: String::new(),
-                resource_type: serde_json::to_value(event.resource).ok().and_then(|v| v.as_str().map(String::from)).unwrap_or_default(),
-                resource_id: event.target_id.as_deref().and_then(|s| Uuid::try_parse(s).ok()),
+                resource_type: serde_json::to_value(event.resource)
+                    .ok()
+                    .and_then(|v| v.as_str().map(String::from))
+                    .unwrap_or_default(),
+                resource_id: event
+                    .target_id
+                    .as_deref()
+                    .and_then(|s| Uuid::try_parse(s).ok()),
                 resource_target: event.target_id.unwrap_or_default(),
                 resource_icon: String::new(),
                 action: event.action.as_str().to_owned(),
@@ -14543,7 +14548,7 @@ pub(crate) mod tests {
     }
 
     /// Helper: insert a connected agent AND the full workspace chain (resource
-    /// → build → workspace) so that `authorize_agent_workspace` / 
+    /// → build → workspace) so that `authorize_agent_workspace` /
     /// `find_workspace_by_agent_id` succeeds.
     fn insert_agent_with_workspace(
         store: &FakeStore,
@@ -35198,7 +35203,9 @@ pub(crate) mod tests {
         let store_trait: Arc<dyn AppStore> = store.clone();
         // Use FakeStoreAuditSink so audit events recorded via state.audit
         // are persisted to FakeStore and visible via GET /api/v2/audit.
-        let audit: Arc<dyn AuditSink> = Arc::new(FakeStoreAuditSink { store: store.clone() });
+        let audit: Arc<dyn AuditSink> = Arc::new(FakeStoreAuditSink {
+            store: store.clone(),
+        });
         let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
             Arc::new(coder_core::pubsub::InMemoryPubSub::new());
         let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
@@ -35217,9 +35224,9 @@ pub(crate) mod tests {
             agent_provider,
             coordinator,
             derp_tracker,
-            coder_connectivity::derp::DerpServer::new(
-                coder_connectivity::derp::NodeKey::new([0u8; 32]),
-            ),
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         )?;
