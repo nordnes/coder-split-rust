@@ -15,8 +15,8 @@
 //! * [`NotificationDispatchError`] — transport-level delivery failures
 //! * [`Webpusher`] — Web Push dispatcher with VAPID key management
 //!
-//! Email dispatch is currently stubbed (requires `lettre` wiring); webhook
-//! and inbox delivery are fully implemented.
+//! Email dispatch uses [`lettre`] for SMTP delivery with TLS/STARTTLS support;
+//! webhook and inbox delivery are also fully implemented.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -28,6 +28,9 @@ use coder_core::AppStore;
 use coder_core::IdentityStore;
 use coder_core::api::{WebpushMessage, WebpushSubscription};
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
+use lettre::message::{Mailbox, MultiPart, SinglePart, header::ContentType};
+use lettre::transport::smtp::authentication::Credentials;
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor};
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -42,6 +45,17 @@ pub const STATUS: &str = "active";
 const DISPATCH_BATCH_SIZE: u32 = 50;
 const MAX_DISPATCH_ATTEMPTS: u32 = 3;
 
+/// TLS mode for the SMTP connection.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SmtpTlsMode {
+    /// No encryption (plain text). Not recommended for production.
+    None,
+    /// Implicit TLS — connect with TLS from the start (typically port 465).
+    Tls,
+    /// Opportunistic STARTTLS — upgrade a plain connection to TLS (typically port 587).
+    StartTls,
+}
+
 /// Configuration for the notification dispatch pipeline.
 #[derive(Clone, Debug)]
 pub struct NotificationConfig {
@@ -51,6 +65,12 @@ pub struct NotificationConfig {
     pub smtp_port: u16,
     /// Sender email address for outgoing notifications.
     pub smtp_from: String,
+    /// SMTP authentication username (empty = no auth).
+    pub smtp_username: String,
+    /// SMTP authentication password.
+    pub smtp_password: String,
+    /// TLS mode for the SMTP connection.
+    pub smtp_tls_mode: SmtpTlsMode,
     /// Webhook timeout in seconds.
     pub webhook_timeout_secs: u64,
 }
@@ -61,6 +81,9 @@ impl Default for NotificationConfig {
             smtp_host: String::new(),
             smtp_port: 587,
             smtp_from: String::new(),
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_tls_mode: SmtpTlsMode::StartTls,
             webhook_timeout_secs: 30,
         }
     }
@@ -178,18 +201,21 @@ where
             ));
         }
 
-        // A full SMTP implementation using `lettre` will be wired in when
-        // SMTP credentials are provisioned. Until then, return an error so the
-        // message is not incorrectly marked as Sent.
-        warn!(
+        let email_msg = build_email_message(&self.config, message)?;
+        let transport = build_smtp_transport(&self.config)?;
+
+        transport
+            .send(email_msg)
+            .await
+            .map_err(|e| NotificationDispatchError::Transport(format!("SMTP send failed: {e}")))?;
+
+        info!(
             message_id = %message.id,
             user_id = %message.user_id,
             smtp_host = %self.config.smtp_host,
-            "email dispatch not yet implemented"
+            "email notification dispatched"
         );
-        Err(NotificationDispatchError::Transport(
-            "SMTP email dispatch is not yet implemented".to_owned(),
-        ))
+        Ok(())
     }
 
     async fn dispatch_webhook(
@@ -298,6 +324,146 @@ async fn run_dispatch_loop<S>(
             Err(error) => warn!(error = %error, "notification dispatch cycle failed"),
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// SMTP email helpers
+// ---------------------------------------------------------------------------
+
+/// Payload extracted from the notification message JSON for email content.
+struct EmailContent {
+    /// Recipient email address.
+    to: String,
+    /// Email subject line (from notification title).
+    subject: String,
+    /// Plain-text body.
+    body_text: String,
+    /// HTML body (if present).
+    body_html: Option<String>,
+}
+
+/// Extracts email content from a [`NotificationMessageRecord`].
+///
+/// The `targets_json` is expected to contain the recipient email address under
+/// a `"email"` key.  The `input_json` is expected to contain `"title"` and
+/// `"body"` (and optionally `"body_html"`) keys for the email content.
+fn extract_email_content(
+    message: &coder_core::identity::NotificationMessageRecord,
+) -> Result<EmailContent, NotificationDispatchError> {
+    let targets: serde_json::Value = serde_json::from_str(&message.targets_json)
+        .map_err(|e| NotificationDispatchError::Transport(format!("invalid targets JSON: {e}")))?;
+
+    let to = targets
+        .get("email")
+        .and_then(|v| v.as_str())
+        .map(String::from)
+        .unwrap_or_default();
+
+    if to.is_empty() {
+        return Err(NotificationDispatchError::ConfigMissing(
+            "recipient email address not found in targets".to_owned(),
+        ));
+    }
+
+    let input: serde_json::Value = serde_json::from_str(&message.input_json)
+        .map_err(|e| NotificationDispatchError::Transport(format!("invalid input JSON: {e}")))?;
+
+    let subject = input
+        .get("title")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Notification")
+        .to_owned();
+
+    let body_text = input
+        .get("body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    let body_html = input
+        .get("body_html")
+        .and_then(|v| v.as_str())
+        .map(String::from);
+
+    Ok(EmailContent {
+        to,
+        subject,
+        body_text,
+        body_html,
+    })
+}
+
+/// Builds a [`Message`] from the notification config and message record.
+fn build_email_message(
+    config: &NotificationConfig,
+    message: &coder_core::identity::NotificationMessageRecord,
+) -> Result<Message, NotificationDispatchError> {
+    let content = extract_email_content(message)?;
+
+    let from_mailbox: Mailbox = config.smtp_from.parse().map_err(|e| {
+        NotificationDispatchError::ConfigMissing(format!("invalid from address: {e}"))
+    })?;
+
+    let to_mailbox: Mailbox = content.to.parse().map_err(|e| {
+        NotificationDispatchError::Transport(format!("invalid recipient address: {e}"))
+    })?;
+
+    let builder = Message::builder()
+        .from(from_mailbox)
+        .to(to_mailbox)
+        .subject(content.subject);
+
+    let email = if let Some(html) = content.body_html {
+        builder.multipart(
+            MultiPart::alternative()
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_PLAIN)
+                        .body(content.body_text),
+                )
+                .singlepart(
+                    SinglePart::builder()
+                        .header(ContentType::TEXT_HTML)
+                        .body(html),
+                ),
+        )
+    } else {
+        builder.body(content.body_text)
+    };
+
+    email.map_err(|e| NotificationDispatchError::Transport(format!("failed to build email: {e}")))
+}
+
+/// Builds an async SMTP transport from the notification config.
+fn build_smtp_transport(
+    config: &NotificationConfig,
+) -> Result<AsyncSmtpTransport<Tokio1Executor>, NotificationDispatchError> {
+    let builder = match config.smtp_tls_mode {
+        SmtpTlsMode::Tls => AsyncSmtpTransport::<Tokio1Executor>::relay(&config.smtp_host)
+            .map_err(|e| {
+                NotificationDispatchError::Transport(format!("SMTP relay TLS error: {e}"))
+            })?,
+        SmtpTlsMode::StartTls => AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(
+            &config.smtp_host,
+        )
+        .map_err(|e| NotificationDispatchError::Transport(format!("SMTP STARTTLS error: {e}")))?,
+        SmtpTlsMode::None => {
+            AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(&config.smtp_host)
+        }
+    };
+
+    let builder = builder.port(config.smtp_port);
+
+    let builder = if !config.smtp_username.is_empty() {
+        builder.credentials(Credentials::new(
+            config.smtp_username.clone(),
+            config.smtp_password.clone(),
+        ))
+    } else {
+        builder
+    };
+
+    Ok(builder.build())
 }
 
 // ---------------------------------------------------------------------------
@@ -1403,6 +1569,9 @@ mod tests {
         assert!(config.smtp_host.is_empty());
         assert_eq!(config.smtp_port, 587);
         assert!(config.smtp_from.is_empty());
+        assert!(config.smtp_username.is_empty());
+        assert!(config.smtp_password.is_empty());
+        assert_eq!(config.smtp_tls_mode, SmtpTlsMode::StartTls);
         assert_eq!(config.webhook_timeout_secs, 30);
     }
 
@@ -1448,6 +1617,7 @@ mod tests {
             smtp_port: 465,
             smtp_from: "noreply@example.com".to_owned(),
             webhook_timeout_secs: 15,
+            ..NotificationConfig::default()
         };
         let service = make_service(store, config.clone());
         assert_eq!(service.config().smtp_host, "mail.example.com");
@@ -1655,6 +1825,7 @@ mod tests {
             smtp_port: 2525,
             smtp_from: "sender@custom.com".to_owned(),
             webhook_timeout_secs: 5,
+            ..NotificationConfig::default()
         };
         let service = make_service(store, config);
         assert_eq!(service.config().smtp_host, "custom.smtp.example.com");
@@ -1925,5 +2096,267 @@ mod tests {
         assert!(!encoded.contains('+'), "should use URL-safe encoding");
         assert!(!encoded.contains('/'), "should use URL-safe encoding");
         assert!(!encoded.contains('='), "should have no padding");
+    }
+
+    // ── 26. Email content extraction ─────────────────────────
+
+    fn make_email_message(targets_json: &str, input_json: &str) -> NotificationMessageRecord {
+        let now = OffsetDateTime::now_utc();
+        NotificationMessageRecord {
+            id: Uuid::new_v4(),
+            user_id: Uuid::new_v4(),
+            notification_template_id: Uuid::new_v4(),
+            method: NotificationMethod::Email,
+            status: NotificationMessageStatus::Pending,
+            attempt_count: 0,
+            input_json: input_json.to_owned(),
+            targets_json: targets_json.to_owned(),
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    fn make_smtp_config() -> NotificationConfig {
+        NotificationConfig {
+            smtp_host: "mail.example.com".to_owned(),
+            smtp_port: 587,
+            smtp_from: "noreply@example.com".to_owned(),
+            smtp_username: "user".to_owned(),
+            smtp_password: "pass".to_owned(),
+            smtp_tls_mode: SmtpTlsMode::StartTls,
+            webhook_timeout_secs: 30,
+        }
+    }
+
+    #[test]
+    fn extract_email_content_with_valid_json() {
+        let msg = make_email_message(
+            r#"{"email":"user@example.com"}"#,
+            r#"{"title":"Hello","body":"World"}"#,
+        );
+        let content =
+            extract_email_content(&msg).unwrap_or_else(|e| panic!("extraction failed: {e}"));
+        assert_eq!(content.to, "user@example.com");
+        assert_eq!(content.subject, "Hello");
+        assert_eq!(content.body_text, "World");
+        assert!(content.body_html.is_none());
+    }
+
+    #[test]
+    fn extract_email_content_with_html_body() {
+        let msg = make_email_message(
+            r#"{"email":"user@example.com"}"#,
+            r#"{"title":"Hi","body":"plain","body_html":"<b>rich</b>"}"#,
+        );
+        let content =
+            extract_email_content(&msg).unwrap_or_else(|e| panic!("extraction failed: {e}"));
+        assert_eq!(content.body_html.as_deref(), Some("<b>rich</b>"));
+    }
+
+    #[test]
+    fn extract_email_content_missing_email_returns_error() {
+        let msg = make_email_message(r#"{"other":"value"}"#, r#"{"title":"Hi","body":"text"}"#);
+        let result = extract_email_content(&msg);
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("recipient email"))
+        );
+    }
+
+    #[test]
+    fn extract_email_content_defaults_subject_when_missing() {
+        let msg = make_email_message(r#"{"email":"user@example.com"}"#, r#"{"body":"text only"}"#);
+        let content =
+            extract_email_content(&msg).unwrap_or_else(|e| panic!("extraction failed: {e}"));
+        assert_eq!(content.subject, "Notification");
+    }
+
+    #[test]
+    fn extract_email_content_invalid_targets_json() {
+        let msg = make_email_message("not valid json", r#"{"title":"Hi"}"#);
+        let result = extract_email_content(&msg);
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("invalid targets JSON"))
+        );
+    }
+
+    // ── 27. Email message building ──────────────────────────
+
+    #[test]
+    fn build_email_message_plain_text() {
+        let config = make_smtp_config();
+        let msg = make_email_message(
+            r#"{"email":"recipient@example.com"}"#,
+            r#"{"title":"Test Subject","body":"Plain text body"}"#,
+        );
+        let email =
+            build_email_message(&config, &msg).unwrap_or_else(|e| panic!("build failed: {e}"));
+        let formatted = email.formatted();
+        let formatted_str = String::from_utf8_lossy(&formatted);
+        assert!(
+            formatted_str.contains("Test Subject"),
+            "formatted email should contain subject"
+        );
+    }
+
+    #[test]
+    fn build_email_message_multipart_html() {
+        let config = make_smtp_config();
+        let msg = make_email_message(
+            r#"{"email":"recipient@example.com"}"#,
+            r#"{"title":"HTML Test","body":"plain","body_html":"<h1>Rich</h1>"}"#,
+        );
+        let email =
+            build_email_message(&config, &msg).unwrap_or_else(|e| panic!("build failed: {e}"));
+        // The formatted body should contain both parts
+        let formatted = email.formatted();
+        let body = String::from_utf8_lossy(&formatted);
+        assert!(body.contains("plain"), "should contain plain text part");
+        assert!(body.contains("Rich"), "should contain HTML part");
+    }
+
+    #[test]
+    fn build_email_message_invalid_from_address() {
+        let mut config = make_smtp_config();
+        config.smtp_from = "not-an-email".to_owned();
+        let msg = make_email_message(
+            r#"{"email":"user@example.com"}"#,
+            r#"{"title":"Hi","body":"text"}"#,
+        );
+        let result = build_email_message(&config, &msg);
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("invalid from address"))
+        );
+    }
+
+    #[test]
+    fn build_email_message_invalid_recipient_address() {
+        let config = make_smtp_config();
+        let msg = make_email_message(
+            r#"{"email":"not-valid-email"}"#,
+            r#"{"title":"Hi","body":"text"}"#,
+        );
+        let result = build_email_message(&config, &msg);
+        assert!(result.is_err());
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("invalid recipient address"))
+        );
+    }
+
+    // ── 28. SMTP transport construction ─────────────────────
+
+    #[test]
+    fn build_smtp_transport_starttls_mode() {
+        let config = make_smtp_config();
+        let result = build_smtp_transport(&config);
+        assert!(result.is_ok(), "STARTTLS transport should build");
+    }
+
+    #[test]
+    fn build_smtp_transport_tls_mode() {
+        let mut config = make_smtp_config();
+        config.smtp_tls_mode = SmtpTlsMode::Tls;
+        let result = build_smtp_transport(&config);
+        assert!(result.is_ok(), "TLS transport should build");
+    }
+
+    #[test]
+    fn build_smtp_transport_none_mode() {
+        let mut config = make_smtp_config();
+        config.smtp_tls_mode = SmtpTlsMode::None;
+        let result = build_smtp_transport(&config);
+        assert!(result.is_ok(), "plain transport should build");
+    }
+
+    #[test]
+    fn build_smtp_transport_without_credentials() {
+        let mut config = make_smtp_config();
+        config.smtp_username = String::new();
+        config.smtp_password = String::new();
+        let result = build_smtp_transport(&config);
+        assert!(result.is_ok(), "transport without auth should build");
+    }
+
+    // ── 29. SmtpTlsMode equality ────────────────────────────
+
+    #[test]
+    fn smtp_tls_mode_equality() {
+        assert_eq!(SmtpTlsMode::Tls, SmtpTlsMode::Tls);
+        assert_eq!(SmtpTlsMode::StartTls, SmtpTlsMode::StartTls);
+        assert_eq!(SmtpTlsMode::None, SmtpTlsMode::None);
+        assert_ne!(SmtpTlsMode::Tls, SmtpTlsMode::StartTls);
+        assert_ne!(SmtpTlsMode::Tls, SmtpTlsMode::None);
+    }
+
+    // ── 30. Email dispatch with configured SMTP but unreachable server ─
+
+    #[tokio::test]
+    async fn dispatch_email_with_smtp_configured_but_unreachable() {
+        let msg = make_email_message(
+            r#"{"email":"user@example.com"}"#,
+            r#"{"title":"Test","body":"Hello"}"#,
+        );
+        let msg_id = msg.id;
+        let store = MockStore::new().with_pending(vec![msg]);
+        let config = NotificationConfig {
+            smtp_host: "127.0.0.1".to_owned(),
+            smtp_port: 1,
+            smtp_from: "noreply@example.com".to_owned(),
+            smtp_tls_mode: SmtpTlsMode::None,
+            ..NotificationConfig::default()
+        };
+        let service = make_service(store.clone(), config);
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 1);
+
+        let updates = store
+            .status_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, msg_id);
+        // Should fail but not panic — marked as temporary failure
+        assert_eq!(updates[0].1, NotificationMessageStatus::TemporaryFailure);
+    }
+
+    // ── 31. Email dispatch without recipient email in targets ─
+
+    #[tokio::test]
+    async fn dispatch_email_missing_recipient_records_failure() {
+        let msg = make_email_message(r#"{"other":"value"}"#, r#"{"title":"Test","body":"Hello"}"#);
+        let msg_id = msg.id;
+        let store = MockStore::new().with_pending(vec![msg]);
+        let config = make_smtp_config();
+        let service = make_service(store.clone(), config);
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 1);
+
+        let updates = store
+            .status_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, msg_id);
+        assert_eq!(updates[0].1, NotificationMessageStatus::TemporaryFailure);
     }
 }
