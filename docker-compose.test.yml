@@ -16,8 +16,6 @@ services:
       POSTGRES_DB: coder_test
     ports:
       - "${TEST_PG_PORT:-5433}:5432"
-    volumes:
-      - test_postgres_data:/var/lib/postgresql/data
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U coder -d coder_test"]
       interval: 5s
@@ -25,6 +23,3 @@ services:
       retries: 5
     tmpfs:
       - /var/lib/postgresql/data
-
-volumes:
-  test_postgres_data:

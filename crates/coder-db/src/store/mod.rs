@@ -8188,6 +8188,7 @@ mod tests {
             "archived=Some(true) should include archived chat"
         );
 
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 
@@ -8492,6 +8493,7 @@ mod tests {
         assert_eq!(found.id, file.id);
         assert_eq!(found.data, b"hello world");
 
+        cleanup(&pool, &[user_id]).await;
         Ok(())
     }
 }

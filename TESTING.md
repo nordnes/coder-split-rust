@@ -66,10 +66,10 @@ Migrations are **not** baked into the Docker image. They are applied at runtime 
 The GitHub Actions CI workflow (`.github/workflows/ci.yml`) automatically:
 1. Starts a PostgreSQL 16 service container
 2. Sets `DATABASE_URL`, `CODER_POSTGRES_URL`, and `TEST_DATABASE_URL`
-3. Runs `cargo test --locked --workspace` (unit tests)
-4. Runs `cargo test --locked --workspace -- --ignored` (integration tests)
+3. Runs `cargo test --locked --workspace` (unit tests + `coder-integration-tests` HTTP-level tests which use `skip_without_db!()` instead of `#[ignore]`)
+4. Runs `cargo test --locked --workspace -- --ignored` (`coder-db` store-level integration tests marked with `#[ignore]`)
 
-If any integration test fails, the CI build fails.
+If any test fails, the CI build fails.
 
 ## Troubleshooting
 
