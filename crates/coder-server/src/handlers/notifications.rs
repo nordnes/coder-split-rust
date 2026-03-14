@@ -834,9 +834,12 @@ pub(crate) async fn post_user_webpush_test(
     let result = webpusher
         .send_test_to_user(target_user.id)
         .await
-        .map_err(|e| AppError::InternalError {
-            message: "web push test failed".to_owned(),
-            detail: e.to_string(),
+        .map_err(|e| match e {
+            coder_notifications::WebpushError::Storage(se) => AppError::Storage(se),
+            other => AppError::InternalError {
+                message: "web push test failed".to_owned(),
+                detail: other.to_string(),
+            },
         })?;
 
     Ok((StatusCode::OK, Json(result)).into_response())
