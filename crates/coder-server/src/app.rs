@@ -15969,7 +15969,9 @@ pub(crate) mod tests {
 
         // Configure VAPID keys so the handler can sign push messages.
         let test_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIMwug/U2ds75hkEIeou9s0kj1ziCJETswt5S9ztJ2L5SoAoGCCqGSM49\nAwEHoUQDQgAEyjUeooXqyQxljKSu17126pjAEPTyYNApO6dGQl0PexMn0T7LI3qw\nmU9ZOko2Gn7LYp5LqgA0cX6rfDftsKVvtQ==\n-----END EC PRIVATE KEY-----";
-        store.upsert_webpush_vapid_keys("test_public_key", test_pem).await?;
+        store
+            .upsert_webpush_vapid_keys("test_public_key", test_pem)
+            .await?;
 
         let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
@@ -37010,7 +37012,11 @@ pub(crate) mod tests {
         // Without VAPID keys configured, the endpoint should return 500.
         let response = call(
             app,
-            authenticated_request(Method::POST, "/api/v2/users/me/webpush/test", &session_token)?,
+            authenticated_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/test",
+                &session_token,
+            )?,
         )
         .await?;
         assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
@@ -37032,7 +37038,9 @@ pub(crate) mod tests {
         // Configure VAPID keys so we pass that check.
         // Use a well-formed EC PEM key for the VAPID private key.
         let test_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIMwug/U2ds75hkEIeou9s0kj1ziCJETswt5S9ztJ2L5SoAoGCCqGSM49\nAwEHoUQDQgAEyjUeooXqyQxljKSu17126pjAEPTyYNApO6dGQl0PexMn0T7LI3qw\nmU9ZOko2Gn7LYp5LqgA0cX6rfDftsKVvtQ==\n-----END EC PRIVATE KEY-----";
-        store.upsert_webpush_vapid_keys("test_public_key", test_pem).await?;
+        store
+            .upsert_webpush_vapid_keys("test_public_key", test_pem)
+            .await?;
 
         let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
@@ -37040,7 +37048,11 @@ pub(crate) mod tests {
         // No subscriptions registered, should return 400.
         let response = call(
             app,
-            authenticated_request(Method::POST, "/api/v2/users/me/webpush/test", &session_token)?,
+            authenticated_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/test",
+                &session_token,
+            )?,
         )
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
@@ -37062,7 +37074,9 @@ pub(crate) mod tests {
         // Generate a real EC private key using openssl-compatible PEM.
         // This key is only for testing; it won't actually deliver to a real push service.
         let test_pem = "-----BEGIN EC PRIVATE KEY-----\nMHcCAQEEIMwug/U2ds75hkEIeou9s0kj1ziCJETswt5S9ztJ2L5SoAoGCCqGSM49\nAwEHoUQDQgAEyjUeooXqyQxljKSu17126pjAEPTyYNApO6dGQl0PexMn0T7LI3qw\nmU9ZOko2Gn7LYp5LqgA0cX6rfDftsKVvtQ==\n-----END EC PRIVATE KEY-----";
-        store.upsert_webpush_vapid_keys("test_public_key", test_pem).await?;
+        store
+            .upsert_webpush_vapid_keys("test_public_key", test_pem)
+            .await?;
 
         let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
@@ -37088,7 +37102,11 @@ pub(crate) mod tests {
         // will fail but the handler should still return 200 with counts.
         let response = call(
             app,
-            authenticated_request(Method::POST, "/api/v2/users/me/webpush/test", &session_token)?,
+            authenticated_request(
+                Method::POST,
+                "/api/v2/users/me/webpush/test",
+                &session_token,
+            )?,
         )
         .await?;
         assert_eq!(response.status(), StatusCode::OK);
@@ -37101,8 +37119,14 @@ pub(crate) mod tests {
             "expected completion message, got: {body}"
         );
         // The response should include success_count and failure_count fields.
-        assert!(body.get("success_count").is_some(), "missing success_count in {body}");
-        assert!(body.get("failure_count").is_some(), "missing failure_count in {body}");
+        assert!(
+            body.get("success_count").is_some(),
+            "missing success_count in {body}"
+        );
+        assert!(
+            body.get("failure_count").is_some(),
+            "missing failure_count in {body}"
+        );
         Ok(())
     }
 

@@ -832,8 +832,7 @@ pub(crate) async fn post_user_webpush_test(
 
     // Build a partial VAPID signature builder from the stored PEM private key.
     let partial_builder =
-        match web_push::VapidSignatureBuilder::from_pem_no_sub(vapid_keys.private_key.as_bytes())
-        {
+        match web_push::VapidSignatureBuilder::from_pem_no_sub(vapid_keys.private_key.as_bytes()) {
             Ok(builder) => builder,
             Err(err) => {
                 tracing::warn!(error = %err, "failed to parse VAPID private key");
@@ -863,7 +862,10 @@ pub(crate) async fn post_user_webpush_test(
             tracing::warn!(error = %err, "failed to serialize webpush payload");
             return Ok((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error("Failed to build notification payload.", "")),
+                Json(ApiResponse::error(
+                    "Failed to build notification payload.",
+                    "",
+                )),
             )
                 .into_response());
         }
