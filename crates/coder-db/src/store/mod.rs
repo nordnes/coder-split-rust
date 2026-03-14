@@ -8223,9 +8223,9 @@ mod tests {
         let msg_id = Uuid::new_v4();
         sqlx::query(
             r#"INSERT INTO notification_messages
-               (id, notification_template_id, user_id, method, status, payload, targets, created_at, updated_at)
+               (id, notification_template_id, user_id, method, status, created_by, payload, targets, created_at, updated_at)
                VALUES ($1, $2, $3, 'smtp'::notification_method, 'pending'::notification_message_status,
-                       '{"label":"test"}'::jsonb, ARRAY[$3]::uuid[], NOW(), NOW())"#,
+                       'test', '{"label":"test"}'::jsonb, ARRAY[$3]::uuid[], NOW(), NOW())"#,
         )
         .bind(msg_id)
         .bind(template_id)
