@@ -1,0 +1,30 @@
+# Docker Compose configuration for running PostgreSQL integration tests locally.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   DATABASE_URL="postgres://coder:coder@localhost:5433/coder_test" cargo test -p coder-db -- --ignored
+#   TEST_DATABASE_URL="postgres://coder:coder@localhost:5433/coder_test" cargo test -p coder-integration-tests
+#   docker compose -f docker-compose.test.yml down -v
+
+services:
+  test-postgres:
+    image: postgres:16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: coder
+      POSTGRES_PASSWORD: coder
+      POSTGRES_DB: coder_test
+    ports:
+      - "${TEST_PG_PORT:-5433}:5432"
+    volumes:
+      - test_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U coder -d coder_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    tmpfs:
+      - /var/lib/postgresql/data
+
+volumes:
+  test_postgres_data:

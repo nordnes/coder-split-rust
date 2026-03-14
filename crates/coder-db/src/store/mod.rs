@@ -8051,4 +8051,447 @@ mod tests {
 
         Ok(())
     }
+
+    // =========================================================================
+    // PR #162 verification: list_user_memberships populates org_roles
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_user_memberships_org_roles_populated() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let suffix = uniq();
+        let user_id = create_test_user(&store, org_id, &suffix).await?;
+
+        // Assign an org-scoped role via raw SQL
+        sqlx::query(
+            "UPDATE organization_members SET roles = ARRAY['organization-admin']
+             WHERE user_id = $1 AND organization_id = $2",
+        )
+        .bind(user_id)
+        .bind(org_id)
+        .execute(&pool)
+        .await?;
+
+        let memberships = store.list_user_memberships(user_id).await?;
+        assert!(
+            !memberships.is_empty(),
+            "user should have at least one membership"
+        );
+
+        let membership = memberships
+            .iter()
+            .find(|m| m.organization_id == org_id)
+            .unwrap_or_else(|| panic!("membership for org_id should exist"));
+
+        // Verify the org-scoped roles are populated (PR #162 fix)
+        assert!(
+            membership
+                .roles
+                .iter()
+                .any(|r| r.name == "organization-admin"),
+            "org_roles should contain 'organization-admin', got: {:?}",
+            membership.roles
+        );
+
+        // Verify user metadata is populated
+        assert!(
+            !membership.username.is_empty(),
+            "username should be populated"
+        );
+        assert!(!membership.email.is_empty(), "email should be populated");
+
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    // =========================================================================
+    // PR #168 verification: list_chats_by_owner archived filtering
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_chats_by_owner_archived_filter_all_variants() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let model_config_id = Uuid::new_v4();
+
+        // Create two chats
+        let chat1 = store
+            .insert_chat(coder_core::InsertChatInput {
+                owner_id: user_id,
+                workspace_id: None,
+                parent_chat_id: None,
+                root_chat_id: None,
+                last_model_config_id: model_config_id,
+                title: "Active Chat".to_string(),
+            })
+            .await?;
+        let chat2 = store
+            .insert_chat(coder_core::InsertChatInput {
+                owner_id: user_id,
+                workspace_id: None,
+                parent_chat_id: None,
+                root_chat_id: None,
+                last_model_config_id: model_config_id,
+                title: "Archived Chat".to_string(),
+            })
+            .await?;
+
+        // Archive chat2
+        store.archive_chat(chat2.id).await?;
+
+        // archived = None => returns ALL chats for this owner
+        let all_chats = store.list_chats_by_owner(user_id, None).await?;
+        let all_ids: Vec<Uuid> = all_chats.iter().map(|c| c.id).collect();
+        assert!(
+            all_ids.contains(&chat1.id),
+            "archived=None should include active chat"
+        );
+        assert!(
+            all_ids.contains(&chat2.id),
+            "archived=None should include archived chat"
+        );
+
+        // archived = Some(false) => only non-archived chats
+        let active_chats = store.list_chats_by_owner(user_id, Some(false)).await?;
+        let active_ids: Vec<Uuid> = active_chats.iter().map(|c| c.id).collect();
+        assert!(
+            active_ids.contains(&chat1.id),
+            "archived=Some(false) should include active chat"
+        );
+        assert!(
+            !active_ids.contains(&chat2.id),
+            "archived=Some(false) should exclude archived chat"
+        );
+
+        // archived = Some(true) => only archived chats
+        let archived_chats = store.list_chats_by_owner(user_id, Some(true)).await?;
+        let archived_ids: Vec<Uuid> = archived_chats.iter().map(|c| c.id).collect();
+        assert!(
+            !archived_ids.contains(&chat1.id),
+            "archived=Some(true) should exclude active chat"
+        );
+        assert!(
+            archived_ids.contains(&chat2.id),
+            "archived=Some(true) should include archived chat"
+        );
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // PR #167 verification: notification message INSERT against real schema
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_notification_message_insert_and_acquire() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Seed notification template
+        let template_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO notification_templates (id, name, title_template, body_template, "group", actions, kind)
+               VALUES ($1, $2, 'Title {{.Label}}', 'Body text', NULL, '[]', 'system')
+               ON CONFLICT (id) DO NOTHING"#,
+        )
+        .bind(template_id)
+        .bind(format!("test-insert-{}", uniq()))
+        .execute(&pool)
+        .await?;
+
+        // Insert a pending notification message via raw SQL (simulating enqueue)
+        let msg_id = Uuid::new_v4();
+        sqlx::query(
+            r#"INSERT INTO notification_messages
+               (id, notification_template_id, user_id, method, status, payload, targets, created_at, updated_at)
+               VALUES ($1, $2, $3, 'smtp'::notification_method, 'pending'::notification_message_status,
+                       '{"label":"test"}'::jsonb, ARRAY[$3]::uuid[], NOW(), NOW())"#,
+        )
+        .bind(msg_id)
+        .bind(template_id)
+        .bind(user_id)
+        .execute(&pool)
+        .await?;
+
+        // Acquire the message via the store method
+        let acquired = store.acquire_pending_notification_messages(10, 5).await?;
+        let our_msg = acquired.iter().find(|m| m.id == msg_id);
+        assert!(our_msg.is_some(), "inserted message should be acquired");
+
+        let msg = our_msg.unwrap_or_else(|| panic!("message should exist"));
+        assert_eq!(msg.user_id, user_id);
+        assert_eq!(msg.notification_template_id, template_id);
+        assert_eq!(
+            msg.status,
+            coder_core::NotificationMessageStatus::Leased,
+            "acquired message should be leased"
+        );
+
+        // Update status to sent
+        let updated = store
+            .update_notification_message_status(msg_id, coder_core::NotificationMessageStatus::Sent)
+            .await?;
+        assert!(updated, "status update should succeed");
+
+        // Increment attempt count
+        let incremented = store
+            .increment_notification_message_attempt_count(msg_id)
+            .await?;
+        assert!(incremented, "attempt count increment should succeed");
+
+        // Clean up
+        let _ = sqlx::query("DELETE FROM notification_messages WHERE id = $1")
+            .bind(msg_id)
+            .execute(&pool)
+            .await;
+        let _ = sqlx::query("DELETE FROM notification_templates WHERE id = $1")
+            .bind(template_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Additional high-value store method tests
+    // =========================================================================
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_list_user_memberships_excludes_deleted_users() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Verify membership exists
+        let before = store.list_user_memberships(user_id).await?;
+        assert!(!before.is_empty(), "user should have memberships");
+
+        // Soft-delete the user
+        store.soft_delete_user(user_id).await?;
+
+        // Verify memberships are empty (deleted=false filter in the query)
+        let after = store.list_user_memberships(user_id).await?;
+        assert!(
+            after.is_empty(),
+            "soft-deleted user should have no memberships returned"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_persist_and_list_audit_logs_roundtrip() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let audit_id = Uuid::new_v4();
+        let resource_id = Uuid::new_v4();
+        let target = format!("audit-target-{}", uniq());
+        store
+            .insert_audit_log(coder_core::PersistAuditLogInput {
+                id: audit_id,
+                request_id: None,
+                time: OffsetDateTime::now_utc(),
+                ip: "127.0.0.1".to_string(),
+                user_agent: "test-agent".to_string(),
+                resource_type: "user".to_string(),
+                resource_id: Some(resource_id),
+                resource_target: target.clone(),
+                resource_icon: "".to_string(),
+                action: "create".to_string(),
+                diff: serde_json::json!({}),
+                status_code: 200,
+                additional_fields: serde_json::json!({}),
+                description: "test audit event".to_string(),
+                resource_link: "".to_string(),
+                is_deleted: false,
+                organization_id: Some(org_id),
+                user_id: Some(user_id),
+            })
+            .await?;
+
+        // List audit logs and find ours
+        let result = store
+            .list_audit_logs(coder_core::AuditLogListFilter {
+                search: target.clone(),
+                limit: 10,
+                offset: 0,
+            })
+            .await?;
+
+        assert!(
+            result.audit_logs.iter().any(|log| log.id == audit_id),
+            "should find our audit log by search"
+        );
+
+        // Clean up
+        let _ = sqlx::query("DELETE FROM audit_logs WHERE id = $1")
+            .bind(audit_id)
+            .execute(&pool)
+            .await;
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_organization_member_insert_and_list() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let tag = uniq();
+
+        // Create two users in the same org
+        let u1 = create_test_user(&store, org_id, &format!("orgmem1-{tag}")).await?;
+        let u2 = create_test_user(&store, org_id, &format!("orgmem2-{tag}")).await?;
+
+        // List organization members
+        let members = store
+            .list_organization_members(coder_core::OrganizationMemberListFilter {
+                organization_id: org_id,
+                search: String::new(),
+                limit: 1000,
+                offset: 0,
+            })
+            .await?;
+
+        let member_ids: Vec<Uuid> = members.iter().map(|m| m.user_id).collect();
+        assert!(member_ids.contains(&u1), "user1 should be an org member");
+        assert!(member_ids.contains(&u2), "user2 should be an org member");
+
+        // Verify member metadata
+        let m1 = members.iter().find(|m| m.user_id == u1);
+        assert!(m1.is_some(), "should find user1 in members");
+        assert!(
+            !m1.unwrap_or_else(|| panic!("should exist"))
+                .username
+                .is_empty()
+        );
+
+        cleanup(&pool, &[u1, u2]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_git_ssh_key_upsert_and_find() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        // Upsert SSH key
+        store
+            .upsert_git_ssh_key(
+                user_id,
+                "ssh-ed25519 AAAA... test@example.com",
+                "-----BEGIN OPENSSH PRIVATE KEY-----\ntest\n-----END OPENSSH PRIVATE KEY-----",
+            )
+            .await?;
+
+        // Find by user_id
+        let key = store.find_git_ssh_key(user_id).await?;
+        assert!(key.is_some(), "should find SSH key for user");
+        let key = key.unwrap_or_else(|| panic!("key should exist"));
+        assert!(
+            key.public_key.contains("ssh-ed25519"),
+            "public key should contain the algorithm"
+        );
+        assert_eq!(key.user_id, user_id);
+
+        // Upsert again (should update, not create)
+        store
+            .upsert_git_ssh_key(
+                user_id,
+                "ssh-ed25519 BBBB... updated@example.com",
+                "-----BEGIN OPENSSH PRIVATE KEY-----\nupdated\n-----END OPENSSH PRIVATE KEY-----",
+            )
+            .await?;
+
+        let updated = store.find_git_ssh_key(user_id).await?;
+        assert!(updated.is_some());
+        assert!(
+            updated
+                .unwrap_or_else(|| panic!("should exist"))
+                .public_key
+                .contains("BBBB"),
+            "SSH key should be updated"
+        );
+
+        cleanup(&pool, &[user_id]).await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore]
+    async fn test_chat_file_insert_and_find() -> TestResult {
+        let store = match setup_store().await? {
+            Some(s) => s,
+            None => return Ok(()),
+        };
+        let pool = store.pool();
+        let org_id = ensure_default_org(&pool).await?;
+        let user_id = create_test_user(&store, org_id, &uniq()).await?;
+
+        let file = store
+            .insert_chat_file(coder_core::InsertChatFileInput {
+                owner_id: user_id,
+                organization_id: org_id,
+                name: "test-file.txt".to_string(),
+                mimetype: "text/plain".to_string(),
+                data: b"hello world".to_vec(),
+            })
+            .await?;
+
+        assert_eq!(file.name, "test-file.txt");
+        assert_eq!(file.mimetype, "text/plain");
+        assert_eq!(file.data, b"hello world");
+        assert_eq!(file.owner_id, user_id);
+        assert_eq!(file.organization_id, org_id);
+
+        // Find by ID
+        let found = store.find_chat_file_by_id(file.id).await?;
+        assert!(found.is_some(), "should find chat file by ID");
+        let found = found.unwrap_or_else(|| panic!("file should exist"));
+        assert_eq!(found.id, file.id);
+        assert_eq!(found.data, b"hello world");
+
+        Ok(())
+    }
 }

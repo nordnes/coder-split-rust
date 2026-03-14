@@ -110,6 +110,8 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-test-${{ matrix.toolchain }}-
       - run: cargo test --locked --workspace
+      - name: Run integration tests (requires PostgreSQL)
+        run: cargo test --locked --workspace -- --ignored
 
   audit:
     name: Security Audit
