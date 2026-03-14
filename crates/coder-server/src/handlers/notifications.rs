@@ -502,6 +502,21 @@ pub(crate) async fn watch_inbox_notifications(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
+    // RBAC: verify the actor can read their own notifications.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::InboxNotification).with_owner(context.user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read inbox notifications.",
+        ));
+    }
+
     let channel = coder_core::pubsub::inbox_notification_channel(context.user.id);
     let subscription = state
         .pubsub
