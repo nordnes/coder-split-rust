@@ -688,7 +688,11 @@ pub(crate) async fn watch_chats(
     };
 
     Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(SSE_KEEPALIVE_INTERVAL)
+                .text("ping"),
+        )
         .into_response())
 }
 
@@ -851,7 +855,11 @@ pub(crate) async fn stream_chat(
     };
 
     Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(SSE_KEEPALIVE_INTERVAL)
+                .text("ping"),
+        )
         .into_response())
 }
 

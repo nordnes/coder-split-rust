@@ -1,7 +1,5 @@
 //! Notification and inbox handlers.
 
-use std::time::Duration;
-
 use super::*;
 
 pub(crate) async fn get_notifications_settings(
@@ -493,18 +491,6 @@ pub(crate) async fn put_mark_all_inbox_notifications_read(
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
-/// SSE keepalive interval for inbox watch streams.
-///
-/// Proxies and load balancers often drop idle connections after 30-60 seconds.
-/// A 15-second interval keeps the connection alive through most intermediaries.
-const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
-
-/// SSE retry hint sent to clients in the initial event.
-///
-/// Tells conformant EventSource clients to wait 3 seconds before reconnecting
-/// after an unexpected disconnect.
-const SSE_RETRY_MILLIS: Duration = Duration::from_millis(3000);
-
 pub(crate) async fn watch_inbox_notifications(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -554,7 +540,7 @@ pub(crate) async fn watch_inbox_notifications(
                     Ok(json) => {
                         // Include `retry:` hint in the first event so clients
                         // know how long to wait before reconnecting.
-                        yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_MILLIS));
+                        yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_DURATION));
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "failed to serialize initial inbox SSE event");
@@ -568,7 +554,7 @@ pub(crate) async fn watch_inbox_notifications(
                     data: None,
                 };
                 if let Ok(json) = serde_json::to_string(&err_sse) {
-                    yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_MILLIS));
+                    yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_DURATION));
                 }
             }
         }
