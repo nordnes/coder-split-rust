@@ -6,6 +6,7 @@
 use std::{collections::HashMap, fmt, sync::Arc};
 
 use async_trait::async_trait;
+use coder_core::WorkspaceAgentListeningPort;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::Mutex;
@@ -82,6 +83,16 @@ pub trait AgentProvider: Send + Sync {
 
     /// Returns debug info about all currently connected agents.
     async fn debug_info(&self) -> Vec<AgentConnectionInfo>;
+
+    /// Stores the latest set of listening ports reported by an agent.
+    ///
+    /// Replaces any previously stored ports for the given agent.
+    async fn set_listening_ports(&self, agent_id: Uuid, ports: Vec<WorkspaceAgentListeningPort>);
+
+    /// Returns the listening ports most recently reported by the given agent.
+    ///
+    /// Returns an empty vector if the agent has not reported any ports.
+    async fn get_listening_ports(&self, agent_id: Uuid) -> Vec<WorkspaceAgentListeningPort>;
 }
 
 // ---------------------------------------------------------------------------
@@ -95,6 +106,7 @@ pub trait AgentProvider: Send + Sync {
 #[derive(Debug, Default)]
 pub struct InMemoryAgentProvider {
     agents: Mutex<HashMap<Uuid, Arc<dyn AgentConnection>>>,
+    listening_ports: Mutex<HashMap<Uuid, Vec<WorkspaceAgentListeningPort>>>,
 }
 
 impl InMemoryAgentProvider {
@@ -103,6 +115,7 @@ impl InMemoryAgentProvider {
     pub fn new() -> Self {
         Self {
             agents: Mutex::new(HashMap::new()),
+            listening_ports: Mutex::new(HashMap::new()),
         }
     }
 }
@@ -115,6 +128,9 @@ impl AgentProvider for InMemoryAgentProvider {
 
     async fn register_agent(&self, agent_id: Uuid, conn: Arc<dyn AgentConnection>) {
         self.agents.lock().await.insert(agent_id, conn);
+        // Clear any stale listening-port data from a previous connection so the
+        // endpoint doesn't serve outdated ports until the new agent reports.
+        self.listening_ports.lock().await.remove(&agent_id);
     }
 
     async fn remove_agent(&self, agent_id: Uuid, conn: &Arc<dyn AgentConnection>) {
@@ -122,6 +138,8 @@ impl AgentProvider for InMemoryAgentProvider {
         if let Some(current) = agents.get(&agent_id) {
             if Arc::ptr_eq(current, conn) {
                 agents.remove(&agent_id);
+                // Also clear stale listening-port data for the disconnected agent.
+                self.listening_ports.lock().await.remove(&agent_id);
             }
         }
     }
@@ -136,6 +154,19 @@ impl AgentProvider for InMemoryAgentProvider {
                 connected_at: conn.connected_at(),
             })
             .collect()
+    }
+
+    async fn set_listening_ports(&self, agent_id: Uuid, ports: Vec<WorkspaceAgentListeningPort>) {
+        self.listening_ports.lock().await.insert(agent_id, ports);
+    }
+
+    async fn get_listening_ports(&self, agent_id: Uuid) -> Vec<WorkspaceAgentListeningPort> {
+        self.listening_ports
+            .lock()
+            .await
+            .get(&agent_id)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -407,5 +438,151 @@ mod tests {
         assert_eq!(info.connected_at, cloned.connected_at);
         let debug = format!("{info:?}");
         assert!(debug.contains("AgentConnectionInfo"));
+    }
+
+    // ── Listening port storage ─────────────────────────────
+
+    #[tokio::test]
+    async fn get_listening_ports_empty_by_default() {
+        let provider = InMemoryAgentProvider::new();
+        let ports = provider.get_listening_ports(Uuid::new_v4()).await;
+        assert!(ports.is_empty(), "no ports should be stored initially");
+    }
+
+    #[tokio::test]
+    async fn set_and_get_listening_ports() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+
+        let ports = vec![
+            WorkspaceAgentListeningPort {
+                port: 8080,
+                network: "tcp".to_owned(),
+                process_name: "node".to_owned(),
+            },
+            WorkspaceAgentListeningPort {
+                port: 3000,
+                network: "tcp".to_owned(),
+                process_name: String::new(),
+            },
+        ];
+        provider.set_listening_ports(agent_id, ports.clone()).await;
+
+        let retrieved = provider.get_listening_ports(agent_id).await;
+        assert_eq!(retrieved, ports);
+    }
+
+    #[tokio::test]
+    async fn set_listening_ports_replaces_previous() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+
+        let ports_v1 = vec![WorkspaceAgentListeningPort {
+            port: 8080,
+            network: "tcp".to_owned(),
+            process_name: "old".to_owned(),
+        }];
+        provider.set_listening_ports(agent_id, ports_v1).await;
+
+        let ports_v2 = vec![WorkspaceAgentListeningPort {
+            port: 9090,
+            network: "udp".to_owned(),
+            process_name: "new".to_owned(),
+        }];
+        provider
+            .set_listening_ports(agent_id, ports_v2.clone())
+            .await;
+
+        let retrieved = provider.get_listening_ports(agent_id).await;
+        assert_eq!(retrieved, ports_v2, "new report should replace old");
+    }
+
+    #[tokio::test]
+    async fn remove_agent_clears_listening_ports() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let conn: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+
+        provider.register_agent(agent_id, conn.clone()).await;
+        provider
+            .set_listening_ports(
+                agent_id,
+                vec![WorkspaceAgentListeningPort {
+                    port: 8080,
+                    network: "tcp".to_owned(),
+                    process_name: String::new(),
+                }],
+            )
+            .await;
+
+        provider.remove_agent(agent_id, &conn).await;
+
+        let ports = provider.get_listening_ports(agent_id).await;
+        assert!(
+            ports.is_empty(),
+            "ports should be cleared when agent is removed"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_agent_clears_stale_listening_ports() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_id = Uuid::new_v4();
+        let conn_old: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+
+        provider.register_agent(agent_id, conn_old).await;
+        provider
+            .set_listening_ports(
+                agent_id,
+                vec![WorkspaceAgentListeningPort {
+                    port: 8080,
+                    network: "tcp".to_owned(),
+                    process_name: String::new(),
+                }],
+            )
+            .await;
+
+        // Simulate reconnection: register a new connection for the same agent.
+        let conn_new: Arc<dyn AgentConnection> = Arc::new(StubConnection {
+            id: agent_id,
+            connected: OffsetDateTime::now_utc(),
+        });
+        provider.register_agent(agent_id, conn_new).await;
+
+        let ports = provider.get_listening_ports(agent_id).await;
+        assert!(
+            ports.is_empty(),
+            "stale ports should be cleared on reconnection"
+        );
+    }
+
+    #[tokio::test]
+    async fn listening_ports_isolated_between_agents() {
+        let provider = InMemoryAgentProvider::new();
+        let agent_a = Uuid::new_v4();
+        let agent_b = Uuid::new_v4();
+
+        let ports_a = vec![WorkspaceAgentListeningPort {
+            port: 8080,
+            network: "tcp".to_owned(),
+            process_name: "a".to_owned(),
+        }];
+        let ports_b = vec![WorkspaceAgentListeningPort {
+            port: 9090,
+            network: "tcp".to_owned(),
+            process_name: "b".to_owned(),
+        }];
+
+        provider.set_listening_ports(agent_a, ports_a.clone()).await;
+        provider.set_listening_ports(agent_b, ports_b.clone()).await;
+
+        assert_eq!(provider.get_listening_ports(agent_a).await, ports_a);
+        assert_eq!(provider.get_listening_ports(agent_b).await, ports_b);
     }
 }
