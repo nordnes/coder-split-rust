@@ -1,0 +1,10 @@
+# Security audit configuration
+# See: https://docs.rs/cargo-audit/latest/cargo_audit/
+
+[advisories]
+# RUSTSEC-2023-0071: Marvin Attack timing sidechannel in `rsa` crate.
+# No upstream patch available yet. The crate is used for VAPID/webpush
+# key handling where timing attacks are not a practical concern (no
+# network-observable RSA decryption). Suppress until a patched version
+# ships.
+ignore = ["RUSTSEC-2023-0071"]
