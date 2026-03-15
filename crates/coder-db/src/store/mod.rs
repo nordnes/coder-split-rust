@@ -7205,11 +7205,8 @@ mod tests {
 
         // Should be findable before deletion
         let before = store.find_template_by_id(tmpl_id).await?;
-        assert!(before.is_some(), "template should exist before soft-delete");
-        assert!(
-            !before.unwrap().deleted,
-            "template should not be deleted yet"
-        );
+        let before = before.unwrap_or_else(|| panic!("template should exist before soft-delete"));
+        assert!(!before.deleted, "template should not be deleted yet");
 
         // Soft-delete
         let deleted = store.soft_delete_template(tmpl_id).await?;
@@ -7218,12 +7215,11 @@ mod tests {
         // Should still be findable after deletion (Go parity: GetTemplateByID
         // does not filter deleted), but the `deleted` flag must be true.
         let after = store.find_template_by_id(tmpl_id).await?;
+        let after = after.unwrap_or_else(|| {
+            panic!("find_template_by_id should still return soft-deleted templates")
+        });
         assert!(
-            after.is_some(),
-            "find_template_by_id should still return soft-deleted templates"
-        );
-        assert!(
-            after.unwrap().deleted,
+            after.deleted,
             "template should have deleted = true after soft-delete"
         );
 
