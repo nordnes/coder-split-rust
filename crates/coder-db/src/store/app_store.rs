@@ -7300,7 +7300,7 @@ impl AppStore for PostgresStore {
             FROM templates t
             LEFT JOIN organizations o ON o.id = t.organization_id
             LEFT JOIN users u ON u.id = t.created_by
-            WHERE t.id = $1 AND t.deleted = false
+            WHERE t.id = $1
             "#,
         )
         .bind(template_id)

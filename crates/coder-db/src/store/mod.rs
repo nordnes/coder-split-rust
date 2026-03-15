@@ -3613,7 +3613,7 @@ mod tests {
     // =========================================================================
 
     /// Insert a user row into the `users` table (minimal fields for joining).
-    async fn seed_user(pool: &PgPool, user_id: Uuid, username: &str) {
+    async fn seed_user(pool: &PgPool, user_id: Uuid, username: &str) -> Result<(), sqlx::Error> {
         sqlx::query(
             r#"
             INSERT INTO users (id, email, username, hashed_password, created_at, updated_at, status, rbac_roles, login_type, avatar_url, deleted, last_seen_at, name, github_com_user_id, hashed_one_time_passcode, one_time_passcode_expires_at, is_system)
@@ -3625,8 +3625,8 @@ mod tests {
         .bind(format!("{username}@test.com"))
         .bind(username)
         .execute(pool)
-        .await
-        .expect("seed_user INSERT should succeed");
+        .await?;
+        Ok(())
     }
 
     /// Insert a row into template_usage_stats.
@@ -3705,8 +3705,12 @@ mod tests {
         let start = datetime!(2026-01-01 00:00 UTC);
         let end = datetime!(2026-01-01 00:30 UTC);
 
-        seed_user(&pool, user1, "latuser1").await;
-        seed_user(&pool, user2, "latuser2").await;
+        seed_user(&pool, user1, "latuser1")
+            .await
+            .unwrap_or_else(|e| panic!("seed_user failed: {e:?}"));
+        seed_user(&pool, user2, "latuser2")
+            .await
+            .unwrap_or_else(|e| panic!("seed_user failed: {e:?}"));
 
         // user1: latency 10ms, user2: latency 50ms
         seed_usage_stats(
@@ -3809,7 +3813,9 @@ mod tests {
         let start = datetime!(2026-02-01 00:00 UTC);
         let end = datetime!(2026-02-01 00:30 UTC);
 
-        seed_user(&pool, user1, "actuser1").await;
+        seed_user(&pool, user1, "actuser1")
+            .await
+            .unwrap_or_else(|e| panic!("seed_user failed: {e:?}"));
 
         // Two rows for the same (start_time, user_id) but different templates.
         // usage_mins=20 each → capped at 30 per slot → 30 minutes = 1800 seconds.
@@ -3865,7 +3871,9 @@ mod tests {
         let user1 = Uuid::new_v4();
         let tmpl = Uuid::new_v4();
 
-        seed_user(&pool, user1, "intuser1").await;
+        seed_user(&pool, user1, "intuser1")
+            .await
+            .unwrap_or_else(|e| panic!("seed_user failed: {e:?}"));
 
         // Seed data across 2 days
         let day1_start = datetime!(2026-03-01 00:00 UTC);
@@ -3946,7 +3954,9 @@ mod tests {
         let user1 = Uuid::new_v4();
         let tmpl = Uuid::new_v4();
 
-        seed_user(&pool, user1, "weekuser1").await;
+        seed_user(&pool, user1, "weekuser1")
+            .await
+            .unwrap_or_else(|e| panic!("seed_user failed: {e:?}"));
 
         let start = datetime!(2026-03-01 00:00 UTC);
         let end = datetime!(2026-03-01 00:30 UTC);
@@ -4028,7 +4038,9 @@ mod tests {
         let user1 = Uuid::new_v4();
         let tmpl = Uuid::new_v4();
 
-        seed_user(&pool, user1, "insightuser1").await;
+        seed_user(&pool, user1, "insightuser1")
+            .await
+            .unwrap_or_else(|e| panic!("seed_user failed: {e:?}"));
 
         let start = datetime!(2026-04-01 00:00 UTC);
         let end = datetime!(2026-04-01 00:30 UTC);
@@ -7168,8 +7180,10 @@ mod tests {
     // NEW: Soft-delete cascade – template soft-delete hides from find
     // =========================================================================
 
-    /// After soft-deleting a template, `find_template_by_id` should return
-    /// `None` (the SQL filters `deleted = false`).
+    /// After soft-deleting a template, `find_template_by_id` should still
+    /// return the template (matching Go's `GetTemplateByID` which does not
+    /// filter deleted), but with `deleted = true`.  Callers that need to
+    /// exclude deleted templates check the flag explicitly.
     #[tokio::test]
     #[ignore]
     async fn test_soft_delete_template_hides_from_find() -> TestResult {
@@ -7192,16 +7206,25 @@ mod tests {
         // Should be findable before deletion
         let before = store.find_template_by_id(tmpl_id).await?;
         assert!(before.is_some(), "template should exist before soft-delete");
+        assert!(
+            !before.unwrap().deleted,
+            "template should not be deleted yet"
+        );
 
         // Soft-delete
         let deleted = store.soft_delete_template(tmpl_id).await?;
         assert!(deleted, "soft_delete_template should return true");
 
-        // Should NOT be findable after deletion
+        // Should still be findable after deletion (Go parity: GetTemplateByID
+        // does not filter deleted), but the `deleted` flag must be true.
         let after = store.find_template_by_id(tmpl_id).await?;
         assert!(
-            after.is_none(),
-            "template should not be found after soft-delete"
+            after.is_some(),
+            "find_template_by_id should still return soft-deleted templates"
+        );
+        assert!(
+            after.unwrap().deleted,
+            "template should have deleted = true after soft-delete"
         );
 
         // Deleting again should return false (already soft-deleted)
