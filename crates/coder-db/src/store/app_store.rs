@@ -7300,7 +7300,7 @@ impl AppStore for PostgresStore {
             FROM templates t
             LEFT JOIN organizations o ON o.id = t.organization_id
             LEFT JOIN users u ON u.id = t.created_by
-            WHERE t.id = $1
+            WHERE t.id = $1 AND t.deleted = false
             "#,
         )
         .bind(template_id)
@@ -7891,7 +7891,7 @@ impl AppStore for PostgresStore {
                        WHEN started_at IS NOT NULL THEN 'running'
                        ELSE 'pending'
                    END AS job_status,
-                   file_id, type, input, worker_id, tags
+                   file_id, type::text, input, worker_id, tags
             FROM provisioner_jobs
             WHERE id = $1
             "#,
