@@ -8188,6 +8188,11 @@ mod tests {
             "archived=Some(true) should include archived chat"
         );
 
+        // Clean up chats explicitly (no FK CASCADE on owner_id)
+        let _ = sqlx::query("DELETE FROM chats WHERE owner_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await;
         cleanup(&pool, &[user_id]).await;
         Ok(())
     }
@@ -8494,6 +8499,11 @@ mod tests {
         assert_eq!(found.id, file.id);
         assert_eq!(found.data, b"hello world");
 
+        // Clean up chat_files explicitly (no FK CASCADE on owner_id)
+        let _ = sqlx::query("DELETE FROM chat_files WHERE owner_id = $1")
+            .bind(user_id)
+            .execute(&pool)
+            .await;
         cleanup(&pool, &[user_id]).await;
         Ok(())
     }
