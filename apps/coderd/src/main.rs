@@ -821,13 +821,14 @@ async fn run() -> Result<(), MainError> {
 
     let log_format = args.log_format;
     let migrate_only = args.migrate_only;
+    let raw_smtp_tls_mode = args.smtp_tls_mode.clone();
     let notification_config = NotificationConfig {
         smtp_host: args.smtp_host.clone(),
         smtp_port: args.smtp_port,
         smtp_from: args.smtp_from.clone(),
         smtp_username: args.smtp_username.clone(),
         smtp_password: args.smtp_password.clone(),
-        smtp_tls_mode: parse_smtp_tls_mode(&args.smtp_tls_mode),
+        smtp_tls_mode: parse_smtp_tls_mode(&raw_smtp_tls_mode),
         webhook_timeout_secs: args.webhook_timeout_secs,
     };
     let config = build_config(args)?;
@@ -835,6 +836,12 @@ async fn run() -> Result<(), MainError> {
     init_panic_hook();
 
     // Validate SMTP config after tracing is initialised so warnings are visible.
+    if !is_known_smtp_tls_mode(&raw_smtp_tls_mode) {
+        warn!(
+            value = raw_smtp_tls_mode.as_str(),
+            "unrecognised SMTP TLS mode, falling back to start_tls"
+        );
+    }
     if !notification_config.smtp_host.is_empty() && notification_config.smtp_from.is_empty() {
         warn!(
             "SMTP host is configured but smtp_from is empty; email dispatch will fail until a sender address is provided"
@@ -1274,23 +1281,26 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
     })
 }
 
+/// Returns `true` if the value is a recognised SMTP TLS mode string.
+fn is_known_smtp_tls_mode(value: &str) -> bool {
+    matches!(
+        value.to_ascii_lowercase().as_str(),
+        "none" | "tls" | "start_tls" | "starttls"
+    )
+}
+
 /// Parses a CLI/env string into a [`SmtpTlsMode`].
 ///
 /// Accepted values (case-insensitive): `none`, `tls`, `start_tls` / `starttls`.
-/// Falls back to [`SmtpTlsMode::StartTls`] for unrecognised input with a
-/// warning so that configuration typos are visible in the logs.
+/// Falls back to [`SmtpTlsMode::StartTls`] for unrecognised input.  Callers
+/// should use [`is_known_smtp_tls_mode`] to check validity and log a warning
+/// after the tracing subscriber is initialised.
 fn parse_smtp_tls_mode(value: &str) -> SmtpTlsMode {
     match value.to_ascii_lowercase().as_str() {
         "none" => SmtpTlsMode::None,
         "tls" => SmtpTlsMode::Tls,
         "start_tls" | "starttls" => SmtpTlsMode::StartTls,
-        other => {
-            warn!(
-                value = other,
-                "unrecognised SMTP TLS mode, falling back to start_tls"
-            );
-            SmtpTlsMode::StartTls
-        }
+        _ => SmtpTlsMode::StartTls,
     }
 }
 
