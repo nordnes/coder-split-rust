@@ -887,6 +887,7 @@ pub(crate) async fn post_user_webpush_test(
     let mut failure_count: u32 = 0;
     let mut stale_subscription_ids: Vec<Uuid> = Vec::new();
 
+    use web_push::WebPushClient as _;
     for sub in &subscriptions {
         let subscription_info = web_push::SubscriptionInfo::new(
             &sub.endpoint,
@@ -931,7 +932,6 @@ pub(crate) async fn post_user_webpush_test(
         };
 
         // Send the push notification.
-        use web_push::WebPushClient as _;
         match client.send(message).await {
             Ok(()) => {
                 success_count = success_count.saturating_add(1);
@@ -967,13 +967,20 @@ pub(crate) async fn post_user_webpush_test(
         }
     }
 
+    #[derive(serde::Serialize)]
+    struct WebpushTestResponse {
+        message: String,
+        success_count: u32,
+        failure_count: u32,
+    }
+
     Ok((
         StatusCode::OK,
-        Json(serde_json::json!({
-            "message": "Web push test completed.",
-            "success_count": success_count,
-            "failure_count": failure_count,
-        })),
+        Json(WebpushTestResponse {
+            message: "Web push test completed.".to_owned(),
+            success_count,
+            failure_count,
+        }),
     )
         .into_response())
 }
