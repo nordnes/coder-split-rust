@@ -58,7 +58,7 @@ pub enum SmtpTlsMode {
 }
 
 /// Configuration for the notification dispatch pipeline.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct NotificationConfig {
     /// SMTP relay host for email dispatch (empty = disabled).
     pub smtp_host: String,
@@ -74,6 +74,20 @@ pub struct NotificationConfig {
     pub smtp_tls_mode: SmtpTlsMode,
     /// Webhook timeout in seconds.
     pub webhook_timeout_secs: u64,
+}
+
+impl std::fmt::Debug for NotificationConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NotificationConfig")
+            .field("smtp_host", &self.smtp_host)
+            .field("smtp_port", &self.smtp_port)
+            .field("smtp_from", &self.smtp_from)
+            .field("smtp_username", &self.smtp_username)
+            .field("smtp_password", &"[REDACTED]")
+            .field("smtp_tls_mode", &self.smtp_tls_mode)
+            .field("webhook_timeout_secs", &self.webhook_timeout_secs)
+            .finish()
+    }
 }
 
 impl Default for NotificationConfig {
@@ -157,11 +171,11 @@ where
                 Ok(t) => Some(t),
                 Err(e) => {
                     warn!(error = %e, "failed to build SMTP transport for batch");
-                    Option::<AsyncSmtpTransport<Tokio1Executor>>::None
+                    None
                 }
             }
         } else {
-            Option::<AsyncSmtpTransport<Tokio1Executor>>::None
+            None
         };
 
         for message in messages {

@@ -584,7 +584,6 @@ struct ServerArgs {
     #[arg(long, env = "CODER_REFERRER_POLICY", default_value = "no-referrer")]
     referrer_policy: String,
 
-    // ----- Worker Intervals -----
     // ----- SMTP / Notifications -----
     /// SMTP relay host for email notifications (empty = email disabled).
     #[arg(long, env = "CODER_NOTIFICATIONS_SMTP_HOST", default_value = "")]
@@ -622,6 +621,7 @@ struct ServerArgs {
     )]
     webhook_timeout_secs: u64,
 
+    // ----- Worker Intervals -----
     /// Poll interval in seconds for the notification dispatch worker.
     #[arg(
         long,
@@ -833,6 +833,13 @@ async fn run() -> Result<(), MainError> {
     let config = build_config(args)?;
     let tracer_provider = init_tracing(log_format, &config.otel);
     init_panic_hook();
+
+    // Validate SMTP config after tracing is initialised so warnings are visible.
+    if !notification_config.smtp_host.is_empty() && notification_config.smtp_from.is_empty() {
+        warn!(
+            "SMTP host is configured but smtp_from is empty; email dispatch will fail until a sender address is provided"
+        );
+    }
 
     let store = PostgresStore::connect(&config.database).await?;
     let pool = store.pool();
@@ -1270,13 +1277,20 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
 /// Parses a CLI/env string into a [`SmtpTlsMode`].
 ///
 /// Accepted values (case-insensitive): `none`, `tls`, `start_tls` / `starttls`.
-/// Falls back to [`SmtpTlsMode::StartTls`] for unrecognised input.
+/// Falls back to [`SmtpTlsMode::StartTls`] for unrecognised input with a
+/// warning so that configuration typos are visible in the logs.
 fn parse_smtp_tls_mode(value: &str) -> SmtpTlsMode {
     match value.to_ascii_lowercase().as_str() {
         "none" => SmtpTlsMode::None,
         "tls" => SmtpTlsMode::Tls,
         "start_tls" | "starttls" => SmtpTlsMode::StartTls,
-        _ => SmtpTlsMode::StartTls,
+        other => {
+            warn!(
+                value = other,
+                "unrecognised SMTP TLS mode, falling back to start_tls"
+            );
+            SmtpTlsMode::StartTls
+        }
     }
 }
 
