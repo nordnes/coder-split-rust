@@ -34657,6 +34657,10 @@ pub(crate) mod tests {
             chats[0].get("id").and_then(Value::as_str),
             Some(active_id.as_str()),
         );
+        assert_eq!(
+            chats[0].get("archived").and_then(Value::as_bool),
+            Some(false),
+        );
         Ok(())
     }
 
@@ -34696,6 +34700,10 @@ pub(crate) mod tests {
             chats[0].get("id").and_then(Value::as_str),
             Some(active_id.as_str()),
         );
+        assert_eq!(
+            chats[0].get("archived").and_then(Value::as_bool),
+            Some(false),
+        );
         Ok(())
     }
 
@@ -34734,6 +34742,10 @@ pub(crate) mod tests {
         assert_eq!(
             chats[0].get("id").and_then(Value::as_str),
             Some(archived_id.as_str()),
+        );
+        assert_eq!(
+            chats[0].get("archived").and_then(Value::as_bool),
+            Some(true),
         );
         Ok(())
     }
