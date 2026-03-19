@@ -822,7 +822,7 @@ pub(crate) async fn post_custom_notification(
     };
 
     // Block system users from sending custom notifications.
-    // Checked early (before input validation) to match Go handler ordering.
+    // Checked early, before RBAC and input validation, for a fast reject path.
     if context.user.is_system {
         return Ok((
             StatusCode::FORBIDDEN,
@@ -915,8 +915,10 @@ pub(crate) async fn post_custom_notification(
             .into_response());
     }
 
-    // Custom notification template UUID (matches Go's TemplateCustomNotification).
-    let template_id = Uuid::parse_str("39b1e189-c857-4b0c-877a-511144c18516").unwrap_or_default();
+    // Custom notification template UUID (matches Go's TemplateCustomNotification
+    // defined in coderd/notifications/events.go).
+    const TEMPLATE_CUSTOM_NOTIFICATION: Uuid =
+        uuid::uuid!("39b1e189-c857-4b0c-877a-511144c18516");
 
     // Build the JSON payload matching the Go handler's label map.
     // Include a minute-bucketed timestamp to bypass per-day deduplication for
@@ -940,11 +942,11 @@ pub(crate) async fn post_custom_notification(
     let input = EnqueueNotificationMessageInput {
         id: Uuid::new_v4(),
         user_id,
-        notification_template_id: template_id,
+        notification_template_id: TEMPLATE_CUSTOM_NOTIFICATION,
         method: NotificationMethod::Inbox,
         payload: payload.to_string(),
         targets: vec![user_id],
-        created_by: user_id,
+        created_by: user_id.to_string(),
     };
     state
         .store

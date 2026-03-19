@@ -920,7 +920,7 @@ pub enum NotificationMethod {
 impl NotificationMethod {
     /// Returns the database string representation.
     #[must_use]
-    pub fn as_str(&self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Email => "smtp",
             Self::Webhook => "webhook",
