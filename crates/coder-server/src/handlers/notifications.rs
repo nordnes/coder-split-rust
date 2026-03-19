@@ -146,6 +146,11 @@ pub(crate) async fn post_test_notification(
         ));
     }
 
+    // The template ID for test notifications is a compile-time constant.
+    // When the notification enqueue path is wired, it will use this constant
+    // as the `notification_template_id` column value.
+    let _template_id = coder_core::TEMPLATE_TEST_NOTIFICATION;
+
     // The test notification endpoint just returns 200 OK to confirm it's reachable.
     // Full dispatch integration is not implemented yet.
     let _ = &state;
@@ -929,17 +934,12 @@ pub(crate) async fn post_custom_notification(
     // check will be added once the identity layer tracks that attribute.
     let _ = &context;
 
-    // The template ID for custom notifications is a compile-time constant.
-    // When the notification enqueue path is wired, it will use this constant
-    // as the `notification_template_id` column value in the
-    // `notification_messages` table.
-    let _template_id = coder_core::TEMPLATE_CUSTOM_NOTIFICATION;
-
     // NOTE: `enqueue_notification_message` is not yet implemented in the Rust
     // backend.  The Go handler calls `api.NotificationsEnqueuer.EnqueueWithData`
     // which inserts into the `notification_messages` table (defined by migration
-    // `20260308000000_notifications_domain.sql`).  When wired, the inbox
-    // insertion path should publish to
+    // `20260308000000_notifications_domain.sql`).  When wired, use
+    // `coder_core::TEMPLATE_CUSTOM_NOTIFICATION` as the
+    // `notification_template_id` column value and publish to
     // `inbox_notification_channel(target_user_id)` so SSE subscribers are
     // notified of new notifications in real time.
     //
