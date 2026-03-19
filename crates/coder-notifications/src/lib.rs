@@ -43,8 +43,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use web_push::{
-    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, VapidSignatureBuilder, WebPushClient,
-    WebPushMessageBuilder,
+    ContentEncoding, IsahcWebPushClient, PartialVapidSignatureBuilder, SubscriptionInfo,
+    VapidSignatureBuilder, WebPushClient, WebPushMessageBuilder,
 };
 
 /// Current milestone for the notifications crate.
@@ -691,8 +691,8 @@ pub struct Webpusher {
     vapid_sub: String,
     /// Base64url-encoded VAPID public key (for clients).
     vapid_public_key: String,
-    /// PEM-encoded VAPID private key.
-    vapid_private_pem: String,
+    /// Parsed VAPID private key, cached to avoid re-parsing PEM on every send.
+    vapid_key: PartialVapidSignatureBuilder,
     /// Reusable web push HTTP client (constructed once, shared across sends).
     client: IsahcWebPushClient,
 }
@@ -722,9 +722,13 @@ impl Webpusher {
         // Validate the private key and derive the public key from it rather
         // than trusting the stored public key.  This guards against a
         // mismatched/rotated value in the database.
-        let partial = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
+        //
+        // The parsed `PartialVapidSignatureBuilder` is cached in the struct
+        // so that `send_single` can clone it cheaply instead of re-parsing
+        // the PEM on every send.
+        let vapid_key = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
             .map_err(|e| WebpushError::WebPush(format!("invalid stored VAPID key: {e}")))?;
-        let derived_public = URL_SAFE_NO_PAD.encode(partial.get_public_key());
+        let derived_public = URL_SAFE_NO_PAD.encode(vapid_key.get_public_key());
 
         let client = IsahcWebPushClient::new().map_err(|e| WebpushError::WebPush(e.to_string()))?;
 
@@ -732,7 +736,7 @@ impl Webpusher {
             store,
             vapid_sub,
             vapid_public_key: derived_public,
-            vapid_private_pem: private_pem,
+            vapid_key,
             client,
         })
     }
@@ -1024,11 +1028,10 @@ impl Webpusher {
     ) -> Result<(), WebpushSendOutcome> {
         let subscription_info = SubscriptionInfo::new(endpoint, p256dh_key, auth_key);
 
-        // Build VAPID signature: load private key from PEM, attach subscription
-        // info, add the subscriber contact ("sub" claim), then build.
-        let partial = VapidSignatureBuilder::from_pem_no_sub(self.vapid_private_pem.as_bytes())
-            .map_err(|e| WebpushSendOutcome::Failed(format!("VAPID key load: {e}")))?;
-        let mut sig_builder = partial.add_sub_info(&subscription_info);
+        // Build VAPID signature: clone the pre-parsed key (avoids PEM
+        // re-parsing on every send), attach subscription info, add the
+        // subscriber contact ("sub" claim), then build.
+        let mut sig_builder = self.vapid_key.clone().add_sub_info(&subscription_info);
         sig_builder.add_claim("sub", self.vapid_sub.as_str());
         let sig = sig_builder
             .build()
@@ -1081,11 +1084,15 @@ fn is_subscription_gone(err: &web_push::WebPushError) -> bool {
 
 /// Checks whether a web push error is transient and worth retrying.
 ///
-/// `ServerError` (5xx) is considered retryable.  Hard failures such as
-/// `EndpointNotValid` (410), `Unauthorized` (403), and `BadRequest` (400)
-/// are **not** retried.
+/// `ServerError` (5xx) and `Unspecified` (network-level failures such as
+/// connection timeouts and DNS errors from the isahc HTTP client) are
+/// considered retryable.  Hard failures such as `EndpointNotValid` (410),
+/// `Unauthorized` (403), and `BadRequest` (400) are **not** retried.
 fn is_retryable(err: &web_push::WebPushError) -> bool {
-    matches!(err, web_push::WebPushError::ServerError { .. })
+    matches!(
+        err,
+        web_push::WebPushError::ServerError { .. } | web_push::WebPushError::Unspecified
+    )
 }
 
 /// Validates that a PEM-encoded VAPID private key is well-formed.
@@ -3154,9 +3161,14 @@ mod tests {
     // ── 28. Retryable error classification ───────────────────
 
     #[test]
-    fn is_retryable_rejects_unspecified() {
+    fn is_retryable_accepts_unspecified() {
+        // Unspecified wraps network-level failures (connection timeout, DNS
+        // errors) from the isahc HTTP client and should be retried.
         let err = web_push::WebPushError::Unspecified;
-        assert!(!is_retryable(&err), "Unspecified should not be retryable");
+        assert!(
+            is_retryable(&err),
+            "Unspecified (network failure) should be retryable"
+        );
     }
 
     #[test]
@@ -3214,7 +3226,7 @@ mod tests {
     #[test]
     fn webpusher_struct_has_shared_client_field() {
         // Webpusher fields: store, vapid_sub, vapid_public_key,
-        // vapid_private_pem, client.  If someone accidentally adds a
+        // vapid_key, client.  If someone accidentally adds a
         // second client or removes the shared one, this size assertion
         // will break.
         let size = std::mem::size_of::<Webpusher>();
