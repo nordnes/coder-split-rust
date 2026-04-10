@@ -2299,16 +2299,19 @@ pub(crate) async fn get_external_agent_credentials(
     }
 
     // 7–8. Construct init script URL and command string.
+    // The Go source uses /api/v2/init-script/{os}/{arch} which serves a shell
+    // script (not a binary).  The agent token is embedded in the command so the
+    // script can authenticate on first run.
     let access_url = state.config.access_url.as_str().trim_end_matches('/');
     let os = &agent.operating_system;
     let arch = &agent.architecture;
+    let token = &agent.auth_token;
 
-    let command = if os.eq_ignore_ascii_case("windows") {
-        format!(
-            "powershell -Command \"Invoke-Expression $(Invoke-WebRequest -Uri '{access_url}/bin/coder-windows-{arch}.exe' -UseBasicParsing).Content\""
-        )
+    let init_script_url = format!("{access_url}/api/v2/init-script/{os}/{arch}");
+    let command = if os == "windows" {
+        format!("$env:CODER_AGENT_TOKEN=\"{token}\"; iwr -useb \"{init_script_url}\" | iex")
     } else {
-        format!("curl -fsSL {access_url}/bin/coder-{os}-{arch} | sh")
+        format!("curl -fsSL \"{init_script_url}\" | CODER_AGENT_TOKEN=\"{token}\" sh")
     };
 
     // 9. Return credentials.
