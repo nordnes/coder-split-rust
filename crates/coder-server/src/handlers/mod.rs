@@ -325,6 +325,8 @@ pub(crate) mod mcp;
 pub(crate) mod notifications;
 pub(crate) mod oauth2;
 pub(crate) mod organizations;
+pub(crate) mod quotas;
+pub(crate) mod replicas;
 pub(crate) mod scim;
 pub(crate) mod tasks;
 pub(crate) mod telemetry;
@@ -335,4 +337,5 @@ pub(crate) mod users;
 // tests for now.
 #[allow(dead_code)]
 pub(crate) mod workspace_apps;
+pub(crate) mod workspace_sharing;
 pub(crate) mod workspaces;

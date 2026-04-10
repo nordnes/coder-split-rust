@@ -2016,6 +2016,87 @@ pub struct PutUserConfigRequest {
     pub value: String,
 }
 
+// ---------------------------------------------------------------------------
+// Quiet Hours
+// ---------------------------------------------------------------------------
+
+/// Response for a user's quiet hours schedule.
+#[derive(Clone, Debug, Serialize)]
+pub struct UserQuietHoursScheduleResponse {
+    /// Raw cron schedule string, e.g. `CRON_TZ=America/Chicago 0 0 * * *`.
+    pub raw_schedule: String,
+    /// Whether the user explicitly set this schedule.
+    pub user_set: bool,
+    /// Whether the deployment allows users to set their own schedule.
+    pub user_can_set: bool,
+    /// Human-readable time string, e.g. `"00:00"`.
+    pub time: String,
+    /// IANA timezone name, e.g. `"America/Chicago"`.
+    pub timezone: String,
+    /// Next quiet hours window start time (UTC).
+    #[serde(with = "time::serde::rfc3339")]
+    pub next: OffsetDateTime,
+}
+
+/// Request to update a user's quiet hours schedule.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateUserQuietHoursScheduleRequest {
+    /// Cron schedule string with timezone, e.g. `CRON_TZ=America/Chicago 0 0 * * *`.
+    pub schedule: String,
+}
+
+// ---------------------------------------------------------------------------
+// Replicas
+// ---------------------------------------------------------------------------
+
+/// A running Coder replica instance.
+#[derive(Clone, Debug, Serialize)]
+pub struct Replica {
+    /// Unique identifier of this replica.
+    pub id: Uuid,
+    /// Hostname of the replica.
+    pub hostname: String,
+    /// When the replica was registered.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Relay address used for DERP traffic.
+    pub relay_address: String,
+    /// DERP region identifier for this replica.
+    pub region_id: i32,
+    /// Error message if the replica is unhealthy (empty string if healthy).
+    pub error: String,
+    /// Database latency in nanoseconds.
+    pub database_latency: i64,
+}
+
+// ---------------------------------------------------------------------------
+// Workspace Quota
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Workspace Sharing Settings
+// ---------------------------------------------------------------------------
+
+/// Organization-level workspace sharing settings.
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceSharingSettings {
+    /// Whether workspace sharing is globally disabled at the deployment level.
+    pub sharing_globally_disabled: bool,
+    /// Whether workspace sharing is disabled for this organization.
+    pub sharing_disabled: bool,
+    /// Who can share workspaces: `"none"`, `"everyone"`, or `"service_accounts"`.
+    pub shareable_workspace_owners: String,
+}
+
+/// Request to update workspace sharing settings for an organization.
+#[derive(Clone, Debug, Deserialize)]
+pub struct UpdateWorkspaceSharingSettingsRequest {
+    /// Whether workspace sharing should be disabled.
+    pub sharing_disabled: Option<bool>,
+    /// Who can share workspaces: `"none"`, `"everyone"`, or `"service_accounts"`.
+    pub shareable_workspace_owners: Option<String>,
+}
+
 /// Response for a group.
 #[derive(Clone, Debug, Serialize)]
 pub struct GroupResponse {
