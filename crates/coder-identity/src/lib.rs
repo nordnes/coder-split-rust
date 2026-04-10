@@ -1103,10 +1103,15 @@ where
         actor: &Actor,
         organization_id: Option<Uuid>,
     ) -> Result<Vec<CustomRoleRecord>, IdentityServiceError> {
-        if !actor.is_owner() {
-            return Err(IdentityServiceError::forbidden(
-                "You are not authorized to list custom roles.",
-            ));
+        // For org-scoped operations, allow org admins; otherwise require owner.
+        match organization_id {
+            Some(org_id) if actor.can_manage_organization(org_id) => {}
+            None if actor.is_owner() => {}
+            _ => {
+                return Err(IdentityServiceError::forbidden(
+                    "You are not authorized to list custom roles.",
+                ));
+            }
         }
         self.store
             .list_custom_roles(organization_id)
@@ -1120,10 +1125,15 @@ where
         actor: &Actor,
         input: &UpsertCustomRoleInput,
     ) -> Result<CustomRoleRecord, IdentityServiceError> {
-        if !actor.is_owner() {
-            return Err(IdentityServiceError::forbidden(
-                "You are not authorized to manage custom roles.",
-            ));
+        // For org-scoped operations, allow org admins; otherwise require owner.
+        match input.organization_id {
+            Some(org_id) if actor.can_manage_organization(org_id) => {}
+            None if actor.is_owner() => {}
+            _ => {
+                return Err(IdentityServiceError::forbidden(
+                    "You are not authorized to manage custom roles.",
+                ));
+            }
         }
         if input.name.trim().is_empty() {
             return Err(IdentityServiceError::bad_request(
@@ -1143,10 +1153,15 @@ where
         name: &str,
         organization_id: Option<Uuid>,
     ) -> Result<bool, IdentityServiceError> {
-        if !actor.is_owner() {
-            return Err(IdentityServiceError::forbidden(
-                "You are not authorized to manage custom roles.",
-            ));
+        // For org-scoped operations, allow org admins; otherwise require owner.
+        match organization_id {
+            Some(org_id) if actor.can_manage_organization(org_id) => {}
+            None if actor.is_owner() => {}
+            _ => {
+                return Err(IdentityServiceError::forbidden(
+                    "You are not authorized to manage custom roles.",
+                ));
+            }
         }
         self.store
             .delete_custom_role(name, organization_id)
@@ -1161,10 +1176,15 @@ where
         name: &str,
         organization_id: Option<Uuid>,
     ) -> Result<Option<CustomRoleRecord>, IdentityServiceError> {
-        if !actor.is_owner() {
-            return Err(IdentityServiceError::forbidden(
-                "You are not authorized to view custom roles.",
-            ));
+        // For org-scoped operations, allow org admins; otherwise require owner.
+        match organization_id {
+            Some(org_id) if actor.can_manage_organization(org_id) => {}
+            None if actor.is_owner() => {}
+            _ => {
+                return Err(IdentityServiceError::forbidden(
+                    "You are not authorized to view custom roles.",
+                ));
+            }
         }
         self.store
             .find_custom_role(name, organization_id)
@@ -1295,19 +1315,16 @@ where
             .get_organization_resource_counts(target_organization.id)
             .await
             .unwrap_or_default();
+        // Only block on workspaces, templates, and provisioner keys.
+        // Members and groups are expected (creator + "Everyone" group) and will
+        // be cleaned up as part of the soft-delete cascade.
         if counts.workspace_count > 0
             || counts.template_count > 0
-            || counts.member_count > 0
-            || counts.group_count > 0
             || counts.provisioner_key_count > 0
         {
             let detail = format!(
-                "Organization has {} workspace(s), {} template(s), {} member(s), {} group(s), and {} provisioner key(s).",
-                counts.workspace_count,
-                counts.template_count,
-                counts.member_count,
-                counts.group_count,
-                counts.provisioner_key_count,
+                "Organization has {} workspace(s), {} template(s), and {} provisioner key(s).",
+                counts.workspace_count, counts.template_count, counts.provisioner_key_count,
             );
             return Err(IdentityServiceError::bad_request_with_detail(
                 "Organization is not empty and cannot be deleted.",

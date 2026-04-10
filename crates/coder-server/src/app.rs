@@ -3128,9 +3128,29 @@ pub(crate) mod tests {
 
         async fn get_organization_resource_counts(
             &self,
-            _id: Uuid,
+            id: Uuid,
         ) -> Result<OrgResourceCounts, StorageError> {
-            Ok(OrgResourceCounts::default())
+            let member_count = self
+                .organization_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .keys()
+                .filter(|(org_id, _)| *org_id == id)
+                .count() as u64;
+            let group_count = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .filter(|g| g.organization_id == id)
+                .count() as u64;
+            Ok(OrgResourceCounts {
+                workspace_count: 0,
+                template_count: 0,
+                member_count,
+                group_count,
+                provisioner_key_count: 0,
+            })
         }
 
         async fn find_custom_role(

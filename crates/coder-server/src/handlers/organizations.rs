@@ -591,12 +591,15 @@ pub(crate) async fn post_org_role(
     }
 
     // Check if a custom role with this name already exists — POST should not overwrite.
-    if let Some(_existing) = state
+    let existing = match state
         .identity
         .find_custom_role(&context.actor, &request.name, Some(org.id))
         .await
-        .map_err(AppError::from)?
     {
+        Ok(role) => role,
+        Err(error) => return handle_identity_error(error),
+    };
+    if existing.is_some() {
         return Ok((
             StatusCode::CONFLICT,
             Json(ApiResponse::error(
