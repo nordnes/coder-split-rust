@@ -2217,6 +2217,108 @@ pub(crate) async fn build_timings_response(
     }))
 }
 
+/// `GET /workspaces/{workspace}/external-agent/{agent}/credentials`
+///
+/// Returns the auth token and bootstrap command for an external agent in a
+/// workspace.  Mirrors Go `workspaceExternalAgentCredentials()`.
+pub(crate) async fn get_external_agent_credentials(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path((workspace_id, agent_name)): Path<(Uuid, String)>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    // 1. Get workspace by ID.
+    let Some(workspace) = state
+        .store
+        .find_workspace_by_id(workspace_id, Some(context.user.id))
+        .await?
+    else {
+        return Ok(resource_not_found_response());
+    };
+
+    // 2. Get latest workspace build.
+    let Some(build) = state
+        .store
+        .find_latest_workspace_build(workspace.id)
+        .await?
+    else {
+        return Ok(not_found_response("No builds found for this workspace."));
+    };
+
+    // 3. Check build's template version has_external_agent → 404 if false.
+    let tv = state
+        .store
+        .find_template_version_by_id(build.template_version_id)
+        .await?
+        .ok_or_else(|| AppError::NotFound {
+            message: "Template version not found.".to_owned(),
+        })?;
+
+    if !tv.has_external_agent.unwrap_or(false) {
+        return Ok(not_found_response(
+            "This workspace does not have an external agent.",
+        ));
+    }
+
+    // 4. Get all agents for the workspace build.
+    let resources = state
+        .store
+        .list_workspace_resources_by_job(build.job_id)
+        .await?;
+    let resource_ids: Vec<Uuid> = resources.iter().map(|r| r.id).collect();
+    let agents = if resource_ids.is_empty() {
+        vec![]
+    } else {
+        state
+            .store
+            .list_workspace_agents_by_resource_ids(&resource_ids)
+            .await?
+    };
+
+    // 5. Find agent by name → 404 if not found.
+    let agent = match agents.iter().find(|a| a.name == agent_name) {
+        Some(a) => a,
+        None => {
+            return Ok(not_found_response("Agent not found."));
+        }
+    };
+
+    // 6. Check agent.auth_instance_id is empty (external agents don't use
+    //    instance auth) → 404 if set.
+    if agent
+        .auth_instance_id
+        .as_ref()
+        .is_some_and(|id| !id.is_empty())
+    {
+        return Ok(not_found_response(
+            "This agent uses instance identity authentication and is not an external agent.",
+        ));
+    }
+
+    // 7–8. Construct init script URL and command string.
+    let access_url = state.config.access_url.as_str().trim_end_matches('/');
+    let os = &agent.operating_system;
+    let arch = &agent.architecture;
+
+    let command = if os.eq_ignore_ascii_case("windows") {
+        format!(
+            "powershell -Command \"Invoke-Expression $(Invoke-WebRequest -Uri '{access_url}/bin/coder-windows-{arch}.exe' -UseBasicParsing).Content\""
+        )
+    } else {
+        format!("curl -fsSL {access_url}/bin/coder-{os}-{arch} | sh")
+    };
+
+    // 9. Return credentials.
+    let body = json!({
+        "agent_token": agent.auth_token.to_string(),
+        "command": command,
+    });
+    Ok((StatusCode::OK, Json(body)).into_response())
+}
+
 pub(crate) fn workspace_transition_from_str(s: &str) -> coder_core::api::WorkspaceTransition {
     match s {
         "start" => coder_core::api::WorkspaceTransition::Start,
