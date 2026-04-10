@@ -921,11 +921,21 @@ fn validate_quiet_hours_schedule(schedule: &str) -> Result<(), String> {
         return Err("Cron schedule must have at least 5 fields.".to_owned());
     }
 
-    // Validate hour and minute ranges.
-    if parsed.hour >= 24 {
+    // Validate minute and hour fields are numeric and in range.
+    // Note: we cannot rely on `parsed.hour` / `parsed.minute` here because
+    // `parse_cron_fields` silently defaults non-numeric values to 0.
+    let minute: u32 = match fields[0].parse() {
+        Ok(v) => v,
+        Err(_) => return Err(format!("Invalid minute field: {}", fields[0])),
+    };
+    let hour: u32 = match fields[1].parse() {
+        Ok(v) => v,
+        Err(_) => return Err(format!("Invalid hour field: {}", fields[1])),
+    };
+    if hour >= 24 {
         return Err(format!("Invalid hour field: {}", fields[1]));
     }
-    if parsed.minute >= 60 {
+    if minute >= 60 {
         return Err(format!("Invalid minute field: {}", fields[0]));
     }
 
