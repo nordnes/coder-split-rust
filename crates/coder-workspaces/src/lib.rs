@@ -1946,6 +1946,32 @@ mod tests {
             Ok(false)
         }
 
+        async fn appearance_config(
+            &self,
+        ) -> Result<coder_core::api::AppearanceConfig, StorageError> {
+            Ok(coder_core::api::AppearanceConfig::default())
+        }
+
+        async fn upsert_appearance_config(
+            &self,
+            _config: &coder_core::api::AppearanceConfig,
+        ) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
+        async fn prebuilds_settings(
+            &self,
+        ) -> Result<coder_core::api::PrebuildsSettings, StorageError> {
+            Ok(coder_core::api::PrebuildsSettings::default())
+        }
+
+        async fn upsert_prebuilds_settings(
+            &self,
+            _settings: &coder_core::api::PrebuildsSettings,
+        ) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+
         async fn find_git_ssh_key(
             &self,
             _user_id: uuid::Uuid,

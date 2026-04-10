@@ -115,6 +115,7 @@ fn bench_app_state() -> AppState {
         derp_server,
         None,
         coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+        std::sync::Arc::new(coder_license::EntitlementSet::new()),
     )
     .unwrap_or_else(|_| std::process::abort())
 }

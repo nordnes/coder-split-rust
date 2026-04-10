@@ -738,3 +738,58 @@ mod tests {
         assert_eq!(parts[2].len(), 16, "span-id should be 16 hex chars");
     }
 }
+
+// ── Enterprise feature-gate middleware ───────────────────────────────────
+
+/// Creates an Axum middleware layer that gates access behind an enterprise
+/// feature entitlement.  When the feature is **not** entitled the layer
+/// short-circuits with a 403 response.
+///
+/// # Usage
+///
+/// ```ignore
+/// use coder_license::FeatureName;
+///
+/// Router::new()
+///     .route("/appearance", get(get_appearance).put(put_appearance))
+///     .route_layer(axum::middleware::from_fn_with_state(
+///         state.clone(),
+///         require_feature(FeatureName::Appearance),
+///     ))
+/// ```
+///
+/// Because [`axum::middleware::from_fn_with_state`] requires a function
+/// (not a closure capturing `feature`), the middleware is implemented as a
+/// higher-order function returning an async handler.
+pub(crate) async fn require_feature_appearance(
+    axum::extract::State(state): axum::extract::State<crate::app::AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if !state
+        .entitlements
+        .is_entitled(coder_license::FeatureName::Appearance)
+    {
+        return crate::handlers::licenses::require_enterprise_feature(
+            &coder_license::FeatureName::Appearance,
+        );
+    }
+    next.run(request).await
+}
+
+/// Enterprise feature gate for workspace prebuilds.
+pub(crate) async fn require_feature_prebuilds(
+    axum::extract::State(state): axum::extract::State<crate::app::AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if !state
+        .entitlements
+        .is_entitled(coder_license::FeatureName::WorkspacePrebuilds)
+    {
+        return crate::handlers::licenses::require_enterprise_feature(
+            &coder_license::FeatureName::WorkspacePrebuilds,
+        );
+    }
+    next.run(request).await
+}

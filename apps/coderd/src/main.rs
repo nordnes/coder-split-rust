@@ -902,6 +902,7 @@ async fn run() -> Result<(), MainError> {
         )),
         Some(prometheus_handle),
         telemetry_reporter,
+        std::sync::Arc::new(coder_license::EntitlementSet::new()),
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 

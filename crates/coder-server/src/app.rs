@@ -29,6 +29,7 @@ use coder_connectivity::{
 use coder_core::pubsub::PubSub;
 use coder_core::{ApiResponse, AppStore, BuildMetadata, ServerConfig};
 use coder_identity::IdentityService;
+use coder_license::{EntitlementSet, FeatureName};
 use coder_workspaces::DeploymentStatsService;
 use serde::Deserialize;
 use serde_json::Value;
@@ -45,6 +46,7 @@ use crate::error::AppError;
 
 // Re-export handler functions for use in route definitions.
 use crate::handlers::agents::*;
+use crate::handlers::appearance::*;
 use crate::handlers::audit::*;
 use crate::handlers::auth::*;
 use crate::handlers::chats::*;
@@ -59,6 +61,7 @@ use crate::handlers::mcp::*;
 use crate::handlers::notifications::*;
 use crate::handlers::oauth2::*;
 use crate::handlers::organizations::*;
+use crate::handlers::prebuilds::*;
 use crate::handlers::quotas::*;
 use crate::handlers::replicas::*;
 use crate::handlers::scim::*;
@@ -178,6 +181,8 @@ pub struct AppState {
     pub telemetry_reporter: coder_telemetry::TelemetryReporter,
     /// Shared HTTP client for outbound requests (connection pooling).
     pub http_client: reqwest::Client,
+    /// Enterprise feature entitlements for gating enterprise-only routes.
+    pub entitlements: std::sync::Arc<EntitlementSet>,
 }
 
 impl AppState {
@@ -196,6 +201,7 @@ impl AppState {
         derp_server: Arc<DerpServer>,
         prometheus_handle: Option<PrometheusHandle>,
         telemetry_reporter: coder_telemetry::TelemetryReporter,
+        entitlements: std::sync::Arc<EntitlementSet>,
     ) -> Result<Self, reqwest::Error> {
         let audit = Arc::new(BatchedAuditSink::new(
             audit,
@@ -233,6 +239,7 @@ impl AppState {
             external_auth,
             oauth2_provider,
             http_client,
+            entitlements,
         })
     }
 
@@ -842,9 +849,18 @@ pub fn build_router(
                     post(post_file).layer(DefaultBodyLimit::max(10 * 1024 * 1024)),
                 )
                 .route("/files/{fileid}", get(get_file_by_id))
+                // ----- Appearance routes (enterprise) -----
+                .route("/appearance", put(put_appearance))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_appearance,
+                    ))
+                // ----- Prebuilds settings routes -----
+                .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
                 // ----- License & Entitlements routes -----
                 .route("/licenses", get(list_licenses).post(post_license))
                 .route("/licenses/{id}", delete(delete_license_handler))
+                .route("/licenses/refresh-entitlements", post(post_refresh_entitlements))
                 .route("/entitlements", get(get_entitlements))
                 .route("/replicas", get(get_replicas))
                 .route("/workspace-quota/{user}", get(get_workspace_quota_deprecated))
@@ -860,6 +876,7 @@ pub fn build_router(
                 // still be able to reach these endpoints.
                 // -------------------------------------------------------
                 .route("/", get(api_root))
+                .route("/appearance", get(get_appearance))
                 .route("/buildinfo", get(build_info))
                 .route("/updatecheck", get(update_check))
                 .route("/csp/reports", post(post_csp_report))
@@ -1532,6 +1549,8 @@ pub(crate) mod tests {
         appearance: Mutex<HashMap<Uuid, UserAppearanceRecord>>,
         preferences: Mutex<HashMap<Uuid, UserPreferenceRecord>>,
         health_settings: Mutex<HealthSettings>,
+        appearance_config: Mutex<coder_core::api::AppearanceConfig>,
+        prebuilds_settings: Mutex<coder_core::api::PrebuildsSettings>,
         git_ssh_keys: Mutex<HashMap<Uuid, GitSshKeyRecord>>,
         external_auth_links: Mutex<HashMap<(Uuid, String), ExternalAuthLinkRecord>>,
         stats_workspaces: Mutex<HashMap<Uuid, WorkspaceStatsWorkspaceInput>>,
@@ -1635,6 +1654,8 @@ pub(crate) mod tests {
                 appearance: Mutex::new(HashMap::new()),
                 preferences: Mutex::new(HashMap::new()),
                 health_settings: Mutex::new(HealthSettings::default()),
+                appearance_config: Mutex::new(coder_core::api::AppearanceConfig::default()),
+                prebuilds_settings: Mutex::new(coder_core::api::PrebuildsSettings::default()),
                 git_ssh_keys: Mutex::new(HashMap::new()),
                 external_auth_links: Mutex::new(HashMap::new()),
                 stats_workspaces: Mutex::new(HashMap::new()),
@@ -3738,6 +3759,54 @@ pub(crate) mod tests {
         ) -> Result<bool, StorageError> {
             let mut current = self
                 .health_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if *current == *settings {
+                return Ok(false);
+            }
+            *current = settings.clone();
+            Ok(true)
+        }
+
+        async fn appearance_config(
+            &self,
+        ) -> Result<coder_core::api::AppearanceConfig, StorageError> {
+            self.appearance_config
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|config| config.clone())
+        }
+
+        async fn upsert_appearance_config(
+            &self,
+            config: &coder_core::api::AppearanceConfig,
+        ) -> Result<bool, StorageError> {
+            let mut current = self
+                .appearance_config
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if *current == *config {
+                return Ok(false);
+            }
+            *current = config.clone();
+            Ok(true)
+        }
+
+        async fn prebuilds_settings(
+            &self,
+        ) -> Result<coder_core::api::PrebuildsSettings, StorageError> {
+            self.prebuilds_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|settings| settings.clone())
+        }
+
+        async fn upsert_prebuilds_settings(
+            &self,
+            settings: &coder_core::api::PrebuildsSettings,
+        ) -> Result<bool, StorageError> {
+            let mut current = self
+                .prebuilds_settings
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             if *current == *settings {
@@ -8572,6 +8641,7 @@ pub(crate) mod tests {
                 derp_server,
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+                std::sync::Arc::new(coder_license::EntitlementSet::new()),
             )?,
             store,
         ))
@@ -32760,6 +32830,7 @@ pub(crate) mod tests {
             )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
         )?)
     }
 
@@ -32805,6 +32876,7 @@ pub(crate) mod tests {
             )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
         )?)
     }
 
@@ -32967,6 +33039,7 @@ pub(crate) mod tests {
             )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
         )?)
     }
 
@@ -33449,6 +33522,7 @@ pub(crate) mod tests {
                 )),
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+                std::sync::Arc::new(coder_license::EntitlementSet::new()),
             )?
         };
         let app = build_router(state, None);
@@ -35373,6 +35447,7 @@ pub(crate) mod tests {
             )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
         )?;
         let app = build_router(state, None);
         let (session_token, _org_id, _template) = create_test_template(&app).await?;
