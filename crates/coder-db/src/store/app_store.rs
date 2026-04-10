@@ -1197,6 +1197,139 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_organization(
+        &self,
+        input: &CreateOrganizationInput,
+    ) -> Result<OrganizationRecord, CreateOrganizationStoreError> {
+        let row = sqlx::query_as::<_, StoredOrganizationRow>(
+            "INSERT INTO organizations (id, name, display_name, description, icon, created_at, updated_at, is_default, deleted)
+             VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW(), false, false)
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+        )
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.description)
+        .bind(&input.icon)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            if is_unique_violation(&error) {
+                CreateOrganizationStoreError::AlreadyExists
+            } else {
+                CreateOrganizationStoreError::Storage(storage_error(error))
+            }
+        })?;
+        organization_record_from_row(row).map_err(|e| CreateOrganizationStoreError::Storage(e))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_organization(
+        &self,
+        input: &UpdateOrganizationInput,
+    ) -> Result<OrganizationRecord, UpdateOrganizationStoreError> {
+        let row = sqlx::query_as::<_, StoredOrganizationRow>(
+            "UPDATE organizations
+             SET name = $2, display_name = $3, description = $4, icon = $5, updated_at = NOW()
+             WHERE id = $1 AND deleted = false
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+        )
+        .bind(input.id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.description)
+        .bind(&input.icon)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|error| {
+            if is_unique_violation(&error) {
+                UpdateOrganizationStoreError::AlreadyExists
+            } else {
+                UpdateOrganizationStoreError::Storage(storage_error(error))
+            }
+        })?;
+        organization_record_from_row(row).map_err(|e| UpdateOrganizationStoreError::Storage(e))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn soft_delete_organization(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE organizations SET deleted = true, updated_at = NOW() WHERE id = $1 AND deleted = false",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_organization_resource_counts(
+        &self,
+        id: Uuid,
+    ) -> Result<OrgResourceCounts, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Counts {
+            workspace_count: i64,
+            template_count: i64,
+            member_count: i64,
+            group_count: i64,
+            provisioner_key_count: i64,
+        }
+        let counts = sqlx::query_as::<_, Counts>(
+            "SELECT
+                (SELECT COUNT(*) FROM workspaces WHERE organization_id = $1 AND deleted = false) AS workspace_count,
+                (SELECT COUNT(*) FROM templates WHERE organization_id = $1 AND deleted = false) AS template_count,
+                (SELECT COUNT(*) FROM organization_members WHERE organization_id = $1) AS member_count,
+                (SELECT COUNT(*) FROM groups WHERE organization_id = $1) AS group_count,
+                (SELECT COUNT(*) FROM provisioner_keys WHERE organization_id = $1) AS provisioner_key_count",
+        )
+        .bind(id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(OrgResourceCounts {
+            workspace_count: counts.workspace_count as u64,
+            template_count: counts.template_count as u64,
+            member_count: counts.member_count as u64,
+            group_count: counts.group_count as u64,
+            provisioner_key_count: counts.provisioner_key_count as u64,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<Option<CustomRoleRecord>, StorageError> {
+        let row = sqlx::query_as::<_, StoredCustomRoleRow>(
+            "SELECT name, display_name, organization_id,
+                    site_permissions::text AS site_permissions,
+                    org_permissions::text AS org_permissions,
+                    user_permissions::text AS user_permissions,
+                    created_at, updated_at
+             FROM custom_roles
+             WHERE LOWER(name) = LOWER($1)
+               AND (($2::uuid IS NULL AND organization_id IS NULL) OR organization_id = $2)",
+        )
+        .bind(name)
+        .bind(organization_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.map(|r| CustomRoleRecord {
+            name: r.name,
+            display_name: r.display_name,
+            organization_id: r.organization_id,
+            site_permissions: r.site_permissions,
+            org_permissions: r.org_permissions,
+            user_permissions: r.user_permissions,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+        }))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_organization_members(
         &self,
         filter: OrganizationMemberListFilter,

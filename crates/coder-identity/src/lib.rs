@@ -18,10 +18,11 @@
 use std::collections::{HashMap, HashSet};
 
 use coder_core::{
-    AssignableRoleResponse, CreateGroupInput, CreateUserInput, CreateUserRequestWithOrgs,
-    CreateUserStoreError, CustomRoleRecord, GroupMemberRecord, GroupRecord, IdentityStore,
-    InsertOrganizationMemberError, LoginType, OrganizationMemberListFilter,
-    OrganizationMemberRecord, PasswordError, RoleResponse, StorageError, UpdateRolesRequest,
+    AssignableRoleResponse, CreateGroupInput, CreateOrganizationInput, CreateUserInput,
+    CreateUserRequestWithOrgs, CreateUserStoreError, CustomRoleRecord, GroupMemberRecord,
+    GroupRecord, IdentityStore, InsertOrganizationMemberError, LoginType, OrgResourceCounts,
+    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordError,
+    RoleResponse, StorageError, UpdateOrganizationInput, UpdateRolesRequest,
     UpdateUserAppearanceSettingsRequest, UpdateUserPreferenceSettingsRequest,
     UpdateUserProfileRequest, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
     UserConfigRecord, UserLinkRecord, UserPreferenceRecord, UserRecord, UserStatus,
@@ -1149,6 +1150,190 @@ where
         }
         self.store
             .delete_custom_role(name, organization_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    /// Looks up a custom role by name and optional organization.
+    pub async fn find_custom_role(
+        &self,
+        actor: &Actor,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<Option<CustomRoleRecord>, IdentityServiceError> {
+        if !actor.is_owner() {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view custom roles.",
+            ));
+        }
+        self.store
+            .find_custom_role(name, organization_id)
+            .await
+            .map_err(Into::into)
+    }
+
+    // -----------------------------------------------------------------
+    // Organization CRUD
+    // -----------------------------------------------------------------
+
+    /// Creates a new organization.
+    pub async fn create_organization(
+        &self,
+        actor: &Actor,
+        input: &CreateOrganizationInput,
+    ) -> Result<OrganizationRecord, IdentityServiceError> {
+        if !actor.is_owner() {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to create organizations.",
+            ));
+        }
+        if input.name == "default" {
+            return Err(IdentityServiceError::bad_request(
+                "Organization name 'default' is reserved.",
+            ));
+        }
+        if input.name.trim().is_empty() {
+            return Err(IdentityServiceError::bad_request(
+                "Organization name must not be empty.",
+            ));
+        }
+        let org = self
+            .store
+            .insert_organization(input)
+            .await
+            .map_err(|error| match error {
+                coder_core::CreateOrganizationStoreError::AlreadyExists => {
+                    IdentityServiceError::Conflict {
+                        message: "Organization already exists.".to_owned(),
+                        detail: None,
+                        validations: vec![],
+                    }
+                }
+                coder_core::CreateOrganizationStoreError::Storage(e) => {
+                    IdentityServiceError::Storage(e)
+                }
+            })?;
+
+        // Create the "Everyone" group for the new organization.
+        let _ = self
+            .store
+            .create_group(&CreateGroupInput {
+                organization_id: org.id,
+                name: "Everyone".to_owned(),
+                display_name: "Everyone".to_owned(),
+                avatar_url: String::new(),
+                quota_allowance: 0,
+            })
+            .await;
+
+        // Add the creator as an organization member.
+        let _ = self
+            .store
+            .insert_organization_member(org.id, input.actor_user_id)
+            .await;
+
+        Ok(org)
+    }
+
+    /// Updates an existing organization.
+    pub async fn update_organization(
+        &self,
+        actor: &Actor,
+        requested_organization: &str,
+        input: &coder_core::UpdateOrganizationInput,
+    ) -> Result<OrganizationRecord, IdentityServiceError> {
+        let target_organization = self
+            .resolve_organization(requested_organization)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Organization not found."))?;
+        if !actor.can_manage_organization(target_organization.id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to update this organization.",
+            ));
+        }
+        self.store
+            .update_organization(input)
+            .await
+            .map_err(|error| match error {
+                coder_core::UpdateOrganizationStoreError::AlreadyExists => {
+                    IdentityServiceError::Conflict {
+                        message: "An organization with that name already exists.".to_owned(),
+                        detail: None,
+                        validations: vec![],
+                    }
+                }
+                coder_core::UpdateOrganizationStoreError::Storage(e) => {
+                    IdentityServiceError::Storage(e)
+                }
+            })
+    }
+
+    /// Soft-deletes an organization.
+    pub async fn delete_organization(
+        &self,
+        actor: &Actor,
+        requested_organization: &str,
+    ) -> Result<Uuid, IdentityServiceError> {
+        let target_organization = self
+            .resolve_organization(requested_organization)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Organization not found."))?;
+        if !actor.is_owner() {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to delete organizations.",
+            ));
+        }
+        if target_organization.is_default {
+            return Err(IdentityServiceError::bad_request(
+                "Cannot delete the default organization.",
+            ));
+        }
+
+        let deleted = self
+            .store
+            .soft_delete_organization(target_organization.id)
+            .await?;
+
+        if !deleted {
+            let counts = self
+                .store
+                .get_organization_resource_counts(target_organization.id)
+                .await
+                .unwrap_or_default();
+            let detail = format!(
+                "Organization has {} workspace(s), {} template(s), {} member(s), {} group(s), and {} provisioner key(s).",
+                counts.workspace_count,
+                counts.template_count,
+                counts.member_count,
+                counts.group_count,
+                counts.provisioner_key_count,
+            );
+            return Err(IdentityServiceError::bad_request_with_detail(
+                "Organization is not empty and cannot be deleted.",
+                detail,
+            ));
+        }
+
+        Ok(target_organization.id)
+    }
+
+    /// Returns resource counts for an organization.
+    pub async fn get_organization_resource_counts(
+        &self,
+        actor: &Actor,
+        requested_organization: &str,
+    ) -> Result<OrgResourceCounts, IdentityServiceError> {
+        let target_organization = self
+            .resolve_organization(requested_organization)
+            .await?
+            .ok_or_else(|| IdentityServiceError::not_found("Organization not found."))?;
+        if !actor.can_access_organization(target_organization.id) {
+            return Err(IdentityServiceError::forbidden(
+                "You are not authorized to view this organization.",
+            ));
+        }
+        self.store
+            .get_organization_resource_counts(target_organization.id)
             .await
             .map_err(Into::into)
     }

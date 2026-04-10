@@ -351,9 +351,9 @@ pub fn build_router(
                     get(get_external_auth_device_by_id).post(post_external_auth_device_exchange),
                 )
                 .route("/debug/{user}/debug-link", get(get_user_debug_link))
-                .route("/organizations", get(list_organizations))
+                .route("/organizations", get(list_organizations).post(post_organization))
                 .route("/init-script/{os}/{arch}", get(get_init_script))
-                .route("/organizations/{organization}", get(get_organization))
+                .route("/organizations/{organization}", get(get_organization).patch(patch_organization).delete(delete_organization))
                 .route(
                     "/organizations/{organization}/settings/workspace-sharing",
                     get(get_workspace_sharing_settings).patch(patch_workspace_sharing_settings),
@@ -384,7 +384,11 @@ pub fn build_router(
                 )
                 .route(
                     "/organizations/{organization}/members/roles",
-                    get(list_organization_roles),
+                    get(list_organization_roles).post(post_org_role).put(put_org_role),
+                )
+                .route(
+                    "/organizations/{organization}/members/roles/{roleName}",
+                    delete(delete_org_role),
                 )
                 .route(
                     "/organizations/{organization}/members",
@@ -1407,28 +1411,30 @@ pub(crate) mod tests {
         CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
         CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
         CreateFirstUserRequest, CreateFirstUserStoreError, CreateGroupInput,
-        CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
-        CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
-        CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
-        CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig,
-        DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, DerpNodeConfig,
-        DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser,
-        FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
-        HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
-        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        CreateOrganizationInput, CreateOrganizationStoreError, CreateProvisionerJobInput,
+        CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest, CreateTemplateStoreError,
+        CreateTemplateVersionInput, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
+        CreateUserRequestWithOrgs, CreateUserStoreError, CreateWorkspaceBuildInput,
+        CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig, DeploymentMetadata,
+        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
+        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
+        GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings,
+        InsertAgentLogInput, InsertChatFileInput, InsertChatInput, InsertChatMessageInput,
+        InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
         InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
         InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord,
         LogFormat, LoginType, LoginWithPasswordRequest, NotificationMessageRecord,
-        NotificationMessageStatus, OrganizationMemberListFilter, OrganizationMemberRecord,
-        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
-        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        NotificationMessageStatus, OrgResourceCounts, OrganizationMemberListFilter,
+        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
+        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
+        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
         TemplateVersionListFilter, TemplateVersionParameterRecord,
         TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
-        TemplateVersionVariableRecord, TokenConfigRecord, UpdateRolesRequest, UpdateTemplateMeta,
+        TemplateVersionVariableRecord, TokenConfigRecord, UpdateOrganizationInput,
+        UpdateOrganizationStoreError, UpdateRolesRequest, UpdateTemplateMeta,
         UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
         UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertCustomRoleInput,
         UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
@@ -3045,6 +3051,99 @@ pub(crate) mod tests {
             Ok(organizations
                 .values()
                 .find(|org| !org.deleted && org.name.eq_ignore_ascii_case(name))
+                .cloned())
+        }
+
+        async fn insert_organization(
+            &self,
+            input: &CreateOrganizationInput,
+        ) -> Result<OrganizationRecord, CreateOrganizationStoreError> {
+            let mut organizations = self.organizations.lock().map_err(|error| {
+                CreateOrganizationStoreError::Storage(StorageError::unavailable(error.to_string()))
+            })?;
+            // Check for uniqueness.
+            if organizations
+                .values()
+                .any(|org| !org.deleted && org.name.eq_ignore_ascii_case(&input.name))
+            {
+                return Err(CreateOrganizationStoreError::AlreadyExists);
+            }
+            let now = OffsetDateTime::now_utc();
+            let org = OrganizationRecord {
+                id: Uuid::new_v4(),
+                name: input.name.clone(),
+                display_name: input.display_name.clone(),
+                description: input.description.clone(),
+                icon: input.icon.clone(),
+                created_at: now,
+                updated_at: now,
+                is_default: false,
+                deleted: false,
+            };
+            organizations.insert(org.id, org.clone());
+            Ok(org)
+        }
+
+        async fn update_organization(
+            &self,
+            input: &UpdateOrganizationInput,
+        ) -> Result<OrganizationRecord, UpdateOrganizationStoreError> {
+            let mut organizations = self.organizations.lock().map_err(|error| {
+                UpdateOrganizationStoreError::Storage(StorageError::unavailable(error.to_string()))
+            })?;
+            // Check uniqueness for name collision with a different org.
+            if organizations.values().any(|org| {
+                !org.deleted && org.id != input.id && org.name.eq_ignore_ascii_case(&input.name)
+            }) {
+                return Err(UpdateOrganizationStoreError::AlreadyExists);
+            }
+            let org = organizations.get_mut(&input.id).ok_or_else(|| {
+                UpdateOrganizationStoreError::Storage(StorageError::not_found(
+                    "Organization not found.",
+                ))
+            })?;
+            org.name = input.name.clone();
+            org.display_name = input.display_name.clone();
+            org.description = input.description.clone();
+            org.icon = input.icon.clone();
+            org.updated_at = OffsetDateTime::now_utc();
+            Ok(org.clone())
+        }
+
+        async fn soft_delete_organization(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut organizations = self
+                .organizations
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(org) = organizations.get_mut(&id) {
+                org.deleted = true;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
+        }
+
+        async fn get_organization_resource_counts(
+            &self,
+            _id: Uuid,
+        ) -> Result<OrgResourceCounts, StorageError> {
+            Ok(OrgResourceCounts::default())
+        }
+
+        async fn find_custom_role(
+            &self,
+            name: &str,
+            organization_id: Option<Uuid>,
+        ) -> Result<Option<CustomRoleRecord>, StorageError> {
+            let roles = self
+                .custom_roles
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(roles
+                .values()
+                .find(|role| {
+                    role.name.eq_ignore_ascii_case(name) && role.organization_id == organization_id
+                })
                 .cloned())
         }
 

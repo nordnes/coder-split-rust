@@ -3,6 +3,11 @@
 use super::templates::resolve_organization;
 use super::users::clamp_pagination_limit;
 use super::*;
+use coder_core::api::CustomRoleResponse;
+use coder_core::{
+    CreateOrganizationInput, CreateOrganizationRequest, CustomRoleRequest, UpdateOrganizationInput,
+    UpdateOrganizationRequest,
+};
 
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct MembersQuery {
@@ -346,4 +351,437 @@ pub(crate) async fn put_organization_member_roles(
         Json(OrganizationMember::from(updated_member)),
     )
         .into_response())
+}
+
+// -----------------------------------------------------------------
+// Organization CRUD
+// -----------------------------------------------------------------
+
+pub(crate) async fn post_organization(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    payload: Result<Json<CreateOrganizationRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::Organization),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create organizations.",
+        ));
+    }
+
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let input = CreateOrganizationInput {
+        name: request.name,
+        display_name: request.display_name,
+        description: request.description,
+        icon: request.icon,
+        actor_user_id: context.user.id,
+    };
+
+    let org = match state
+        .identity
+        .create_organization(&context.actor, &input)
+        .await
+    {
+        Ok(org) => org,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::Organization,
+        Some(&context.user),
+        Some(org.id.to_string()),
+        "created organization",
+    )
+    .await;
+
+    Ok((StatusCode::CREATED, Json(OrganizationResponse::from(org))).into_response())
+}
+
+pub(crate) async fn patch_organization(
+    State(state): State<AppState>,
+    Path(organization): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateOrganizationRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Organization).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this organization.",
+        ));
+    }
+
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    let input = UpdateOrganizationInput {
+        id: org.id,
+        name: request.name.unwrap_or(org.name),
+        display_name: request.display_name.unwrap_or(org.display_name),
+        description: request.description.unwrap_or(org.description),
+        icon: request.icon.unwrap_or(org.icon),
+    };
+
+    let updated_org = match state
+        .identity
+        .update_organization(&context.actor, &organization, &input)
+        .await
+    {
+        Ok(org) => org,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Organization,
+        Some(&context.user),
+        Some(updated_org.id.to_string()),
+        "updated organization",
+    )
+    .await;
+
+    Ok((
+        StatusCode::OK,
+        Json(OrganizationResponse::from(updated_org)),
+    )
+        .into_response())
+}
+
+pub(crate) async fn delete_organization(
+    State(state): State<AppState>,
+    Path(organization): Path<String>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::Organization).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete organizations.",
+        ));
+    }
+
+    let org_id = match state
+        .identity
+        .delete_organization(&context.actor, &organization)
+        .await
+    {
+        Ok(id) => id,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Organization,
+        Some(&context.user),
+        Some(org_id.to_string()),
+        "deleted organization",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+// -----------------------------------------------------------------
+// Custom Roles CRUD
+// -----------------------------------------------------------------
+
+/// Reserved role names that cannot be used for custom roles.
+const RESERVED_ROLE_NAMES: &[&str] = &[
+    "owner",
+    "member",
+    "auditor",
+    "template-admin",
+    "user-admin",
+    "organization-admin",
+    "organization-member",
+    "organization-auditor",
+];
+
+pub(crate) async fn post_org_role(
+    State(state): State<AppState>,
+    Path(organization): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<CustomRoleRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Create,
+            &Object::new(ResourceType::AssignOrgRole).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to create custom roles in this organization.",
+        ));
+    }
+
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    if RESERVED_ROLE_NAMES.contains(&request.name.as_str()) {
+        return Ok(validation_message_response(
+            &format!(
+                "Role name '{}' is reserved and cannot be used for custom roles.",
+                request.name
+            ),
+            vec![],
+        ));
+    }
+
+    let input = coder_core::UpsertCustomRoleInput {
+        name: request.name,
+        display_name: request.display_name,
+        organization_id: Some(org.id),
+        site_permissions: serde_json::to_value(&request.site_permissions)
+            .unwrap_or_default()
+            .to_string(),
+        org_permissions: serde_json::to_value(&request.organization_permissions)
+            .unwrap_or_default()
+            .to_string(),
+        user_permissions: serde_json::to_value(&request.user_permissions)
+            .unwrap_or_default()
+            .to_string(),
+    };
+
+    let role = match state
+        .identity
+        .upsert_custom_role(&context.actor, &input)
+        .await
+    {
+        Ok(role) => role,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::CustomRole,
+        Some(&context.user),
+        Some(role.name.clone()),
+        "created custom role",
+    )
+    .await;
+
+    Ok((
+        StatusCode::CREATED,
+        Json(CustomRoleResponse {
+            name: role.name,
+            display_name: role.display_name,
+            organization_id: role.organization_id.map(|id| id.to_string()),
+        }),
+    )
+        .into_response())
+}
+
+pub(crate) async fn put_org_role(
+    State(state): State<AppState>,
+    Path(organization): Path<String>,
+    headers: HeaderMap,
+    payload: Result<Json<CustomRoleRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::AssignOrgRole).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update custom roles in this organization.",
+        ));
+    }
+
+    let Json(request) = match payload {
+        Ok(request) => request,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    if RESERVED_ROLE_NAMES.contains(&request.name.as_str()) {
+        return Ok(validation_message_response(
+            &format!(
+                "Role name '{}' is reserved and cannot be used for custom roles.",
+                request.name
+            ),
+            vec![],
+        ));
+    }
+
+    let input = coder_core::UpsertCustomRoleInput {
+        name: request.name,
+        display_name: request.display_name,
+        organization_id: Some(org.id),
+        site_permissions: serde_json::to_value(&request.site_permissions)
+            .unwrap_or_default()
+            .to_string(),
+        org_permissions: serde_json::to_value(&request.organization_permissions)
+            .unwrap_or_default()
+            .to_string(),
+        user_permissions: serde_json::to_value(&request.user_permissions)
+            .unwrap_or_default()
+            .to_string(),
+    };
+
+    let role = match state
+        .identity
+        .upsert_custom_role(&context.actor, &input)
+        .await
+    {
+        Ok(role) => role,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::CustomRole,
+        Some(&context.user),
+        Some(role.name.clone()),
+        "updated custom role",
+    )
+    .await;
+
+    Ok((
+        StatusCode::OK,
+        Json(CustomRoleResponse {
+            name: role.name,
+            display_name: role.display_name,
+            organization_id: role.organization_id.map(|id| id.to_string()),
+        }),
+    )
+        .into_response())
+}
+
+pub(crate) async fn delete_org_role(
+    State(state): State<AppState>,
+    Path((organization, role_name)): Path<(String, String)>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(org) = resolve_organization(&state, &organization).await? else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Delete,
+            &Object::new(ResourceType::AssignOrgRole).in_org(org.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to delete custom roles in this organization.",
+        ));
+    }
+
+    if RESERVED_ROLE_NAMES.contains(&role_name.as_str()) {
+        return Ok(validation_message_response(
+            &format!(
+                "Role '{}' is a built-in role and cannot be deleted.",
+                role_name
+            ),
+            vec![],
+        ));
+    }
+
+    let deleted = match state
+        .identity
+        .delete_custom_role(&context.actor, &role_name, Some(org.id))
+        .await
+    {
+        Ok(deleted) => deleted,
+        Err(error) => return handle_identity_error(error),
+    };
+
+    if !deleted {
+        return Ok(not_found_response("Custom role not found."));
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::CustomRole,
+        Some(&context.user),
+        Some(role_name),
+        "deleted custom role",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
 }
