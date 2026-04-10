@@ -346,8 +346,8 @@ fn build_inventory(
         }
     }
     go_routes.sort_by(|left, right| {
-        left.path
-            .cmp(&right.path)
+        left.normalized_path
+            .cmp(&right.normalized_path)
             .then(left.method.cmp(&right.method))
             .then(left.source.cmp(&right.source))
     });
@@ -1192,26 +1192,27 @@ mod tests {
         let mut routes = vec![
             GoRoute {
                 method: "GET".to_owned(),
-                path: "/users".to_owned(),
-                live_path: "/api/v2/users".to_owned(),
+                path: "/users/{user}".to_owned(),
+                live_path: "/api/v2/users/{user}".to_owned(),
                 mount: "/api/v2".to_owned(),
-                normalized_path: "/users".to_owned(),
+                normalized_path: "/users/{}".to_owned(),
                 source: "coder/coderd/users.go".to_owned(),
                 scope: RouteScope::Oss,
             },
             GoRoute {
                 method: "GET".to_owned(),
-                path: "/users".to_owned(),
-                live_path: "/api/v2/users".to_owned(),
+                path: "/users/{id}".to_owned(),
+                live_path: "/api/v2/users/{id}".to_owned(),
                 mount: "/api/v2".to_owned(),
-                normalized_path: "/users".to_owned(),
+                normalized_path: "/users/{}".to_owned(),
                 source: "coder/enterprise/coderd/users.go".to_owned(),
                 scope: RouteScope::Enterprise,
             },
         ];
+        // Sort by normalized_path (matching dedup key) to ensure correct dedup
         routes.sort_by(|left, right| {
-            left.path
-                .cmp(&right.path)
+            left.normalized_path
+                .cmp(&right.normalized_path)
                 .then(left.method.cmp(&right.method))
                 .then(left.source.cmp(&right.source))
         });
