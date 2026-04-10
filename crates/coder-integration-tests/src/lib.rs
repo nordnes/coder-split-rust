@@ -2871,6 +2871,10 @@ mod tests {
         let h = TestHarness::new().await?;
         let _token = create_first_user_and_login(&h.router).await?;
 
+        // Wait for the BatchedAuditSink to flush events to the underlying
+        // MemoryAuditSink (flush interval is 500ms per test_config).
+        tokio::time::sleep(std::time::Duration::from_millis(700)).await;
+
         let events = h.audit.recorded_events();
         assert!(
             !events.is_empty(),
