@@ -115,10 +115,6 @@ pub(crate) async fn delete_license_handler(
 }
 
 /// GET /api/v2/entitlements — return the current entitlements snapshot.
-///
-/// Since no persistent `EntitlementSet` is wired into `AppState` yet, this
-/// returns a default unlicensed snapshot.  Once the license service is
-/// integrated into server startup the real entitlements will be served.
 pub(crate) async fn get_entitlements(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -127,8 +123,7 @@ pub(crate) async fn get_entitlements(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Return a default unlicensed entitlements snapshot for now.
-    let entitlements = coder_license::Entitlements::new_unlicensed();
+    let entitlements = state.entitlements.snapshot();
 
     Ok((StatusCode::OK, Json(entitlements)).into_response())
 }
