@@ -1,8 +1,8 @@
 //! User CRUD, profile, preferences, appearance, role, and quiet hours handlers.
 
 use super::*;
+use chrono_tz::Tz;
 use coder_core::api::{UpdateUserQuietHoursScheduleRequest, UserQuietHoursScheduleResponse};
-use coder_license::FeatureName;
 
 /// Maximum number of rows a single paginated request may return.
 ///
@@ -811,58 +811,82 @@ pub(crate) async fn delete_user(
 /// Key used to store the quiet hours schedule in the `user_configs` table.
 const QUIET_HOURS_SCHEDULE_KEY: &str = "quiet_hours_schedule";
 
-/// Parses a quiet hours cron schedule string and returns the timezone name
-/// and the local time string (e.g. `("America/Chicago", "00:00")`).
+/// Parsed components of a quiet-hours cron schedule.
+struct ParsedQuietHours<'a> {
+    tz_name: &'a str,
+    hour: u32,
+    minute: u32,
+}
+
+/// Extracts timezone, hour, and minute from a quiet-hours cron schedule.
 ///
 /// Expected format: `CRON_TZ=America/Chicago 0 0 * * *`
-fn parse_quiet_hours_cron(schedule: &str) -> (String, String) {
+/// Falls back to `UTC` / `0` for missing or unparseable parts.
+fn parse_cron_fields(schedule: &str) -> ParsedQuietHours<'_> {
     let schedule = schedule.trim();
     let (tz_name, cron_part) = if let Some(rest) = schedule.strip_prefix("CRON_TZ=") {
         match rest.split_once(' ') {
-            Some((tz, cron)) => (tz.to_owned(), cron.to_owned()),
-            None => ("UTC".to_owned(), rest.to_owned()),
+            Some((tz, cron)) => (tz, cron),
+            None => ("UTC", rest),
         }
     } else {
-        ("UTC".to_owned(), schedule.to_owned())
+        ("UTC", schedule)
     };
 
     let fields: Vec<&str> = cron_part.split_whitespace().collect();
-    let minute: u8 = fields.first().and_then(|f| f.parse().ok()).unwrap_or(0);
-    let hour: u8 = fields.get(1).and_then(|f| f.parse().ok()).unwrap_or(0);
-    let time_str = format!("{hour:02}:{minute:02}");
+    let minute: u32 = fields.first().and_then(|f| f.parse().ok()).unwrap_or(0);
+    let hour: u32 = fields.get(1).and_then(|f| f.parse().ok()).unwrap_or(0);
 
-    (tz_name, time_str)
+    ParsedQuietHours {
+        tz_name,
+        hour,
+        minute,
+    }
+}
+
+/// Returns `(timezone_name, "HH:MM")` for a quiet-hours cron schedule.
+fn parse_quiet_hours_cron(schedule: &str) -> (String, String) {
+    let parsed = parse_cron_fields(schedule);
+    let time_str = format!("{:02}:{:02}", parsed.hour, parsed.minute);
+    (parsed.tz_name.to_owned(), time_str)
 }
 
 /// Computes the next quiet hours window start time in UTC given a cron schedule.
 ///
-/// Since full timezone conversion requires the `chrono-tz` crate (which is not
-/// currently a dependency), this implementation treats the schedule as UTC.  The
-/// parsed hour/minute are used to build "today at HH:MM UTC" and, if that time
-/// has already passed, advances to tomorrow.  This is accurate for UTC schedules
-/// and a reasonable approximation until proper timezone support is added.
+/// Parses the `CRON_TZ=` prefix to obtain the IANA timezone, converts the
+/// local hour/minute to UTC using `chrono-tz`, and returns the next occurrence.
+/// If the timezone is invalid or missing, falls back to UTC.
 fn next_quiet_hours(schedule: &str) -> OffsetDateTime {
-    let schedule = schedule.trim();
-    let cron_part = if let Some(rest) = schedule.strip_prefix("CRON_TZ=") {
-        rest.split_once(' ').map_or(rest, |(_, cron)| cron)
-    } else {
-        schedule
+    let parsed = parse_cron_fields(schedule);
+
+    // Parse the timezone; fall back to UTC on failure.
+    let tz: Tz = parsed.tz_name.parse().unwrap_or(chrono_tz::UTC);
+
+    use chrono::{NaiveTime, TimeZone, Utc};
+    let now_utc = Utc::now();
+    let now_local = now_utc.with_timezone(&tz);
+
+    let target_time = NaiveTime::from_hms_opt(parsed.hour, parsed.minute, 0).unwrap_or_default();
+
+    // Build today's candidate in the local timezone.
+    let today_naive = now_local.date_naive().and_time(target_time);
+    let today_local = tz.from_local_datetime(&today_naive).earliest();
+
+    let next_utc = match today_local {
+        Some(dt) if dt > now_local => dt.with_timezone(&Utc),
+        _ => {
+            // Already passed today or ambiguous — try tomorrow.
+            let tomorrow_naive =
+                (now_local.date_naive() + chrono::Duration::days(1)).and_time(target_time);
+            tz.from_local_datetime(&tomorrow_naive)
+                .earliest()
+                .map(|dt| dt.with_timezone(&Utc))
+                .unwrap_or(now_utc)
+        }
     };
 
-    let fields: Vec<&str> = cron_part.split_whitespace().collect();
-    let minute: u8 = fields.first().and_then(|f| f.parse().ok()).unwrap_or(0);
-    let hour: u8 = fields.get(1).and_then(|f| f.parse().ok()).unwrap_or(0);
-
-    let now = OffsetDateTime::now_utc();
-    let target_time = time::Time::from_hms(hour, minute, 0).unwrap_or(time::Time::MIDNIGHT);
-
-    let today_target = now.date().with_time(target_time).assume_utc();
-    if today_target > now {
-        today_target
-    } else {
-        // Already passed today — advance to tomorrow.
-        today_target + time::Duration::hours(24)
-    }
+    // Convert chrono::DateTime<Utc> → time::OffsetDateTime.
+    OffsetDateTime::from_unix_timestamp(next_utc.timestamp()).unwrap_or(OffsetDateTime::now_utc())
 }
 
 /// Validates a quiet hours cron schedule string.
@@ -874,17 +898,18 @@ fn validate_quiet_hours_schedule(schedule: &str) -> Result<(), String> {
         return Err("Schedule must not be empty.".to_owned());
     }
 
+    let parsed = parse_cron_fields(schedule);
+
+    // Validate timezone against the IANA database via chrono-tz.
+    if parsed.tz_name != "UTC" && parsed.tz_name.parse::<Tz>().is_err() {
+        return Err(format!("Invalid timezone: {}", parsed.tz_name));
+    }
+
+    // Ensure the schedule has a CRON_TZ prefix *and* cron fields following it,
+    // or is a bare 5-field cron expression.
     let cron_part = if let Some(rest) = schedule.strip_prefix("CRON_TZ=") {
         match rest.split_once(' ') {
-            Some((tz, cron)) => {
-                // Basic timezone name validation: must contain a `/` (e.g.
-                // "America/Chicago") or be "UTC".  Full IANA database
-                // validation would require the `chrono-tz` crate.
-                if tz != "UTC" && !tz.contains('/') {
-                    return Err(format!("Invalid timezone: {tz}"));
-                }
-                cron
-            }
+            Some((_, cron)) => cron,
             None => return Err("Missing cron fields after CRON_TZ.".to_owned()),
         }
     } else {
@@ -896,18 +921,12 @@ fn validate_quiet_hours_schedule(schedule: &str) -> Result<(), String> {
         return Err("Cron schedule must have at least 5 fields.".to_owned());
     }
 
-    // Validate hour field
-    let hour_str = fields[1];
-    match hour_str.parse::<u8>() {
-        Ok(h) if h < 24 => {}
-        _ => return Err(format!("Invalid hour field: {hour_str}")),
+    // Validate hour and minute ranges.
+    if parsed.hour >= 24 {
+        return Err(format!("Invalid hour field: {}", fields[1]));
     }
-
-    // Validate minute field
-    let minute_str = fields[0];
-    match minute_str.parse::<u8>() {
-        Ok(m) if m < 60 => {}
-        _ => return Err(format!("Invalid minute field: {minute_str}")),
+    if parsed.minute >= 60 {
+        return Err(format!("Invalid minute field: {}", fields[0]));
     }
 
     Ok(())
@@ -932,6 +951,11 @@ pub(crate) async fn get_user_quiet_hours(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can read this user's personal data.
+    if !context.actor.can_access_user(target_user.id) {
+        return Ok(resource_not_found_response());
+    }
 
     // Read the user's quiet hours schedule from user_configs.
     let config_record = state
@@ -983,6 +1007,23 @@ pub(crate) async fn put_user_quiet_hours(
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // RBAC: verify the actor can update this user's personal data.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::UpdatePersonal,
+            &Object::new(ResourceType::User)
+                .with_id(target_user.id)
+                .with_owner(target_user.id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this user's quiet hours schedule.",
+        ));
+    }
 
     let Json(request) = match payload {
         Ok(request) => request,

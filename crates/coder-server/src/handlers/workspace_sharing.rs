@@ -144,29 +144,17 @@ pub(crate) async fn patch_workspace_sharing_settings(
     //   3. Reconcile system roles
     //   4. If sharing disabled, delete workspace ACLs for this org
     //
-    // For now, we log the audit event and return the new settings.
     // The actual database update requires adding the shareable_workspace_owners
-    // field to OrganizationRecord and the store layer.
-
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::Organization,
-        Some(&context.user),
-        Some(org.id.to_string()),
-        "updated workspace sharing settings",
-    )
-    .await;
-
-    let sharing_disabled = new_owners == "none";
-
+    // field to OrganizationRecord and the store layer.  Until that is wired,
+    // return 501 to avoid a false audit trail and misleading clients.
+    let _ = new_owners; // suppress unused-variable warning
     Ok((
-        StatusCode::OK,
-        Json(WorkspaceSharingSettings {
-            sharing_globally_disabled: globally_disabled,
-            sharing_disabled: sharing_disabled || globally_disabled,
-            shareable_workspace_owners: new_owners,
-        }),
+        StatusCode::NOT_IMPLEMENTED,
+        Json(ApiResponse::error(
+            "Not implemented.",
+            "Updating workspace sharing settings is not yet supported. \
+             The persistence layer for shareable_workspace_owners has not been wired.",
+        )),
     )
         .into_response())
 }
