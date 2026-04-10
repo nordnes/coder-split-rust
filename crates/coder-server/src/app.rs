@@ -850,13 +850,21 @@ pub fn build_router(
                 )
                 .route("/files/{fileid}", get(get_file_by_id))
                 // ----- Appearance routes (enterprise) -----
-                .route("/appearance", put(put_appearance))
+                .merge(axum::Router::new()
+                    .route("/appearance", put(put_appearance))
                     .route_layer(axum::middleware::from_fn_with_state(
                         state.clone(),
                         crate::middleware::require_feature_appearance,
                     ))
+                )
                 // ----- Prebuilds settings routes -----
-                .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
+                .merge(axum::Router::new()
+                    .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_prebuilds,
+                    ))
+                )
                 // ----- License & Entitlements routes -----
                 .route("/licenses", get(list_licenses).post(post_license))
                 .route("/licenses/{id}", delete(delete_license_handler))

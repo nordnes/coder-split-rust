@@ -64,7 +64,7 @@ pub(crate) async fn put_appearance(
     record_audit(
         &state,
         AuditAction::Write,
-        ResourceKind::HealthSettings,
+        ResourceKind::AppearanceConfig,
         Some(&context.user),
         None,
         "updated appearance configuration",
