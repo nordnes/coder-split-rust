@@ -1,0 +1,53 @@
+name: Sync Upstream Coder
+
+on:
+  schedule:
+    - cron: '0 6 * * 1'  # Weekly on Monday at 06:00 UTC
+  workflow_dispatch:  # Allow manual trigger
+
+jobs:
+  sync:
+    name: Sync coder submodule & regenerate parity
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update submodule to latest upstream release
+        run: |
+          cd coder
+          git remote add upstream https://github.com/coder/coder.git || true
+          git fetch upstream main
+          git checkout upstream/main
+          cd ..
+          git add coder
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-parity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-parity-
+      - name: Regenerate all parity matrices
+        run: |
+          cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope oss --output docs/parity-matrix.md
+          cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope enterprise --output docs/parity-matrix-enterprise.md
+          cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope all --output docs/parity-matrix-all.md
+      - name: Create PR if changes detected
+        uses: peter-evans/create-pull-request@v6
+        with:
+          commit-message: "chore: sync coder submodule and regenerate parity matrices"
+          title: "chore: weekly upstream sync & parity refresh"
+          body: |
+            Automated weekly sync of the `coder/` submodule to latest `coder/coder` upstream main.
+            Parity matrices have been regenerated.
+          branch: chore/sync-upstream
+          delete-branch: true

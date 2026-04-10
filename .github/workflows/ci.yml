@@ -119,3 +119,35 @@ jobs:
       - uses: rustsec/audit-check@v2.0.0
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  parity:
+    name: Parity Matrix Freshness
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-parity-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-parity-
+      - name: Generate OSS parity matrix
+        run: cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope oss --output docs/parity-matrix.md
+      - name: Generate Enterprise parity matrix
+        run: cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope enterprise --output docs/parity-matrix-enterprise.md
+      - name: Generate Full parity matrix
+        run: cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope all --output docs/parity-matrix-all.md
+      - name: Check for uncommitted changes
+        run: |
+          if ! git diff --quiet docs/parity-matrix*.md; then
+            echo "::error::Parity matrices are stale. Run 'make parity-refresh' and commit the results."
+            git diff docs/parity-matrix*.md
+            exit 1
+          fi

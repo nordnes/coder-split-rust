@@ -4,9 +4,12 @@ You are an experienced, pragmatic software engineering AI agent. Do not over-eng
 
 This repo is a **complete Rust rewrite of the Coder backend**. The objective is to reproduce ALL backend features from the original Go codebase (`https://github.com/coder/coder`) in Rust, achieving full route and behavior parity.
 
-**Current progress: 72 of 229 OSS routes ported (31%).**
+**Current progress: 229 of 229 OSS routes ported (100%). Enterprise: 29 of 87 (33%).**
 
-See [`docs/parity-matrix.md`](docs/parity-matrix.md) for full route-by-route status.
+See the generated parity matrices for full route-by-route status:
+- [`docs/parity-matrix.md`](docs/parity-matrix.md) — OSS routes
+- [`docs/parity-matrix-enterprise.md`](docs/parity-matrix-enterprise.md) — Enterprise routes
+- [`docs/parity-matrix-all.md`](docs/parity-matrix-all.md) — Combined (OSS + Enterprise)
 
 # The Go Reference (`coder/`)
 
@@ -20,8 +23,10 @@ See [`docs/parity-matrix.md`](docs/parity-matrix.md) for full route-by-route sta
 
 ## Navigating the Go Source
 
-- Route handlers: `coder/coderd/*.go` (e.g., `users.go`, `workspaces.go`, `templates.go`)
+- OSS route handlers: `coder/coderd/*.go` (e.g., `users.go`, `workspaces.go`, `templates.go`)
+- Enterprise route handlers: `coder/enterprise/coderd/*.go` (e.g., `appearance.go`, `licenses.go`)
 - SDK/API models: `coder/codersdk/*.go`
+- Enterprise SDK models: `coder/enterprise/codersdk/*.go` (if present)
 - Database queries: `coder/coderd/database/queries/*.sql`
 - Database models: `coder/coderd/database/*.go`
 - Migrations: `coder/coderd/database/migrations/`
@@ -40,29 +45,20 @@ See [`docs/parity-matrix.md`](docs/parity-matrix.md) for full route-by-route sta
 
 # What's Been Ported vs What Remains
 
-## ✅ Ported (72 routes, 31%)
+## ✅ OSS Routes: Fully Ported (229/229, 100%)
 
-- User management — CRUD, profiles, roles, status, passwords, appearance, preferences
-- Authentication — login, logout, first user bootstrap, API keys/tokens, OTP, external auth
-- Organizations — list, get, members, paginated members, member roles
-- Deployment ops — config, stats, SSH, health checks, health settings
-- Audit logging — list, test generate
-- Misc — build info, experiments, CSP reports, init scripts, update check, latency check
+All OSS API routes have been ported to Rust. See `docs/parity-matrix.md` for the full matrix.
 
-## ❌ Remaining (157 routes, 69%)
+## 🔶 Enterprise Routes: In Progress (29/87, 33%)
 
-| Domain | Routes | Go Source Files |
-|--------|--------|-----------------|
-| Templates & Versions | 33 | `templates.go`, `templateversions.go` |
-| Workspaces & Builds | 32 | `workspaces.go`, `workspacebuilds.go` |
-| Workspace Agents | 20 | `workspaceagents.go`, `workspaceagentsrpc.go` |
-| Debug & Observability | 11 | `debug.go` |
-| AI Tasks | 10 | `aitasks.go` |
-| Notifications & Inbox | 13 | `notifications.go`, `inboxnotifications.go`, `webpush.go` |
-| Insights & Analytics | 5 | `insights.go` |
-| Chats | 5 | `chats.go` |
-| Files | 2 | `files.go` |
-| Other (params, presets, provisioner jobs, deprecated) | 26 | various |
+Enterprise routes (tagged `// @Tags Enterprise` in Go source) are partially ported. See `docs/parity-matrix-enterprise.md` for the full matrix. Enterprise route handlers live in `coder/enterprise/coderd/`.
+
+## ❌ Remaining Enterprise Work (58 routes)
+
+Refer to `docs/parity-matrix-enterprise.md` for the full list of missing enterprise routes. Key areas include:
+- Appearance settings, licenses, SCIM, groups
+- Workspace proxies, quotas, template ACLs
+- Custom roles, OAuth2 provider, JFrog integration
 
 # Crate Architecture (Go → Rust Mapping)
 
@@ -77,7 +73,7 @@ See [`docs/parity-matrix.md`](docs/parity-matrix.md) for full route-by-route sta
 | Notifications, inbox, webpush | `crates/coder-notifications` | Stub — placeholder only |
 | DERP, tailnet, agent RPC, workspace apps | `crates/coder-connectivity` | Partial — health checks, SSH keys |
 | Shared SQL repositories and migrations | `crates/coder-db` | Active — user/org/auth/audit queries |
-| HTTP composition and cross-cutting middleware | `crates/coder-server` | Active — 72 route handlers |
+| HTTP composition and cross-cutting middleware | `crates/coder-server` | Active — 229+ route handlers |
 | Shared types: config, identity, API models, passwords | `crates/coder-core` | Active — foundational types |
 
 # Technology
@@ -125,8 +121,11 @@ coder/                  # ⛔ Original Go monorepo — READ-ONLY REFERENCE
 - `crates/coder-core/src/api.rs` — API request/response models (1,528 lines)
 - `crates/coder-core/src/config.rs` — Configuration types
 - `apps/coderd/src/main.rs` — Server entry point
-- `docs/parity-matrix.md` — Generated route parity status (source of truth)
+- `docs/parity-matrix.md` — Generated OSS route parity status
+- `docs/parity-matrix-enterprise.md` — Generated Enterprise route parity status
+- `docs/parity-matrix-all.md` — Generated combined route parity status
 - `docs/backend-rewrite.md` — Migration map and methodology
+- `Makefile` — Convenience targets for submodule update and parity generation
 
 # Essential Commands
 
@@ -149,8 +148,12 @@ cargo fmt --all
 # Check formatting without modifying
 cargo fmt --all -- --check
 
-# Regenerate the parity matrix (requires Go source in coder/)
+# Regenerate all parity matrices (requires Go source in coder/)
+make parity-refresh
+# Or individually:
 cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope oss --output docs/parity-matrix.md
+cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope enterprise --output docs/parity-matrix-enterprise.md
+cargo run -p coder-parity -- inventory --go-root coder --rust-root . --scope all --output docs/parity-matrix-all.md
 
 # Run tests for a specific crate
 cargo test -p coder-server
