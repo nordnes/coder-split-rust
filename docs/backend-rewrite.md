@@ -105,8 +105,28 @@ recreating the same monolith in Rust. The intended split is:
 The workspace now includes these crate seams as concrete Rust crates, and the
 auth/RBAC/audit/identity slices now carry live behavior.
 
-The generated route inventory in `docs/parity-matrix.md` is now the committed
-OSS source of truth for parity tracking.
+The generated route inventories are the committed source of truth for parity
+tracking:
+
+- `docs/parity-matrix.md` — OSS routes (229/229 ported)
+- `docs/parity-matrix-enterprise.md` — Enterprise routes (29/87 ported)
+- `docs/parity-matrix-all.md` — Combined OSS + Enterprise routes
+
+## Enterprise parity tracking
+
+Enterprise routes are tagged with `// @Tags Enterprise` in the Go source and
+live under `coder/enterprise/coderd/`. The parity tool now supports scanning
+multiple Go source directories via `--go-dirs` and `--sdk-dirs` flags, with
+scope presets that automatically include `enterprise/coderd` when
+`--scope enterprise` or `--scope all` is used.
+
+A weekly GitHub Actions workflow (`.github/workflows/sync-upstream.yml`)
+automatically syncs the `coder/` submodule to the latest upstream commit and
+regenerates all parity matrices. If changes are detected, a PR is created
+automatically. The CI pipeline also includes a freshness check that fails if
+committed parity matrices are stale.
+
+Use `make parity-refresh` to regenerate all three matrices locally.
 
 ## Migration rule
 

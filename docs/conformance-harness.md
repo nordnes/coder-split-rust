@@ -4,20 +4,55 @@ The Rust rewrite now includes a parity tool in `apps/coder-parity`.
 
 ## Inventory
 
-Generate a scoped route matrix from `coder/coderd`, `coder/codersdk`, and the
-current Rust crates:
+Generate a scoped route matrix from Go source directories, SDK directories, and
+the current Rust crates:
+
+```bash
+# OSS routes only (default)
+cargo run -p coder-parity -- inventory \
+  --go-root coder --rust-root . --scope oss \
+  --output docs/parity-matrix.md
+
+# Enterprise routes (auto-includes enterprise/coderd)
+cargo run -p coder-parity -- inventory \
+  --go-root coder --rust-root . --scope enterprise \
+  --output docs/parity-matrix-enterprise.md
+
+# All routes combined
+cargo run -p coder-parity -- inventory \
+  --go-root coder --rust-root . --scope all \
+  --output docs/parity-matrix-all.md
+
+# Or regenerate all three at once:
+make parity-refresh
+```
+
+### Scope presets
+
+The `--scope` flag controls which routes are included and which Go directories
+are scanned by default:
+
+| Scope | Go dirs scanned | SDK dirs scanned | Routes included |
+|-------|----------------|------------------|-----------------|
+| `oss` | `coderd` | `codersdk` | OSS only |
+| `enterprise` | `coderd`, `enterprise/coderd` | `codersdk`, `enterprise/codersdk` (if present) | Enterprise only |
+| `all` | `coderd`, `enterprise/coderd` | `codersdk`, `enterprise/codersdk` (if present) | Both |
+
+### Custom directories
+
+Override the default directories with `--go-dirs` and `--sdk-dirs`:
 
 ```bash
 cargo run -p coder-parity -- inventory \
-  --go-root coder \
-  --rust-root . \
-  --scope oss \
-  --output docs/parity-matrix.md
+  --go-root coder --rust-root . --scope oss \
+  --go-dirs coderd,enterprise/coderd \
+  --sdk-dirs codersdk
 ```
 
-The inventory now:
+The inventory:
 
 - filters Go handlers by scope: `oss`, `enterprise`, or `all`
+- scans multiple Go source directories and merges/deduplicates routes
 - records the documented route path and the real live path
 - treats `GET /api/v2` as the API root for `@Router / [get]`
 - keeps server `GET /` out of the route matrix so it can be tested separately
