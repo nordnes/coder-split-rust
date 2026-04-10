@@ -857,14 +857,9 @@ pub fn build_router(
                         crate::middleware::require_feature_appearance,
                     ))
                 )
-                // ----- Prebuilds settings routes -----
-                .merge(axum::Router::new()
-                    .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
-                    .route_layer(axum::middleware::from_fn_with_state(
-                        state.clone(),
-                        crate::middleware::require_feature_prebuilds,
-                    ))
-                )
+                // ----- Prebuilds settings routes (OSS scope) -----
+                .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
+
                 // ----- License & Entitlements routes -----
                 .route("/licenses", get(list_licenses).post(post_license))
                 .route("/licenses/{id}", delete(delete_license_handler))
