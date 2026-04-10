@@ -2239,6 +2239,22 @@ pub(crate) async fn get_external_agent_credentials(
         return Ok(resource_not_found_response());
     };
 
+    // RBAC: verify the actor can read this workspace.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::Workspace)
+                .with_id(workspace.id)
+                .with_owner(workspace.owner_id)
+                .in_org(workspace.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(resource_not_found_response());
+    }
+
     // 2. Get latest workspace build.
     let Some(build) = state
         .store
