@@ -580,7 +580,7 @@ pub(crate) async fn post_org_role(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    if RESERVED_ROLE_NAMES.contains(&request.name.as_str()) {
+    if RESERVED_ROLE_NAMES.contains(&request.name.to_ascii_lowercase().as_str()) {
         return Ok(validation_message_response(
             &format!(
                 "Role name '{}' is reserved and cannot be used for custom roles.",
@@ -588,6 +588,23 @@ pub(crate) async fn post_org_role(
             ),
             vec![],
         ));
+    }
+
+    // Check if a custom role with this name already exists — POST should not overwrite.
+    if let Some(_existing) = state
+        .identity
+        .find_custom_role(&context.actor, &request.name, Some(org.id))
+        .await
+        .map_err(AppError::from)?
+    {
+        return Ok((
+            StatusCode::CONFLICT,
+            Json(ApiResponse::error(
+                "A custom role with this name already exists in this organization.",
+                "Use PUT to update an existing role.",
+            )),
+        )
+            .into_response());
     }
 
     let input = coder_core::UpsertCustomRoleInput {
@@ -668,7 +685,7 @@ pub(crate) async fn put_org_role(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    if RESERVED_ROLE_NAMES.contains(&request.name.as_str()) {
+    if RESERVED_ROLE_NAMES.contains(&request.name.to_ascii_lowercase().as_str()) {
         return Ok(validation_message_response(
             &format!(
                 "Role name '{}' is reserved and cannot be used for custom roles.",
@@ -750,7 +767,7 @@ pub(crate) async fn delete_org_role(
         ));
     }
 
-    if RESERVED_ROLE_NAMES.contains(&role_name.as_str()) {
+    if RESERVED_ROLE_NAMES.contains(&role_name.to_ascii_lowercase().as_str()) {
         return Ok(validation_message_response(
             &format!(
                 "Role '{}' is a built-in role and cannot be deleted.",

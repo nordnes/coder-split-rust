@@ -1289,17 +1289,18 @@ where
             ));
         }
 
-        let deleted = self
+        // Check resource counts BEFORE deleting to prevent deleting non-empty orgs.
+        let counts = self
             .store
-            .soft_delete_organization(target_organization.id)
-            .await?;
-
-        if !deleted {
-            let counts = self
-                .store
-                .get_organization_resource_counts(target_organization.id)
-                .await
-                .unwrap_or_default();
+            .get_organization_resource_counts(target_organization.id)
+            .await
+            .unwrap_or_default();
+        if counts.workspace_count > 0
+            || counts.template_count > 0
+            || counts.member_count > 0
+            || counts.group_count > 0
+            || counts.provisioner_key_count > 0
+        {
             let detail = format!(
                 "Organization has {} workspace(s), {} template(s), {} member(s), {} group(s), and {} provisioner key(s).",
                 counts.workspace_count,
@@ -1311,6 +1312,17 @@ where
             return Err(IdentityServiceError::bad_request_with_detail(
                 "Organization is not empty and cannot be deleted.",
                 detail,
+            ));
+        }
+
+        let deleted = self
+            .store
+            .soft_delete_organization(target_organization.id)
+            .await?;
+
+        if !deleted {
+            return Err(IdentityServiceError::not_found(
+                "Organization not found or already deleted.",
             ));
         }
 

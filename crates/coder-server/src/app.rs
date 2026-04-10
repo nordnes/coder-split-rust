@@ -3116,6 +3116,9 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             if let Some(org) = organizations.get_mut(&id) {
+                if org.deleted {
+                    return Ok(false);
+                }
                 org.deleted = true;
                 Ok(true)
             } else {
