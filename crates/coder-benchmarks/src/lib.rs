@@ -557,6 +557,28 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn appearance_config(&self) -> Result<coder_core::api::AppearanceConfig, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn upsert_appearance_config(
+        &self,
+        _config: &coder_core::api::AppearanceConfig,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn prebuilds_settings(&self) -> Result<coder_core::api::PrebuildsSettings, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn upsert_prebuilds_settings(
+        &self,
+        _settings: &coder_core::api::PrebuildsSettings,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn deployment_stats(&self) -> Result<DeploymentStatsResponse, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }

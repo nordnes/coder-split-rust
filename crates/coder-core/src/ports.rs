@@ -1954,6 +1954,24 @@ pub trait OperationalStore: Send + Sync {
     async fn upsert_health_settings(&self, settings: &HealthSettings)
     -> Result<bool, StorageError>;
 
+    /// Returns the deployment appearance configuration.
+    async fn appearance_config(&self) -> Result<crate::api::AppearanceConfig, StorageError>;
+
+    /// Replaces deployment appearance configuration, returning whether the value changed.
+    async fn upsert_appearance_config(
+        &self,
+        config: &crate::api::AppearanceConfig,
+    ) -> Result<bool, StorageError>;
+
+    /// Returns workspace prebuilds settings.
+    async fn prebuilds_settings(&self) -> Result<crate::api::PrebuildsSettings, StorageError>;
+
+    /// Replaces workspace prebuilds settings, returning whether the value changed.
+    async fn upsert_prebuilds_settings(
+        &self,
+        settings: &crate::api::PrebuildsSettings,
+    ) -> Result<bool, StorageError>;
+
     /// Returns deployment statistics for the current backend slice.
     async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError>;
 
@@ -2784,6 +2802,24 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Replaces deployment health settings, returning whether the value changed.
     async fn upsert_health_settings(&self, settings: &HealthSettings)
     -> Result<bool, StorageError>;
+
+    /// Returns the deployment appearance configuration.
+    async fn appearance_config(&self) -> Result<crate::api::AppearanceConfig, StorageError>;
+
+    /// Replaces deployment appearance configuration, returning whether the value changed.
+    async fn upsert_appearance_config(
+        &self,
+        config: &crate::api::AppearanceConfig,
+    ) -> Result<bool, StorageError>;
+
+    /// Returns workspace prebuilds settings.
+    async fn prebuilds_settings(&self) -> Result<crate::api::PrebuildsSettings, StorageError>;
+
+    /// Replaces workspace prebuilds settings, returning whether the value changed.
+    async fn upsert_prebuilds_settings(
+        &self,
+        settings: &crate::api::PrebuildsSettings,
+    ) -> Result<bool, StorageError>;
 
     /// Returns deployment statistics for the current backend slice.
     async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError>;
@@ -6125,6 +6161,28 @@ where
         AppStore::upsert_health_settings(self, settings).await
     }
 
+    async fn appearance_config(&self) -> Result<crate::api::AppearanceConfig, StorageError> {
+        AppStore::appearance_config(self).await
+    }
+
+    async fn upsert_appearance_config(
+        &self,
+        config: &crate::api::AppearanceConfig,
+    ) -> Result<bool, StorageError> {
+        AppStore::upsert_appearance_config(self, config).await
+    }
+
+    async fn prebuilds_settings(&self) -> Result<crate::api::PrebuildsSettings, StorageError> {
+        AppStore::prebuilds_settings(self).await
+    }
+
+    async fn upsert_prebuilds_settings(
+        &self,
+        settings: &crate::api::PrebuildsSettings,
+    ) -> Result<bool, StorageError> {
+        AppStore::upsert_prebuilds_settings(self, settings).await
+    }
+
     async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError> {
         AppStore::deployment_stats(self).await
     }
@@ -6275,6 +6333,28 @@ where
         settings: &HealthSettings,
     ) -> Result<bool, StorageError> {
         (**self).upsert_health_settings(settings).await
+    }
+
+    async fn appearance_config(&self) -> Result<crate::api::AppearanceConfig, StorageError> {
+        (**self).appearance_config().await
+    }
+
+    async fn upsert_appearance_config(
+        &self,
+        config: &crate::api::AppearanceConfig,
+    ) -> Result<bool, StorageError> {
+        (**self).upsert_appearance_config(config).await
+    }
+
+    async fn prebuilds_settings(&self) -> Result<crate::api::PrebuildsSettings, StorageError> {
+        (**self).prebuilds_settings().await
+    }
+
+    async fn upsert_prebuilds_settings(
+        &self,
+        settings: &crate::api::PrebuildsSettings,
+    ) -> Result<bool, StorageError> {
+        (**self).upsert_prebuilds_settings(settings).await
     }
 
     async fn deployment_stats(&self) -> Result<crate::api::DeploymentStatsResponse, StorageError> {

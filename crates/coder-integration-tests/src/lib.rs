@@ -263,6 +263,7 @@ mod tests {
                 )),
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+                std::sync::Arc::new(coder_license::EntitlementSet::new()),
             )?;
 
             let router = build_router(state, None);
@@ -2043,6 +2044,7 @@ mod tests {
             )),
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
         )?;
 
         let router = build_router(state, None);

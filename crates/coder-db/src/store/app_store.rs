@@ -2218,6 +2218,108 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn appearance_config(&self) -> Result<coder_core::api::AppearanceConfig, StorageError> {
+        let encoded: Option<String> = sqlx::query_scalar(
+            "SELECT value
+             FROM site_configs
+             WHERE key = 'appearance_config'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        match encoded {
+            Some(encoded) => serde_json::from_str(&encoded)
+                .map_err(|error| StorageError::invalid_data(error.to_string())),
+            None => Ok(coder_core::api::AppearanceConfig::default()),
+        }
+    }
+
+    #[instrument(skip(self, config), err(level = tracing::Level::WARN))]
+    async fn upsert_appearance_config(
+        &self,
+        config: &coder_core::api::AppearanceConfig,
+    ) -> Result<bool, StorageError> {
+        let encoded = serde_json::to_string(config)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT value
+             FROM site_configs
+             WHERE key = 'appearance_config'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        if current.as_deref() == Some(encoded.as_str()) {
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ('appearance_config', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(encoded)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(true)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn prebuilds_settings(&self) -> Result<coder_core::api::PrebuildsSettings, StorageError> {
+        let encoded: Option<String> = sqlx::query_scalar(
+            "SELECT value
+             FROM site_configs
+             WHERE key = 'prebuilds_settings'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        match encoded {
+            Some(encoded) => serde_json::from_str(&encoded)
+                .map_err(|error| StorageError::invalid_data(error.to_string())),
+            None => Ok(coder_core::api::PrebuildsSettings::default()),
+        }
+    }
+
+    #[instrument(skip(self, settings), err(level = tracing::Level::WARN))]
+    async fn upsert_prebuilds_settings(
+        &self,
+        settings: &coder_core::api::PrebuildsSettings,
+    ) -> Result<bool, StorageError> {
+        let encoded = serde_json::to_string(settings)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        let current: Option<String> = sqlx::query_scalar(
+            "SELECT value
+             FROM site_configs
+             WHERE key = 'prebuilds_settings'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        if current.as_deref() == Some(encoded.as_str()) {
+            return Ok(false);
+        }
+
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ('prebuilds_settings', $1)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(encoded)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(true)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn deployment_stats(&self) -> Result<DeploymentStatsResponse, StorageError> {
         let collected_at: OffsetDateTime = sqlx::query_scalar("SELECT NOW()")
             .fetch_one(&self.pool)

@@ -6285,3 +6285,60 @@ impl ScimErrorResponse {
         }
     }
 }
+
+// ── Appearance configuration ────────────────────────────────────────────
+
+/// Deployment-wide appearance configuration (enterprise feature).
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AppearanceConfig {
+    /// Custom application name shown in the UI.
+    #[serde(default)]
+    pub application_name: String,
+    /// URL for a custom logo image.
+    #[serde(default)]
+    pub logo_url: String,
+    /// Service banner displayed to all users.
+    #[serde(default)]
+    pub service_banner: ServiceBannerConfig,
+    /// Announcement banners displayed to all users.
+    #[serde(default)]
+    pub announcement_banners: Vec<AnnouncementBannerConfig>,
+}
+
+/// Configuration for the service banner.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct ServiceBannerConfig {
+    /// Whether the banner is currently displayed.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Banner message content (must be non-empty when enabled).
+    #[serde(default)]
+    pub message: String,
+    /// CSS background colour for the banner.
+    #[serde(default)]
+    pub background_color: String,
+}
+
+/// Configuration for an announcement banner.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct AnnouncementBannerConfig {
+    /// Whether the banner is currently displayed.
+    #[serde(default)]
+    pub enabled: bool,
+    /// Banner message content.
+    #[serde(default)]
+    pub message: String,
+    /// CSS background colour for the banner.
+    #[serde(default)]
+    pub background_color: String,
+}
+
+// ── Prebuilds settings ──────────────────────────────────────────────────
+
+/// Workspace prebuilds reconciliation settings.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct PrebuildsSettings {
+    /// When `true`, the prebuilds reconciliation loop is paused.
+    #[serde(default)]
+    pub reconciliation_paused: bool,
+}

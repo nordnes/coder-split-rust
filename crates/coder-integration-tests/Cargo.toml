@@ -19,6 +19,7 @@ coder-audit = { path = "../coder-audit" }
 coder-auth = { path = "../coder-auth" }
 coder-connectivity = { path = "../coder-connectivity" }
 coder-core = { path = "../coder-core" }
+coder-license = { path = "../coder-license" }
 coder-db = { path = "../coder-db" }
 coder-identity = { path = "../coder-identity" }
 coder-server = { path = "../coder-server" }

@@ -115,10 +115,6 @@ pub(crate) async fn delete_license_handler(
 }
 
 /// GET /api/v2/entitlements — return the current entitlements snapshot.
-///
-/// Since no persistent `EntitlementSet` is wired into `AppState` yet, this
-/// returns a default unlicensed snapshot.  Once the license service is
-/// integrated into server startup the real entitlements will be served.
 pub(crate) async fn get_entitlements(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -127,8 +123,7 @@ pub(crate) async fn get_entitlements(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Return a default unlicensed entitlements snapshot for now.
-    let entitlements = coder_license::Entitlements::new_unlicensed();
+    let entitlements = state.entitlements.snapshot();
 
     Ok((StatusCode::OK, Json(entitlements)).into_response())
 }
@@ -148,7 +143,6 @@ pub(crate) async fn get_entitlements(
 ///     return Ok(require_enterprise_feature(&feature_name));
 /// }
 /// ```
-#[allow(dead_code)] // Scaffolded for enterprise route handlers.
 pub(crate) fn require_enterprise_feature(feature: &FeatureName) -> Response {
     (
         StatusCode::FORBIDDEN,
@@ -167,7 +161,47 @@ pub(crate) fn require_enterprise_feature(feature: &FeatureName) -> Response {
 ///
 /// Returns `true` when the feature is available (either fully entitled or in
 /// a grace period).  Returns `false` otherwise.
-#[allow(dead_code)] // Scaffolded for enterprise route handlers.
 pub(crate) fn is_feature_entitled(entitlements: &EntitlementSet, feature: FeatureName) -> bool {
     entitlements.is_entitled(feature)
+}
+
+/// POST /api/v2/licenses/refresh-entitlements — triggers a manual refresh
+/// of enterprise feature entitlements.
+pub(crate) async fn post_refresh_entitlements(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::License),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to refresh license entitlements.",
+        ));
+    }
+
+    // Publish a pubsub event so that replicas that *do* have a full
+    // LicenseService can pick up the request and recompute entitlements.
+    if let Err(e) = state
+        .pubsub
+        .publish("entitlements_refreshed", b"refresh")
+        .await
+    {
+        tracing::warn!("failed to publish entitlements refresh event: {e}");
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Entitlements refresh requested.")),
+    )
+        .into_response())
 }

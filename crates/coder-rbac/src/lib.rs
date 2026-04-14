@@ -390,6 +390,8 @@ pub enum ResourceKind {
     WorkspaceAgent,
     /// A workspace application.
     WorkspaceApp,
+    /// Appearance configuration.
+    AppearanceConfig,
     /// Prebuilds settings.
     PrebuildsSettings,
     /// A task.

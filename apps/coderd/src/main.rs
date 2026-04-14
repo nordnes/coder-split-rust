@@ -902,6 +902,7 @@ async fn run() -> Result<(), MainError> {
         )),
         Some(prometheus_handle),
         telemetry_reporter,
+        std::sync::Arc::new(coder_license::EntitlementSet::new()),
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
@@ -1393,6 +1394,7 @@ fn resource_kind_name(resource: coder_rbac::ResourceKind) -> &'static str {
         coder_rbac::ResourceKind::IdpSyncSettingsRole => "idp_sync_settings_role",
         coder_rbac::ResourceKind::WorkspaceAgent => "workspace_agent",
         coder_rbac::ResourceKind::WorkspaceApp => "workspace_app",
+        coder_rbac::ResourceKind::AppearanceConfig => "appearance_config",
         coder_rbac::ResourceKind::PrebuildsSettings => "prebuilds_settings",
         coder_rbac::ResourceKind::Task => "task",
     }
