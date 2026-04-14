@@ -391,7 +391,12 @@ pub(crate) async fn list_provisioner_key_daemons(
 
         let daemons: Vec<ProvisionerDaemonResponse> = recent_daemons
             .iter()
-            .filter(|d| d.key_id == Some(key.id))
+            .filter(|d| {
+                // Daemons without a key_id were authenticated via user
+                // session — attribute them to the user-auth key.
+                let effective_key = d.key_id.unwrap_or(user_auth_uuid);
+                effective_key == key.id
+            })
             .map(|d| daemon_to_response(d))
             .collect();
 
