@@ -118,6 +118,21 @@ pub(crate) async fn patch_group(
             .into_response());
     }
 
+    // Go reference (groups.go:132): cannot update display_name on Everyone group.
+    if is_everyone {
+        if let Some(ref display) = request.display_name {
+            if !display.is_empty() {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::ok(
+                        "Cannot update the Display Name for the Everyone group.".to_string(),
+                    )),
+                )
+                    .into_response());
+            }
+        }
+    }
+
     // Validate name is not "Everyone".
     if !req_name.is_empty() && req_name.eq_ignore_ascii_case("everyone") && !is_everyone {
         return Ok((
@@ -464,18 +479,48 @@ fn reduced_user_from_record(user: &coder_core::identity::UserRecord) -> ReducedU
 }
 
 /// Build a `GroupResponse` for a single group, including members and org info.
+///
+/// For the "Everyone" group (`id == organization_id`), the Go reference resolves
+/// members via `group_members_expanded` — a SQL view that UNIONs explicit
+/// `group_members` rows with `organization_members`.  Since the Rust store only
+/// queries the `group_members` table, the Everyone group would return an empty
+/// member list.  We detect that case here and fall back to the organization
+/// member list, matching Go behaviour.
 async fn build_group_response(
     state: &AppState,
     group: &GroupRecord,
 ) -> Result<GroupResponse, AppError> {
-    let members_records = state.store.list_group_members(group.id).await?;
-    let mut members = Vec::with_capacity(members_records.len());
-    for mr in &members_records {
-        if let Some(user) = state.store.find_user_by_id(mr.user_id).await? {
-            members.push(reduced_user_from_record(&user));
+    let is_everyone = group.id == group.organization_id;
+
+    let mut members: Vec<ReducedUser>;
+    let total_member_count: i32;
+
+    if is_everyone {
+        // Everyone group: all org members are implicit members.
+        let org_members = state
+            .store
+            .list_organization_members(coder_core::identity::OrganizationMemberListFilter {
+                organization_id: group.organization_id,
+                ..Default::default()
+            })
+            .await?;
+        total_member_count = org_members.len() as i32;
+        members = Vec::with_capacity(org_members.len());
+        for om in &org_members {
+            if let Some(user) = state.store.find_user_by_id(om.user_id).await? {
+                members.push(reduced_user_from_record(&user));
+            }
+        }
+    } else {
+        let members_records = state.store.list_group_members(group.id).await?;
+        total_member_count = members_records.len() as i32;
+        members = Vec::with_capacity(members_records.len());
+        for mr in &members_records {
+            if let Some(user) = state.store.find_user_by_id(mr.user_id).await? {
+                members.push(reduced_user_from_record(&user));
+            }
         }
     }
-    let total_member_count = members_records.len() as i32;
 
     // Resolve org name/display_name.
     let (org_name, org_display_name) = if let Some(org) = state

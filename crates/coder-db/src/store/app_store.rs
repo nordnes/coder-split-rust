@@ -6569,7 +6569,7 @@ impl AppStore for PostgresStore {
                     "group with this name already exists in the organization",
                 )
             } else {
-                storage_error(e)
+                storage_error_or_not_found(e)
             }
         })?;
 
