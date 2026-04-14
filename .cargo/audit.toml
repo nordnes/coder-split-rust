@@ -1,0 +1,6 @@
+[advisories]
+# rsa v0.9.10 has RUSTSEC-2023-0071 (Marvin Attack timing sidechannel).
+# No patch is available. The crate is pulled in transitively via:
+#   web-push -> jwt-simple -> superboring -> rsa
+# Ignored until upstream provides a fix.
+ignore = ["RUSTSEC-2023-0071"]

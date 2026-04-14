@@ -288,6 +288,10 @@ pub fn build_router(
         )
         // SCIM 2.0 user provisioning endpoints.
         .route(
+            "/scim/v2/ServiceProviderConfig",
+            get(scim_service_provider_config),
+        )
+        .route(
             "/scim/v2/Users",
             get(scim_get_users).post(scim_post_user),
         )
@@ -628,6 +632,10 @@ pub fn build_router(
                     get(get_workspace_timings),
                 )
                 .route("/workspaces/{workspace}/usage", post(post_workspace_usage))
+                .route(
+                    "/workspaces/{workspace}/external-agent/{agent}/credentials",
+                    get(get_external_agent_credentials),
+                )
                 .route("/workspaces/{workspace}/watch", get(get_workspace_watch))
                 .route(
                     "/workspaces/{workspace}/watch-ws",
@@ -998,7 +1006,7 @@ pub fn build_router(
             "/oauth2/authorize",
             get(get_oauth2_authorize).post(post_oauth2_authorize),
         )
-        .route("/oauth2/tokens", post(post_oauth2_token))
+        .route("/oauth2/tokens", post(post_oauth2_token).delete(delete_oauth2_tokens))
         // route_layer runs *after* routing so MatchedPath is populated.
         .route_layer(middleware::from_fn(prometheus_middleware));
 
