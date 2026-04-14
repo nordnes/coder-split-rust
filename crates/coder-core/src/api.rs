@@ -573,6 +573,129 @@ pub struct AuditLogResponse {
     pub count: usize,
 }
 
+// ── Connection log types ─────────────────────────────────────────────────
+
+/// The type of connection that an agent is receiving.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum ConnectionType {
+    /// SSH connection.
+    #[serde(rename = "ssh")]
+    Ssh,
+    /// VS Code connection.
+    #[serde(rename = "vscode")]
+    VsCode,
+    /// JetBrains IDE connection.
+    #[serde(rename = "jetbrains")]
+    JetBrains,
+    /// Reconnecting PTY session.
+    #[serde(rename = "reconnecting_pty")]
+    ReconnectingPty,
+    /// Workspace application connection.
+    #[serde(rename = "workspace_app")]
+    WorkspaceApp,
+    /// Port forwarding connection.
+    #[serde(rename = "port_forwarding")]
+    PortForwarding,
+}
+
+impl ConnectionType {
+    /// Returns the canonical wire-format string for this connection type.
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Ssh => "ssh",
+            Self::VsCode => "vscode",
+            Self::JetBrains => "jetbrains",
+            Self::ReconnectingPty => "reconnecting_pty",
+            Self::WorkspaceApp => "workspace_app",
+            Self::PortForwarding => "port_forwarding",
+        }
+    }
+}
+
+impl fmt::Display for ConnectionType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Web-specific metadata for workspace_app and port_forwarding connections.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ConnectionLogWebInfo {
+    /// The user agent string of the HTTP request.
+    pub user_agent: String,
+    /// The user who initiated the connection, if authenticated.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user: Option<MinimalUser>,
+    /// The app slug or port number.
+    pub slug_or_port: String,
+    /// HTTP status code of the request.
+    pub status_code: i32,
+}
+
+/// SSH-specific metadata for ssh, vscode, jetbrains, and reconnecting_pty connections.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ConnectionLogSSHInfo {
+    /// Unique connection identifier linking connect/disconnect events.
+    pub connection_id: Uuid,
+    /// When the connection was closed, if known.
+    #[serde(
+        with = "time::serde::rfc3339::option",
+        default,
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub disconnect_time: Option<OffsetDateTime>,
+    /// Reason for disconnection, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disconnect_reason: Option<String>,
+    /// Exit code of the SSH session, if known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exit_code: Option<i32>,
+}
+
+/// One connection log entry returned by `GET /api/v2/connectionlog`.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq)]
+pub struct ConnectionLog {
+    /// Stable connection log identifier.
+    pub id: Uuid,
+    /// When the connection was established.
+    #[serde(with = "time::serde::rfc3339")]
+    pub connect_time: OffsetDateTime,
+    /// Organization the workspace belongs to.
+    pub organization: MinimalOrganization,
+    /// Owner of the workspace.
+    pub workspace_owner_id: Uuid,
+    /// Username of the workspace owner.
+    pub workspace_owner_username: String,
+    /// Workspace identifier.
+    pub workspace_id: Uuid,
+    /// Workspace name.
+    pub workspace_name: String,
+    /// Agent name inside the workspace.
+    pub agent_name: String,
+    /// Client IP address, if known.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ip: Option<String>,
+    /// Type of connection.
+    #[serde(rename = "type")]
+    pub connection_type: ConnectionType,
+    /// Web-specific info (workspace_app / port_forwarding only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub web_info: Option<ConnectionLogWebInfo>,
+    /// SSH-specific info (ssh / vscode / jetbrains / reconnecting_pty only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ssh_info: Option<ConnectionLogSSHInfo>,
+}
+
+/// Response for `GET /api/v2/connectionlog`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
+pub struct ConnectionLogResponse {
+    /// Returned connection log entries.
+    pub connection_logs: Vec<ConnectionLog>,
+    /// Total number of matching entries.
+    pub count: i64,
+}
+
 /// Request payload for `POST /api/v2/audit/testgenerate`.
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq)]
 pub struct CreateTestAuditLogRequest {

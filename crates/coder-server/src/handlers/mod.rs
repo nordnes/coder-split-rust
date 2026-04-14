@@ -315,6 +315,7 @@ pub(crate) mod appearance;
 pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod chats;
+pub(crate) mod connectionlog;
 pub(crate) mod deployment;
 pub(crate) mod derp;
 pub(crate) mod external_auth;

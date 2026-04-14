@@ -794,3 +794,20 @@ pub(crate) async fn require_feature_prebuilds(
     }
     next.run(request).await
 }
+
+/// Enterprise feature gate for connection logs.
+pub(crate) async fn require_feature_connection_log(
+    axum::extract::State(state): axum::extract::State<crate::app::AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if !state
+        .entitlements
+        .is_entitled(coder_license::FeatureName::ConnectionLog)
+    {
+        return crate::handlers::licenses::require_enterprise_feature(
+            &coder_license::FeatureName::ConnectionLog,
+        );
+    }
+    next.run(request).await
+}

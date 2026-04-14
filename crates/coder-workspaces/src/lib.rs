@@ -1876,6 +1876,16 @@ mod tests {
             Ok(())
         }
 
+        async fn list_connection_logs(
+            &self,
+            _filter: coder_core::ports::ConnectionLogListFilter,
+        ) -> Result<coder_core::ConnectionLogResponse, StorageError> {
+            Ok(coder_core::ConnectionLogResponse {
+                connection_logs: Vec::new(),
+                count: 0,
+            })
+        }
+
         async fn batch_insert_workspace_build_parameters(
             &self,
             _params: Vec<coder_core::ports::WorkspaceBuildParameterRecord>,

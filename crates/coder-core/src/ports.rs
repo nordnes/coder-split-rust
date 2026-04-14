@@ -22,10 +22,10 @@ use time::OffsetDateTime;
 use uuid::Uuid;
 
 use crate::api::{
-    AuditLogResponse, ChatMessageVisibility, ChatStatus, DAUsResponse, ExternalAuthAppInstallation,
-    ExternalAuthUser, GetUserStatusCountsResponse, HealthSettings, InboxNotification,
-    InsightsReportInterval, NotificationPreference, NotificationTemplate, NotificationsSettings,
-    TaskStatus, TemplateInsightsIntervalReport, TemplateInsightsResponse,
+    AuditLogResponse, ChatMessageVisibility, ChatStatus, ConnectionLogResponse, DAUsResponse,
+    ExternalAuthAppInstallation, ExternalAuthUser, GetUserStatusCountsResponse, HealthSettings,
+    InboxNotification, InsightsReportInterval, NotificationPreference, NotificationTemplate,
+    NotificationsSettings, TaskStatus, TemplateInsightsIntervalReport, TemplateInsightsResponse,
     UserActivityInsightsResponse, UserLatencyInsightsResponse,
 };
 use crate::identity::{
@@ -472,6 +472,17 @@ pub struct DeploymentMetadata {
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct AuditLogListFilter {
     /// Search query applied to descriptions, targets, and actor usernames.
+    pub search: String,
+    /// Page limit.
+    pub limit: u32,
+    /// Page offset.
+    pub offset: u32,
+}
+
+/// Pagination and search filter for `GET /api/v2/connectionlog`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ConnectionLogListFilter {
+    /// Free-text search query string (the `q` parameter).
     pub search: String,
     /// Page limit.
     pub limit: u32,
@@ -1931,6 +1942,12 @@ pub trait OperationalStore: Send + Sync {
         logs: Vec<PersistAuditLogInput>,
     ) -> Result<(), StorageError>;
 
+    /// Lists connection logs using the supplied filter.
+    async fn list_connection_logs(
+        &self,
+        filter: ConnectionLogListFilter,
+    ) -> Result<ConnectionLogResponse, StorageError>;
+
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
         &self,
@@ -2779,6 +2796,12 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         logs: Vec<PersistAuditLogInput>,
     ) -> Result<(), StorageError>;
+
+    /// Lists connection logs using the supplied filter.
+    async fn list_connection_logs(
+        &self,
+        filter: ConnectionLogListFilter,
+    ) -> Result<ConnectionLogResponse, StorageError>;
 
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
@@ -6135,6 +6158,13 @@ where
         AppStore::batch_insert_audit_logs(self, logs).await
     }
 
+    async fn list_connection_logs(
+        &self,
+        filter: ConnectionLogListFilter,
+    ) -> Result<ConnectionLogResponse, StorageError> {
+        AppStore::list_connection_logs(self, filter).await
+    }
+
     async fn batch_insert_workspace_build_parameters(
         &self,
         params: Vec<WorkspaceBuildParameterRecord>,
@@ -6303,6 +6333,13 @@ where
         logs: Vec<PersistAuditLogInput>,
     ) -> Result<(), StorageError> {
         (**self).batch_insert_audit_logs(logs).await
+    }
+
+    async fn list_connection_logs(
+        &self,
+        filter: ConnectionLogListFilter,
+    ) -> Result<ConnectionLogResponse, StorageError> {
+        (**self).list_connection_logs(filter).await
     }
 
     async fn batch_insert_workspace_build_parameters(
