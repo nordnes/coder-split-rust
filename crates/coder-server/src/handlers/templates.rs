@@ -2245,6 +2245,16 @@ pub(crate) async fn get_template_acl(
                 });
             }
         }
+        let (org_name, org_display_name) = if let Some(org) = state
+            .store
+            .find_organization_by_id(row.organization_id)
+            .await?
+        {
+            (org.name, org.display_name)
+        } else {
+            (String::new(), String::new())
+        };
+        let total_member_count = member_users.len() as i32;
         groups.push(TemplateACLGroup {
             group: GroupResponse {
                 id: row.id.to_string(),
@@ -2255,6 +2265,9 @@ pub(crate) async fn get_template_acl(
                 quota_allowance: row.quota_allowance,
                 source: row.source.clone(),
                 members: member_users,
+                total_member_count,
+                organization_name: org_name,
+                organization_display_name: org_display_name,
             },
             role: actions_to_template_role(&row.actions),
         });
@@ -2455,6 +2468,16 @@ pub(crate) async fn get_template_acl_available(
                 });
             }
         }
+        let (org_name, org_display_name) = if let Some(org) = state
+            .store
+            .find_organization_by_id(g.organization_id)
+            .await?
+        {
+            (org.name, org.display_name)
+        } else {
+            (String::new(), String::new())
+        };
+        let total_member_count = member_users.len() as i32;
         groups.push(GroupResponse {
             id: g.id.to_string(),
             name: g.name.clone(),
@@ -2464,6 +2487,9 @@ pub(crate) async fn get_template_acl_available(
             quota_allowance: g.quota_allowance,
             source: g.source.clone(),
             members: member_users,
+            total_member_count,
+            organization_name: org_name,
+            organization_display_name: org_display_name,
         });
     }
 
