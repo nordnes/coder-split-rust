@@ -50,6 +50,7 @@ use crate::handlers::appearance::*;
 use crate::handlers::audit::*;
 use crate::handlers::auth::*;
 use crate::handlers::chats::*;
+use crate::handlers::connectionlog::*;
 use crate::handlers::deployment::*;
 use crate::handlers::derp::*;
 use crate::handlers::external_auth::*;
@@ -316,6 +317,14 @@ pub fn build_router(
                 // -------------------------------------------------------
                 .route("/audit", get(list_audit_logs))
                 .route("/audit/testgenerate", post(post_generate_test_audit_log))
+                // ----- Connection log route (enterprise) -----
+                .merge(axum::Router::new()
+                    .route("/connectionlog", get(list_connection_logs))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_connection_log,
+                    ))
+                )
                 .route("/telemetry", get(get_telemetry_status))
                 .route("/deployment/stats", get(deployment_stats))
                 .route("/deployment/ssh", get(deployment_ssh))
@@ -1428,19 +1437,19 @@ pub(crate) mod tests {
         AppStore, AuditLog, AuditLogListFilter, AuditLogResponse, AuthenticatedUser, BuildMetadata,
         CancelProvisionerJobInput, ChangePasswordWithOneTimePasscodeRequest, ChatInputPart,
         ChatInputPartType, ChatMessageRecord, ChatQueuedMessageRecord, ChatRecord, ChatStatus,
-        CompleteProvisionerJobInput, ConvertLoginRequest, CreateApiKeyInput,
-        CreateApiKeyStoreError, CreateChatMessageRequest, CreateChatRequest, CreateFirstUserInput,
-        CreateFirstUserRequest, CreateFirstUserStoreError, CreateGroupInput,
-        CreateOrganizationInput, CreateOrganizationStoreError, CreateProvisionerJobInput,
-        CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest, CreateTemplateStoreError,
-        CreateTemplateVersionInput, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserInput,
-        CreateUserRequestWithOrgs, CreateUserStoreError, CreateWorkspaceBuildInput,
-        CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig, DeploymentMetadata,
-        DeploymentStatsResponse, DeploymentStore, DerpNodeConfig, DerpRegionConfig,
-        ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser, FileRecord,
-        GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings,
-        InsertAgentLogInput, InsertChatFileInput, InsertChatInput, InsertChatMessageInput,
-        InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
+        CompleteProvisionerJobInput, ConnectionLogListFilter, ConnectionLogResponse,
+        ConvertLoginRequest, CreateApiKeyInput, CreateApiKeyStoreError, CreateChatMessageRequest,
+        CreateChatRequest, CreateFirstUserInput, CreateFirstUserRequest, CreateFirstUserStoreError,
+        CreateGroupInput, CreateOrganizationInput, CreateOrganizationStoreError,
+        CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
+        CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
+        CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
+        CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig,
+        DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, DerpNodeConfig,
+        DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser,
+        FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
+        HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
+        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
         InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
         InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord,
         LogFormat, LoginType, LoginWithPasswordRequest, NotificationMessageRecord,
@@ -3747,6 +3756,19 @@ pub(crate) mod tests {
                 self.insert_audit_log(log).await?;
             }
             Ok(())
+        }
+
+        async fn list_connection_logs(
+            &self,
+            filter: ConnectionLogListFilter,
+        ) -> Result<ConnectionLogResponse, StorageError> {
+            // FakeStore returns an empty list — no in-memory connection log
+            // storage is needed for current tests.
+            let _ = filter;
+            Ok(ConnectionLogResponse {
+                connection_logs: Vec::new(),
+                count: 0,
+            })
         }
 
         async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
@@ -35413,6 +35435,70 @@ pub(crate) mod tests {
             .and_then(Value::as_array)
             .ok_or("expected audit_logs array")?;
         assert!(!logs.is_empty());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Happy-path tests: Connection logs
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_connection_logs_requires_entitlement() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Without the ConnectionLog entitlement the feature gate returns 403.
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/connectionlog?limit=10&offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_connection_logs_entitled_returns_ok() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        // Enable the ConnectionLog enterprise feature.
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::ConnectionLog
+                .as_str()
+                .to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/connectionlog?limit=10&offset=0",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(
+            body.get("connection_logs")
+                .and_then(Value::as_array)
+                .is_some()
+        );
+        assert_eq!(body.get("count").and_then(Value::as_i64), Some(0));
         Ok(())
     }
 

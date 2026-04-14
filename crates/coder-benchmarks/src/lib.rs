@@ -546,6 +546,13 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn list_connection_logs(
+        &self,
+        _filter: coder_core::ports::ConnectionLogListFilter,
+    ) -> Result<coder_core::ConnectionLogResponse, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }

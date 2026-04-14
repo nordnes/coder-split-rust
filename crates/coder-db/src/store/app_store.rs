@@ -2060,6 +2060,21 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_connection_logs(
+        &self,
+        filter: ConnectionLogListFilter,
+    ) -> Result<ConnectionLogResponse, StorageError> {
+        // The connection_logs table may not exist yet (enterprise-only migration).
+        // Return an empty response; the feature gate middleware prevents unlicensed
+        // access, and the actual SQL will be wired when the migration lands.
+        let _ = filter;
+        Ok(ConnectionLogResponse {
+            connection_logs: Vec::new(),
+            count: 0,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
         if ids.is_empty() {
             return Ok(Vec::new());
