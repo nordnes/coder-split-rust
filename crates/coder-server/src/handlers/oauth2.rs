@@ -683,6 +683,59 @@ pub(crate) async fn post_oauth2_token(
     }
 }
 
+/// `DELETE /oauth2/tokens` — revokes all tokens for the OAuth2 app identified
+/// by the `client_id` query parameter, scoped to the current user.
+///
+/// Mirrors Go `deleteOAuth2ProviderAppTokens()` (the query-param variant).
+pub(crate) async fn delete_oauth2_tokens(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Query(params): Query<DeleteOAuth2TokensQuery>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let client_id = match Uuid::parse_str(&params.client_id) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Invalid client_id.",
+                    "The client_id must be a valid UUID.",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    if let Err(error) = state
+        .oauth2_provider
+        .revoke_tokens(client_id, context.user.id)
+        .await
+    {
+        return handle_oauth2_provider_error(error);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Oauth2ProviderApp,
+        Some(&context.user),
+        Some(client_id.to_string()),
+        "revoked oauth2 provider app tokens via /oauth2/tokens",
+    )
+    .await;
+
+    Ok(StatusCode::NO_CONTENT.into_response())
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct DeleteOAuth2TokensQuery {
+    pub client_id: String,
+}
+
 // ---------------------------------------------------------------------------
 // RFC 8414 — Authorization Server Metadata
 // ---------------------------------------------------------------------------

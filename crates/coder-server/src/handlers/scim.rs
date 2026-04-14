@@ -75,6 +75,35 @@ fn scim_error_response(status: StatusCode, scim_type: &str, detail: impl Into<St
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// `GET /scim/v2/ServiceProviderConfig` — returns a static SCIM 2.0
+/// ServiceProviderConfig document describing server capabilities.
+///
+/// Mirrors Go `scimServiceProviderConfig()`.
+pub(crate) async fn scim_service_provider_config(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+) -> Response {
+    if !scim_verify_auth(&headers, &state.config.scim_api_key) {
+        return scim_unauthorized_response();
+    }
+
+    let body = json!({
+        "schemas": ["urn:ietf:params:scim:schemas:core:2.0:ServiceProviderConfig"],
+        "patch": { "supported": true },
+        "bulk": { "supported": false, "maxOperations": 0, "maxPayloadSize": 0 },
+        "filter": { "supported": false, "maxResults": 0 },
+        "changePassword": { "supported": false },
+        "sort": { "supported": false },
+        "etag": { "supported": false },
+        "authenticationSchemes": [{
+            "type": "httpbasic",
+            "name": "HTTP Basic",
+            "description": "Authentication via HTTP Basic"
+        }]
+    });
+    (StatusCode::OK, Json(body)).into_response()
+}
+
 /// `GET /scim/v2/Users` — intentionally returns an empty list.
 ///
 /// This forces the IdP (e.g. Okta) to create each user individually via POST,

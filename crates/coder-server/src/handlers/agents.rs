@@ -3104,9 +3104,10 @@ mod tests {
         app: Router,
         req: Request<Body>,
     ) -> Result<axum::response::Response, Box<dyn Error>> {
-        Ok(app.oneshot(req).await.map_err(|e| -> Box<dyn Error> {
-            format!("oneshot failed: {e:?}").into()
-        })?)
+        Ok(app
+            .oneshot(req)
+            .await
+            .map_err(|e| -> Box<dyn Error> { format!("oneshot failed: {e:?}").into() })?)
     }
 
     async fn json_body(response: axum::response::Response) -> Result<Value, Box<dyn Error>> {
@@ -3147,9 +3148,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = json_body(response).await?;
-        let ports = body["ports"]
-            .as_array()
-            .ok_or("ports should be an array")?;
+        let ports = body["ports"].as_array().ok_or("ports should be an array")?;
         assert_eq!(ports.len(), 1);
         assert_eq!(ports[0]["port"], 8080);
         assert_eq!(ports[0]["network"], "tcp");
@@ -3177,9 +3176,7 @@ mod tests {
         assert_eq!(response.status(), StatusCode::OK);
 
         let body = json_body(response).await?;
-        let ports = body["ports"]
-            .as_array()
-            .ok_or("ports should be an array")?;
+        let ports = body["ports"].as_array().ok_or("ports should be an array")?;
         assert!(ports.is_empty());
         Ok(())
     }
