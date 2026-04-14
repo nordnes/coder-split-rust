@@ -1244,7 +1244,7 @@ impl AppStore for PostgresStore {
             if is_unique_violation(&error) {
                 UpdateOrganizationStoreError::AlreadyExists
             } else {
-                UpdateOrganizationStoreError::Storage(storage_error(error))
+                UpdateOrganizationStoreError::Storage(storage_error_or_not_found(error))
             }
         })?;
         organization_record_from_row(row).map_err(|e| UpdateOrganizationStoreError::Storage(e))

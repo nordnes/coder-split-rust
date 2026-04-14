@@ -1207,7 +1207,7 @@ where
                 "You are not authorized to create organizations.",
             ));
         }
-        if input.name == "default" {
+        if input.name.eq_ignore_ascii_case("default") {
             return Err(IdentityServiceError::bad_request(
                 "Organization name 'default' is reserved.",
             ));
@@ -1235,8 +1235,7 @@ where
             })?;
 
         // Create the "Everyone" group for the new organization.
-        let _ = self
-            .store
+        self.store
             .create_group(&CreateGroupInput {
                 organization_id: org.id,
                 name: "Everyone".to_owned(),
@@ -1244,13 +1243,19 @@ where
                 avatar_url: String::new(),
                 quota_allowance: 0,
             })
-            .await;
+            .await
+            .map_err(IdentityServiceError::Storage)?;
 
         // Add the creator as an organization member.
-        let _ = self
-            .store
+        self.store
             .insert_organization_member(org.id, input.actor_user_id)
-            .await;
+            .await
+            .map_err(|e| match e {
+                InsertOrganizationMemberError::AlreadyExists => IdentityServiceError::bad_request(
+                    "Creator is already a member of this organization.",
+                ),
+                InsertOrganizationMemberError::Storage(se) => IdentityServiceError::Storage(se),
+            })?;
 
         Ok(org)
     }
@@ -1269,6 +1274,21 @@ where
         if !actor.can_manage_organization(target_organization.id) {
             return Err(IdentityServiceError::forbidden(
                 "You are not authorized to update this organization.",
+            ));
+        }
+        if input.id != target_organization.id {
+            return Err(IdentityServiceError::bad_request(
+                "Organization ID in request body does not match the resolved organization.",
+            ));
+        }
+        if input.name.eq_ignore_ascii_case("default") && !target_organization.is_default {
+            return Err(IdentityServiceError::bad_request(
+                "Organization name 'default' is reserved.",
+            ));
+        }
+        if input.name.trim().is_empty() {
+            return Err(IdentityServiceError::bad_request(
+                "Organization name must not be empty.",
             ));
         }
         self.store
@@ -1313,8 +1333,7 @@ where
         let counts = self
             .store
             .get_organization_resource_counts(target_organization.id)
-            .await
-            .unwrap_or_default();
+            .await?;
         // Only block on workspaces, templates, and provisioner keys.
         // Members and groups are expected (creator + "Everyone" group) and will
         // be cleaned up as part of the soft-delete cascade.
