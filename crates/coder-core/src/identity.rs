@@ -277,6 +277,21 @@ pub struct OrganizationRecord {
     pub deleted: bool,
 }
 
+/// Resource counts for an organization, used for detailed delete-failure messages.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct OrgResourceCounts {
+    /// Number of workspaces in the organization.
+    pub workspace_count: u64,
+    /// Number of templates in the organization.
+    pub template_count: u64,
+    /// Number of members in the organization.
+    pub member_count: u64,
+    /// Number of groups in the organization.
+    pub group_count: u64,
+    /// Number of provisioner keys in the organization.
+    pub provisioner_key_count: u64,
+}
+
 /// Organization membership joined with user data.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct OrganizationMemberRecord {

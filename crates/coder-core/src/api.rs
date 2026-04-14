@@ -1068,6 +1068,36 @@ pub struct UpdateOrganizationRequest {
     pub icon: Option<String>,
 }
 
+/// Request payload for creating or updating a custom role.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CustomRoleRequest {
+    /// Unique role name (slug).
+    pub name: String,
+    /// Human-readable display name.
+    pub display_name: String,
+    /// Site-wide permissions granted by this role.
+    #[serde(default)]
+    pub site_permissions: Vec<Permission>,
+    /// Organization-scoped permissions granted by this role.
+    #[serde(default)]
+    pub organization_permissions: Vec<Permission>,
+    /// User-scoped permissions granted by this role.
+    #[serde(default)]
+    pub user_permissions: Vec<Permission>,
+}
+
+/// A single permission entry in a custom role.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct Permission {
+    /// The resource type this permission applies to.
+    pub resource_type: String,
+    /// The action this permission grants or denies.
+    pub action: String,
+    /// Whether this permission is negated.
+    #[serde(default)]
+    pub negate: bool,
+}
+
 /// Organization membership without embedded user data.
 #[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct OrganizationMember {

@@ -676,12 +676,15 @@ mod tests {
     use super::*;
     use async_trait::async_trait;
     use coder_core::identity::{
-        CreateGroupInput, CreateUserStoreError, CustomRoleRecord, GroupMemberRecord, GroupRecord,
+        CreateGroupInput, CreateOrganizationInput, CreateOrganizationStoreError,
+        CreateUserStoreError, CustomRoleRecord, GroupMemberRecord, GroupRecord,
         InsertOrganizationMemberError, LoginType, NotificationMessageRecord,
-        NotificationMessageStatus, NotificationMethod, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, UpsertCustomRoleInput, UpsertUserLinkInput,
-        UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter,
-        UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
+        NotificationMessageStatus, NotificationMethod, OrgResourceCounts,
+        OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+        UpdateOrganizationInput, UpdateOrganizationStoreError, UpsertCustomRoleInput,
+        UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord,
+        UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+        UserStatusChangeRecord,
     };
     use coder_core::{CreateUserInput, IdentityStore, StorageError};
     use std::sync::Mutex;
@@ -1039,6 +1042,45 @@ mod tests {
         ) -> Result<bool, StorageError> {
             self.maybe_err()?;
             Ok(false)
+        }
+
+        async fn find_custom_role(
+            &self,
+            _name: &str,
+            _organization_id: Option<Uuid>,
+        ) -> Result<Option<CustomRoleRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn insert_organization(
+            &self,
+            _input: &CreateOrganizationInput,
+        ) -> Result<OrganizationRecord, CreateOrganizationStoreError> {
+            Err(CreateOrganizationStoreError::Storage(
+                StorageError::unavailable("not implemented in MockStore"),
+            ))
+        }
+
+        async fn update_organization(
+            &self,
+            _input: &UpdateOrganizationInput,
+        ) -> Result<OrganizationRecord, UpdateOrganizationStoreError> {
+            Err(UpdateOrganizationStoreError::Storage(
+                StorageError::unavailable("not implemented in MockStore"),
+            ))
+        }
+
+        async fn soft_delete_organization(&self, _id: Uuid) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(false)
+        }
+
+        async fn get_organization_resource_counts(
+            &self,
+            _id: Uuid,
+        ) -> Result<OrgResourceCounts, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
         }
 
         async fn list_groups(

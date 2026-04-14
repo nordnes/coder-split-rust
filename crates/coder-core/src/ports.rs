@@ -31,14 +31,16 @@ use crate::api::{
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
     CreateApiKeyStoreError, CreateFirstUserInput, CreateFirstUserStoreError, CreateGroupInput,
-    CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateUserInput,
-    CreateUserStoreError, CustomRoleRecord, FirstUserRecord, GroupMemberRecord, GroupRecord,
-    InsertOrganizationMemberError, NotificationMessageRecord, OAuth2ProviderAppCodeRecord,
-    OAuth2ProviderAppRecord, OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord,
+    CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateOrganizationInput,
+    CreateOrganizationStoreError, CreateUserInput, CreateUserStoreError, CustomRoleRecord,
+    FirstUserRecord, GroupMemberRecord, GroupRecord, InsertOrganizationMemberError,
+    NotificationMessageRecord, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
+    OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrgResourceCounts,
     OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    TokenConfigRecord, UpdateOAuth2ProviderAppInput, UpsertCustomRoleInput, UpsertUserLinkInput,
-    UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter,
-    UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
+    TokenConfigRecord, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
+    UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
+    UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
+    UserRecord, UserStatus, UserStatusChangeRecord,
 };
 use crate::provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
@@ -1533,6 +1535,27 @@ pub trait IdentityStore: Send + Sync {
         name: &str,
     ) -> Result<Option<OrganizationRecord>, StorageError>;
 
+    /// Inserts a new organization.
+    async fn insert_organization(
+        &self,
+        input: &CreateOrganizationInput,
+    ) -> Result<OrganizationRecord, CreateOrganizationStoreError>;
+
+    /// Updates an existing organization.
+    async fn update_organization(
+        &self,
+        input: &UpdateOrganizationInput,
+    ) -> Result<OrganizationRecord, UpdateOrganizationStoreError>;
+
+    /// Soft-deletes an organization by setting `deleted = true`.
+    async fn soft_delete_organization(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Returns resource counts for an organization (members, templates, etc.).
+    async fn get_organization_resource_counts(
+        &self,
+        id: Uuid,
+    ) -> Result<OrgResourceCounts, StorageError>;
+
     /// Lists members for an organization.
     async fn list_organization_members(
         &self,
@@ -1678,6 +1701,13 @@ pub trait IdentityStore: Send + Sync {
         name: &str,
         organization_id: Option<Uuid>,
     ) -> Result<bool, StorageError>;
+
+    /// Looks up a custom role by name and optional organization.
+    async fn find_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<Option<CustomRoleRecord>, StorageError>;
 
     // ----- Groups -----
 
@@ -2568,6 +2598,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         organization_id: Option<Uuid>,
     ) -> Result<bool, StorageError>;
 
+    /// Looks up a custom role by name and optional organization.
+    async fn find_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<Option<CustomRoleRecord>, StorageError>;
+
     /// Lists organizations, optionally filtering by identifiers.
     async fn list_organizations(
         &self,
@@ -2585,6 +2622,27 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         name: &str,
     ) -> Result<Option<OrganizationRecord>, StorageError>;
+
+    /// Inserts a new organization.
+    async fn insert_organization(
+        &self,
+        input: &CreateOrganizationInput,
+    ) -> Result<OrganizationRecord, CreateOrganizationStoreError>;
+
+    /// Updates an existing organization.
+    async fn update_organization(
+        &self,
+        input: &UpdateOrganizationInput,
+    ) -> Result<OrganizationRecord, UpdateOrganizationStoreError>;
+
+    /// Soft-deletes an organization by setting `deleted = true`.
+    async fn soft_delete_organization(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Returns resource counts for an organization (members, templates, etc.).
+    async fn get_organization_resource_counts(
+        &self,
+        id: Uuid,
+    ) -> Result<OrgResourceCounts, StorageError>;
 
     /// Lists members for an organization.
     async fn list_organization_members(
@@ -4998,6 +5056,31 @@ where
         AppStore::find_organization_by_name(self, name).await
     }
 
+    async fn insert_organization(
+        &self,
+        input: &CreateOrganizationInput,
+    ) -> Result<OrganizationRecord, CreateOrganizationStoreError> {
+        AppStore::insert_organization(self, input).await
+    }
+
+    async fn update_organization(
+        &self,
+        input: &UpdateOrganizationInput,
+    ) -> Result<OrganizationRecord, UpdateOrganizationStoreError> {
+        AppStore::update_organization(self, input).await
+    }
+
+    async fn soft_delete_organization(&self, id: Uuid) -> Result<bool, StorageError> {
+        AppStore::soft_delete_organization(self, id).await
+    }
+
+    async fn get_organization_resource_counts(
+        &self,
+        id: Uuid,
+    ) -> Result<OrgResourceCounts, StorageError> {
+        AppStore::get_organization_resource_counts(self, id).await
+    }
+
     async fn list_organization_members(
         &self,
         filter: OrganizationMemberListFilter,
@@ -5377,6 +5460,14 @@ where
         AppStore::delete_custom_role(self, name, organization_id).await
     }
 
+    async fn find_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<Option<CustomRoleRecord>, StorageError> {
+        AppStore::find_custom_role(self, name, organization_id).await
+    }
+
     async fn acquire_pending_notification_messages(
         &self,
         limit: u32,
@@ -5515,6 +5606,31 @@ where
         name: &str,
     ) -> Result<Option<OrganizationRecord>, StorageError> {
         (**self).find_organization_by_name(name).await
+    }
+
+    async fn insert_organization(
+        &self,
+        input: &CreateOrganizationInput,
+    ) -> Result<OrganizationRecord, CreateOrganizationStoreError> {
+        (**self).insert_organization(input).await
+    }
+
+    async fn update_organization(
+        &self,
+        input: &UpdateOrganizationInput,
+    ) -> Result<OrganizationRecord, UpdateOrganizationStoreError> {
+        (**self).update_organization(input).await
+    }
+
+    async fn soft_delete_organization(&self, id: Uuid) -> Result<bool, StorageError> {
+        (**self).soft_delete_organization(id).await
+    }
+
+    async fn get_organization_resource_counts(
+        &self,
+        id: Uuid,
+    ) -> Result<OrgResourceCounts, StorageError> {
+        (**self).get_organization_resource_counts(id).await
     }
 
     async fn list_organization_members(
@@ -5920,6 +6036,14 @@ where
         organization_id: Option<Uuid>,
     ) -> Result<bool, StorageError> {
         (**self).delete_custom_role(name, organization_id).await
+    }
+
+    async fn find_custom_role(
+        &self,
+        name: &str,
+        organization_id: Option<Uuid>,
+    ) -> Result<Option<CustomRoleRecord>, StorageError> {
+        (**self).find_custom_role(name, organization_id).await
     }
 
     async fn acquire_pending_notification_messages(

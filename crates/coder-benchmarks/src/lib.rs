@@ -1981,6 +1981,43 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn find_custom_role(
+        &self,
+        _name: &str,
+        _organization_id: Option<Uuid>,
+    ) -> Result<Option<CustomRoleRecord>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn insert_organization(
+        &self,
+        _input: &CreateOrganizationInput,
+    ) -> Result<OrganizationRecord, CreateOrganizationStoreError> {
+        Err(CreateOrganizationStoreError::Storage(
+            StorageError::unavailable("bench stub"),
+        ))
+    }
+
+    async fn update_organization(
+        &self,
+        _input: &UpdateOrganizationInput,
+    ) -> Result<OrganizationRecord, UpdateOrganizationStoreError> {
+        Err(UpdateOrganizationStoreError::Storage(
+            StorageError::unavailable("bench stub"),
+        ))
+    }
+
+    async fn soft_delete_organization(&self, _id: Uuid) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn get_organization_resource_counts(
+        &self,
+        _id: Uuid,
+    ) -> Result<OrgResourceCounts, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn batch_insert_workspace_build_parameters(
         &self,
         _params: Vec<WorkspaceBuildParameterRecord>,
