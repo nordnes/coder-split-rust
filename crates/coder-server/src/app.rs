@@ -59,12 +59,15 @@ use crate::handlers::mcp::*;
 use crate::handlers::notifications::*;
 use crate::handlers::oauth2::*;
 use crate::handlers::organizations::*;
+use crate::handlers::quotas::*;
+use crate::handlers::replicas::*;
 use crate::handlers::scim::*;
 use crate::handlers::tasks::*;
 use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
 use crate::handlers::users::*;
 use crate::handlers::workspace_apps::{workspace_apps_proxy_path, workspace_port_forward};
+use crate::handlers::workspace_sharing::*;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
@@ -352,6 +355,10 @@ pub fn build_router(
                 .route("/init-script/{os}/{arch}", get(get_init_script))
                 .route("/organizations/{organization}", get(get_organization))
                 .route(
+                    "/organizations/{organization}/settings/workspace-sharing",
+                    get(get_workspace_sharing_settings).patch(patch_workspace_sharing_settings),
+                )
+                .route(
                     "/organizations/{organization}/provisionerdaemons",
                     get(list_provisioner_daemons),
                 )
@@ -400,6 +407,10 @@ pub fn build_router(
                 .route(
                     "/organizations/{organization}/members/{user}/workspaces",
                     post(post_org_member_workspace),
+                )
+                .route(
+                    "/organizations/{organization}/members/{user}/workspace-quota",
+                    get(get_workspace_quota),
                 )
                 .route(
                     "/organizations/{organization}/members/{user}/workspaces/available-users",
@@ -462,6 +473,7 @@ pub fn build_router(
                     get(get_user_preferences).put(put_user_preferences),
                 )
                 .route("/users/{user}/password", put(put_user_password))
+                .route("/users/{user}/quiet-hours", get(get_user_quiet_hours).put(put_user_quiet_hours))
                 .route("/users/{user}/convert-login", post(post_convert_login))
                 .route("/users/{user}", get(get_user).delete(delete_user))
                 // AI Tasks
@@ -830,6 +842,8 @@ pub fn build_router(
                 .route("/licenses", get(list_licenses).post(post_license))
                 .route("/licenses/{id}", delete(delete_license_handler))
                 .route("/entitlements", get(get_entitlements))
+                .route("/replicas", get(get_replicas))
+                .route("/workspace-quota/{user}", get(get_workspace_quota_deprecated))
                 .route("/derp-map", get(derp_map_updates))
                 .route("/regions", get(get_regions))
                 .route_layer(middleware::from_fn_with_state(
