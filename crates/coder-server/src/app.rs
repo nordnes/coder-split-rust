@@ -747,6 +747,18 @@ pub fn build_router(
                     get(get_template_version_by_name),
                 )
                 .route(
+                    "/templates/{template}/acl",
+                    get(get_template_acl).patch(patch_template_acl),
+                )
+                .route(
+                    "/templates/{template}/acl/available",
+                    get(get_template_acl_available),
+                )
+                .route(
+                    "/templates/{template}/prebuilds/invalidate",
+                    post(post_invalidate_template_presets),
+                )
+                .route(
                     "/templateversions/{templateversion}",
                     get(get_template_version).patch(patch_template_version),
                 )
@@ -1422,6 +1434,9 @@ pub(crate) mod tests {
         hash_password,
     };
     use coder_core::ports::{
+        InvalidatedPresetRow, TemplateGroupRoleRow, TemplateUserRoleRow, UpdateTemplateACLInput,
+    };
+    use coder_core::ports::{
         ProvisionerJobLogRecord as PortsJobLogRecord,
         ProvisionerJobTimingRecord as PortsJobTimingRecord,
     };
@@ -1622,6 +1637,9 @@ pub(crate) mod tests {
         provisioner_job_timings: Mutex<HashMap<Uuid, Vec<PortsJobTimingRecord>>>,
         workspace_port_shares: Mutex<Vec<WorkspaceAgentPortShareRecord>>,
         workspace_acls: Mutex<HashMap<Uuid, WorkspaceACLRecord>>,
+        // Template ACL fields
+        template_user_roles: Mutex<HashMap<Uuid, Vec<TemplateUserRoleRow>>>,
+        template_group_roles: Mutex<HashMap<Uuid, Vec<TemplateGroupRoleRow>>>,
         // ProvisionerStore fields
         prov_jobs: Mutex<HashMap<Uuid, ProvisionerJobRecord>>,
         prov_job_logs: Mutex<Vec<ProvisionerLogRecord>>,
@@ -1721,6 +1739,8 @@ pub(crate) mod tests {
                 provisioner_job_timings: Mutex::new(HashMap::new()),
                 workspace_port_shares: Mutex::new(Vec::new()),
                 workspace_acls: Mutex::new(HashMap::new()),
+                template_user_roles: Mutex::new(HashMap::new()),
+                template_group_roles: Mutex::new(HashMap::new()),
                 prov_jobs: Mutex::new(HashMap::new()),
                 prov_job_logs: Mutex::new(Vec::new()),
                 prov_job_log_next_id: Mutex::new(1),
@@ -6139,6 +6159,108 @@ pub(crate) mod tests {
                 .collect();
             candidates.sort_by(|a, b| b.created_at.cmp(&a.created_at));
             Ok(candidates.first().cloned().cloned())
+        }
+
+        async fn get_template_user_roles(
+            &self,
+            template_id: Uuid,
+        ) -> Result<Vec<TemplateUserRoleRow>, StorageError> {
+            let map = self
+                .template_user_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(map.get(&template_id).cloned().unwrap_or_default())
+        }
+
+        async fn get_template_group_roles(
+            &self,
+            template_id: Uuid,
+        ) -> Result<Vec<TemplateGroupRoleRow>, StorageError> {
+            let map = self
+                .template_group_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(map.get(&template_id).cloned().unwrap_or_default())
+        }
+
+        async fn update_template_acl(
+            &self,
+            template_id: Uuid,
+            input: &UpdateTemplateACLInput,
+        ) -> Result<(), StorageError> {
+            // Update the template record itself.
+            let mut templates = self
+                .templates
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(t) = templates.get_mut(&template_id) {
+                t.user_acl = input.user_acl.clone();
+                t.group_acl = input.group_acl.clone();
+            }
+            drop(templates);
+
+            // Keep template_user_roles in sync so get_template_user_roles
+            // reflects the update (mirrors what PostgresStore does via SQL).
+            let user_rows: Vec<TemplateUserRoleRow> = input
+                .user_acl
+                .iter()
+                .filter_map(|(uid_str, actions_val)| {
+                    let id = uid_str.parse::<Uuid>().ok()?;
+                    let actions: Vec<String> =
+                        serde_json::from_value(actions_val.clone()).unwrap_or_default();
+                    Some(TemplateUserRoleRow {
+                        id,
+                        username: String::new(),
+                        avatar_url: String::new(),
+                        name: String::new(),
+                        email: String::new(),
+                        status: "active".to_string(),
+                        login_type: "password".to_string(),
+                        created_at: time::OffsetDateTime::now_utc(),
+                        updated_at: time::OffsetDateTime::now_utc(),
+                        actions,
+                    })
+                })
+                .collect();
+            self.template_user_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(template_id, user_rows);
+
+            // Keep template_group_roles in sync.
+            let group_rows: Vec<TemplateGroupRoleRow> = input
+                .group_acl
+                .iter()
+                .filter_map(|(gid_str, actions_val)| {
+                    let id = gid_str.parse::<Uuid>().ok()?;
+                    let actions: Vec<String> =
+                        serde_json::from_value(actions_val.clone()).unwrap_or_default();
+                    Some(TemplateGroupRoleRow {
+                        id,
+                        name: String::new(),
+                        display_name: String::new(),
+                        organization_id: Uuid::nil(),
+                        avatar_url: String::new(),
+                        quota_allowance: 0,
+                        source: "user".to_string(),
+                        actions,
+                    })
+                })
+                .collect();
+            self.template_group_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(template_id, group_rows);
+
+            Ok(())
+        }
+
+        async fn invalidate_template_presets(
+            &self,
+            _template_id: Uuid,
+        ) -> Result<Vec<InvalidatedPresetRow>, StorageError> {
+            // FakeStore returns an empty list — no real presets to invalidate.
+            Ok(Vec::new())
         }
 
         // ----- Agent storage methods -----

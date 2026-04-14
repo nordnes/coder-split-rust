@@ -32,6 +32,10 @@ use coder_auth::{
 use coder_connectivity::agents::{AgentConnection, AgentError, AgentProvider};
 use coder_core::StorageError;
 use coder_core::api::{
+    ACLAvailableResponse, GroupResponse, InvalidatePresetsResponse, InvalidatedPreset, ReducedUser,
+    TemplateACLGroup, TemplateACLResponse, TemplateACLUser, TemplateRole, UpdateTemplateACLRequest,
+};
+use coder_core::api::{
     ArchiveTemplateVersionsRequest, ArchiveTemplateVersionsResponse, CreateTemplateRequest,
     CreateTemplateVersionDryRunRequest, CreateTemplateVersionRequest, DAUEntry, DAUsResponse,
     DynamicParametersRequest, DynamicParametersResponse, MatchedProvisioners, MinimalUser,
@@ -47,6 +51,9 @@ use coder_core::api::{
     UpdateWorkspaceACLRequest, WorkspaceACLGroup, WorkspaceACLResponse, WorkspaceACLUser,
 };
 use coder_core::ports::UpdateWorkspaceACLInput;
+use coder_core::ports::{
+    InvalidatedPresetRow, TemplateGroupRoleRow, TemplateUserRoleRow, UpdateTemplateACLInput,
+};
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
     CreateTemplateVersionInput, ProvisionerJobRecord as TemplateProvisionerJobRecord,

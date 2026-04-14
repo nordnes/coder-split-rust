@@ -12,6 +12,9 @@ use coder_core::api::{
     UserActivityInsightsReport, UserActivityInsightsResponse, UserLatency,
     UserLatencyInsightsReport, UserLatencyInsightsResponse, UserStatusChangeCount, VapidKeyPair,
 };
+use coder_core::ports::{
+    InvalidatedPresetRow, TemplateGroupRoleRow, TemplateUserRoleRow, UpdateTemplateACLInput,
+};
 use coder_core::ports::{UpdateWorkspaceACLInput, WorkspaceACLRecord, WorkspaceTransitionRow};
 use coder_core::provisioner::{
     LogLevel, LogSource, ProvisionerJobLogRecord as ProvisionerLogRecord,

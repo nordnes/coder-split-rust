@@ -1303,6 +1303,35 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn get_template_user_roles(
+        &self,
+        _template_id: Uuid,
+    ) -> Result<Vec<coder_core::ports::TemplateUserRoleRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn get_template_group_roles(
+        &self,
+        _template_id: Uuid,
+    ) -> Result<Vec<coder_core::ports::TemplateGroupRoleRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_template_acl(
+        &self,
+        _template_id: Uuid,
+        _input: &coder_core::ports::UpdateTemplateACLInput,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn invalidate_template_presets(
+        &self,
+        _template_id: Uuid,
+    ) -> Result<Vec<coder_core::ports::InvalidatedPresetRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn find_workspace_agent_by_id(
         &self,
         _agent_id: Uuid,
