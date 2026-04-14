@@ -484,7 +484,7 @@ pub struct AuditLogListFilter {
 pub struct ConnectionLogListFilter {
     /// Free-text search query string (the `q` parameter).
     pub search: String,
-    /// Page limit (clamped by `clamp_pagination_limit`).
+    /// Page limit.
     pub limit: u32,
     /// Page offset.
     pub offset: u32,

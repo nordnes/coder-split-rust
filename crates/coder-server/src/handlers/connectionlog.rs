@@ -23,13 +23,13 @@ pub(crate) async fn list_connection_logs(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // RBAC: connection logs use the same permission as audit logs in Go.
+    // RBAC: connection logs have their own resource type in the Rust RBAC model.
     let authorizer = Authorizer::new();
     if authorizer
         .authorize(
             &context.actor,
             Action::Read,
-            &Object::new(ResourceType::AuditLog),
+            &Object::new(ResourceType::ConnectionLog),
         )
         .is_err()
     {
