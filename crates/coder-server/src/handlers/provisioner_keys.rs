@@ -477,6 +477,14 @@ pub(crate) async fn get_provisioner_key(
     headers: HeaderMap,
     Path(key_id): Path<Uuid>,
 ) -> Result<Response, AppError> {
+    // Enterprise gate
+    let entitlements = state.entitlements.clone();
+    if !is_feature_entitled(&entitlements, FeatureName::ExternalProvisionerDaemons) {
+        return Ok(require_enterprise_feature(
+            &FeatureName::ExternalProvisionerDaemons,
+        ));
+    }
+
     // Authenticate via the provisioner daemon key header
     let raw_token = headers
         .get(PROVISIONER_DAEMON_KEY_HEADER)
