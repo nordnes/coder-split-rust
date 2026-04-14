@@ -64,6 +64,7 @@ use crate::handlers::notifications::*;
 use crate::handlers::oauth2::*;
 use crate::handlers::organizations::*;
 use crate::handlers::prebuilds::*;
+use crate::handlers::provisioner_keys::*;
 use crate::handlers::quotas::*;
 use crate::handlers::replicas::*;
 use crate::handlers::scim::*;
@@ -398,6 +399,22 @@ pub fn build_router(
                 .route(
                     "/organizations/{organization}/provisionerjobs/{job}/logs",
                     get(get_provisioner_job_logs),
+                )
+                .route(
+                    "/organizations/{organization}/provisionerkeys",
+                    get(list_provisioner_keys).post(post_provisioner_key),
+                )
+                .route(
+                    "/organizations/{organization}/provisionerkeys/daemons",
+                    get(list_provisioner_key_daemons),
+                )
+                .route(
+                    "/organizations/{organization}/provisionerkeys/{provisionerkey}",
+                    delete(delete_provisioner_key),
+                )
+                .route(
+                    "/provisionerkeys/{provisionerkey}",
+                    get(get_provisioner_key),
                 )
                 .route(
                     "/organizations/{organization}/members/roles",
@@ -2417,6 +2434,26 @@ pub(crate) mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .values()
                 .filter(|k| k.organization_id == organization_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn list_provisioner_keys_by_organization_exclude_reserved(
+            &self,
+            organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+            use coder_core::api::RESERVED_PROVISIONER_KEY_NAMES;
+            Ok(self
+                .provisioner_keys
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .filter(|k| {
+                    k.organization_id == organization_id
+                        && !RESERVED_PROVISIONER_KEY_NAMES
+                            .iter()
+                            .any(|r| r.eq_ignore_ascii_case(&k.name))
+                })
                 .cloned()
                 .collect())
         }

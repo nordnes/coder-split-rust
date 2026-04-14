@@ -577,6 +577,26 @@ impl ProvisionerStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_provisioner_keys_by_organization_exclude_reserved(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredProvisionerKeyRow>(
+            "SELECT id, created_at, organization_id, name, hashed_secret, tags
+             FROM provisioner_keys
+             WHERE organization_id = $1
+               AND LOWER(name) NOT IN ('built-in', 'user-auth', 'psk')
+             ORDER BY name ASC",
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows.into_iter().map(provisioner_key_from_row).collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError> {
         let result = sqlx::query("DELETE FROM provisioner_keys WHERE id = $1")
             .bind(id)

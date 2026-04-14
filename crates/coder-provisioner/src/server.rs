@@ -1011,6 +1011,13 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn list_provisioner_keys_by_organization_exclude_reserved(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
         async fn delete_provisioner_key(&self, _id: Uuid) -> Result<bool, StorageError> {
             Ok(false)
         }

@@ -2395,6 +2395,63 @@ pub struct ProvisionerDaemonResponse {
 }
 
 // ---------------------------------------------------------------------------
+// Provisioner keys domain
+// ---------------------------------------------------------------------------
+
+/// Reserved provisioner key UUID for the built-in key.
+pub const PROVISIONER_KEY_ID_BUILT_IN: &str = "00000000-0000-0000-0000-000000000001";
+/// Reserved provisioner key UUID for user-auth key.
+pub const PROVISIONER_KEY_ID_USER_AUTH: &str = "00000000-0000-0000-0000-000000000002";
+/// Reserved provisioner key UUID for PSK key.
+pub const PROVISIONER_KEY_ID_PSK: &str = "00000000-0000-0000-0000-000000000003";
+
+/// Reserved provisioner key names that cannot be created or deleted.
+pub const RESERVED_PROVISIONER_KEY_NAMES: &[&str] = &["built-in", "user-auth", "psk"];
+
+/// Request body for creating a provisioner key.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct CreateProvisionerKeyRequest {
+    /// Human-readable name for the key.
+    pub name: String,
+    /// Free-form tags associated with this key.
+    #[serde(default)]
+    pub tags: HashMap<String, String>,
+}
+
+/// Response returned after creating a provisioner key (contains the raw token).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct CreateProvisionerKeyResponse {
+    /// The raw provisioner key token. Only returned on creation.
+    pub key: String,
+}
+
+/// API response representing a provisioner key (never includes the secret).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisionerKeyResponse {
+    /// Key identifier.
+    pub id: Uuid,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Organization that owns this key.
+    #[serde(rename = "organization")]
+    pub organization_id: Uuid,
+    /// Human-readable name.
+    pub name: String,
+    /// Free-form tags.
+    pub tags: HashMap<String, String>,
+}
+
+/// A provisioner key with its associated daemons.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ProvisionerKeyDaemonsResponse {
+    /// The provisioner key.
+    pub key: ProvisionerKeyResponse,
+    /// Daemons authenticated with this key.
+    pub daemons: Vec<ProvisionerDaemonResponse>,
+}
+
+// ---------------------------------------------------------------------------
 // Notifications domain
 // ---------------------------------------------------------------------------
 

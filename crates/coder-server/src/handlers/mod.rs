@@ -336,6 +336,7 @@ pub(crate) mod notifications;
 pub(crate) mod oauth2;
 pub(crate) mod organizations;
 pub(crate) mod prebuilds;
+pub(crate) mod provisioner_keys;
 pub(crate) mod quotas;
 pub(crate) mod replicas;
 pub(crate) mod scim;

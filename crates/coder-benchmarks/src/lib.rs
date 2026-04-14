@@ -216,6 +216,13 @@ impl ProvisionerStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn list_provisioner_keys_by_organization_exclude_reserved(
+        &self,
+        _organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn delete_provisioner_key(&self, _id: Uuid) -> Result<bool, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
