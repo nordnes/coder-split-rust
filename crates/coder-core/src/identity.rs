@@ -754,6 +754,21 @@ pub struct CreateGroupInput {
     pub quota_allowance: i32,
 }
 
+/// Input for updating a group.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateGroupInput {
+    /// Group identifier.
+    pub id: Uuid,
+    /// Updated group name.
+    pub name: String,
+    /// Updated display name.
+    pub display_name: String,
+    /// Updated avatar URL.
+    pub avatar_url: String,
+    /// Updated quota allowance.
+    pub quota_allowance: i32,
+}
+
 /// A group membership entry.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GroupMemberRecord {

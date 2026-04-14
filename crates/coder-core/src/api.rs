@@ -2262,14 +2262,19 @@ pub struct GroupResponse {
     /// Owning organization identifier.
     pub organization_id: String,
     /// Avatar URL.
-    #[serde(skip_serializing_if = "String::is_empty")]
     pub avatar_url: String,
     /// Quota allowance.
     pub quota_allowance: i32,
     /// Source of creation.
     pub source: String,
-    /// Member user identifiers.
+    /// Member list (may be empty if caller lacks read-member permission).
     pub members: Vec<ReducedUser>,
+    /// Total member count (may differ from `members.len()` due to permissions).
+    pub total_member_count: i32,
+    /// Organization name.
+    pub organization_name: String,
+    /// Organization display name.
+    pub organization_display_name: String,
 }
 
 /// Request to create a group.

@@ -681,10 +681,10 @@ mod tests {
         InsertOrganizationMemberError, LoginType, NotificationMessageRecord,
         NotificationMessageStatus, NotificationMethod, OrgResourceCounts,
         OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
-        UpdateOrganizationInput, UpdateOrganizationStoreError, UpsertCustomRoleInput,
-        UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord,
-        UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-        UserStatusChangeRecord,
+        UpdateGroupInput, UpdateOrganizationInput, UpdateOrganizationStoreError,
+        UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
+        UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+        UserStatus, UserStatusChangeRecord,
     };
     use coder_core::{CreateUserInput, IdentityStore, StorageError};
     use std::sync::Mutex;
@@ -1135,6 +1135,27 @@ mod tests {
         ) -> Result<bool, StorageError> {
             self.maybe_err()?;
             Ok(false)
+        }
+
+        async fn find_group_by_name(
+            &self,
+            _organization_id: Uuid,
+            _name: &str,
+        ) -> Result<Option<GroupRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn update_group(
+            &self,
+            _input: &UpdateGroupInput,
+        ) -> Result<GroupRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+            self.maybe_err()?;
+            Ok(Vec::new())
         }
 
         // ----- Notification overrides -----

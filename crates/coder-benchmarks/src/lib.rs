@@ -1971,6 +1971,22 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn find_group_by_name(
+        &self,
+        _organization_id: Uuid,
+        _name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_group(&self, _input: &UpdateGroupInput) -> Result<GroupRecord, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn upsert_user_link(
         &self,
         _user_id: Uuid,

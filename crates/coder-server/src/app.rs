@@ -55,6 +55,7 @@ use crate::handlers::deployment::*;
 use crate::handlers::derp::*;
 use crate::handlers::external_auth::*;
 use crate::handlers::files::*;
+use crate::handlers::groups::*;
 use crate::handlers::health::*;
 use crate::handlers::insights::*;
 use crate::handlers::licenses::*;
@@ -878,6 +879,17 @@ pub fn build_router(
                         crate::middleware::require_feature_appearance,
                     ))
                 )
+                // ----- Group routes (enterprise — TemplateRbac) -----
+                .merge(axum::Router::new()
+                    .route("/groups", get(list_all_groups))
+                    .route("/groups/{group}", get(get_group).patch(patch_group).delete(delete_group))
+                    .route("/organizations/{organization}/groups", get(list_org_groups).post(post_org_group))
+                    .route("/organizations/{organization}/groups/{groupName}", get(get_org_group_by_name))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_template_rbac,
+                    ))
+                )
                 // ----- Prebuilds settings routes (OSS scope) -----
                 .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
 
@@ -1477,21 +1489,22 @@ pub(crate) mod tests {
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
         TemplateVersionListFilter, TemplateVersionParameterRecord,
         TemplateVersionPresetParameterRecord, TemplateVersionPresetRecord, TemplateVersionRecord,
-        TemplateVersionVariableRecord, TokenConfigRecord, UpdateOrganizationInput,
-        UpdateOrganizationStoreError, UpdateRolesRequest, UpdateTemplateMeta,
-        UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest, UpdateUserPasswordRequest,
-        UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest, UpsertCustomRoleInput,
-        UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
-        UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord,
-        UserLinkClaims, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
-        UserStatus, UserStatusChangeRecord, ValidateUserPasswordRequest, WorkspaceAgentLogRow,
-        WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord,
-        WorkspaceAgentRow, WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow,
-        WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
-        WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
-        WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
-        WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceRecord,
-        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+        TemplateVersionVariableRecord, TokenConfigRecord, UpdateGroupInput,
+        UpdateOrganizationInput, UpdateOrganizationStoreError, UpdateRolesRequest,
+        UpdateTemplateMeta, UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest,
+        UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
+        UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
+        UpsertProvisionerDaemonInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
+        UserDeletedRecord, UserLinkClaims, UserLinkRecord, UserListFilter, UserPreferenceRecord,
+        UserRecord, UserStatus, UserStatusChangeRecord, ValidateUserPasswordRequest,
+        WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+        WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+        WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow,
+        WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
+        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
+        WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
+        WorkspaceRecord, WorkspaceResourceMetadataRecord, WorkspaceResourceRecord,
+        WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -2503,6 +2516,24 @@ pub(crate) mod tests {
             organizations.insert(organization_id, organization);
             members.insert((organization_id, user_id), member);
             users.insert(user_id, user_record.clone());
+
+            // Auto-create the "Everyone" group (id == org_id).
+            if let Ok(mut groups) = self.groups.lock() {
+                groups.insert(
+                    organization_id,
+                    GroupRecord {
+                        id: organization_id,
+                        name: "Everyone".to_owned(),
+                        display_name: String::new(),
+                        organization_id,
+                        avatar_url: String::new(),
+                        quota_allowance: 0,
+                        source: "user".to_owned(),
+                        created_at: now,
+                    },
+                );
+            }
+
             self.password_hashes
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))
@@ -3134,6 +3165,25 @@ pub(crate) mod tests {
                 deleted: false,
             };
             organizations.insert(org.id, org.clone());
+
+            // Auto-create the "Everyone" group (id == org.id), matching the
+            // real database trigger / migration behaviour.
+            if let Ok(mut groups) = self.groups.lock() {
+                groups.insert(
+                    org.id,
+                    GroupRecord {
+                        id: org.id,
+                        name: "Everyone".to_owned(),
+                        display_name: String::new(),
+                        organization_id: org.id,
+                        avatar_url: String::new(),
+                        quota_allowance: 0,
+                        source: "user".to_owned(),
+                        created_at: now,
+                    },
+                );
+            }
+
             Ok(org)
         }
 
@@ -8288,6 +8338,69 @@ pub(crate) mod tests {
                     .unwrap_or_default();
                 a_name.cmp(&b_name)
             });
+            Ok(result)
+        }
+
+        async fn find_group_by_name(
+            &self,
+            organization_id: Uuid,
+            name: &str,
+        ) -> Result<Option<GroupRecord>, StorageError> {
+            let groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let lower = name.to_lowercase();
+            Ok(groups
+                .values()
+                .find(|g| g.organization_id == organization_id && g.name.to_lowercase() == lower)
+                .cloned())
+        }
+
+        async fn update_group(
+            &self,
+            input: &UpdateGroupInput,
+        ) -> Result<GroupRecord, StorageError> {
+            let mut groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+
+            // Check name uniqueness within the organization (excluding self).
+            let Some(existing) = groups.get(&input.id).cloned() else {
+                return Err(StorageError::unavailable("group not found"));
+            };
+            if input.name != existing.name {
+                let lower = input.name.to_lowercase();
+                let dup = groups.values().any(|g| {
+                    g.id != input.id
+                        && g.organization_id == existing.organization_id
+                        && g.name.to_lowercase() == lower
+                });
+                if dup {
+                    return Err(StorageError::invalid_data(
+                        "group with this name already exists in the organization",
+                    ));
+                }
+            }
+
+            let record = groups
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::unavailable("group not found"))?;
+            record.name = input.name.clone();
+            record.display_name = input.display_name.clone();
+            record.avatar_url = input.avatar_url.clone();
+            record.quota_allowance = input.quota_allowance;
+            Ok(record.clone())
+        }
+
+        async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+            let groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut result: Vec<GroupRecord> = groups.values().cloned().collect();
+            result.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
             Ok(result)
         }
 
@@ -36732,6 +36845,221 @@ pub(crate) mod tests {
             "expected 4xx for oversized body, got {}",
             response.status()
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Group CRUD handler tests (enterprise — TemplateRbac)
+    // -----------------------------------------------------------------------
+
+    /// Build an `AppState` with the `TemplateRbac` entitlement enabled so
+    /// the enterprise group routes are reachable.
+    fn test_state_with_template_rbac() -> Result<AppState, Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        // Enable the TemplateRbac feature.
+        let mut ents = coder_license::Entitlements::new_unlicensed();
+        ents.has_license = true;
+        if let Some(f) = ents
+            .features
+            .get_mut(coder_license::FeatureName::TemplateRbac.as_str())
+        {
+            f.entitlement = coder_license::Entitlement::Entitled;
+            f.enabled = true;
+        }
+        state.entitlements.update(ents);
+        Ok(state)
+    }
+
+    #[tokio::test]
+    async fn group_routes_require_template_rbac_entitlement() -> Result<(), Box<dyn Error>> {
+        // Without the entitlement the routes should return 403 (middleware
+        // blocks the request before it reaches the handler).
+        let app = build_router(test_state(true)?, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/groups", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn group_crud_lifecycle() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_template_rbac()?, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+
+        // 1. List groups for org — should have the "Everyone" group.
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/groups"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let groups = body.as_array().ok_or("expected array")?;
+        // The "Everyone" group (id == org_id) is auto-created.
+        assert!(!groups.is_empty());
+
+        // 2. Create a new group.
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/groups"),
+                &token,
+                &serde_json::json!({
+                    "name": "devs",
+                    "display_name": "Developers",
+                    "avatar_url": "",
+                    "quota_allowance": 10,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let group_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing group id")?
+            .to_owned();
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("devs"));
+        assert_eq!(
+            body.get("display_name").and_then(Value::as_str),
+            Some("Developers")
+        );
+        assert_eq!(
+            body.get("quota_allowance").and_then(Value::as_i64),
+            Some(10)
+        );
+
+        // 3. Get group by ID.
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, &format!("/api/v2/groups/{group_id}"), &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("devs"));
+
+        // 4. Patch group.
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/groups/{group_id}"),
+                &token,
+                &serde_json::json!({
+                    "name": "developers",
+                    "quota_allowance": 20,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("developers"));
+        assert_eq!(
+            body.get("quota_allowance").and_then(Value::as_i64),
+            Some(20)
+        );
+
+        // 5. Get group by name in the org.
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/groups/developers"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("name").and_then(Value::as_str), Some("developers"));
+
+        // 6. List all groups.
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/groups", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let all = body.as_array().ok_or("expected array")?;
+        // Should include at least the Everyone group + "developers".
+        assert!(all.len() >= 2);
+
+        // 7. Delete group.
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/groups/{group_id}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        // Confirm deletion — should 404.
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, &format!("/api/v2/groups/{group_id}"), &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cannot_delete_everyone_group() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_template_rbac()?, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+
+        // The "Everyone" group has id == org_id.
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::DELETE, &format!("/api/v2/groups/{org_id}"), &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn cannot_create_group_named_everyone() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state_with_template_rbac()?, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/groups"),
+                &token,
+                &serde_json::json!({
+                    "name": "Everyone",
+                    "display_name": "",
+                    "avatar_url": "",
+                    "quota_allowance": 0,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 }

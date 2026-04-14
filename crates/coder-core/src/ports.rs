@@ -37,7 +37,7 @@ use crate::identity::{
     NotificationMessageRecord, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
     OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrgResourceCounts,
     OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    TokenConfigRecord, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
+    TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
     UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
     UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
     UserRecord, UserStatus, UserStatusChangeRecord,
@@ -1820,6 +1820,19 @@ pub trait IdentityStore: Send + Sync {
         user_id: Uuid,
     ) -> Result<bool, StorageError>;
 
+    /// Looks up a group by organization and name.
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError>;
+
+    /// Updates a group.
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError>;
+
+    /// Lists all groups across all organizations.
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError>;
+
     // ----- OAuth2 Provider -----
 
     /// Lists registered OAuth2 provider apps.
@@ -3547,6 +3560,19 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Looks up a group by identifier.
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
 
+    /// Looks up a group by organization and name.
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError>;
+
+    /// Updates a group.
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError>;
+
+    /// Lists all groups across all organizations.
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError>;
+
     /// Returns the ACL for a workspace.
     async fn get_workspace_acl(
         &self,
@@ -4596,6 +4622,19 @@ pub trait WorkspaceStore: Send + Sync {
     /// Looks up a group by identifier.
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError>;
 
+    /// Looks up a group by organization and name.
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError>;
+
+    /// Updates a group.
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError>;
+
+    /// Lists all groups across all organizations.
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError>;
+
     /// Returns the ACL for a workspace.
     async fn get_workspace_acl(
         &self,
@@ -5342,6 +5381,22 @@ where
         AppStore::delete_group_member(self, group_id, user_id).await
     }
 
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError> {
+        AppStore::find_group_by_name(self, organization_id, name).await
+    }
+
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError> {
+        AppStore::update_group(self, input).await
+    }
+
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+        AppStore::list_all_groups(self).await
+    }
+
     async fn find_user_by_linked_id(
         &self,
         login_type: crate::identity::LoginType,
@@ -5900,6 +5955,22 @@ where
         user_id: Uuid,
     ) -> Result<bool, StorageError> {
         (**self).delete_group_member(group_id, user_id).await
+    }
+
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError> {
+        (**self).find_group_by_name(organization_id, name).await
+    }
+
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError> {
+        (**self).update_group(input).await
+    }
+
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+        (**self).list_all_groups().await
     }
 
     async fn find_user_by_linked_id(
@@ -6770,6 +6841,22 @@ where
         AppStore::find_group_by_id(self, group_id).await
     }
 
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError> {
+        AppStore::find_group_by_name(self, organization_id, name).await
+    }
+
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError> {
+        AppStore::update_group(self, input).await
+    }
+
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+        AppStore::list_all_groups(self).await
+    }
+
     async fn get_workspace_acl(
         &self,
         workspace_id: Uuid,
@@ -7134,6 +7221,22 @@ where
 
     async fn find_group_by_id(&self, group_id: Uuid) -> Result<Option<GroupRecord>, StorageError> {
         (**self).find_group_by_id(group_id).await
+    }
+
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError> {
+        (**self).find_group_by_name(organization_id, name).await
+    }
+
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError> {
+        (**self).update_group(input).await
+    }
+
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+        (**self).list_all_groups().await
     }
 
     async fn get_workspace_acl(

@@ -777,6 +777,23 @@ pub(crate) async fn require_feature_appearance(
     next.run(request).await
 }
 
+/// Enterprise feature gate for template RBAC (groups).
+pub(crate) async fn require_feature_template_rbac(
+    axum::extract::State(state): axum::extract::State<crate::app::AppState>,
+    request: axum::extract::Request,
+    next: Next,
+) -> Response {
+    if !state
+        .entitlements
+        .is_entitled(coder_license::FeatureName::TemplateRbac)
+    {
+        return crate::handlers::licenses::require_enterprise_feature(
+            &coder_license::FeatureName::TemplateRbac,
+        );
+    }
+    next.run(request).await
+}
+
 /// Enterprise feature gate for workspace prebuilds.
 #[allow(dead_code)]
 pub(crate) async fn require_feature_prebuilds(

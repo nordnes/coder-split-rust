@@ -327,6 +327,7 @@ pub(crate) mod deployment;
 pub(crate) mod derp;
 pub(crate) mod external_auth;
 pub(crate) mod files;
+pub(crate) mod groups;
 pub(crate) mod health;
 pub(crate) mod insights;
 pub(crate) mod licenses;
