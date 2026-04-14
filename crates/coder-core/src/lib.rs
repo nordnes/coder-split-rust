@@ -133,10 +133,11 @@ pub use identity::{
     NotificationMethod, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
     OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrgResourceCounts,
     OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    SlimRoleRecord, TokenConfigRecord, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
-    UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
-    UserConfigRecord, UserDeletedRecord, UserLinkClaims, UserLinkRecord, UserListFilter,
-    UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
+    SlimRoleRecord, TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput,
+    UpdateOrganizationInput, UpdateOrganizationStoreError, UpsertCustomRoleInput,
+    UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkClaims,
+    UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
+    UserStatusChangeRecord,
 };
 pub use password::{
     PasswordError, hash_password, hash_session_token, new_session_token, normalize_real_name,

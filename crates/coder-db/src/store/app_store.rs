@@ -6486,6 +6486,164 @@ impl AppStore for PostgresStore {
         ))
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_group_by_name(
+        &self,
+        organization_id: Uuid,
+        name: &str,
+    ) -> Result<Option<GroupRecord>, StorageError> {
+        let row: Option<(
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        )> = sqlx::query_as(
+            "SELECT id, name, display_name, organization_id, avatar_url,
+                    quota_allowance, source, created_at
+             FROM groups
+             WHERE organization_id = $1 AND LOWER(name) = LOWER($2)",
+        )
+        .bind(organization_id)
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(
+            |(
+                id,
+                name,
+                display_name,
+                organization_id,
+                avatar_url,
+                quota_allowance,
+                source,
+                created_at,
+            )| {
+                GroupRecord {
+                    id,
+                    name,
+                    display_name,
+                    organization_id,
+                    avatar_url,
+                    quota_allowance,
+                    source,
+                    created_at,
+                }
+            },
+        ))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_group(&self, input: &UpdateGroupInput) -> Result<GroupRecord, StorageError> {
+        let row: (
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        ) = sqlx::query_as(
+            "UPDATE groups
+             SET name = $2, display_name = $3, avatar_url = $4, quota_allowance = $5
+             WHERE id = $1
+             RETURNING id, name, display_name, organization_id, avatar_url,
+                       quota_allowance, source, created_at",
+        )
+        .bind(input.id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.avatar_url)
+        .bind(input.quota_allowance)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(|e| {
+            if is_unique_violation(&e) {
+                StorageError::invalid_data(
+                    "group with this name already exists in the organization",
+                )
+            } else {
+                storage_error_or_not_found(e)
+            }
+        })?;
+
+        let (
+            id,
+            name,
+            display_name,
+            organization_id,
+            avatar_url,
+            quota_allowance,
+            source,
+            created_at,
+        ) = row;
+        Ok(GroupRecord {
+            id,
+            name,
+            display_name,
+            organization_id,
+            avatar_url,
+            quota_allowance,
+            source,
+            created_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_all_groups(&self) -> Result<Vec<GroupRecord>, StorageError> {
+        let rows: Vec<(
+            Uuid,
+            String,
+            String,
+            Uuid,
+            String,
+            i32,
+            String,
+            OffsetDateTime,
+        )> = sqlx::query_as(
+            "SELECT id, name, display_name, organization_id, avatar_url,
+                    quota_allowance, source, created_at
+             FROM groups
+             ORDER BY LOWER(name) ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    id,
+                    name,
+                    display_name,
+                    organization_id,
+                    avatar_url,
+                    quota_allowance,
+                    source,
+                    created_at,
+                )| {
+                    GroupRecord {
+                        id,
+                        name,
+                        display_name,
+                        organization_id,
+                        avatar_url,
+                        quota_allowance,
+                        source,
+                        created_at,
+                    }
+                },
+            )
+            .collect())
+    }
+
     // ----- OAuth2 Provider Apps -----
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
