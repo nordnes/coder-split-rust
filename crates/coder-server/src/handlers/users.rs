@@ -921,6 +921,14 @@ fn validate_quiet_hours_schedule(schedule: &str) -> Result<(), String> {
         return Err("Cron schedule must have at least 5 fields.".to_owned());
     }
 
+    // Quiet hours schedules must be daily — the last three fields must be "* * *".
+    if fields[2] != "*" || fields[3] != "*" || fields[4] != "*" {
+        return Err(
+            "Quiet hours schedule must be daily: day-of-month, month, and day-of-week fields must be '*'."
+                .to_owned(),
+        );
+    }
+
     // Validate minute and hour fields are numeric and in range.
     // Note: we cannot rely on `parsed.hour` / `parsed.minute` here because
     // `parse_cron_fields` silently defaults non-numeric values to 0.
