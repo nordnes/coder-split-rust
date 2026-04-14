@@ -209,7 +209,8 @@ pub(crate) async fn post_provisioner_key(
         tags,
     };
 
-    // Check uniqueness by trying to insert; handle conflict
+    // Check uniqueness first (fast-path), then handle the race condition
+    // at insert time by re-checking on failure.
     let existing = state
         .store
         .get_provisioner_key_by_name(organization, &request.name)
@@ -228,7 +229,31 @@ pub(crate) async fn post_provisioner_key(
             .into_response());
     }
 
-    state.store.insert_provisioner_key(input).await?;
+    match state.store.insert_provisioner_key(input).await {
+        Ok(_) => {}
+        Err(storage_err) => {
+            // Concurrent insert may have won the race — re-check before
+            // propagating as a generic storage error.
+            if let Ok(Some(_)) = state
+                .store
+                .get_provisioner_key_by_name(organization, &request.name)
+                .await
+            {
+                return Ok((
+                    StatusCode::CONFLICT,
+                    Json(ApiResponse::error(
+                        format!(
+                            "Provisioner key with name '{}' already exists in organization",
+                            request.name
+                        ),
+                        "",
+                    )),
+                )
+                    .into_response());
+            }
+            return Err(AppError::from(storage_err));
+        }
+    }
 
     Ok((
         StatusCode::CREATED,

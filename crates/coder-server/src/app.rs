@@ -413,10 +413,6 @@ pub fn build_router(
                     delete(delete_provisioner_key),
                 )
                 .route(
-                    "/provisionerkeys/{provisionerkey}",
-                    get(get_provisioner_key),
-                )
-                .route(
                     "/organizations/{organization}/members/roles",
                     get(list_organization_roles).post(post_org_role).put(put_org_role),
                 )
@@ -966,6 +962,12 @@ pub fn build_router(
                 .route(
                     "/applications/auth-redirect",
                     get(applications_auth_redirect),
+                )
+                // Provisioner daemon key route — uses custom header auth
+                // (Coder-Provisioner-Daemon-Key), not session tokens.
+                .route(
+                    "/provisionerkeys/{provisionerkey}",
+                    get(get_provisioner_key),
                 )
                 // Workspace agent routes
                 .route(
