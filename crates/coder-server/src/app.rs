@@ -6188,6 +6188,7 @@ pub(crate) mod tests {
             template_id: Uuid,
             input: &UpdateTemplateACLInput,
         ) -> Result<(), StorageError> {
+            // Update the template record itself.
             let mut templates = self
                 .templates
                 .lock()
@@ -6196,6 +6197,61 @@ pub(crate) mod tests {
                 t.user_acl = input.user_acl.clone();
                 t.group_acl = input.group_acl.clone();
             }
+            drop(templates);
+
+            // Keep template_user_roles in sync so get_template_user_roles
+            // reflects the update (mirrors what PostgresStore does via SQL).
+            let user_rows: Vec<TemplateUserRoleRow> = input
+                .user_acl
+                .iter()
+                .filter_map(|(uid_str, actions_val)| {
+                    let id = uid_str.parse::<Uuid>().ok()?;
+                    let actions: Vec<String> =
+                        serde_json::from_value(actions_val.clone()).unwrap_or_default();
+                    Some(TemplateUserRoleRow {
+                        id,
+                        username: String::new(),
+                        avatar_url: String::new(),
+                        name: String::new(),
+                        email: String::new(),
+                        status: "active".to_string(),
+                        login_type: "password".to_string(),
+                        created_at: time::OffsetDateTime::now_utc(),
+                        updated_at: time::OffsetDateTime::now_utc(),
+                        actions,
+                    })
+                })
+                .collect();
+            self.template_user_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(template_id, user_rows);
+
+            // Keep template_group_roles in sync.
+            let group_rows: Vec<TemplateGroupRoleRow> = input
+                .group_acl
+                .iter()
+                .filter_map(|(gid_str, actions_val)| {
+                    let id = gid_str.parse::<Uuid>().ok()?;
+                    let actions: Vec<String> =
+                        serde_json::from_value(actions_val.clone()).unwrap_or_default();
+                    Some(TemplateGroupRoleRow {
+                        id,
+                        name: String::new(),
+                        display_name: String::new(),
+                        organization_id: Uuid::nil(),
+                        avatar_url: String::new(),
+                        quota_allowance: 0,
+                        source: "user".to_string(),
+                        actions,
+                    })
+                })
+                .collect();
+            self.template_group_roles
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(template_id, group_rows);
+
             Ok(())
         }
 

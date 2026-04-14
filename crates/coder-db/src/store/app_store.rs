@@ -8317,7 +8317,7 @@ impl AppStore for PostgresStore {
                    u.login_type::text AS login_type,
                    u.created_at,
                    u.updated_at,
-                   t.user_acl -> u.id::text AS actions
+                   t.user_acl -> k.uid AS actions
             FROM templates t
             CROSS JOIN LATERAL jsonb_object_keys(t.user_acl) AS k(uid)
             JOIN users u ON u.id = k.uid::uuid
@@ -8378,7 +8378,7 @@ impl AppStore for PostgresStore {
                    COALESCE(g.avatar_url, '') AS avatar_url,
                    g.quota_allowance,
                    g.source::text AS source,
-                   t.group_acl -> g.id::text AS actions
+                   t.group_acl -> k.gid AS actions
             FROM templates t
             CROSS JOIN LATERAL jsonb_object_keys(t.group_acl) AS k(gid)
             JOIN groups g ON g.id = k.gid::uuid
@@ -8449,7 +8449,7 @@ impl AppStore for PostgresStore {
         let rows = sqlx::query_as::<_, Row>(
             r#"
             UPDATE template_version_presets tvp
-            SET invalidated_at = now()
+            SET last_invalidated_at = now()
             FROM template_versions tv
             JOIN templates t ON t.active_version_id = tv.id AND t.id = $1
             WHERE tvp.template_version_id = tv.id
