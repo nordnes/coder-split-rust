@@ -118,20 +118,6 @@ pub(crate) async fn patch_group(
             .into_response());
     }
 
-    if is_everyone {
-        if let Some(ref display) = request.display_name {
-            if !display.is_empty() {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::ok(
-                        "Cannot set a display name for the Everyone group.".to_string(),
-                    )),
-                )
-                    .into_response());
-            }
-        }
-    }
-
     // Validate name is not "Everyone".
     if !req_name.is_empty() && req_name.eq_ignore_ascii_case("everyone") && !is_everyone {
         return Ok((
@@ -168,20 +154,23 @@ pub(crate) async fn patch_group(
         .unwrap_or_else(|| group.avatar_url.clone());
     let new_quota_allowance = request.quota_allowance.unwrap_or(group.quota_allowance);
 
-    // Check name uniqueness if renaming.
+    // Check name uniqueness if renaming (exclude self so case-only
+    // renames like "devs" → "Devs" are not blocked).
     if new_name != group.name {
-        if let Some(_existing) = state
+        if let Some(existing) = state
             .store
             .find_group_by_name(group.organization_id, &new_name)
             .await?
         {
-            return Ok((
-                StatusCode::CONFLICT,
-                Json(ApiResponse::ok(
-                    "A group with this name already exists.".to_string(),
-                )),
-            )
-                .into_response());
+            if existing.id != group.id {
+                return Ok((
+                    StatusCode::CONFLICT,
+                    Json(ApiResponse::ok(
+                        "A group with this name already exists.".to_string(),
+                    )),
+                )
+                    .into_response());
+            }
         }
     }
 
@@ -192,14 +181,25 @@ pub(crate) async fn patch_group(
         avatar_url: new_avatar_url,
         quota_allowance: new_quota_allowance,
     };
-    let updated = state.store.update_group(&update_input).await?;
+    let updated = match state.store.update_group(&update_input).await {
+        Ok(g) => g,
+        Err(StorageError::InvalidData { message }) => {
+            return Ok((StatusCode::CONFLICT, Json(ApiResponse::ok(message))).into_response());
+        }
+        Err(e) => return Err(AppError::from(e)),
+    };
 
     // Process member additions.
     for user_id_str in &request.add_users {
         if let Ok(uid) = Uuid::parse_str(user_id_str) {
             // Verify user exists.
             if state.store.find_user_by_id(uid).await?.is_some() {
-                let _ = state.store.insert_group_member(group.id, uid).await;
+                match state.store.insert_group_member(group.id, uid).await {
+                    Ok(()) => {}
+                    // Duplicate membership is harmless — skip.
+                    Err(coder_core::StorageError::InvalidData { .. }) => {}
+                    Err(e) => return Err(e.into()),
+                }
             }
         }
     }
@@ -475,7 +475,7 @@ async fn build_group_response(
             members.push(reduced_user_from_record(&user));
         }
     }
-    let total_member_count = members.len() as i32;
+    let total_member_count = members_records.len() as i32;
 
     // Resolve org name/display_name.
     let (org_name, org_display_name) = if let Some(org) = state

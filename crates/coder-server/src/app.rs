@@ -8192,9 +8192,10 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             // Check for duplicate name within the organization.
-            let duplicate = groups
-                .values()
-                .any(|g| g.organization_id == input.organization_id && g.name == input.name);
+            let duplicate = groups.values().any(|g| {
+                g.organization_id == input.organization_id
+                    && g.name.to_lowercase() == input.name.to_lowercase()
+            });
             if duplicate {
                 return Err(StorageError::invalid_data(
                     "group with this name already exists in the organization",
@@ -8368,7 +8369,7 @@ pub(crate) mod tests {
 
             // Check name uniqueness within the organization (excluding self).
             let Some(existing) = groups.get(&input.id).cloned() else {
-                return Err(StorageError::unavailable("group not found"));
+                return Err(StorageError::not_found("group not found"));
             };
             if input.name != existing.name {
                 let lower = input.name.to_lowercase();
@@ -8386,7 +8387,7 @@ pub(crate) mod tests {
 
             let record = groups
                 .get_mut(&input.id)
-                .ok_or_else(|| StorageError::unavailable("group not found"))?;
+                .ok_or_else(|| StorageError::not_found("group not found"))?;
             record.name = input.name.clone();
             record.display_name = input.display_name.clone();
             record.avatar_url = input.avatar_url.clone();
