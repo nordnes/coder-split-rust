@@ -2251,7 +2251,7 @@ pub struct UpdateWorkspaceSharingSettingsRequest {
 }
 
 /// Response for a group.
-#[derive(Clone, Debug, Serialize)]
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
 pub struct GroupResponse {
     /// Group identifier.
     pub id: String,
@@ -6464,4 +6464,94 @@ pub struct PrebuildsSettings {
     /// When `true`, the prebuilds reconciliation loop is paused.
     #[serde(default)]
     pub reconciliation_paused: bool,
+}
+
+// ── Template ACL types ──────────────────────────────────────────────────
+
+/// Role assigned to a user or group on a template ACL.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub enum TemplateRole {
+    /// Full admin access to the template.
+    #[serde(rename = "admin")]
+    Admin,
+    /// Use-only access to the template.
+    #[serde(rename = "use")]
+    Use,
+    /// Deleted / no role (serialised as empty string).
+    #[default]
+    #[serde(rename = "")]
+    Deleted,
+}
+
+/// Template ACL response containing users and groups with access.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct TemplateACLResponse {
+    /// Users with access to the template.
+    #[serde(default)]
+    pub users: Vec<TemplateACLUser>,
+    /// Groups with access to the template.
+    #[serde(default, rename = "group")]
+    pub groups: Vec<TemplateACLGroup>,
+}
+
+/// A user entry in a template ACL.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct TemplateACLUser {
+    /// Full user details.
+    #[serde(flatten)]
+    pub user: UserResponse,
+    /// Template role for this user.
+    pub role: TemplateRole,
+}
+
+/// A group entry in a template ACL.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct TemplateACLGroup {
+    /// Group details.
+    #[serde(flatten)]
+    pub group: GroupResponse,
+    /// Template role for this group.
+    pub role: TemplateRole,
+}
+
+/// Request to update template ACL.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct UpdateTemplateACLRequest {
+    /// User permissions: mapping from user UUID string to template role.
+    /// Use empty string role to remove a user.
+    #[serde(default)]
+    pub user_perms: HashMap<String, TemplateRole>,
+    /// Group permissions: mapping from group UUID string to template role.
+    /// Use empty string role to remove a group.
+    #[serde(default)]
+    pub group_perms: HashMap<String, TemplateRole>,
+}
+
+/// Available users and groups that can be added to a template ACL.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct ACLAvailableResponse {
+    /// Users available for ACL assignment.
+    #[serde(default)]
+    pub users: Vec<ReducedUser>,
+    /// Groups available for ACL assignment.
+    #[serde(default)]
+    pub groups: Vec<GroupResponse>,
+}
+
+/// Response for invalidating template presets.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct InvalidatePresetsResponse {
+    /// List of presets that were invalidated.
+    pub invalidated: Vec<InvalidatedPreset>,
+}
+
+/// A single invalidated preset entry.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct InvalidatedPreset {
+    /// Template name.
+    pub template_name: String,
+    /// Template version name.
+    pub template_version_name: String,
+    /// Preset name.
+    pub preset_name: String,
 }

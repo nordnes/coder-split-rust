@@ -8281,6 +8281,199 @@ impl AppStore for PostgresStore {
     }
 
     // -----------------------------------------------------------------------
+    // Template ACL
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_template_user_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateUserRoleRow>, StorageError> {
+        // The template stores user_acl as a JSONB column mapping
+        // user-UUID strings to arrays of action strings.
+        // We join against the users table to get user metadata.
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            username: String,
+            avatar_url: String,
+            name: String,
+            email: String,
+            status: String,
+            login_type: String,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+            actions: Value,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            r#"
+            SELECT u.id,
+                   u.username,
+                   COALESCE(u.avatar_url, '') AS avatar_url,
+                   COALESCE(u.name, '') AS name,
+                   u.email,
+                   u.status::text AS status,
+                   u.login_type::text AS login_type,
+                   u.created_at,
+                   u.updated_at,
+                   t.user_acl -> u.id::text AS actions
+            FROM templates t
+            CROSS JOIN LATERAL jsonb_object_keys(t.user_acl) AS k(uid)
+            JOIN users u ON u.id = k.uid::uuid
+            WHERE t.id = $1
+              AND t.deleted = false
+              AND u.deleted = false
+            "#,
+        )
+        .bind(template_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let actions: Vec<String> =
+                    serde_json::from_value(r.actions.clone()).unwrap_or_default();
+                TemplateUserRoleRow {
+                    id: r.id,
+                    username: r.username,
+                    avatar_url: r.avatar_url,
+                    name: r.name,
+                    email: r.email,
+                    status: r.status,
+                    login_type: r.login_type,
+                    created_at: r.created_at,
+                    updated_at: r.updated_at,
+                    actions,
+                }
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_template_group_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateGroupRoleRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            display_name: String,
+            organization_id: Uuid,
+            avatar_url: String,
+            quota_allowance: i32,
+            source: String,
+            actions: Value,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            r#"
+            SELECT g.id,
+                   g.name,
+                   COALESCE(g.display_name, '') AS display_name,
+                   g.organization_id,
+                   COALESCE(g.avatar_url, '') AS avatar_url,
+                   g.quota_allowance,
+                   g.source::text AS source,
+                   t.group_acl -> g.id::text AS actions
+            FROM templates t
+            CROSS JOIN LATERAL jsonb_object_keys(t.group_acl) AS k(gid)
+            JOIN groups g ON g.id = k.gid::uuid
+            WHERE t.id = $1
+              AND t.deleted = false
+            "#,
+        )
+        .bind(template_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| {
+                let actions: Vec<String> =
+                    serde_json::from_value(r.actions.clone()).unwrap_or_default();
+                TemplateGroupRoleRow {
+                    id: r.id,
+                    name: r.name,
+                    display_name: r.display_name,
+                    organization_id: r.organization_id,
+                    avatar_url: r.avatar_url,
+                    quota_allowance: r.quota_allowance,
+                    source: r.source,
+                    actions,
+                }
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_template_acl(
+        &self,
+        template_id: Uuid,
+        input: &UpdateTemplateACLInput,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            r#"
+            UPDATE templates
+            SET user_acl = $2::jsonb,
+                group_acl = $3::jsonb,
+                updated_at = now()
+            WHERE id = $1
+            "#,
+        )
+        .bind(template_id)
+        .bind(serde_json::to_value(&input.user_acl).unwrap_or_default())
+        .bind(serde_json::to_value(&input.group_acl).unwrap_or_default())
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn invalidate_template_presets(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<InvalidatedPresetRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            template_name: String,
+            template_version_name: String,
+            preset_name: String,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            r#"
+            UPDATE template_version_presets tvp
+            SET invalidated_at = now()
+            FROM template_versions tv
+            JOIN templates t ON t.active_version_id = tv.id AND t.id = $1
+            WHERE tvp.template_version_id = tv.id
+            RETURNING t.name AS template_name,
+                      tv.name AS template_version_name,
+                      tvp.name AS preset_name
+            "#,
+        )
+        .bind(template_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| InvalidatedPresetRow {
+                template_name: r.template_name,
+                template_version_name: r.template_version_name,
+                preset_name: r.preset_name,
+            })
+            .collect())
+    }
+
+    // -----------------------------------------------------------------------
     // Licenses
     // -----------------------------------------------------------------------
 

@@ -836,6 +836,76 @@ pub struct UpdateWorkspaceACLInput {
     pub group_roles: HashMap<String, String>,
 }
 
+// ---------------------------------------------------------------------------
+// Template ACL domain records
+// ---------------------------------------------------------------------------
+
+/// A row returned by the template user roles query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateUserRoleRow {
+    /// User identifier.
+    pub id: Uuid,
+    /// Username.
+    pub username: String,
+    /// Avatar URL.
+    pub avatar_url: String,
+    /// Display name.
+    pub name: String,
+    /// Email.
+    pub email: String,
+    /// User status.
+    pub status: String,
+    /// Login type.
+    pub login_type: String,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Last update time.
+    pub updated_at: OffsetDateTime,
+    /// Actions granted by the ACL entry.
+    pub actions: Vec<String>,
+}
+
+/// A row returned by the template group roles query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplateGroupRoleRow {
+    /// Group identifier.
+    pub id: Uuid,
+    /// Group name.
+    pub name: String,
+    /// Display name.
+    pub display_name: String,
+    /// Owning organization identifier.
+    pub organization_id: Uuid,
+    /// Avatar URL.
+    pub avatar_url: String,
+    /// Quota allowance.
+    pub quota_allowance: i32,
+    /// Source.
+    pub source: String,
+    /// Actions granted by the ACL entry.
+    pub actions: Vec<String>,
+}
+
+/// Input for updating template ACL entries.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct UpdateTemplateACLInput {
+    /// Complete user ACL map (UUID string -> actions JSON value).
+    pub user_acl: HashMap<String, Value>,
+    /// Complete group ACL map (UUID string -> actions JSON value).
+    pub group_acl: HashMap<String, Value>,
+}
+
+/// A row returned by the invalidate presets query.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InvalidatedPresetRow {
+    /// Template name.
+    pub template_name: String,
+    /// Template version name.
+    pub template_version_name: String,
+    /// Preset name.
+    pub preset_name: String,
+}
+
 /// Stored workspace record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WorkspaceRecord {
@@ -2422,6 +2492,31 @@ pub trait TemplateStore: Send + Sync {
         name: &str,
         template_id: Option<Uuid>,
     ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
+    /// Returns user roles for a template ACL.
+    async fn get_template_user_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateUserRoleRow>, StorageError>;
+
+    /// Returns group roles for a template ACL.
+    async fn get_template_group_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateGroupRoleRow>, StorageError>;
+
+    /// Updates the ACL entries (user_acl and group_acl) on a template.
+    async fn update_template_acl(
+        &self,
+        template_id: Uuid,
+        input: &UpdateTemplateACLInput,
+    ) -> Result<(), StorageError>;
+
+    /// Invalidates all presets for the active version of a template.
+    async fn invalidate_template_presets(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<InvalidatedPresetRow>, StorageError>;
 }
 
 /// Aggregate store contract used by the current Rust backend slice.
@@ -3751,6 +3846,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         name: &str,
         template_id: Option<Uuid>,
     ) -> Result<Option<TemplateVersionRecord>, StorageError>;
+
+    /// Returns user roles for a template ACL.
+    async fn get_template_user_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateUserRoleRow>, StorageError>;
+
+    /// Returns group roles for a template ACL.
+    async fn get_template_group_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateGroupRoleRow>, StorageError>;
+
+    /// Updates the ACL entries (user_acl and group_acl) on a template.
+    async fn update_template_acl(
+        &self,
+        template_id: Uuid,
+        input: &UpdateTemplateACLInput,
+    ) -> Result<(), StorageError>;
+
+    /// Invalidates all presets for the active version of a template.
+    async fn invalidate_template_presets(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<InvalidatedPresetRow>, StorageError>;
 
     // -----------------------------------------------------------------------
     // Notifications domain
@@ -7731,6 +7851,35 @@ where
         template_id: Option<Uuid>,
     ) -> Result<Option<TemplateVersionRecord>, StorageError> {
         AppStore::get_previous_template_version(self, organization_id, name, template_id).await
+    }
+
+    async fn get_template_user_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateUserRoleRow>, StorageError> {
+        AppStore::get_template_user_roles(self, template_id).await
+    }
+
+    async fn get_template_group_roles(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<TemplateGroupRoleRow>, StorageError> {
+        AppStore::get_template_group_roles(self, template_id).await
+    }
+
+    async fn update_template_acl(
+        &self,
+        template_id: Uuid,
+        input: &UpdateTemplateACLInput,
+    ) -> Result<(), StorageError> {
+        AppStore::update_template_acl(self, template_id, input).await
+    }
+
+    async fn invalidate_template_presets(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Vec<InvalidatedPresetRow>, StorageError> {
+        AppStore::invalidate_template_presets(self, template_id).await
     }
 }
 

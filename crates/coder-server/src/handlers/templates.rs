@@ -2106,3 +2106,416 @@ pub(crate) async fn get_template_version_variables(
 
     Ok((StatusCode::OK, Json(body)).into_response())
 }
+
+// ── Enterprise template ACL handlers ────────────────────────────────────
+
+/// Converts a list of action strings into a `TemplateRole`.
+///
+/// Mirrors the Go helper `convertToTemplateRole` in
+/// `enterprise/coderd/templates.go`.
+fn actions_to_template_role(actions: &[String]) -> TemplateRole {
+    let mut sorted = actions.to_vec();
+    sorted.sort();
+
+    let mut admin_actions = vec![
+        "application_connect".to_string(),
+        "assign".to_string(),
+        "delete".to_string(),
+        "read".to_string(),
+        "update".to_string(),
+        "view_insights".to_string(),
+    ];
+    admin_actions.sort();
+
+    let mut use_actions = vec![
+        "application_connect".to_string(),
+        "read".to_string(),
+        "view_insights".to_string(),
+    ];
+    use_actions.sort();
+
+    if sorted == admin_actions {
+        TemplateRole::Admin
+    } else if sorted == use_actions {
+        TemplateRole::Use
+    } else {
+        TemplateRole::Deleted
+    }
+}
+
+/// Converts a `TemplateRole` into the set of policy action strings
+/// that should be stored in the ACL JSON.
+fn template_role_to_actions(role: &TemplateRole) -> Vec<String> {
+    match role {
+        TemplateRole::Admin => vec![
+            "application_connect".to_string(),
+            "assign".to_string(),
+            "delete".to_string(),
+            "read".to_string(),
+            "update".to_string(),
+            "view_insights".to_string(),
+        ],
+        TemplateRole::Use => vec![
+            "application_connect".to_string(),
+            "read".to_string(),
+            "view_insights".to_string(),
+        ],
+        TemplateRole::Deleted => vec![],
+    }
+}
+
+/// GET /templates/{template}/acl
+pub(crate) async fn get_template_acl(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(_context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+    if template.deleted {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    let user_rows = state.store.get_template_user_roles(template_id).await?;
+    let group_rows = state.store.get_template_group_roles(template_id).await?;
+
+    // Build user entries.
+    let mut users = Vec::with_capacity(user_rows.len());
+    for row in &user_rows {
+        let memberships = state.store.list_user_memberships(row.id).await?;
+        let org_ids: Vec<Uuid> = memberships.iter().map(|m| m.organization_id).collect();
+        let status = row
+            .status
+            .parse::<UserStatus>()
+            .unwrap_or(UserStatus::Active);
+        let login_type = row
+            .login_type
+            .parse::<LoginType>()
+            .unwrap_or(LoginType::None);
+        users.push(TemplateACLUser {
+            user: UserResponse {
+                reduced: ReducedUser {
+                    minimal: MinimalUser {
+                        id: row.id,
+                        username: row.username.clone(),
+                        name: row.name.clone(),
+                        avatar_url: row.avatar_url.clone(),
+                    },
+                    email: row.email.clone(),
+                    created_at: row.created_at,
+                    updated_at: row.updated_at,
+                    last_seen_at: None,
+                    status,
+                    login_type: login_type.as_str(),
+                    theme_preference: String::new(),
+                },
+                organization_ids: org_ids,
+                roles: Vec::new(),
+            },
+            role: actions_to_template_role(&row.actions),
+        });
+    }
+
+    // Build group entries.
+    let mut groups = Vec::with_capacity(group_rows.len());
+    for row in &group_rows {
+        let members = state.store.list_group_members(row.id).await?;
+        let mut member_users = Vec::with_capacity(members.len());
+        for member in &members {
+            if let Some(user) = state.store.find_user_by_id(member.user_id).await? {
+                member_users.push(ReducedUser {
+                    minimal: MinimalUser {
+                        id: user.id,
+                        username: user.username.clone(),
+                        name: user.name.clone(),
+                        avatar_url: user.avatar_url.clone(),
+                    },
+                    email: user.email.clone(),
+                    created_at: user.created_at,
+                    updated_at: user.updated_at,
+                    last_seen_at: user.last_seen_at,
+                    status: user.status,
+                    login_type: user.login_type.as_str(),
+                    theme_preference: String::new(),
+                });
+            }
+        }
+        groups.push(TemplateACLGroup {
+            group: GroupResponse {
+                id: row.id.to_string(),
+                name: row.name.clone(),
+                display_name: row.display_name.clone(),
+                organization_id: row.organization_id.to_string(),
+                avatar_url: row.avatar_url.clone(),
+                quota_allowance: row.quota_allowance,
+                source: row.source.clone(),
+                members: member_users,
+            },
+            role: actions_to_template_role(&row.actions),
+        });
+    }
+
+    Ok((StatusCode::OK, Json(TemplateACLResponse { users, groups })).into_response())
+}
+
+/// PATCH /templates/{template}/acl
+pub(crate) async fn patch_template_acl(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+    payload: Result<Json<UpdateTemplateACLRequest>, JsonRejection>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+    if template.deleted {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    // RBAC: verify the actor can update this template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template_id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to update this template's ACL.",
+        ));
+    }
+
+    let Json(req) = match payload {
+        Ok(r) => r,
+        Err(error) => return Ok(invalid_json_response(error)),
+    };
+
+    // Validate roles.
+    let mut validations = Vec::new();
+    for (id, role) in &req.user_perms {
+        if matches!(role, TemplateRole::Deleted) {
+            continue;
+        }
+        let actions = template_role_to_actions(role);
+        if actions.is_empty() {
+            validations.push(ValidationError {
+                field: "user_perms".to_string(),
+                detail: format!("invalid role for user {id}"),
+            });
+        }
+    }
+    for (id, role) in &req.group_perms {
+        if matches!(role, TemplateRole::Deleted) {
+            continue;
+        }
+        let actions = template_role_to_actions(role);
+        if actions.is_empty() {
+            validations.push(ValidationError {
+                field: "group_perms".to_string(),
+                detail: format!("invalid role for group {id}"),
+            });
+        }
+    }
+    if !validations.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse {
+                message: "Invalid request to update template ACL".to_string(),
+                detail: None,
+                validations,
+            }),
+        )
+            .into_response());
+    }
+
+    // Build the updated ACL maps.
+    let mut user_acl = template.user_acl.clone();
+    for (id, role) in &req.user_perms {
+        if matches!(role, TemplateRole::Deleted) {
+            user_acl.remove(id);
+        } else {
+            let value = serde_json::to_value(template_role_to_actions(role)).unwrap_or_default();
+            user_acl.insert(id.clone(), value);
+        }
+    }
+
+    let mut group_acl = template.group_acl.clone();
+    for (id, role) in &req.group_perms {
+        if matches!(role, TemplateRole::Deleted) {
+            group_acl.remove(id);
+        } else {
+            let value = serde_json::to_value(template_role_to_actions(role)).unwrap_or_default();
+            group_acl.insert(id.clone(), value);
+        }
+    }
+
+    let input = UpdateTemplateACLInput {
+        user_acl,
+        group_acl,
+    };
+    state.store.update_template_acl(template_id, &input).await?;
+
+    Ok((
+        StatusCode::OK,
+        Json(ApiResponse::ok("Successfully updated template ACL list.")),
+    )
+        .into_response())
+}
+
+/// GET /templates/{template}/acl/available
+pub(crate) async fn get_template_acl_available(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+    if template.deleted {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    // RBAC: requires update permission on the template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template_id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    // Fetch all users (system-level access to list available assignees).
+    let (user_records, _total) = state.store.list_users(UserListFilter::default()).await?;
+
+    let users: Vec<ReducedUser> = user_records
+        .into_iter()
+        .map(|u| ReducedUser {
+            minimal: MinimalUser {
+                id: u.id,
+                username: u.username,
+                name: u.name,
+                avatar_url: u.avatar_url,
+            },
+            email: u.email,
+            created_at: u.created_at,
+            updated_at: u.updated_at,
+            last_seen_at: u.last_seen_at,
+            status: u.status,
+            login_type: u.login_type.as_str(),
+            theme_preference: String::new(),
+        })
+        .collect();
+
+    // Fetch groups in the template's organization.
+    let group_records = state.store.list_groups(template.organization_id).await?;
+
+    let mut groups = Vec::with_capacity(group_records.len());
+    for g in &group_records {
+        let members = state.store.list_group_members(g.id).await?;
+        let mut member_users = Vec::with_capacity(members.len());
+        for member in &members {
+            if let Some(user) = state.store.find_user_by_id(member.user_id).await? {
+                member_users.push(ReducedUser {
+                    minimal: MinimalUser {
+                        id: user.id,
+                        username: user.username.clone(),
+                        name: user.name.clone(),
+                        avatar_url: user.avatar_url.clone(),
+                    },
+                    email: user.email.clone(),
+                    created_at: user.created_at,
+                    updated_at: user.updated_at,
+                    last_seen_at: user.last_seen_at,
+                    status: user.status,
+                    login_type: user.login_type.as_str(),
+                    theme_preference: String::new(),
+                });
+            }
+        }
+        groups.push(GroupResponse {
+            id: g.id.to_string(),
+            name: g.name.clone(),
+            display_name: g.display_name.clone(),
+            organization_id: g.organization_id.to_string(),
+            avatar_url: g.avatar_url.clone(),
+            quota_allowance: g.quota_allowance,
+            source: g.source.clone(),
+            members: member_users,
+        });
+    }
+
+    Ok((StatusCode::OK, Json(ACLAvailableResponse { users, groups })).into_response())
+}
+
+/// POST /templates/{template}/prebuilds/invalidate
+pub(crate) async fn post_invalidate_template_presets(
+    State(state): State<AppState>,
+    Path(template_id): Path<Uuid>,
+    headers: HeaderMap,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let Some(template) = state.store.find_template_by_id(template_id).await? else {
+        return Ok(not_found_response("Template not found."));
+    };
+    if template.deleted {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    // RBAC: user must be able to update the template.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Update,
+            &Object::new(ResourceType::Template)
+                .with_id(template_id)
+                .in_org(template.organization_id),
+        )
+        .is_err()
+    {
+        return Ok(not_found_response("Template not found."));
+    }
+
+    let rows = state.store.invalidate_template_presets(template_id).await?;
+
+    let invalidated: Vec<InvalidatedPreset> = rows
+        .into_iter()
+        .map(|r| InvalidatedPreset {
+            template_name: r.template_name,
+            template_version_name: r.template_version_name,
+            preset_name: r.preset_name,
+        })
+        .collect();
+
+    Ok((
+        StatusCode::OK,
+        Json(InvalidatePresetsResponse { invalidated }),
+    )
+        .into_response())
+}
