@@ -194,7 +194,7 @@ pub struct AppState {
     /// Generated once at startup; tokens will not survive server restarts.
     /// Will be replaced by the CryptoKeys DB-backed system when workspace-proxy
     /// infrastructure is fully ported.
-    pub app_signing_key: [u8; 32],
+    pub(crate) app_signing_key: [u8; 32],
 }
 
 impl AppState {
