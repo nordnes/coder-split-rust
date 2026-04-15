@@ -4018,6 +4018,90 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        async fn update_group_sync_config(
+            &self,
+            org_id: Uuid,
+            field: String,
+            regex_filter: Option<String>,
+            auto_create_missing_groups: bool,
+        ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+            let mut map = self
+                .group_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            settings.field = field;
+            settings.regex_filter = regex_filter;
+            settings.auto_create_missing_groups = auto_create_missing_groups;
+            Ok(settings.clone())
+        }
+
+        async fn apply_group_sync_mapping_diff(
+            &self,
+            org_id: Uuid,
+            add: &[coder_core::api::IDPSyncMappingGroup],
+            remove: &[coder_core::api::IDPSyncMappingGroup],
+        ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+            let mut map = self
+                .group_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            for entry in add {
+                let ids = settings.mapping.entry(entry.given.clone()).or_default();
+                if !ids.contains(&entry.gets) {
+                    ids.push(entry.gets);
+                }
+            }
+            for entry in remove {
+                if let Some(ids) = settings.mapping.get_mut(&entry.given) {
+                    ids.retain(|id| *id != entry.gets);
+                }
+            }
+            settings.mapping.retain(|_, ids| !ids.is_empty());
+            Ok(settings.clone())
+        }
+
+        async fn update_role_sync_config(
+            &self,
+            org_id: Uuid,
+            field: String,
+        ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+            let mut map = self
+                .role_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            settings.field = field;
+            Ok(settings.clone())
+        }
+
+        async fn apply_role_sync_mapping_diff(
+            &self,
+            org_id: Uuid,
+            add: &[coder_core::api::IDPSyncMappingRole],
+            remove: &[coder_core::api::IDPSyncMappingRole],
+        ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+            let mut map = self
+                .role_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            for entry in add {
+                let roles = settings.mapping.entry(entry.given.clone()).or_default();
+                if !roles.contains(&entry.gets) {
+                    roles.push(entry.gets.clone());
+                }
+            }
+            for entry in remove {
+                if let Some(roles) = settings.mapping.get_mut(&entry.given) {
+                    roles.retain(|role| *role != entry.gets);
+                }
+            }
+            settings.mapping.retain(|_, roles| !roles.is_empty());
+            Ok(settings.clone())
+        }
+
         async fn oidc_claim_fields(&self, _org_id: Uuid) -> Result<Vec<String>, StorageError> {
             Ok(Vec::new())
         }

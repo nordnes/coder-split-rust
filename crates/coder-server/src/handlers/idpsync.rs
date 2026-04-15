@@ -179,8 +179,6 @@ pub(crate) async fn patch_group_idpsync_settings(
         .upsert_group_sync_settings(org.id, &request)
         .await?;
 
-    let settings = state.store.group_sync_settings(org.id).await?;
-
     record_audit(
         &state,
         AuditAction::Write,
@@ -191,7 +189,7 @@ pub(crate) async fn patch_group_idpsync_settings(
     )
     .await;
 
-    Ok((StatusCode::OK, Json(settings)).into_response())
+    Ok((StatusCode::OK, Json(request)).into_response())
 }
 
 /// `PATCH /api/v2/organizations/{organization}/settings/idpsync/groups/config`
@@ -228,17 +226,15 @@ pub(crate) async fn patch_group_idpsync_config(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let mut settings = state.store.group_sync_settings(org.id).await?;
-    settings.field = request.field;
-    settings.regex_filter = request.regex_filter;
-    settings.auto_create_missing_groups = request.auto_create_missing_groups;
-
-    state
+    let settings = state
         .store
-        .upsert_group_sync_settings(org.id, &settings)
+        .update_group_sync_config(
+            org.id,
+            request.field,
+            request.regex_filter,
+            request.auto_create_missing_groups,
+        )
         .await?;
-
-    let settings = state.store.group_sync_settings(org.id).await?;
 
     record_audit(
         &state,
@@ -287,15 +283,10 @@ pub(crate) async fn patch_group_idpsync_mapping(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let mut settings = state.store.group_sync_settings(org.id).await?;
-    apply_group_mapping_diff(&mut settings.mapping, &request.add, &request.remove);
-
-    state
+    let settings = state
         .store
-        .upsert_group_sync_settings(org.id, &settings)
+        .apply_group_sync_mapping_diff(org.id, &request.add, &request.remove)
         .await?;
-
-    let settings = state.store.group_sync_settings(org.id).await?;
 
     record_audit(
         &state,
@@ -383,8 +374,6 @@ pub(crate) async fn patch_role_idpsync_settings(
         .upsert_role_sync_settings(org.id, &request)
         .await?;
 
-    let settings = state.store.role_sync_settings(org.id).await?;
-
     record_audit(
         &state,
         AuditAction::Write,
@@ -395,7 +384,7 @@ pub(crate) async fn patch_role_idpsync_settings(
     )
     .await;
 
-    Ok((StatusCode::OK, Json(settings)).into_response())
+    Ok((StatusCode::OK, Json(request)).into_response())
 }
 
 /// `PATCH /api/v2/organizations/{organization}/settings/idpsync/roles/config`
@@ -432,15 +421,10 @@ pub(crate) async fn patch_role_idpsync_config(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let mut settings = state.store.role_sync_settings(org.id).await?;
-    settings.field = request.field;
-
-    state
+    let settings = state
         .store
-        .upsert_role_sync_settings(org.id, &settings)
+        .update_role_sync_config(org.id, request.field)
         .await?;
-
-    let settings = state.store.role_sync_settings(org.id).await?;
 
     record_audit(
         &state,
@@ -489,15 +473,10 @@ pub(crate) async fn patch_role_idpsync_mapping(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    let mut settings = state.store.role_sync_settings(org.id).await?;
-    apply_role_mapping_diff(&mut settings.mapping, &request.add, &request.remove);
-
-    state
+    let settings = state
         .store
-        .upsert_role_sync_settings(org.id, &settings)
+        .apply_role_sync_mapping_diff(org.id, &request.add, &request.remove)
         .await?;
-
-    let settings = state.store.role_sync_settings(org.id).await?;
 
     record_audit(
         &state,
@@ -510,45 +489,4 @@ pub(crate) async fn patch_role_idpsync_mapping(
     .await;
 
     Ok((StatusCode::OK, Json(settings)).into_response())
-}
-
-// ── Helpers ─────────────────────────────────────────────────────────────
-
-/// Applies add/remove diff to a group sync mapping (mirroring Go's
-/// `applyIDPSyncMappingDiff`).
-fn apply_group_mapping_diff(
-    mapping: &mut HashMap<String, Vec<Uuid>>,
-    add: &[coder_core::api::IDPSyncMappingGroup],
-    remove: &[coder_core::api::IDPSyncMappingGroup],
-) {
-    for entry in add {
-        let ids = mapping.entry(entry.given.clone()).or_default();
-        if !ids.contains(&entry.gets) {
-            ids.push(entry.gets);
-        }
-    }
-    for entry in remove {
-        if let Some(ids) = mapping.get_mut(&entry.given) {
-            ids.retain(|id| *id != entry.gets);
-        }
-    }
-}
-
-/// Applies add/remove diff to a role sync mapping.
-fn apply_role_mapping_diff(
-    mapping: &mut HashMap<String, Vec<String>>,
-    add: &[coder_core::api::IDPSyncMappingRole],
-    remove: &[coder_core::api::IDPSyncMappingRole],
-) {
-    for entry in add {
-        let roles = mapping.entry(entry.given.clone()).or_default();
-        if !roles.contains(&entry.gets) {
-            roles.push(entry.gets.clone());
-        }
-    }
-    for entry in remove {
-        if let Some(roles) = mapping.get_mut(&entry.given) {
-            roles.retain(|role| *role != entry.gets);
-        }
-    }
 }

@@ -2421,13 +2421,207 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_group_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+        regex_filter: Option<String>,
+        auto_create_missing_groups: bool,
+    ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+        let key = format!("{}:group-sync-settings", org_id);
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        let encoded: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = $1 FOR UPDATE")
+                .bind(&key)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+
+        let mut settings: coder_core::api::GroupSyncSettings = match encoded {
+            Some(ref e) => serde_json::from_str(e)
+                .map_err(|error| StorageError::invalid_data(error.to_string()))?,
+            None => coder_core::api::GroupSyncSettings::default(),
+        };
+
+        settings.field = field;
+        settings.regex_filter = regex_filter;
+        settings.auto_create_missing_groups = auto_create_missing_groups;
+
+        let new_encoded = serde_json::to_string(&settings)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&key)
+        .bind(&new_encoded)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(settings)
+    }
+
+    #[instrument(skip(self, add, remove), err(level = tracing::Level::WARN))]
+    async fn apply_group_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[coder_core::api::IDPSyncMappingGroup],
+        remove: &[coder_core::api::IDPSyncMappingGroup],
+    ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+        let key = format!("{}:group-sync-settings", org_id);
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        let encoded: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = $1 FOR UPDATE")
+                .bind(&key)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+
+        let mut settings: coder_core::api::GroupSyncSettings = match encoded {
+            Some(ref e) => serde_json::from_str(e)
+                .map_err(|error| StorageError::invalid_data(error.to_string()))?,
+            None => coder_core::api::GroupSyncSettings::default(),
+        };
+
+        // Apply diff
+        for entry in add {
+            let ids = settings.mapping.entry(entry.given.clone()).or_default();
+            if !ids.contains(&entry.gets) {
+                ids.push(entry.gets);
+            }
+        }
+        for entry in remove {
+            if let Some(ids) = settings.mapping.get_mut(&entry.given) {
+                ids.retain(|id| *id != entry.gets);
+            }
+        }
+        settings.mapping.retain(|_, ids| !ids.is_empty());
+
+        let new_encoded = serde_json::to_string(&settings)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&key)
+        .bind(&new_encoded)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(settings)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_role_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+    ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+        let key = format!("{}:role-sync-settings", org_id);
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        let encoded: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = $1 FOR UPDATE")
+                .bind(&key)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+
+        let mut settings: coder_core::api::RoleSyncSettings = match encoded {
+            Some(ref e) => serde_json::from_str(e)
+                .map_err(|error| StorageError::invalid_data(error.to_string()))?,
+            None => coder_core::api::RoleSyncSettings::default(),
+        };
+
+        settings.field = field;
+
+        let new_encoded = serde_json::to_string(&settings)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&key)
+        .bind(&new_encoded)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(settings)
+    }
+
+    #[instrument(skip(self, add, remove), err(level = tracing::Level::WARN))]
+    async fn apply_role_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[coder_core::api::IDPSyncMappingRole],
+        remove: &[coder_core::api::IDPSyncMappingRole],
+    ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+        let key = format!("{}:role-sync-settings", org_id);
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        let encoded: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = $1 FOR UPDATE")
+                .bind(&key)
+                .fetch_optional(&mut *tx)
+                .await
+                .map_err(storage_error)?;
+
+        let mut settings: coder_core::api::RoleSyncSettings = match encoded {
+            Some(ref e) => serde_json::from_str(e)
+                .map_err(|error| StorageError::invalid_data(error.to_string()))?,
+            None => coder_core::api::RoleSyncSettings::default(),
+        };
+
+        // Apply diff
+        for entry in add {
+            let roles = settings.mapping.entry(entry.given.clone()).or_default();
+            if !roles.contains(&entry.gets) {
+                roles.push(entry.gets.clone());
+            }
+        }
+        for entry in remove {
+            if let Some(roles) = settings.mapping.get_mut(&entry.given) {
+                roles.retain(|role| *role != entry.gets);
+            }
+        }
+        settings.mapping.retain(|_, roles| !roles.is_empty());
+
+        let new_encoded = serde_json::to_string(&settings)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&key)
+        .bind(&new_encoded)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(settings)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError> {
         let nil = Uuid::nil();
         let fields: Vec<String> = sqlx::query_scalar(
             "SELECT DISTINCT jsonb_object_keys(claims->'merged_claims')
              FROM user_links
              WHERE claims ? 'merged_claims'
-               AND jsonb_typeof(claims->'merged_claims') != 'null'
+               AND jsonb_typeof(claims->'merged_claims') = 'object'
                AND login_type = 'oidc'
                AND CASE WHEN $1::uuid != $2::uuid THEN
                    user_links.user_id = ANY(

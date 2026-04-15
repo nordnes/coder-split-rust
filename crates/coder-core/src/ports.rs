@@ -24,10 +24,10 @@ use uuid::Uuid;
 use crate::api::{
     AuditLogResponse, ChatMessageVisibility, ChatStatus, ConnectionLogResponse, DAUsResponse,
     ExternalAuthAppInstallation, ExternalAuthUser, GetUserStatusCountsResponse, GroupSyncSettings,
-    HealthSettings, InboxNotification, InsightsReportInterval, NotificationPreference,
-    NotificationTemplate, NotificationsSettings, RoleSyncSettings, TaskStatus,
-    TemplateInsightsIntervalReport, TemplateInsightsResponse, UserActivityInsightsResponse,
-    UserLatencyInsightsResponse,
+    HealthSettings, IDPSyncMappingGroup, IDPSyncMappingRole, InboxNotification,
+    InsightsReportInterval, NotificationPreference, NotificationTemplate, NotificationsSettings,
+    RoleSyncSettings, TaskStatus, TemplateInsightsIntervalReport, TemplateInsightsResponse,
+    UserActivityInsightsResponse, UserLatencyInsightsResponse,
 };
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
@@ -2070,6 +2070,42 @@ pub trait OperationalStore: Send + Sync {
         settings: &RoleSyncSettings,
     ) -> Result<(), StorageError>;
 
+    /// Atomically updates group sync config (field, regex_filter, auto_create)
+    /// while preserving the existing mapping. Uses a transaction internally.
+    async fn update_group_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+        regex_filter: Option<String>,
+        auto_create_missing_groups: bool,
+    ) -> Result<GroupSyncSettings, StorageError>;
+
+    /// Atomically applies a mapping diff (add/remove) to group sync settings
+    /// while preserving the existing config. Uses a transaction internally.
+    async fn apply_group_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingGroup],
+        remove: &[IDPSyncMappingGroup],
+    ) -> Result<GroupSyncSettings, StorageError>;
+
+    /// Atomically updates role sync config (field) while preserving the
+    /// existing mapping. Uses a transaction internally.
+    async fn update_role_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+    ) -> Result<RoleSyncSettings, StorageError>;
+
+    /// Atomically applies a mapping diff (add/remove) to role sync settings
+    /// while preserving the existing config. Uses a transaction internally.
+    async fn apply_role_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingRole],
+        remove: &[IDPSyncMappingRole],
+    ) -> Result<RoleSyncSettings, StorageError>;
+
     /// Returns distinct OIDC claim field names for an organization.
     /// Pass `Uuid::nil()` to query across all organizations.
     async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError>;
@@ -2990,6 +3026,42 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         org_id: Uuid,
         settings: &RoleSyncSettings,
     ) -> Result<(), StorageError>;
+
+    /// Atomically updates group sync config (field, regex_filter, auto_create)
+    /// while preserving the existing mapping. Uses a transaction internally.
+    async fn update_group_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+        regex_filter: Option<String>,
+        auto_create_missing_groups: bool,
+    ) -> Result<GroupSyncSettings, StorageError>;
+
+    /// Atomically applies a mapping diff (add/remove) to group sync settings
+    /// while preserving the existing config. Uses a transaction internally.
+    async fn apply_group_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingGroup],
+        remove: &[IDPSyncMappingGroup],
+    ) -> Result<GroupSyncSettings, StorageError>;
+
+    /// Atomically updates role sync config (field) while preserving the
+    /// existing mapping. Uses a transaction internally.
+    async fn update_role_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+    ) -> Result<RoleSyncSettings, StorageError>;
+
+    /// Atomically applies a mapping diff (add/remove) to role sync settings
+    /// while preserving the existing config. Uses a transaction internally.
+    async fn apply_role_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingRole],
+        remove: &[IDPSyncMappingRole],
+    ) -> Result<RoleSyncSettings, StorageError>;
 
     /// Returns distinct OIDC claim field names for an organization.
     /// Pass `Uuid::nil()` to query across all organizations.
@@ -6602,6 +6674,49 @@ where
         AppStore::upsert_role_sync_settings(self, org_id, settings).await
     }
 
+    async fn update_group_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+        regex_filter: Option<String>,
+        auto_create_missing_groups: bool,
+    ) -> Result<GroupSyncSettings, StorageError> {
+        AppStore::update_group_sync_config(
+            self,
+            org_id,
+            field,
+            regex_filter,
+            auto_create_missing_groups,
+        )
+        .await
+    }
+
+    async fn apply_group_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingGroup],
+        remove: &[IDPSyncMappingGroup],
+    ) -> Result<GroupSyncSettings, StorageError> {
+        AppStore::apply_group_sync_mapping_diff(self, org_id, add, remove).await
+    }
+
+    async fn update_role_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+    ) -> Result<RoleSyncSettings, StorageError> {
+        AppStore::update_role_sync_config(self, org_id, field).await
+    }
+
+    async fn apply_role_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingRole],
+        remove: &[IDPSyncMappingRole],
+    ) -> Result<RoleSyncSettings, StorageError> {
+        AppStore::apply_role_sync_mapping_diff(self, org_id, add, remove).await
+    }
+
     async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError> {
         AppStore::oidc_claim_fields(self, org_id).await
     }
@@ -6821,6 +6936,48 @@ where
         settings: &RoleSyncSettings,
     ) -> Result<(), StorageError> {
         (**self).upsert_role_sync_settings(org_id, settings).await
+    }
+
+    async fn update_group_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+        regex_filter: Option<String>,
+        auto_create_missing_groups: bool,
+    ) -> Result<GroupSyncSettings, StorageError> {
+        (**self)
+            .update_group_sync_config(org_id, field, regex_filter, auto_create_missing_groups)
+            .await
+    }
+
+    async fn apply_group_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingGroup],
+        remove: &[IDPSyncMappingGroup],
+    ) -> Result<GroupSyncSettings, StorageError> {
+        (**self)
+            .apply_group_sync_mapping_diff(org_id, add, remove)
+            .await
+    }
+
+    async fn update_role_sync_config(
+        &self,
+        org_id: Uuid,
+        field: String,
+    ) -> Result<RoleSyncSettings, StorageError> {
+        (**self).update_role_sync_config(org_id, field).await
+    }
+
+    async fn apply_role_sync_mapping_diff(
+        &self,
+        org_id: Uuid,
+        add: &[IDPSyncMappingRole],
+        remove: &[IDPSyncMappingRole],
+    ) -> Result<RoleSyncSettings, StorageError> {
+        (**self)
+            .apply_role_sync_mapping_diff(org_id, add, remove)
+            .await
     }
 
     async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError> {

@@ -2148,6 +2148,42 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn update_group_sync_config(
+        &self,
+        _org_id: Uuid,
+        _field: String,
+        _regex_filter: Option<String>,
+        _auto_create_missing_groups: bool,
+    ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn apply_group_sync_mapping_diff(
+        &self,
+        _org_id: Uuid,
+        _add: &[coder_core::api::IDPSyncMappingGroup],
+        _remove: &[coder_core::api::IDPSyncMappingGroup],
+    ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_role_sync_config(
+        &self,
+        _org_id: Uuid,
+        _field: String,
+    ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn apply_role_sync_mapping_diff(
+        &self,
+        _org_id: Uuid,
+        _add: &[coder_core::api::IDPSyncMappingRole],
+        _remove: &[coder_core::api::IDPSyncMappingRole],
+    ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn oidc_claim_fields(&self, _org_id: Uuid) -> Result<Vec<String>, StorageError> {
         Ok(Vec::new())
     }
