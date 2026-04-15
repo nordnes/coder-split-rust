@@ -833,6 +833,7 @@ dependencies = [
  "metrics-exporter-prometheus",
  "opentelemetry",
  "opentelemetry_sdk",
+ "rand 0.8.5",
  "regex",
  "reqwest",
  "serde",

@@ -2344,6 +2344,13 @@ pub trait ProvisionerStore: Send + Sync {
         organization_id: Uuid,
     ) -> Result<Vec<ProvisionerKeyRecord>, StorageError>;
 
+    /// Lists provisioner keys for an organization, excluding reserved keys
+    /// (built-in, user-auth, psk).
+    async fn list_provisioner_keys_by_organization_exclude_reserved(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError>;
+
     /// Deletes a provisioner key by identifier.
     async fn delete_provisioner_key(&self, id: Uuid) -> Result<bool, StorageError>;
 }
@@ -7757,6 +7764,15 @@ where
     ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
         (**self)
             .list_provisioner_keys_by_organization(organization_id)
+            .await
+    }
+
+    async fn list_provisioner_keys_by_organization_exclude_reserved(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+        (**self)
+            .list_provisioner_keys_by_organization_exclude_reserved(organization_id)
             .await
     }
 
