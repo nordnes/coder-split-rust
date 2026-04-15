@@ -318,7 +318,9 @@ fn strip_paired_delimiter(input: &str, delim: &str) -> String {
 }
 
 pub(crate) mod agents;
+pub(crate) mod aibridge;
 pub(crate) mod appearance;
+pub(crate) mod applications;
 pub(crate) mod audit;
 pub(crate) mod auth;
 pub(crate) mod chats;

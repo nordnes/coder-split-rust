@@ -7020,3 +7020,168 @@ pub struct PatchOrganizationIDPSyncMappingRequest {
     #[serde(default, rename = "Remove")]
     pub remove: Vec<IDPSyncMappingUUID>,
 }
+
+// ---------------------------------------------------------------------------
+// AI Bridge types
+// ---------------------------------------------------------------------------
+
+/// Token usage record for an AI Bridge interception.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct AIBridgeTokenUsage {
+    /// Unique identifier.
+    pub id: Uuid,
+    /// Parent interception identifier.
+    pub interception_id: Uuid,
+    /// Provider-assigned response identifier.
+    pub provider_response_id: String,
+    /// Number of input tokens consumed.
+    pub input_tokens: i64,
+    /// Number of output tokens produced.
+    pub output_tokens: i64,
+    /// Arbitrary provider metadata.
+    pub metadata: HashMap<String, Value>,
+    /// When the usage was recorded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+/// User prompt captured during an AI Bridge interception.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct AIBridgeUserPrompt {
+    /// Unique identifier.
+    pub id: Uuid,
+    /// Parent interception identifier.
+    pub interception_id: Uuid,
+    /// Provider-assigned response identifier.
+    pub provider_response_id: String,
+    /// The user-supplied prompt text.
+    pub prompt: String,
+    /// Arbitrary provider metadata.
+    pub metadata: HashMap<String, Value>,
+    /// When the prompt was recorded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+/// Tool usage captured during an AI Bridge interception.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct AIBridgeToolUsage {
+    /// Unique identifier.
+    pub id: Uuid,
+    /// Parent interception identifier.
+    pub interception_id: Uuid,
+    /// Provider-assigned response identifier.
+    pub provider_response_id: String,
+    /// MCP server URL.
+    pub server_url: String,
+    /// Tool name invoked.
+    pub tool: String,
+    /// Serialized tool input.
+    pub input: String,
+    /// Whether this tool call was injected by the bridge.
+    pub injected: bool,
+    /// Error message from tool invocation, if any.
+    pub invocation_error: String,
+    /// Arbitrary provider metadata.
+    pub metadata: HashMap<String, Value>,
+    /// When the tool usage was recorded.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+}
+
+/// A single AI Bridge interception record.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct AIBridgeInterception {
+    /// Unique identifier.
+    pub id: Uuid,
+    /// API key identifier, if authentication was via API key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key_id: Option<String>,
+    /// The user who initiated the interception.
+    pub initiator: MinimalUser,
+    /// LLM provider name.
+    pub provider: String,
+    /// LLM model name.
+    pub model: String,
+    /// Client application identifier.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// Arbitrary metadata.
+    pub metadata: HashMap<String, Value>,
+    /// When the interception started.
+    #[serde(with = "time::serde::rfc3339")]
+    pub started_at: OffsetDateTime,
+    /// When the interception ended, if completed.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub ended_at: Option<OffsetDateTime>,
+    /// Token usage records.
+    pub token_usages: Vec<AIBridgeTokenUsage>,
+    /// User prompt records.
+    pub user_prompts: Vec<AIBridgeUserPrompt>,
+    /// Tool usage records.
+    pub tool_usages: Vec<AIBridgeToolUsage>,
+}
+
+/// Paginated response for listing AI Bridge interceptions.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct AIBridgeListInterceptionsResponse {
+    /// Total count of matching interceptions (for pagination).
+    pub count: i64,
+    /// The page of interception results.
+    pub results: Vec<AIBridgeInterception>,
+}
+
+/// Filter parameters for listing AI Bridge interceptions.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AIBridgeInterceptionsFilter {
+    /// Search query string.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// Page limit (max 1000, default 100).
+    #[serde(default)]
+    pub limit: Option<i32>,
+    /// Offset for pagination.
+    #[serde(default)]
+    pub offset: Option<i32>,
+    /// Cursor pagination — return results after this ID.
+    #[serde(default)]
+    pub after_id: Option<Uuid>,
+}
+
+/// Filter parameters for listing AI Bridge models.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct AIBridgeModelsFilter {
+    /// Search query string.
+    #[serde(default)]
+    pub q: Option<String>,
+    /// Page limit (max 1000, default 100).
+    #[serde(default)]
+    pub limit: Option<i32>,
+    /// Offset for pagination.
+    #[serde(default)]
+    pub offset: Option<i32>,
+}
+
+// ---------------------------------------------------------------------------
+// Reconnecting PTY signed token types
+// ---------------------------------------------------------------------------
+
+/// Request body for issuing a signed reconnecting-PTY token.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct IssueReconnectingPTYSignedTokenRequest {
+    /// URL of the reconnecting-pty endpoint.
+    pub url: String,
+    /// Workspace agent identifier.
+    #[serde(rename = "agentID")]
+    pub agent_id: Uuid,
+}
+
+/// Response containing the signed reconnecting-PTY token.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct IssueReconnectingPTYSignedTokenResponse {
+    /// The signed token string.
+    pub signed_token: String,
+}
