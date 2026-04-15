@@ -70,10 +70,20 @@ pub(crate) async fn post_reconnecting_pty_signed_token(
             .into_response());
     }
 
-    // NOTE: The Go handler additionally validates the hostname via
-    // `ValidWorkspaceAppHostname` (lines 906-927 in workspaceproxy.go).
-    // That check requires the full workspace-proxy infrastructure which is
-    // not yet ported; it will be added when workspace-proxy support lands.
+    // NOTE: The Go handler performs two additional checks that are deferred
+    // until the full workspace-proxy infrastructure is ported:
+    //
+    // 1. **Hostname validation** via `ValidWorkspaceAppHostname` (lines
+    //    906-927 in workspaceproxy.go).
+    // 2. **Workspace/agent authorization** via `WorkspaceAppsProvider.Issue()`
+    //    which resolves the workspace agent, verifies the authenticated user
+    //    has `application_connect` permission on the owning workspace, and
+    //    only then issues the signed token.
+    //
+    // Without check (2), any authenticated user could obtain a signed PTY
+    // token for any agent ID.  This route is therefore NOT production-safe
+    // until the workspace-proxy infrastructure lands and both checks are
+    // wired in.
 
     // Build an AppRequest scoped to the terminal access method, matching the
     // Go handler's call to WorkspaceAppsProvider.Issue.
