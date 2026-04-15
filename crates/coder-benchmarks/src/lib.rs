@@ -2160,4 +2160,40 @@ impl AppStore for BenchStore {
     async fn delete_license(&self, _id: i32) -> Result<bool, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
+
+    async fn create_workspace_proxy(
+        &self,
+        _input: CreateWorkspaceProxyInput,
+    ) -> Result<WorkspaceProxyRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn list_workspace_proxies(&self) -> Result<Vec<WorkspaceProxyRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn find_workspace_proxy_by_id(
+        &self,
+        _id: Uuid,
+    ) -> Result<Option<WorkspaceProxyRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn find_workspace_proxy_by_name(
+        &self,
+        _name: &str,
+    ) -> Result<Option<WorkspaceProxyRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_workspace_proxy(
+        &self,
+        _input: UpdateWorkspaceProxyInput,
+    ) -> Result<WorkspaceProxyRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn soft_delete_workspace_proxy(&self, _id: Uuid) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
 }

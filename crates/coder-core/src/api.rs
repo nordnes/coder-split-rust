@@ -6617,3 +6617,246 @@ pub struct InvalidatedPreset {
     /// Preset name.
     pub preset_name: String,
 }
+
+// ---------------------------------------------------------------------------
+// Workspace Proxy types (enterprise)
+// ---------------------------------------------------------------------------
+
+/// Health status of a workspace proxy.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyHealthStatus(pub String);
+
+impl ProxyHealthStatus {
+    /// Proxy is healthy and reachable.
+    pub const HEALTHY: &'static str = "ok";
+    /// Proxy is unreachable.
+    pub const UNREACHABLE: &'static str = "unreachable";
+    /// Proxy is reachable but unhealthy.
+    pub const UNHEALTHY: &'static str = "unhealthy";
+    /// Proxy has not registered yet.
+    pub const UNREGISTERED: &'static str = "unregistered";
+    /// Proxy health status is unknown.
+    pub const UNKNOWN: &'static str = "unknown";
+}
+
+/// Health report for a workspace proxy.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ProxyHealthReport {
+    /// Problems preventing healthy status.
+    #[serde(default)]
+    pub errors: Vec<String>,
+    /// Non-fatal warnings.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Workspace proxy status snapshot.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceProxyStatus {
+    /// Current health status.
+    pub status: String,
+    /// Detailed health report.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report: Option<ProxyHealthReport>,
+    /// Time of last health check.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub checked_at: Option<OffsetDateTime>,
+}
+
+/// Full workspace proxy API response.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WorkspaceProxyResponse {
+    /// Region data (flattened).
+    #[serde(flatten)]
+    pub region: Region,
+    /// Whether DERP is enabled.
+    pub derp_enabled: bool,
+    /// Whether this is a DERP-only proxy.
+    pub derp_only: bool,
+    /// Proxy status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub status: Option<WorkspaceProxyStatus>,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// Last update time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub updated_at: OffsetDateTime,
+    /// Soft-deletion marker.
+    pub deleted: bool,
+    /// Running version string.
+    #[serde(default)]
+    pub version: String,
+}
+
+/// Request to create a new workspace proxy.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct CreateWorkspaceProxyRequest {
+    /// Proxy name (required, unique).
+    pub name: String,
+    /// Human-readable display name.
+    #[serde(default)]
+    pub display_name: String,
+    /// Icon URL.
+    #[serde(default)]
+    pub icon: String,
+}
+
+/// Request to patch an existing workspace proxy.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct PatchWorkspaceProxyRequest {
+    /// New name.
+    #[serde(default)]
+    pub name: String,
+    /// New display name.
+    #[serde(default)]
+    pub display_name: String,
+    /// New icon URL.
+    #[serde(default)]
+    pub icon: String,
+    /// Whether to regenerate the proxy token.
+    #[serde(default)]
+    pub regenerate_token: bool,
+}
+
+/// Response after creating or updating a workspace proxy (includes token).
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct UpdateWorkspaceProxyResponse {
+    /// Updated proxy.
+    pub proxy: WorkspaceProxyResponse,
+    /// Full proxy token (only returned on create or regenerate).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub proxy_token: String,
+}
+
+/// Request to register a workspace proxy (internal).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct RegisterWorkspaceProxyRequest {
+    /// Access URL for the proxy.
+    pub access_url: String,
+    /// Wildcard hostname for subdomain apps.
+    #[serde(default)]
+    pub wildcard_hostname: String,
+    /// Whether DERP should be enabled.
+    #[serde(default)]
+    pub derp_enabled: bool,
+    /// Whether the proxy is DERP-only.
+    #[serde(default)]
+    pub derp_only: bool,
+    /// Unique identifier for this replica.
+    pub replica_id: Uuid,
+    /// OS hostname of the machine running the proxy.
+    #[serde(default)]
+    pub hostname: String,
+    /// Error from the replica (for debugging).
+    #[serde(default)]
+    pub replica_error: String,
+    /// DERP relay address for meshing.
+    #[serde(default)]
+    pub replica_relay_address: String,
+    /// Coder version of the proxy.
+    #[serde(default)]
+    pub version: String,
+}
+
+/// Response after registering a workspace proxy (internal).
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct RegisterWorkspaceProxyResponse {
+    /// DERP mesh key for inter-proxy communication.
+    pub derp_mesh_key: String,
+    /// Assigned DERP region ID.
+    pub derp_region_id: i32,
+    /// Whether DERP should force WebSocket connections.
+    pub derp_force_websockets: bool,
+    /// Sibling replicas in the same region.
+    #[serde(default)]
+    pub sibling_replicas: Vec<ReplicaResponse>,
+}
+
+/// Request to deregister a workspace proxy (internal).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct DeregisterWorkspaceProxyRequest {
+    /// Replica ID that was passed during registration.
+    pub replica_id: Uuid,
+}
+
+/// Request to issue a signed app token (internal).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct IssueSignedAppTokenRequest {
+    /// App request details.
+    #[serde(default)]
+    pub app_request: Value,
+    /// Session token of the end-user.
+    #[serde(default)]
+    pub session_token: String,
+}
+
+/// Response after issuing a signed app token.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct IssueSignedAppTokenResponse {
+    /// Signed token string.
+    pub signed_token_str: String,
+}
+
+/// Request to report app stats (internal).
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct ReportAppStatsRequest {
+    /// App stats to report.
+    #[serde(default)]
+    pub stats: Vec<Value>,
+}
+
+/// Crypto key response for workspace proxies.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CryptoKeyResponse {
+    /// Feature the key is for.
+    pub feature: String,
+    /// Secret key material (hex-encoded).
+    pub secret: String,
+    /// Key sequence number.
+    pub sequence: i32,
+    /// When the key becomes active.
+    #[serde(with = "time::serde::rfc3339")]
+    pub starts_at: OffsetDateTime,
+    /// When the key can no longer be used for new operations.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        with = "time::serde::rfc3339::option"
+    )]
+    pub deletes_at: Option<OffsetDateTime>,
+}
+
+/// Response containing crypto keys for a workspace proxy.
+#[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
+pub struct CryptoKeysResponse {
+    /// List of crypto keys.
+    pub crypto_keys: Vec<CryptoKeyResponse>,
+}
+
+/// Replica API response.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ReplicaResponse {
+    /// Replica UUID.
+    pub id: Uuid,
+    /// Hostname.
+    #[serde(default)]
+    pub hostname: String,
+    /// Creation time.
+    #[serde(with = "time::serde::rfc3339")]
+    pub created_at: OffsetDateTime,
+    /// DERP relay address.
+    #[serde(default)]
+    pub relay_address: String,
+    /// DERP region ID.
+    pub region_id: i32,
+    /// Error message.
+    #[serde(default)]
+    pub error: String,
+    /// Database latency in microseconds.
+    pub database_latency: i32,
+}

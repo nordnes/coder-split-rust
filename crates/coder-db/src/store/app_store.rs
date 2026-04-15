@@ -8707,4 +8707,321 @@ impl AppStore for PostgresStore {
 
         Ok(result.rows_affected() > 0)
     }
+
+    // ----- Workspace proxy CRUD -----
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn create_workspace_proxy(
+        &self,
+        input: CreateWorkspaceProxyInput,
+    ) -> Result<WorkspaceProxyRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            display_name: String,
+            icon: String,
+            url: String,
+            wildcard_hostname: String,
+            derp_enabled: bool,
+            derp_only: bool,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+            deleted: bool,
+            version: String,
+            region_id: i32,
+            token_hashed_secret: Vec<u8>,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "INSERT INTO workspace_proxies (id, name, display_name, icon, token_hashed_secret, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7)
+             RETURNING id, name, display_name, icon,
+                       COALESCE(url, '') AS url,
+                       COALESCE(wildcard_hostname, '') AS wildcard_hostname,
+                       derp_enabled, derp_only,
+                       created_at, updated_at, deleted,
+                       COALESCE(version, '') AS version,
+                       region_id, token_hashed_secret",
+        )
+        .bind(input.id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.icon)
+        .bind(&input.token_hashed)
+        .bind(input.created_at)
+        .bind(input.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(WorkspaceProxyRow {
+            id: row.id,
+            name: row.name,
+            display_name: row.display_name,
+            icon: row.icon,
+            url: row.url,
+            wildcard_hostname: row.wildcard_hostname,
+            derp_enabled: row.derp_enabled,
+            derp_only: row.derp_only,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            deleted: row.deleted,
+            version: row.version,
+            region_id: row.region_id,
+            token_hashed: row.token_hashed_secret,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_proxies(&self) -> Result<Vec<WorkspaceProxyRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            display_name: String,
+            icon: String,
+            url: String,
+            wildcard_hostname: String,
+            derp_enabled: bool,
+            derp_only: bool,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+            deleted: bool,
+            version: String,
+            region_id: i32,
+            token_hashed_secret: Vec<u8>,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT id, name, display_name, icon,
+                    COALESCE(url, '') AS url,
+                    COALESCE(wildcard_hostname, '') AS wildcard_hostname,
+                    derp_enabled, derp_only,
+                    created_at, updated_at, deleted,
+                    COALESCE(version, '') AS version,
+                    region_id, token_hashed_secret
+             FROM workspace_proxies
+             WHERE deleted = false
+             ORDER BY created_at ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| WorkspaceProxyRow {
+                id: r.id,
+                name: r.name,
+                display_name: r.display_name,
+                icon: r.icon,
+                url: r.url,
+                wildcard_hostname: r.wildcard_hostname,
+                derp_enabled: r.derp_enabled,
+                derp_only: r.derp_only,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+                deleted: r.deleted,
+                version: r.version,
+                region_id: r.region_id,
+                token_hashed: r.token_hashed_secret,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_proxy_by_id(
+        &self,
+        id: Uuid,
+    ) -> Result<Option<WorkspaceProxyRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            display_name: String,
+            icon: String,
+            url: String,
+            wildcard_hostname: String,
+            derp_enabled: bool,
+            derp_only: bool,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+            deleted: bool,
+            version: String,
+            region_id: i32,
+            token_hashed_secret: Vec<u8>,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT id, name, display_name, icon,
+                    COALESCE(url, '') AS url,
+                    COALESCE(wildcard_hostname, '') AS wildcard_hostname,
+                    derp_enabled, derp_only,
+                    created_at, updated_at, deleted,
+                    COALESCE(version, '') AS version,
+                    region_id, token_hashed_secret
+             FROM workspace_proxies
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| WorkspaceProxyRow {
+            id: r.id,
+            name: r.name,
+            display_name: r.display_name,
+            icon: r.icon,
+            url: r.url,
+            wildcard_hostname: r.wildcard_hostname,
+            derp_enabled: r.derp_enabled,
+            derp_only: r.derp_only,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            deleted: r.deleted,
+            version: r.version,
+            region_id: r.region_id,
+            token_hashed: r.token_hashed_secret,
+        }))
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_workspace_proxy_by_name(
+        &self,
+        name: &str,
+    ) -> Result<Option<WorkspaceProxyRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            display_name: String,
+            icon: String,
+            url: String,
+            wildcard_hostname: String,
+            derp_enabled: bool,
+            derp_only: bool,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+            deleted: bool,
+            version: String,
+            region_id: i32,
+            token_hashed_secret: Vec<u8>,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "SELECT id, name, display_name, icon,
+                    COALESCE(url, '') AS url,
+                    COALESCE(wildcard_hostname, '') AS wildcard_hostname,
+                    derp_enabled, derp_only,
+                    created_at, updated_at, deleted,
+                    COALESCE(version, '') AS version,
+                    region_id, token_hashed_secret
+             FROM workspace_proxies
+             WHERE name = $1 AND deleted = false",
+        )
+        .bind(name)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|r| WorkspaceProxyRow {
+            id: r.id,
+            name: r.name,
+            display_name: r.display_name,
+            icon: r.icon,
+            url: r.url,
+            wildcard_hostname: r.wildcard_hostname,
+            derp_enabled: r.derp_enabled,
+            derp_only: r.derp_only,
+            created_at: r.created_at,
+            updated_at: r.updated_at,
+            deleted: r.deleted,
+            version: r.version,
+            region_id: r.region_id,
+            token_hashed: r.token_hashed_secret,
+        }))
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_workspace_proxy(
+        &self,
+        input: UpdateWorkspaceProxyInput,
+    ) -> Result<WorkspaceProxyRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            display_name: String,
+            icon: String,
+            url: String,
+            wildcard_hostname: String,
+            derp_enabled: bool,
+            derp_only: bool,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+            deleted: bool,
+            version: String,
+            region_id: i32,
+            token_hashed_secret: Vec<u8>,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "UPDATE workspace_proxies
+             SET name = $2,
+                 display_name = $3,
+                 icon = $4,
+                 token_hashed_secret = COALESCE($5, token_hashed_secret),
+                 updated_at = $6
+             WHERE id = $1 AND deleted = false
+             RETURNING id, name, display_name, icon,
+                       COALESCE(url, '') AS url,
+                       COALESCE(wildcard_hostname, '') AS wildcard_hostname,
+                       derp_enabled, derp_only,
+                       created_at, updated_at, deleted,
+                       COALESCE(version, '') AS version,
+                       region_id, token_hashed_secret",
+        )
+        .bind(input.id)
+        .bind(&input.name)
+        .bind(&input.display_name)
+        .bind(&input.icon)
+        .bind(input.token_hashed.as_deref())
+        .bind(input.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(WorkspaceProxyRow {
+            id: row.id,
+            name: row.name,
+            display_name: row.display_name,
+            icon: row.icon,
+            url: row.url,
+            wildcard_hostname: row.wildcard_hostname,
+            derp_enabled: row.derp_enabled,
+            derp_only: row.derp_only,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            deleted: row.deleted,
+            version: row.version,
+            region_id: row.region_id,
+            token_hashed: row.token_hashed_secret,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn soft_delete_workspace_proxy(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE workspace_proxies SET deleted = true, updated_at = NOW()
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(id)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
 }
