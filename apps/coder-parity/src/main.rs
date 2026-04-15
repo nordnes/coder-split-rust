@@ -615,6 +615,16 @@ fn collect_rust_routes_from_content(
             continue;
         }
 
+        if line.contains(".merge(") {
+            let (block, next_index) = collect_block(&lines, index);
+            if let Some(router_start) = block.find("Router::new()") {
+                let nested = &block[router_start + "Router::new()".len()..];
+                collect_rust_routes_from_content(nested, prefix, source, routes)?;
+            }
+            index = next_index;
+            continue;
+        }
+
         if line.contains(".route(") {
             let (block, next_index) = collect_block(&lines, index);
             if let Some(captures) = path_re.captures(&block) {
@@ -1089,8 +1099,9 @@ mod tests {
     use std::error::Error;
 
     use super::{
-        GoRoute, InventoryScope, RouteScope, extract_rust_methods, go_live_path, join_path,
-        matches_scope, normalize_path, parse_go_routes,
+        GoRoute, InventoryScope, RouteScope, collect_rust_routes_from_content,
+        extract_rust_methods, go_live_path, join_path, matches_scope, normalize_path,
+        parse_go_routes,
     };
 
     #[test]
@@ -1256,5 +1267,57 @@ mod tests {
         let dirs = vec!["coderd".to_owned()];
         let md = super::render_inventory_markdown(&inventory, &dirs);
         assert!(!md.contains("--go-dirs"));
+    }
+
+    #[test]
+    fn merge_blocks_detect_routes_at_current_prefix() -> Result<(), Box<dyn Error>> {
+        let content = r#"
+            .route("/audit", get(list_audit_logs))
+            .merge(axum::Router::new()
+                .route("/connectionlog", get(list_connection_logs))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_feature_connection_log,
+                ))
+            )
+            .route("/telemetry", get(get_telemetry_status))
+        "#;
+        let mut routes = Vec::new();
+        collect_rust_routes_from_content(content, "/api/v2", "app.rs", &mut routes)?;
+        let paths: Vec<&str> = routes.iter().map(|r| r.live_path.as_str()).collect();
+        assert!(
+            paths.contains(&"/api/v2/connectionlog"),
+            "expected /api/v2/connectionlog in {paths:?}"
+        );
+        assert!(paths.contains(&"/api/v2/audit"));
+        assert!(paths.contains(&"/api/v2/telemetry"));
+        assert_eq!(routes.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_blocks_detect_multiple_routes() -> Result<(), Box<dyn Error>> {
+        let content = r#"
+            .merge(axum::Router::new()
+                .route("/groups", get(list_all_groups))
+                .route("/groups/{group}", get(get_group).patch(patch_group).delete(delete_group))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_feature_template_rbac,
+                ))
+            )
+        "#;
+        let mut routes = Vec::new();
+        collect_rust_routes_from_content(content, "/api/v2", "app.rs", &mut routes)?;
+        assert_eq!(routes.len(), 2);
+        assert!(routes.iter().any(|r| r.live_path == "/api/v2/groups"));
+        let group_route = routes
+            .iter()
+            .find(|r| r.live_path == "/api/v2/groups/{group}")
+            .ok_or("missing /api/v2/groups/{group}")?;
+        assert!(group_route.methods.contains("GET"));
+        assert!(group_route.methods.contains("PATCH"));
+        assert!(group_route.methods.contains("DELETE"));
+        Ok(())
     }
 }
