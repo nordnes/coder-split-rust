@@ -8879,7 +8879,7 @@ pub(crate) mod tests {
                 icon: input.icon,
                 url: String::new(),
                 wildcard_hostname: String::new(),
-                derp_enabled: false,
+                derp_enabled: true,
                 derp_only: false,
                 created_at: input.created_at,
                 updated_at: input.updated_at,
@@ -8936,6 +8936,9 @@ pub(crate) mod tests {
             let row = map
                 .get_mut(&input.id)
                 .ok_or_else(|| StorageError::invalid_data("Workspace proxy not found"))?;
+            if row.deleted {
+                return Err(StorageError::invalid_data("Workspace proxy not found"));
+            }
             row.name = input.name;
             row.display_name = input.display_name;
             row.icon = input.icon;

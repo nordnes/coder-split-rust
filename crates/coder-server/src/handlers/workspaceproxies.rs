@@ -313,6 +313,17 @@ pub(crate) async fn patch_workspace_proxy(
     let name = if request.name.is_empty() {
         existing.name.clone()
     } else {
+        // The name "primary" is reserved — same guard as create.
+        if request.name.eq_ignore_ascii_case("primary") {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Name \"primary\" is reserved.".to_string(),
+                    "Cannot rename a workspace proxy to \"primary\".",
+                )),
+            )
+                .into_response());
+        }
         request.name
     };
     let display_name = if request.display_name.is_empty() {

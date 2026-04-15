@@ -8734,8 +8734,8 @@ impl AppStore for PostgresStore {
         }
 
         let row = sqlx::query_as::<_, Row>(
-            "INSERT INTO workspace_proxies (id, name, display_name, icon, token_hashed_secret, created_at, updated_at)
-             VALUES ($1, $2, $3, $4, $5, $6, $7)
+            "INSERT INTO workspace_proxies (id, name, display_name, icon, token_hashed_secret, derp_enabled, derp_only, created_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, true, false, $6, $7)
              RETURNING id, name, display_name, icon,
                        COALESCE(url, '') AS url,
                        COALESCE(wildcard_hostname, '') AS wildcard_hostname,

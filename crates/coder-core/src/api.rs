@@ -6729,7 +6729,6 @@ pub struct UpdateWorkspaceProxyResponse {
     /// Updated proxy.
     pub proxy: WorkspaceProxyResponse,
     /// Full proxy token (only returned on create or regenerate).
-    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub proxy_token: String,
 }
 
