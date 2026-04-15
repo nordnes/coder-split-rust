@@ -9411,4 +9411,35 @@ impl AppStore for PostgresStore {
 
         Ok(result.rows_affected() > 0)
     }
+
+    // -----------------------------------------------------------------------
+    // AI Bridge
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_aibridge_interceptions(
+        &self,
+        filter: coder_core::api::AIBridgeInterceptionsFilter,
+    ) -> Result<coder_core::api::AIBridgeListInterceptionsResponse, StorageError> {
+        // The aibridge_interceptions table is enterprise-only; the feature gate
+        // middleware prevents unlicensed access.  Return an empty response until
+        // the full SQL is wired.
+        let _ = filter;
+        Ok(coder_core::api::AIBridgeListInterceptionsResponse {
+            count: 0,
+            results: Vec::new(),
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_aibridge_models(
+        &self,
+        filter: coder_core::api::AIBridgeModelsFilter,
+    ) -> Result<Vec<String>, StorageError> {
+        // The aibridge_interceptions table is enterprise-only; the feature gate
+        // middleware prevents unlicensed access.  Return an empty list until the
+        // full SQL is wired.
+        let _ = filter;
+        Ok(Vec::new())
+    }
 }

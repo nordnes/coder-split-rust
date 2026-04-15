@@ -2287,4 +2287,21 @@ impl AppStore for BenchStore {
     async fn soft_delete_workspace_proxy(&self, _id: Uuid) -> Result<bool, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
+
+    async fn list_aibridge_interceptions(
+        &self,
+        _filter: coder_core::api::AIBridgeInterceptionsFilter,
+    ) -> Result<coder_core::api::AIBridgeListInterceptionsResponse, StorageError> {
+        Ok(coder_core::api::AIBridgeListInterceptionsResponse {
+            count: 0,
+            results: Vec::new(),
+        })
+    }
+
+    async fn list_aibridge_models(
+        &self,
+        _filter: coder_core::api::AIBridgeModelsFilter,
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(Vec::new())
+    }
 }

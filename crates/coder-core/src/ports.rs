@@ -4490,6 +4490,22 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     /// Soft-deletes a workspace proxy.
     async fn soft_delete_workspace_proxy(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    // -----------------------------------------------------------------------
+    // AI Bridge domain
+    // -----------------------------------------------------------------------
+
+    /// Lists AI Bridge interceptions with pagination and filtering.
+    async fn list_aibridge_interceptions(
+        &self,
+        filter: crate::api::AIBridgeInterceptionsFilter,
+    ) -> Result<crate::api::AIBridgeListInterceptionsResponse, StorageError>;
+
+    /// Lists distinct AI Bridge model names.
+    async fn list_aibridge_models(
+        &self,
+        filter: crate::api::AIBridgeModelsFilter,
+    ) -> Result<Vec<String>, StorageError>;
 }
 
 /// Stored webpush subscription record.

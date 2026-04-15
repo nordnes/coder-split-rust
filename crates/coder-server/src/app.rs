@@ -46,7 +46,9 @@ use crate::error::AppError;
 
 // Re-export handler functions for use in route definitions.
 use crate::handlers::agents::*;
+use crate::handlers::aibridge::*;
 use crate::handlers::appearance::*;
+use crate::handlers::applications::*;
 use crate::handlers::audit::*;
 use crate::handlers::auth::*;
 use crate::handlers::chats::*;
@@ -952,6 +954,23 @@ pub fn build_router(
                 )
                 // ----- Prebuilds settings routes (OSS scope) -----
                 .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
+                // ----- AI Bridge routes (enterprise — AiBridge) -----
+                .merge(axum::Router::new()
+                    .route("/aibridge/interceptions", get(list_aibridge_interceptions))
+                    .route("/aibridge/models", get(list_aibridge_models))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_aibridge,
+                    ))
+                )
+                // ----- Reconnecting PTY signed token (enterprise — WorkspaceProxy) -----
+                .merge(axum::Router::new()
+                    .route("/applications/reconnecting-pty-signed-token", post(post_reconnecting_pty_signed_token))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_workspace_proxy,
+                    ))
+                )
 
                 // ----- License & Entitlements routes -----
                 .route("/licenses", get(list_licenses).post(post_license))
@@ -9177,6 +9196,23 @@ pub(crate) mod tests {
             } else {
                 Ok(false)
             }
+        }
+
+        async fn list_aibridge_interceptions(
+            &self,
+            _filter: coder_core::api::AIBridgeInterceptionsFilter,
+        ) -> Result<coder_core::api::AIBridgeListInterceptionsResponse, StorageError> {
+            Ok(coder_core::api::AIBridgeListInterceptionsResponse {
+                count: 0,
+                results: Vec::new(),
+            })
+        }
+
+        async fn list_aibridge_models(
+            &self,
+            _filter: coder_core::api::AIBridgeModelsFilter,
+        ) -> Result<Vec<String>, StorageError> {
+            Ok(Vec::new())
         }
     }
 
@@ -37963,6 +37999,283 @@ pub(crate) mod tests {
             .ok_or("missing team array")?;
         // Still only one entry — no duplicate.
         assert_eq!(team_ids.len(), 1);
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // AI Bridge routes
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn aibridge_interceptions_requires_entitlement() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Without the AiBridge entitlement the feature gate returns 403.
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/aibridge/interceptions",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aibridge_interceptions_entitled_returns_ok() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::AiBridge.as_str().to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/aibridge/interceptions",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("count").and_then(Value::as_i64), Some(0));
+        assert!(body.get("results").and_then(Value::as_array).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aibridge_interceptions_rejects_after_id_with_offset() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::AiBridge.as_str().to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/aibridge/interceptions?after_id=550e8400-e29b-41d4-a716-446655440000&offset=10",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aibridge_models_requires_entitlement() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/aibridge/models", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn aibridge_models_entitled_returns_ok() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::AiBridge.as_str().to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/aibridge/models", &session_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.as_array().is_some());
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Reconnecting PTY signed token
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn reconnecting_pty_signed_token_requires_entitlement() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let body = serde_json::json!({
+            "url": "wss://proxy.example.com/api/v2/workspaceagents/550e8400-e29b-41d4-a716-446655440000/pty",
+            "agentID": "550e8400-e29b-41d4-a716-446655440000"
+        });
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/applications/reconnecting-pty-signed-token",
+                &session_token,
+                &body,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconnecting_pty_signed_token_entitled_returns_ok() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::WorkspaceProxy
+                .as_str()
+                .to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let agent_id = "550e8400-e29b-41d4-a716-446655440000";
+        let body = serde_json::json!({
+            "url": format!("wss://proxy.example.com/api/v2/workspaceagents/{agent_id}/pty"),
+            "agentID": agent_id
+        });
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/applications/reconnecting-pty-signed-token",
+                &session_token,
+                &body,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.get("signed_token").and_then(Value::as_str).is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconnecting_pty_signed_token_rejects_bad_scheme() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::WorkspaceProxy
+                .as_str()
+                .to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let agent_id = "550e8400-e29b-41d4-a716-446655440000";
+        let body = serde_json::json!({
+            "url": format!("https://proxy.example.com/api/v2/workspaceagents/{agent_id}/pty"),
+            "agentID": agent_id
+        });
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/applications/reconnecting-pty-signed-token",
+                &session_token,
+                &body,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reconnecting_pty_signed_token_rejects_bad_path() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::WorkspaceProxy
+                .as_str()
+                .to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let agent_id = "550e8400-e29b-41d4-a716-446655440000";
+        let body = serde_json::json!({
+            "url": format!("wss://proxy.example.com/api/v2/workspaceagents/{agent_id}/wrong"),
+            "agentID": agent_id
+        });
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/applications/reconnecting-pty-signed-token",
+                &session_token,
+                &body,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
 }
