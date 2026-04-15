@@ -4056,6 +4056,50 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_organization_idp_sync_settings(
+        &self,
+    ) -> Result<coder_core::api::OrganizationSyncSettings, StorageError> {
+        let row = sqlx::query_scalar::<_, Option<String>>(
+            "SELECT value FROM site_configs WHERE key = 'organization_idp_sync_settings'",
+        )
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        match row.flatten() {
+            Some(json) => serde_json::from_str(&json).map_err(|e| {
+                StorageError::invalid_data(format!(
+                    "invalid organization_idp_sync_settings JSON: {e}"
+                ))
+            }),
+            None => Ok(coder_core::api::OrganizationSyncSettings::default()),
+        }
+    }
+
+    #[instrument(skip(self, settings), err(level = tracing::Level::WARN))]
+    async fn upsert_organization_idp_sync_settings(
+        &self,
+        settings: &coder_core::api::OrganizationSyncSettings,
+    ) -> Result<(), StorageError> {
+        let json = serde_json::to_string(settings).map_err(|e| {
+            StorageError::invalid_data(format!(
+                "failed to serialize organization_idp_sync_settings: {e}"
+            ))
+        })?;
+
+        sqlx::query(
+            "INSERT INTO site_configs (key, value) VALUES ('organization_idp_sync_settings', $1)
+             ON CONFLICT (key) DO UPDATE SET value = $1",
+        )
+        .bind(&json)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_external_auth_links(
         &self,
         user_id: Uuid,

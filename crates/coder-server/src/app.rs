@@ -893,6 +893,27 @@ pub fn build_router(
                         crate::middleware::require_feature_appearance,
                     ))
                 )
+                // ----- IDP Sync routes (enterprise — deployment-level) -----
+                .route(
+                    "/settings/idpsync/available-fields",
+                    get(get_deployment_idpsync_available_fields),
+                )
+                .route(
+                    "/settings/idpsync/field-values",
+                    get(get_deployment_idpsync_field_values),
+                )
+                .route(
+                    "/settings/idpsync/organization",
+                    get(get_org_idpsync_settings).patch(patch_org_idpsync_settings),
+                )
+                .route(
+                    "/settings/idpsync/organization/config",
+                    patch(patch_org_idpsync_config),
+                )
+                .route(
+                    "/settings/idpsync/organization/mapping",
+                    patch(patch_org_idpsync_mapping),
+                )
                 // ----- Group routes (enterprise — TemplateRbac) -----
                 .merge(axum::Router::new()
                     .route("/groups", get(list_all_groups))
@@ -1717,6 +1738,8 @@ pub(crate) mod tests {
         license_next_id: Mutex<i32>,
         // VAPID keys
         vapid_keys: Mutex<Option<coder_core::api::VapidKeyPair>>,
+        // IDP sync settings (deployment-level)
+        organization_idp_sync_settings: Mutex<coder_core::api::OrganizationSyncSettings>,
     }
 
     impl FakeStore {
@@ -1810,6 +1833,9 @@ pub(crate) mod tests {
                 licenses: Mutex::new(HashMap::new()),
                 license_next_id: Mutex::new(1),
                 vapid_keys: Mutex::new(None),
+                organization_idp_sync_settings: Mutex::new(
+                    coder_core::api::OrganizationSyncSettings::default(),
+                ),
             }
         }
 
@@ -6329,6 +6355,27 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))
                 .map(|mut files| files.remove(&file_id).is_some())
+        }
+
+        async fn get_organization_idp_sync_settings(
+            &self,
+        ) -> Result<coder_core::api::OrganizationSyncSettings, StorageError> {
+            self.organization_idp_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|s| s.clone())
+        }
+
+        async fn upsert_organization_idp_sync_settings(
+            &self,
+            settings: &coder_core::api::OrganizationSyncSettings,
+        ) -> Result<(), StorageError> {
+            let mut current = self
+                .organization_idp_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            *current = settings.clone();
+            Ok(())
         }
 
         async fn archive_unused_template_versions(
@@ -37264,6 +37311,420 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+    // -- IDP Sync (deployment-level) -----------------------------------------
+
+    #[tokio::test]
+    async fn idpsync_available_fields_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let resp = call(
+            app,
+            request(Method::GET, "/api/v2/settings/idpsync/available-fields")?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_available_fields_returns_empty_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/settings/idpsync/available-fields",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        // FakeStore has no OIDC user links, so empty array.
+        assert!(body.as_array().is_some());
+        assert!(body.as_array().map_or(false, |a| a.is_empty()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_field_values_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let resp = call(
+            app,
+            request(
+                Method::GET,
+                "/api/v2/settings/idpsync/field-values?claimField=groups",
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_field_values_missing_param_returns_400() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/settings/idpsync/field-values",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_field_values_returns_empty_list() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/settings/idpsync/field-values?claimField=groups",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert!(body.as_array().is_some());
+        assert!(body.as_array().map_or(false, |a| a.is_empty()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_org_settings_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let resp = call(
+            app,
+            request(Method::GET, "/api/v2/settings/idpsync/organization")?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_org_settings_returns_defaults() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/settings/idpsync/organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert_eq!(body.get("field").and_then(Value::as_str), Some(""));
+        assert_eq!(
+            body.get("organization_assign_default")
+                .and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_patch_org_settings_full_replace() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let new_settings = serde_json::json!({
+            "field": "groups",
+            "organization_assign_default": true,
+            "mapping": {
+                "engineering": ["10000000-0000-0000-0000-000000000001"]
+            }
+        });
+
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/settings/idpsync/organization",
+                &session_token,
+                &new_settings,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        assert_eq!(body.get("field").and_then(Value::as_str), Some("groups"));
+        assert_eq!(
+            body.get("organization_assign_default")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        assert!(body.get("mapping").and_then(Value::as_object).is_some());
+
+        // Verify persistence with GET.
+        let get_resp = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                "/api/v2/settings/idpsync/organization",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get_resp.status(), StatusCode::OK);
+        let get_body = response_json(get_resp).await?;
+        assert_eq!(
+            get_body.get("field").and_then(Value::as_str),
+            Some("groups")
+        );
+        assert_eq!(
+            get_body
+                .get("organization_assign_default")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_patch_config_preserves_mapping() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // First set up some initial settings with a mapping.
+        let initial = serde_json::json!({
+            "field": "department",
+            "organization_assign_default": false,
+            "mapping": {
+                "eng": ["20000000-0000-0000-0000-000000000001"]
+            }
+        });
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/settings/idpsync/organization",
+                &session_token,
+                &initial,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // Now PATCH config (field + assign_default only).
+        let config_patch = serde_json::json!({
+            "field": "teams",
+            "assign_default": true
+        });
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/settings/idpsync/organization/config",
+                &session_token,
+                &config_patch,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        // Config fields updated.
+        assert_eq!(body.get("field").and_then(Value::as_str), Some("teams"));
+        assert_eq!(
+            body.get("organization_assign_default")
+                .and_then(Value::as_bool),
+            Some(true)
+        );
+        // Mapping preserved from initial settings.
+        let mapping = body.get("mapping").and_then(Value::as_object);
+        assert!(mapping.is_some());
+        assert!(mapping.map_or(false, |m| m.contains_key("eng")));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_patch_mapping_add_and_remove() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Set up initial mapping.
+        let initial = serde_json::json!({
+            "field": "groups",
+            "organization_assign_default": false,
+            "mapping": {
+                "alpha": ["30000000-0000-0000-0000-000000000001"]
+            }
+        });
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/settings/idpsync/organization",
+                &session_token,
+                &initial,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        // PATCH mapping: add a new entry, remove an existing one.
+        let mapping_patch = serde_json::json!({
+            "Add": [
+                {"Given": "beta", "Gets": "30000000-0000-0000-0000-000000000002"}
+            ],
+            "Remove": [
+                {"Given": "alpha", "Gets": "30000000-0000-0000-0000-000000000001"}
+            ]
+        });
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/settings/idpsync/organization/mapping",
+                &session_token,
+                &mapping_patch,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+
+        // "field" preserved.
+        assert_eq!(body.get("field").and_then(Value::as_str), Some("groups"));
+
+        let mapping = body
+            .get("mapping")
+            .and_then(Value::as_object)
+            .ok_or("missing mapping")?;
+        // "beta" was added.
+        assert!(mapping.contains_key("beta"));
+        let beta_ids = mapping
+            .get("beta")
+            .and_then(Value::as_array)
+            .ok_or("missing beta array")?;
+        assert_eq!(beta_ids.len(), 1);
+        // "alpha" entry still exists as key but should be empty after removal.
+        let alpha_ids = mapping
+            .get("alpha")
+            .and_then(Value::as_array)
+            .ok_or("missing alpha array")?;
+        assert!(alpha_ids.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_patch_mapping_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let mapping_patch = serde_json::json!({"Add": [], "Remove": []});
+        let body = serde_json::to_vec(&mapping_patch)?;
+        let resp = call(
+            app,
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/v2/settings/idpsync/organization/mapping")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_patch_config_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let config_patch = serde_json::json!({"field": "x", "assign_default": false});
+        let body = serde_json::to_vec(&config_patch)?;
+        let resp = call(
+            app,
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/v2/settings/idpsync/organization/config")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_patch_org_settings_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let settings =
+            serde_json::json!({"field": "x", "organization_assign_default": false, "mapping": {}});
+        let body = serde_json::to_vec(&settings)?;
+        let resp = call(
+            app,
+            Request::builder()
+                .method(Method::PATCH)
+                .uri("/api/v2/settings/idpsync/organization")
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(body))?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn idpsync_patch_mapping_add_duplicate_is_idempotent() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Set up initial mapping with an entry.
+        let initial = serde_json::json!({
+            "field": "groups",
+            "organization_assign_default": false,
+            "mapping": {
+                "team": ["40000000-0000-0000-0000-000000000001"]
+            }
+        });
+        call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/settings/idpsync/organization",
+                &session_token,
+                &initial,
+            )?,
+        )
+        .await?;
+
+        // Add the same mapping again — should be idempotent.
+        let mapping_patch = serde_json::json!({
+            "Add": [
+                {"Given": "team", "Gets": "40000000-0000-0000-0000-000000000001"}
+            ],
+            "Remove": []
+        });
+        let resp = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                "/api/v2/settings/idpsync/organization/mapping",
+                &session_token,
+                &mapping_patch,
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        let team_ids = body
+            .get("mapping")
+            .and_then(|m| m.get("team"))
+            .and_then(Value::as_array)
+            .ok_or("missing team array")?;
+        // Still only one entry — no duplicate.
+        assert_eq!(team_ids.len(), 1);
         Ok(())
     }
 }

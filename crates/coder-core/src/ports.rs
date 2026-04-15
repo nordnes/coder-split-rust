@@ -2223,6 +2223,19 @@ pub trait OperationalStore: Send + Sync {
     ///
     /// Returns `true` when a row was actually removed.
     async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError>;
+
+    // ----- IDP Sync (deployment-level) -----
+
+    /// Returns the deployment-level organization IDP sync settings.
+    async fn get_organization_idp_sync_settings(
+        &self,
+    ) -> Result<crate::api::OrganizationSyncSettings, StorageError>;
+
+    /// Replaces the deployment-level organization IDP sync settings.
+    async fn upsert_organization_idp_sync_settings(
+        &self,
+        settings: &crate::api::OrganizationSyncSettings,
+    ) -> Result<(), StorageError>;
 }
 
 /// Narrow storage contract for insights and analytics queries.
@@ -3180,6 +3193,19 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     ///
     /// Returns `true` when a row was actually removed.
     async fn delete_file(&self, file_id: Uuid) -> Result<bool, StorageError>;
+
+    // ----- IDP Sync (deployment-level) -----
+
+    /// Returns the deployment-level organization IDP sync settings.
+    async fn get_organization_idp_sync_settings(
+        &self,
+    ) -> Result<crate::api::OrganizationSyncSettings, StorageError>;
+
+    /// Replaces the deployment-level organization IDP sync settings.
+    async fn upsert_organization_idp_sync_settings(
+        &self,
+        settings: &crate::api::OrganizationSyncSettings,
+    ) -> Result<(), StorageError>;
 
     /// Lists configured external-auth links for one user.
     async fn list_external_auth_links(
@@ -6728,6 +6754,19 @@ where
     ) -> Result<Vec<String>, StorageError> {
         AppStore::oidc_claim_field_values(self, org_id, claim_field).await
     }
+
+    async fn get_organization_idp_sync_settings(
+        &self,
+    ) -> Result<crate::api::OrganizationSyncSettings, StorageError> {
+        AppStore::get_organization_idp_sync_settings(self).await
+    }
+
+    async fn upsert_organization_idp_sync_settings(
+        &self,
+        settings: &crate::api::OrganizationSyncSettings,
+    ) -> Result<(), StorageError> {
+        AppStore::upsert_organization_idp_sync_settings(self, settings).await
+    }
 }
 
 #[async_trait]
@@ -6990,6 +7029,21 @@ where
         claim_field: &str,
     ) -> Result<Vec<String>, StorageError> {
         (**self).oidc_claim_field_values(org_id, claim_field).await
+    }
+
+    async fn get_organization_idp_sync_settings(
+        &self,
+    ) -> Result<crate::api::OrganizationSyncSettings, StorageError> {
+        (**self).get_organization_idp_sync_settings().await
+    }
+
+    async fn upsert_organization_idp_sync_settings(
+        &self,
+        settings: &crate::api::OrganizationSyncSettings,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .upsert_organization_idp_sync_settings(settings)
+            .await
     }
 }
 
