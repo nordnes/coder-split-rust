@@ -585,7 +585,7 @@ pub(crate) async fn workspace_proxy_crypto_keys(
     }
 
     // Allowed features (matches Go whitelistedCryptoKeyFeatures).
-    let allowed = ["signing_key", "oidc_convert"];
+    let allowed = ["workspace_apps_token", "workspace_apps_api_key"];
     if !allowed.contains(&feature.as_str()) {
         return Ok((
             StatusCode::BAD_REQUEST,

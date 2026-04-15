@@ -913,19 +913,6 @@ pub fn build_router(
                         crate::middleware::require_feature_workspace_proxy,
                     ))
                 )
-                // ----- Workspace proxy internal routes (enterprise — proxy auth) -----
-                .merge(axum::Router::new()
-                    .route("/workspaceproxies/me/register", post(workspace_proxy_register))
-                    .route("/workspaceproxies/me/deregister", post(workspace_proxy_deregister))
-                    .route("/workspaceproxies/me/coordinate", get(workspace_proxy_coordinate))
-                    .route("/workspaceproxies/me/crypto-keys", get(workspace_proxy_crypto_keys))
-                    .route("/workspaceproxies/me/issue-signed-app-token", post(workspace_proxy_issue_signed_app_token))
-                    .route("/workspaceproxies/me/app-stats", post(workspace_proxy_report_app_stats))
-                    .route_layer(axum::middleware::from_fn_with_state(
-                        state.clone(),
-                        crate::middleware::require_feature_workspace_proxy,
-                    ))
-                )
                 // ----- Prebuilds settings routes (OSS scope) -----
                 .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
 
@@ -976,6 +963,22 @@ pub fn build_router(
                 .route("/users/oidc/callback", get(get_oidc_callback))
                 .route("/auth/scopes", get(list_api_key_scopes))
                 .route("/deployment/config", get(deployment_config))
+                // -------------------------------------------------------
+                // Workspace proxy internal routes — use proxy-token
+                // authentication handled inside the handler itself.
+                // -------------------------------------------------------
+                .merge(axum::Router::new()
+                    .route("/workspaceproxies/me/register", post(workspace_proxy_register))
+                    .route("/workspaceproxies/me/deregister", post(workspace_proxy_deregister))
+                    .route("/workspaceproxies/me/coordinate", get(workspace_proxy_coordinate))
+                    .route("/workspaceproxies/me/crypto-keys", get(workspace_proxy_crypto_keys))
+                    .route("/workspaceproxies/me/issue-signed-app-token", post(workspace_proxy_issue_signed_app_token))
+                    .route("/workspaceproxies/me/app-stats", post(workspace_proxy_report_app_stats))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_workspace_proxy,
+                    ))
+                )
                 // -------------------------------------------------------
                 // Agent routes — use agent-token authentication handled
                 // inside the handler itself.
