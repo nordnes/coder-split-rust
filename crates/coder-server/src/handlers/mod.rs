@@ -329,6 +329,7 @@ pub(crate) mod external_auth;
 pub(crate) mod files;
 pub(crate) mod groups;
 pub(crate) mod health;
+pub(crate) mod idpsync;
 pub(crate) mod insights;
 pub(crate) mod licenses;
 pub(crate) mod mcp;
