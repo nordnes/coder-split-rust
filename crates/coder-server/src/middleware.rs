@@ -879,20 +879,3 @@ pub(crate) async fn require_feature_aibridge(
     }
     next.run(request).await
 }
-
-/// Enterprise feature gate for workspace proxies.
-pub(crate) async fn require_feature_workspace_proxy(
-    axum::extract::State(state): axum::extract::State<crate::app::AppState>,
-    request: axum::extract::Request,
-    next: Next,
-) -> Response {
-    if !state
-        .entitlements
-        .is_entitled(coder_license::FeatureName::WorkspaceProxy)
-    {
-        return crate::handlers::licenses::require_enterprise_feature(
-            &coder_license::FeatureName::WorkspaceProxy,
-        );
-    }
-    next.run(request).await
-}
