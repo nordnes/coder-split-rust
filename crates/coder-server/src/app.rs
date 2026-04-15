@@ -893,6 +893,27 @@ pub fn build_router(
                         crate::middleware::require_feature_appearance,
                     ))
                 )
+                // ----- IDP Sync routes (enterprise — deployment-level) -----
+                .route(
+                    "/settings/idpsync/available-fields",
+                    get(get_deployment_idpsync_available_fields),
+                )
+                .route(
+                    "/settings/idpsync/field-values",
+                    get(get_deployment_idpsync_field_values),
+                )
+                .route(
+                    "/settings/idpsync/organization",
+                    get(get_org_idpsync_settings).patch(patch_org_idpsync_settings),
+                )
+                .route(
+                    "/settings/idpsync/organization/config",
+                    patch(patch_org_idpsync_config),
+                )
+                .route(
+                    "/settings/idpsync/organization/mapping",
+                    patch(patch_org_idpsync_mapping),
+                )
                 // ----- Group routes (enterprise — TemplateRbac) -----
                 .merge(axum::Router::new()
                     .route("/groups", get(list_all_groups))
@@ -1717,6 +1738,8 @@ pub(crate) mod tests {
         license_next_id: Mutex<i32>,
         // VAPID keys
         vapid_keys: Mutex<Option<coder_core::api::VapidKeyPair>>,
+        // IDP sync settings (deployment-level)
+        organization_idp_sync_settings: Mutex<coder_core::api::OrganizationSyncSettings>,
     }
 
     impl FakeStore {
@@ -1810,6 +1833,9 @@ pub(crate) mod tests {
                 licenses: Mutex::new(HashMap::new()),
                 license_next_id: Mutex::new(1),
                 vapid_keys: Mutex::new(None),
+                organization_idp_sync_settings: Mutex::new(
+                    coder_core::api::OrganizationSyncSettings::default(),
+                ),
             }
         }
 
@@ -6329,6 +6355,27 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))
                 .map(|mut files| files.remove(&file_id).is_some())
+        }
+
+        async fn get_organization_idp_sync_settings(
+            &self,
+        ) -> Result<coder_core::api::OrganizationSyncSettings, StorageError> {
+            self.organization_idp_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))
+                .map(|s| s.clone())
+        }
+
+        async fn upsert_organization_idp_sync_settings(
+            &self,
+            settings: &coder_core::api::OrganizationSyncSettings,
+        ) -> Result<(), StorageError> {
+            let mut current = self
+                .organization_idp_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            *current = settings.clone();
+            Ok(())
         }
 
         async fn archive_unused_template_versions(

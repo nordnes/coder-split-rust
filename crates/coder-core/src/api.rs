@@ -6718,3 +6718,63 @@ pub struct PatchRoleIDPSyncMappingRequest {
     #[serde(rename = "Remove", default)]
     pub remove: Vec<IDPSyncMappingRole>,
 }
+
+// ---------------------------------------------------------------------------
+// IDP Sync — Organization sync settings (deployment-level)
+// ---------------------------------------------------------------------------
+
+/// Deployment-level organization IDP sync settings.
+///
+/// Maps Go `codersdk.OrganizationSyncSettings`.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct OrganizationSyncSettings {
+    /// The OIDC claim field used to determine organization membership.
+    /// Empty string means no organization sync from the IdP.
+    #[serde(default)]
+    pub field: String,
+    /// Mapping from OIDC claim value to Coder organization UUIDs.
+    #[serde(default)]
+    pub mapping: HashMap<String, Vec<Uuid>>,
+    /// When true, all authenticated users are placed into the default org.
+    #[serde(default, rename = "organization_assign_default")]
+    pub assign_default: bool,
+}
+
+/// Request body for `PATCH /settings/idpsync/organization/config`.
+///
+/// Partially updates the organization sync settings (field + assign_default)
+/// while preserving the existing mapping.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct PatchOrganizationIDPSyncConfigRequest {
+    /// The OIDC claim field.
+    #[serde(default)]
+    pub field: String,
+    /// Whether to assign users to the default organization.
+    #[serde(default)]
+    pub assign_default: bool,
+}
+
+/// A single IDP sync mapping entry (claim value → resource ID).
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct IDPSyncMappingUUID {
+    /// The IdP claim value the user has.
+    #[serde(default, rename = "Given")]
+    pub given: String,
+    /// The UUID of the Coder resource the user should be added to.
+    #[serde(default, rename = "Gets")]
+    pub gets: Uuid,
+}
+
+/// Request body for `PATCH /settings/idpsync/organization/mapping`.
+///
+/// Adds and/or removes individual mapping entries.
+/// If the same mapping appears in both `add` and `remove`, removal wins.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct PatchOrganizationIDPSyncMappingRequest {
+    /// Mappings to add.
+    #[serde(default, rename = "Add")]
+    pub add: Vec<IDPSyncMappingUUID>,
+    /// Mappings to remove.
+    #[serde(default, rename = "Remove")]
+    pub remove: Vec<IDPSyncMappingUUID>,
+}

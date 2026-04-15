@@ -1195,6 +1195,19 @@ mod tests {
             Ok(false)
         }
 
+        async fn get_organization_idp_sync_settings(
+            &self,
+        ) -> Result<coder_core::api::OrganizationSyncSettings, StorageError> {
+            Ok(coder_core::api::OrganizationSyncSettings::default())
+        }
+
+        async fn upsert_organization_idp_sync_settings(
+            &self,
+            _settings: &coder_core::api::OrganizationSyncSettings,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
         async fn list_workspace_proxies_for_health(
             &self,
         ) -> Result<Vec<WorkspaceProxyHealthRecord>, StorageError> {
