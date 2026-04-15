@@ -6617,3 +6617,104 @@ pub struct InvalidatedPreset {
     /// Preset name.
     pub preset_name: String,
 }
+
+// ── IDP Sync settings ───────────────────────────────────────────────────
+
+/// Group sync settings for an organization's IDP integration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct GroupSyncSettings {
+    /// Claim field name that specifies group membership.
+    #[serde(default)]
+    pub field: String,
+    /// Map from OIDC claim values to Coder group IDs.
+    #[serde(default)]
+    pub mapping: HashMap<String, Vec<Uuid>>,
+    /// Regex filter applied to groups returned by the OIDC provider.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub regex_filter: Option<String>,
+    /// Whether to auto-create missing groups.
+    #[serde(default, rename = "auto_create_missing_groups")]
+    pub auto_create_missing_groups: bool,
+    /// Deprecated legacy name mapping.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub legacy_group_name_mapping: Option<HashMap<String, String>>,
+}
+
+/// Role sync settings for an organization's IDP integration.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct RoleSyncSettings {
+    /// Claim field name that specifies role assignments.
+    #[serde(default)]
+    pub field: String,
+    /// Map from OIDC claim values to Coder organization role names.
+    #[serde(default)]
+    pub mapping: HashMap<String, Vec<String>>,
+}
+
+/// Request to partially update group sync config (field, regex, auto-create)
+/// without touching the mapping.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct PatchGroupIDPSyncConfigRequest {
+    /// Claim field name.
+    #[serde(default)]
+    pub field: String,
+    /// Regex filter.
+    #[serde(default)]
+    pub regex_filter: Option<String>,
+    /// Whether to auto-create missing groups.
+    #[serde(default, rename = "auto_create_missing_groups")]
+    pub auto_create_missing_groups: bool,
+}
+
+/// A single IDP sync mapping entry mapping a claim value to a group UUID.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct IDPSyncMappingGroup {
+    /// The IDP claim value the user has.
+    #[serde(rename = "Given")]
+    pub given: String,
+    /// The Coder group ID to assign.
+    #[serde(rename = "Gets")]
+    pub gets: Uuid,
+}
+
+/// Request to add/remove entries in the group sync mapping.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct PatchGroupIDPSyncMappingRequest {
+    /// Mappings to add.
+    #[serde(rename = "Add", default)]
+    pub add: Vec<IDPSyncMappingGroup>,
+    /// Mappings to remove.
+    #[serde(rename = "Remove", default)]
+    pub remove: Vec<IDPSyncMappingGroup>,
+}
+
+/// Request to partially update role sync config (field only)
+/// without touching the mapping.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct PatchRoleIDPSyncConfigRequest {
+    /// Claim field name.
+    #[serde(default)]
+    pub field: String,
+}
+
+/// A single IDP sync mapping entry mapping a claim value to a role name.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+pub struct IDPSyncMappingRole {
+    /// The IDP claim value the user has.
+    #[serde(rename = "Given")]
+    pub given: String,
+    /// The Coder role name to assign.
+    #[serde(rename = "Gets")]
+    pub gets: String,
+}
+
+/// Request to add/remove entries in the role sync mapping.
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+pub struct PatchRoleIDPSyncMappingRequest {
+    /// Mappings to add.
+    #[serde(rename = "Add", default)]
+    pub add: Vec<IDPSyncMappingRole>,
+    /// Mappings to remove.
+    #[serde(rename = "Remove", default)]
+    pub remove: Vec<IDPSyncMappingRole>,
+}

@@ -57,6 +57,7 @@ use crate::handlers::external_auth::*;
 use crate::handlers::files::*;
 use crate::handlers::groups::*;
 use crate::handlers::health::*;
+use crate::handlers::idpsync::*;
 use crate::handlers::insights::*;
 use crate::handlers::licenses::*;
 use crate::handlers::mcp::*;
@@ -903,6 +904,21 @@ pub fn build_router(
                         crate::middleware::require_feature_template_rbac,
                     ))
                 )
+                // ----- IDP Sync routes (enterprise — MultipleExternalAuth) -----
+                .merge(axum::Router::new()
+                    .route("/organizations/{organization}/settings/idpsync/available-fields", get(get_org_idpsync_available_fields))
+                    .route("/organizations/{organization}/settings/idpsync/field-values", get(get_org_idpsync_field_values))
+                    .route("/organizations/{organization}/settings/idpsync/groups", get(get_group_idpsync_settings).patch(patch_group_idpsync_settings))
+                    .route("/organizations/{organization}/settings/idpsync/groups/config", patch(patch_group_idpsync_config))
+                    .route("/organizations/{organization}/settings/idpsync/groups/mapping", patch(patch_group_idpsync_mapping))
+                    .route("/organizations/{organization}/settings/idpsync/roles", get(get_role_idpsync_settings).patch(patch_role_idpsync_settings))
+                    .route("/organizations/{organization}/settings/idpsync/roles/config", patch(patch_role_idpsync_config))
+                    .route("/organizations/{organization}/settings/idpsync/roles/mapping", patch(patch_role_idpsync_mapping))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_multiple_external_auth,
+                    ))
+                )
                 // ----- Prebuilds settings routes (OSS scope) -----
                 .route("/prebuilds/settings", get(get_prebuilds_settings).put(put_prebuilds_settings))
 
@@ -1610,6 +1626,8 @@ pub(crate) mod tests {
         health_settings: Mutex<HealthSettings>,
         appearance_config: Mutex<coder_core::api::AppearanceConfig>,
         prebuilds_settings: Mutex<coder_core::api::PrebuildsSettings>,
+        group_sync_settings: Mutex<HashMap<Uuid, coder_core::api::GroupSyncSettings>>,
+        role_sync_settings: Mutex<HashMap<Uuid, coder_core::api::RoleSyncSettings>>,
         git_ssh_keys: Mutex<HashMap<Uuid, GitSshKeyRecord>>,
         external_auth_links: Mutex<HashMap<(Uuid, String), ExternalAuthLinkRecord>>,
         stats_workspaces: Mutex<HashMap<Uuid, WorkspaceStatsWorkspaceInput>>,
@@ -1718,6 +1736,8 @@ pub(crate) mod tests {
                 health_settings: Mutex::new(HealthSettings::default()),
                 appearance_config: Mutex::new(coder_core::api::AppearanceConfig::default()),
                 prebuilds_settings: Mutex::new(coder_core::api::PrebuildsSettings::default()),
+                group_sync_settings: Mutex::new(HashMap::new()),
+                role_sync_settings: Mutex::new(HashMap::new()),
                 git_ssh_keys: Mutex::new(HashMap::new()),
                 external_auth_links: Mutex::new(HashMap::new()),
                 stats_workspaces: Mutex::new(HashMap::new()),
@@ -3948,6 +3968,150 @@ pub(crate) mod tests {
             }
             *current = settings.clone();
             Ok(true)
+        }
+
+        async fn group_sync_settings(
+            &self,
+            org_id: Uuid,
+        ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+            let map = self
+                .group_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map.get(&org_id).cloned().unwrap_or_default())
+        }
+
+        async fn upsert_group_sync_settings(
+            &self,
+            org_id: Uuid,
+            settings: &coder_core::api::GroupSyncSettings,
+        ) -> Result<(), StorageError> {
+            let mut map = self
+                .group_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            map.insert(org_id, settings.clone());
+            Ok(())
+        }
+
+        async fn role_sync_settings(
+            &self,
+            org_id: Uuid,
+        ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+            let map = self
+                .role_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map.get(&org_id).cloned().unwrap_or_default())
+        }
+
+        async fn upsert_role_sync_settings(
+            &self,
+            org_id: Uuid,
+            settings: &coder_core::api::RoleSyncSettings,
+        ) -> Result<(), StorageError> {
+            let mut map = self
+                .role_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            map.insert(org_id, settings.clone());
+            Ok(())
+        }
+
+        async fn update_group_sync_config(
+            &self,
+            org_id: Uuid,
+            field: String,
+            regex_filter: Option<String>,
+            auto_create_missing_groups: bool,
+        ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+            let mut map = self
+                .group_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            settings.field = field;
+            settings.regex_filter = regex_filter;
+            settings.auto_create_missing_groups = auto_create_missing_groups;
+            Ok(settings.clone())
+        }
+
+        async fn apply_group_sync_mapping_diff(
+            &self,
+            org_id: Uuid,
+            add: &[coder_core::api::IDPSyncMappingGroup],
+            remove: &[coder_core::api::IDPSyncMappingGroup],
+        ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+            let mut map = self
+                .group_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            for entry in add {
+                let ids = settings.mapping.entry(entry.given.clone()).or_default();
+                if !ids.contains(&entry.gets) {
+                    ids.push(entry.gets);
+                }
+            }
+            for entry in remove {
+                if let Some(ids) = settings.mapping.get_mut(&entry.given) {
+                    ids.retain(|id| *id != entry.gets);
+                }
+            }
+            settings.mapping.retain(|_, ids| !ids.is_empty());
+            Ok(settings.clone())
+        }
+
+        async fn update_role_sync_config(
+            &self,
+            org_id: Uuid,
+            field: String,
+        ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+            let mut map = self
+                .role_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            settings.field = field;
+            Ok(settings.clone())
+        }
+
+        async fn apply_role_sync_mapping_diff(
+            &self,
+            org_id: Uuid,
+            add: &[coder_core::api::IDPSyncMappingRole],
+            remove: &[coder_core::api::IDPSyncMappingRole],
+        ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+            let mut map = self
+                .role_sync_settings
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let settings = map.entry(org_id).or_default();
+            for entry in add {
+                let roles = settings.mapping.entry(entry.given.clone()).or_default();
+                if !roles.contains(&entry.gets) {
+                    roles.push(entry.gets.clone());
+                }
+            }
+            for entry in remove {
+                if let Some(roles) = settings.mapping.get_mut(&entry.given) {
+                    roles.retain(|role| *role != entry.gets);
+                }
+            }
+            settings.mapping.retain(|_, roles| !roles.is_empty());
+            Ok(settings.clone())
+        }
+
+        async fn oidc_claim_fields(&self, _org_id: Uuid) -> Result<Vec<String>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn oidc_claim_field_values(
+            &self,
+            _org_id: Uuid,
+            _claim_field: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            Ok(Vec::new())
         }
 
         async fn deployment_stats(&self) -> Result<DeploymentStatsResponse, StorageError> {
