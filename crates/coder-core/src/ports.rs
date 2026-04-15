@@ -23,10 +23,11 @@ use uuid::Uuid;
 
 use crate::api::{
     AuditLogResponse, ChatMessageVisibility, ChatStatus, ConnectionLogResponse, DAUsResponse,
-    ExternalAuthAppInstallation, ExternalAuthUser, GetUserStatusCountsResponse, HealthSettings,
-    InboxNotification, InsightsReportInterval, NotificationPreference, NotificationTemplate,
-    NotificationsSettings, TaskStatus, TemplateInsightsIntervalReport, TemplateInsightsResponse,
-    UserActivityInsightsResponse, UserLatencyInsightsResponse,
+    ExternalAuthAppInstallation, ExternalAuthUser, GetUserStatusCountsResponse, GroupSyncSettings,
+    HealthSettings, InboxNotification, InsightsReportInterval, NotificationPreference,
+    NotificationTemplate, NotificationsSettings, RoleSyncSettings, TaskStatus,
+    TemplateInsightsIntervalReport, TemplateInsightsResponse, UserActivityInsightsResponse,
+    UserLatencyInsightsResponse,
 };
 use crate::identity::{
     ApiKeyListFilter, ApiKeyRecord, ApiKeyWithOwnerRecord, AuthenticatedUser, CreateApiKeyInput,
@@ -2047,6 +2048,40 @@ pub trait OperationalStore: Send + Sync {
     /// Looks up multiple users by their IDs in a single query.
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
 
+    // ── IDP Sync settings ───────────────────────────────────────────────
+
+    /// Returns group sync settings for an organization.
+    async fn group_sync_settings(&self, org_id: Uuid) -> Result<GroupSyncSettings, StorageError>;
+
+    /// Replaces group sync settings for an organization.
+    async fn upsert_group_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &GroupSyncSettings,
+    ) -> Result<(), StorageError>;
+
+    /// Returns role sync settings for an organization.
+    async fn role_sync_settings(&self, org_id: Uuid) -> Result<RoleSyncSettings, StorageError>;
+
+    /// Replaces role sync settings for an organization.
+    async fn upsert_role_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &RoleSyncSettings,
+    ) -> Result<(), StorageError>;
+
+    /// Returns distinct OIDC claim field names for an organization.
+    /// Pass `Uuid::nil()` to query across all organizations.
+    async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError>;
+
+    /// Returns distinct values for a specific OIDC claim field.
+    /// Pass `Uuid::nil()` to query across all organizations.
+    async fn oidc_claim_field_values(
+        &self,
+        org_id: Uuid,
+        claim_field: &str,
+    ) -> Result<Vec<String>, StorageError>;
+
     /// Returns deployment health settings.
     async fn health_settings(&self) -> Result<HealthSettings, StorageError>;
 
@@ -2933,6 +2968,40 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     /// Looks up multiple users by their IDs in a single query.
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError>;
+
+    // ── IDP Sync settings ───────────────────────────────────────────────
+
+    /// Returns group sync settings for an organization.
+    async fn group_sync_settings(&self, org_id: Uuid) -> Result<GroupSyncSettings, StorageError>;
+
+    /// Replaces group sync settings for an organization.
+    async fn upsert_group_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &GroupSyncSettings,
+    ) -> Result<(), StorageError>;
+
+    /// Returns role sync settings for an organization.
+    async fn role_sync_settings(&self, org_id: Uuid) -> Result<RoleSyncSettings, StorageError>;
+
+    /// Replaces role sync settings for an organization.
+    async fn upsert_role_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &RoleSyncSettings,
+    ) -> Result<(), StorageError>;
+
+    /// Returns distinct OIDC claim field names for an organization.
+    /// Pass `Uuid::nil()` to query across all organizations.
+    async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError>;
+
+    /// Returns distinct values for a specific OIDC claim field.
+    /// Pass `Uuid::nil()` to query across all organizations.
+    async fn oidc_claim_field_values(
+        &self,
+        org_id: Uuid,
+        claim_field: &str,
+    ) -> Result<Vec<String>, StorageError>;
 
     /// Returns deployment health settings.
     async fn health_settings(&self) -> Result<HealthSettings, StorageError>;
@@ -6508,6 +6577,42 @@ where
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
         AppStore::find_users_by_ids(self, ids).await
     }
+
+    async fn group_sync_settings(&self, org_id: Uuid) -> Result<GroupSyncSettings, StorageError> {
+        AppStore::group_sync_settings(self, org_id).await
+    }
+
+    async fn upsert_group_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &GroupSyncSettings,
+    ) -> Result<(), StorageError> {
+        AppStore::upsert_group_sync_settings(self, org_id, settings).await
+    }
+
+    async fn role_sync_settings(&self, org_id: Uuid) -> Result<RoleSyncSettings, StorageError> {
+        AppStore::role_sync_settings(self, org_id).await
+    }
+
+    async fn upsert_role_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &RoleSyncSettings,
+    ) -> Result<(), StorageError> {
+        AppStore::upsert_role_sync_settings(self, org_id, settings).await
+    }
+
+    async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError> {
+        AppStore::oidc_claim_fields(self, org_id).await
+    }
+
+    async fn oidc_claim_field_values(
+        &self,
+        org_id: Uuid,
+        claim_field: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        AppStore::oidc_claim_field_values(self, org_id, claim_field).await
+    }
 }
 
 #[async_trait]
@@ -6692,6 +6797,42 @@ where
 
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
         (**self).find_users_by_ids(ids).await
+    }
+
+    async fn group_sync_settings(&self, org_id: Uuid) -> Result<GroupSyncSettings, StorageError> {
+        (**self).group_sync_settings(org_id).await
+    }
+
+    async fn upsert_group_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &GroupSyncSettings,
+    ) -> Result<(), StorageError> {
+        (**self).upsert_group_sync_settings(org_id, settings).await
+    }
+
+    async fn role_sync_settings(&self, org_id: Uuid) -> Result<RoleSyncSettings, StorageError> {
+        (**self).role_sync_settings(org_id).await
+    }
+
+    async fn upsert_role_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &RoleSyncSettings,
+    ) -> Result<(), StorageError> {
+        (**self).upsert_role_sync_settings(org_id, settings).await
+    }
+
+    async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError> {
+        (**self).oidc_claim_fields(org_id).await
+    }
+
+    async fn oidc_claim_field_values(
+        &self,
+        org_id: Uuid,
+        claim_field: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        (**self).oidc_claim_field_values(org_id, claim_field).await
     }
 }
 

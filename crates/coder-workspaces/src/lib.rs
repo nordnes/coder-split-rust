@@ -2022,6 +2022,51 @@ mod tests {
             Ok(Vec::new())
         }
 
+        async fn group_sync_settings(
+            &self,
+            _org_id: uuid::Uuid,
+        ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+            Ok(coder_core::api::GroupSyncSettings::default())
+        }
+
+        async fn upsert_group_sync_settings(
+            &self,
+            _org_id: uuid::Uuid,
+            _settings: &coder_core::api::GroupSyncSettings,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn role_sync_settings(
+            &self,
+            _org_id: uuid::Uuid,
+        ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+            Ok(coder_core::api::RoleSyncSettings::default())
+        }
+
+        async fn upsert_role_sync_settings(
+            &self,
+            _org_id: uuid::Uuid,
+            _settings: &coder_core::api::RoleSyncSettings,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in mock"))
+        }
+
+        async fn oidc_claim_fields(
+            &self,
+            _org_id: uuid::Uuid,
+        ) -> Result<Vec<String>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn oidc_claim_field_values(
+            &self,
+            _org_id: uuid::Uuid,
+            _claim_field: &str,
+        ) -> Result<Vec<String>, StorageError> {
+            Ok(Vec::new())
+        }
+
         async fn upsert_provisioner_job_stats(
             &self,
             _input: &coder_core::ports::ProvisionerJobStatsInput,

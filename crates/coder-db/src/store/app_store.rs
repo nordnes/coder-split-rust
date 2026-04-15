@@ -2334,6 +2334,155 @@ impl AppStore for PostgresStore {
         Ok(true)
     }
 
+    // ── IDP Sync settings ───────────────────────────────────────────────
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn group_sync_settings(
+        &self,
+        org_id: Uuid,
+    ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+        let key = format!("{}:group-sync-settings", org_id);
+        let encoded: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = $1")
+                .bind(&key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage_error)?;
+
+        match encoded {
+            Some(encoded) => serde_json::from_str(&encoded)
+                .map_err(|error| StorageError::invalid_data(error.to_string())),
+            None => Ok(coder_core::api::GroupSyncSettings::default()),
+        }
+    }
+
+    #[instrument(skip(self, settings), err(level = tracing::Level::WARN))]
+    async fn upsert_group_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &coder_core::api::GroupSyncSettings,
+    ) -> Result<(), StorageError> {
+        let key = format!("{}:group-sync-settings", org_id);
+        let encoded = serde_json::to_string(settings)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&key)
+        .bind(&encoded)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn role_sync_settings(
+        &self,
+        org_id: Uuid,
+    ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+        let key = format!("{}:role-sync-settings", org_id);
+        let encoded: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = $1")
+                .bind(&key)
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage_error)?;
+
+        match encoded {
+            Some(encoded) => serde_json::from_str(&encoded)
+                .map_err(|error| StorageError::invalid_data(error.to_string())),
+            None => Ok(coder_core::api::RoleSyncSettings::default()),
+        }
+    }
+
+    #[instrument(skip(self, settings), err(level = tracing::Level::WARN))]
+    async fn upsert_role_sync_settings(
+        &self,
+        org_id: Uuid,
+        settings: &coder_core::api::RoleSyncSettings,
+    ) -> Result<(), StorageError> {
+        let key = format!("{}:role-sync-settings", org_id);
+        let encoded = serde_json::to_string(settings)
+            .map_err(|error| StorageError::invalid_data(error.to_string()))?;
+        sqlx::query(
+            "INSERT INTO site_configs (key, value)
+             VALUES ($1, $2)
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value",
+        )
+        .bind(&key)
+        .bind(&encoded)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn oidc_claim_fields(&self, org_id: Uuid) -> Result<Vec<String>, StorageError> {
+        let nil = Uuid::nil();
+        let fields: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT jsonb_object_keys(claims->'merged_claims')
+             FROM user_links
+             WHERE claims ? 'merged_claims'
+               AND jsonb_typeof(claims->'merged_claims') != 'null'
+               AND login_type = 'oidc'
+               AND CASE WHEN $1::uuid != $2::uuid THEN
+                   user_links.user_id = ANY(
+                       SELECT organization_members.user_id
+                       FROM organization_members
+                       WHERE organization_id = $1
+                   )
+                   ELSE true
+               END",
+        )
+        .bind(org_id)
+        .bind(nil)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(fields)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn oidc_claim_field_values(
+        &self,
+        org_id: Uuid,
+        claim_field: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        let nil = Uuid::nil();
+        let values: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT jsonb_array_elements_text(CASE
+                WHEN jsonb_typeof(claims->'merged_claims'->$1::text) = 'array' THEN
+                    (SELECT jsonb_agg(element)
+                     FROM jsonb_array_elements(claims->'merged_claims'->$1::text) AS element
+                     WHERE jsonb_typeof(element) = 'string')
+                WHEN jsonb_typeof(claims->'merged_claims'->$1::text) = 'string' THEN
+                    jsonb_build_array(claims->'merged_claims'->$1::text)
+             END)
+             FROM user_links
+             WHERE jsonb_typeof(claims->'merged_claims'->$1::text) = ANY(ARRAY['string', 'array'])
+               AND login_type = 'oidc'
+               AND CASE WHEN $2::uuid != $3::uuid THEN
+                   user_links.user_id = ANY(
+                       SELECT organization_members.user_id
+                       FROM organization_members
+                       WHERE organization_id = $2
+                   )
+                   ELSE true
+               END",
+        )
+        .bind(claim_field)
+        .bind(org_id)
+        .bind(nil)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(values)
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn deployment_stats(&self) -> Result<DeploymentStatsResponse, StorageError> {
         let collected_at: OffsetDateTime = sqlx::query_scalar("SELECT NOW()")

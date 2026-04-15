@@ -2118,6 +2118,48 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn group_sync_settings(
+        &self,
+        _org_id: Uuid,
+    ) -> Result<coder_core::api::GroupSyncSettings, StorageError> {
+        Ok(coder_core::api::GroupSyncSettings::default())
+    }
+
+    async fn upsert_group_sync_settings(
+        &self,
+        _org_id: Uuid,
+        _settings: &coder_core::api::GroupSyncSettings,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn role_sync_settings(
+        &self,
+        _org_id: Uuid,
+    ) -> Result<coder_core::api::RoleSyncSettings, StorageError> {
+        Ok(coder_core::api::RoleSyncSettings::default())
+    }
+
+    async fn upsert_role_sync_settings(
+        &self,
+        _org_id: Uuid,
+        _settings: &coder_core::api::RoleSyncSettings,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn oidc_claim_fields(&self, _org_id: Uuid) -> Result<Vec<String>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    async fn oidc_claim_field_values(
+        &self,
+        _org_id: Uuid,
+        _claim_field: &str,
+    ) -> Result<Vec<String>, StorageError> {
+        Ok(Vec::new())
+    }
+
     async fn find_workspace_port_share(
         &self,
         _workspace_id: Uuid,
