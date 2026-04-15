@@ -1293,6 +1293,19 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn get_organization_idp_sync_settings(
+        &self,
+    ) -> Result<coder_core::api::OrganizationSyncSettings, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn upsert_organization_idp_sync_settings(
+        &self,
+        _settings: &coder_core::api::OrganizationSyncSettings,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn archive_unused_template_versions(
         &self,
         _template_id: Uuid,
