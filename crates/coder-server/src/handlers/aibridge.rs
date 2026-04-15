@@ -18,9 +18,24 @@ pub(crate) async fn list_aibridge_interceptions(
     headers: HeaderMap,
     Query(mut filter): Query<coder_core::api::AIBridgeInterceptionsFilter>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: only auditors may read AI Bridge interception records.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::AibridgeInterception),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read AI Bridge interceptions.",
+        ));
+    }
 
     // Cursor and offset pagination are mutually exclusive (Go line 91-97).
     if filter.after_id.is_some() && filter.offset.unwrap_or(0) != 0 {
@@ -66,9 +81,24 @@ pub(crate) async fn list_aibridge_models(
     headers: HeaderMap,
     Query(mut filter): Query<coder_core::api::AIBridgeModelsFilter>,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
+
+    // RBAC: only auditors may read AI Bridge model information.
+    let authorizer = Authorizer::new();
+    if authorizer
+        .authorize(
+            &context.actor,
+            Action::Read,
+            &Object::new(ResourceType::AibridgeInterception),
+        )
+        .is_err()
+    {
+        return Ok(forbidden_response(
+            "You are not authorized to read AI Bridge models.",
+        ));
+    }
 
     // Apply pagination defaults and bounds.
     let limit = filter.limit.unwrap_or(DEFAULT_MODELS_LIMIT);

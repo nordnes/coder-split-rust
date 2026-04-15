@@ -38142,6 +38142,84 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn aibridge_interceptions_forbidden_for_member() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = test_state_with_store(true)?;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::AiBridge.as_str().to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+
+        let app = build_router(state, None);
+        let owner_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &owner_token).await?;
+
+        // Create a regular member user (no owner/auditor roles).
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &owner_token,
+                &CreateUserRequestWithOrgs {
+                    email: "member@example.com".to_owned(),
+                    username: "member".to_owned(),
+                    name: "Member User".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+
+        let member_login = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/api/v2/users/login",
+                &LoginWithPasswordRequest {
+                    email: "member@example.com".to_owned(),
+                    password: "Password123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(member_login.status(), StatusCode::CREATED);
+        let member_token = response_json(member_login)
+            .await?
+            .get("session_token")
+            .and_then(Value::as_str)
+            .ok_or("missing member session token")?
+            .to_owned();
+
+        // A regular member should be forbidden from reading interceptions.
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/aibridge/interceptions", &member_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        // Same for models.
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/aibridge/models", &member_token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Reconnecting PTY signed token
     // -----------------------------------------------------------------------
