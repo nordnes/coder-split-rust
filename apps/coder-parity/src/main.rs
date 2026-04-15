@@ -620,6 +620,10 @@ fn collect_rust_routes_from_content(
             if let Some(router_start) = block.find("Router::new()") {
                 let nested = &block[router_start + "Router::new()".len()..];
                 collect_rust_routes_from_content(nested, prefix, source, routes)?;
+            } else {
+                eprintln!(
+                    "warning: .merge() block without Router::new() in {source} — routes may be missed"
+                );
             }
             index = next_index;
             continue;
@@ -1318,6 +1322,108 @@ mod tests {
         assert!(group_route.methods.contains("GET"));
         assert!(group_route.methods.contains("PATCH"));
         assert!(group_route.methods.contains("DELETE"));
+        Ok(())
+    }
+
+    #[test]
+    fn merge_inside_nest_inherits_nested_prefix() -> Result<(), Box<dyn Error>> {
+        let content = r#"
+            .nest("/api/v2", Router::new()
+                .route("/audit", get(list_audit_logs))
+                .merge(axum::Router::new()
+                    .route("/connectionlog", get(list_connection_logs))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_connection_log,
+                    ))
+                )
+            )
+        "#;
+        let mut routes = Vec::new();
+        collect_rust_routes_from_content(content, "", "app.rs", &mut routes)?;
+        let paths: Vec<&str> = routes.iter().map(|r| r.live_path.as_str()).collect();
+        assert!(
+            paths.contains(&"/api/v2/connectionlog"),
+            "merge inside nest should inherit /api/v2 prefix, got {paths:?}"
+        );
+        assert!(paths.contains(&"/api/v2/audit"));
+        assert_eq!(routes.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_without_router_new_produces_no_routes() -> Result<(), Box<dyn Error>> {
+        let content = r#"
+            .route("/before", get(before_handler))
+            .merge(enterprise_routes(state.clone()))
+            .route("/after", get(after_handler))
+        "#;
+        let mut routes = Vec::new();
+        collect_rust_routes_from_content(content, "/api/v2", "app.rs", &mut routes)?;
+        let paths: Vec<&str> = routes.iter().map(|r| r.live_path.as_str()).collect();
+        assert!(
+            !paths.iter().any(|p| p.contains("enterprise")),
+            "merge without Router::new() should not produce routes"
+        );
+        assert!(paths.contains(&"/api/v2/before"));
+        assert!(paths.contains(&"/api/v2/after"));
+        assert_eq!(routes.len(), 2);
+        Ok(())
+    }
+
+    #[test]
+    fn single_line_merge_block_detected() -> Result<(), Box<dyn Error>> {
+        let content = r#".merge(Router::new().route("/connectionlog", get(list_connection_logs)))"#;
+        let mut routes = Vec::new();
+        collect_rust_routes_from_content(content, "/api/v2", "app.rs", &mut routes)?;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].live_path, "/api/v2/connectionlog");
+        assert!(routes[0].methods.contains("GET"));
+        Ok(())
+    }
+
+    #[test]
+    fn no_duplicate_routes_from_merge_blocks() -> Result<(), Box<dyn Error>> {
+        // Ensure routes inside .merge() are only counted once (via recursive
+        // processing), not also by the outer .route() scan.
+        let content = r#"
+            .route("/before", get(handler_a))
+            .merge(axum::Router::new()
+                .route("/connectionlog", get(list_connection_logs))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
+                    crate::middleware::require_feature_connection_log,
+                ))
+            )
+            .route("/after", get(handler_b))
+        "#;
+        let mut routes = Vec::new();
+        collect_rust_routes_from_content(content, "/api/v2", "app.rs", &mut routes)?;
+        let connectionlog_count = routes
+            .iter()
+            .filter(|r| r.live_path == "/api/v2/connectionlog")
+            .count();
+        assert_eq!(
+            connectionlog_count, 1,
+            "connectionlog should appear exactly once, not duplicated"
+        );
+        assert_eq!(routes.len(), 3);
+        Ok(())
+    }
+
+    #[test]
+    fn merge_containing_nest_works_recursively() -> Result<(), Box<dyn Error>> {
+        let content = r#"
+            .merge(Router::new()
+                .nest("/orgs", Router::new()
+                    .route("/groups", get(list_groups))
+                )
+            )
+        "#;
+        let mut routes = Vec::new();
+        collect_rust_routes_from_content(content, "/api/v2", "app.rs", &mut routes)?;
+        assert_eq!(routes.len(), 1);
+        assert_eq!(routes[0].live_path, "/api/v2/orgs/groups");
         Ok(())
     }
 }
