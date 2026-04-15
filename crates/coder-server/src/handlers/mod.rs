@@ -351,4 +351,5 @@ pub(crate) mod users;
 #[allow(dead_code)]
 pub(crate) mod workspace_apps;
 pub(crate) mod workspace_sharing;
+pub(crate) mod workspaceproxies;
 pub(crate) mod workspaces;

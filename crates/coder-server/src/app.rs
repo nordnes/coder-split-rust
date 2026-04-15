@@ -75,6 +75,7 @@ use crate::handlers::templates::*;
 use crate::handlers::users::*;
 use crate::handlers::workspace_apps::{workspace_apps_proxy_path, workspace_port_forward};
 use crate::handlers::workspace_sharing::*;
+use crate::handlers::workspaceproxies::*;
 use crate::handlers::workspaces::*;
 use crate::helpers::*;
 use crate::middleware::{
@@ -925,6 +926,15 @@ pub fn build_router(
                         crate::middleware::require_feature_template_rbac,
                     ))
                 )
+                // ----- Workspace proxy CRUD routes (enterprise — WorkspaceProxy) -----
+                .merge(axum::Router::new()
+                    .route("/workspaceproxies", get(list_workspace_proxies).post(create_workspace_proxy))
+                    .route("/workspaceproxies/{workspaceproxy}", get(get_workspace_proxy).patch(patch_workspace_proxy).delete(delete_workspace_proxy))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_workspace_proxy,
+                    ))
+                )
                 // ----- IDP Sync routes (enterprise — MultipleExternalAuth) -----
                 .merge(axum::Router::new()
                     .route("/organizations/{organization}/settings/idpsync/available-fields", get(get_org_idpsync_available_fields))
@@ -990,6 +1000,22 @@ pub fn build_router(
                 .route("/users/oidc/callback", get(get_oidc_callback))
                 .route("/auth/scopes", get(list_api_key_scopes))
                 .route("/deployment/config", get(deployment_config))
+                // -------------------------------------------------------
+                // Workspace proxy internal routes — use proxy-token
+                // authentication handled inside the handler itself.
+                // -------------------------------------------------------
+                .merge(axum::Router::new()
+                    .route("/workspaceproxies/me/register", post(workspace_proxy_register))
+                    .route("/workspaceproxies/me/deregister", post(workspace_proxy_deregister))
+                    .route("/workspaceproxies/me/coordinate", get(workspace_proxy_coordinate))
+                    .route("/workspaceproxies/me/crypto-keys", get(workspace_proxy_crypto_keys))
+                    .route("/workspaceproxies/me/issue-signed-app-token", post(workspace_proxy_issue_signed_app_token))
+                    .route("/workspaceproxies/me/app-stats", post(workspace_proxy_report_app_stats))
+                    .route_layer(axum::middleware::from_fn_with_state(
+                        state.clone(),
+                        crate::middleware::require_feature_workspace_proxy,
+                    ))
+                )
                 // -------------------------------------------------------
                 // Agent routes — use agent-token authentication handled
                 // inside the handler itself.
@@ -1527,19 +1553,20 @@ pub(crate) mod tests {
         CreateProvisionerJobInput, CreateTaskRequest, CreateTemplateInput, CreateTemplateRequest,
         CreateTemplateStoreError, CreateTemplateVersionInput, CreateTestAuditLogRequest,
         CreateTokenRequest, CreateUserInput, CreateUserRequestWithOrgs, CreateUserStoreError,
-        CreateWorkspaceBuildInput, CreateWorkspaceInput, CustomRoleRecord, DatabaseConfig,
-        DeploymentMetadata, DeploymentStatsResponse, DeploymentStore, DerpNodeConfig,
-        DerpRegionConfig, ExternalAuthLinkProvider, ExternalAuthLinkRecord, ExternalAuthUser,
-        FileRecord, GetJobsToBeReapedInput, GitSshKeyRecord, GroupMemberRecord, GroupRecord,
-        HealthSettings, InsertAgentLogInput, InsertChatFileInput, InsertChatInput,
-        InsertChatMessageInput, InsertFileInput, InsertFileResult, InsertOrganizationMemberError,
-        InsertProvisionerJobInput, InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput,
-        InsertProvisionerKeyInput, InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord,
-        LogFormat, LoginType, LoginWithPasswordRequest, NotificationMessageRecord,
-        NotificationMessageStatus, OrgResourceCounts, OrganizationMemberListFilter,
-        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
-        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        CreateWorkspaceBuildInput, CreateWorkspaceInput, CreateWorkspaceProxyInput,
+        CustomRoleRecord, DatabaseConfig, DeploymentMetadata, DeploymentStatsResponse,
+        DeploymentStore, DerpNodeConfig, DerpRegionConfig, ExternalAuthLinkProvider,
+        ExternalAuthLinkRecord, ExternalAuthUser, FileRecord, GetJobsToBeReapedInput,
+        GitSshKeyRecord, GroupMemberRecord, GroupRecord, HealthSettings, InsertAgentLogInput,
+        InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
+        InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
+        InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
+        InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord, LogFormat, LoginType,
+        LoginWithPasswordRequest, NotificationMessageRecord, NotificationMessageStatus,
+        OrgResourceCounts, OrganizationMemberListFilter, OrganizationMemberRecord,
+        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
+        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
+        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
@@ -1549,18 +1576,18 @@ pub(crate) mod tests {
         UpdateOrganizationInput, UpdateOrganizationStoreError, UpdateRolesRequest,
         UpdateTemplateMeta, UpdateTemplateMetaInput, UpdateUserAppearanceSettingsRequest,
         UpdateUserPasswordRequest, UpdateUserPreferenceSettingsRequest, UpdateUserProfileRequest,
-        UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
-        UpsertProvisionerDaemonInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
-        UserDeletedRecord, UserLinkClaims, UserLinkRecord, UserListFilter, UserPreferenceRecord,
-        UserRecord, UserStatus, UserStatusChangeRecord, ValidateUserPasswordRequest,
-        WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
-        WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
-        WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow,
-        WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
-        WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-        WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord,
-        WorkspaceRecord, WorkspaceResourceMetadataRecord, WorkspaceResourceRecord,
-        WorkspaceStatsWorkspaceInput,
+        UpdateWorkspaceProxyInput, UpsertCustomRoleInput, UpsertExternalAuthLinkInput,
+        UpsertPortShareInput, UpsertProvisionerDaemonInput, UpsertUserLinkInput,
+        UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkClaims, UserLinkRecord,
+        UserListFilter, UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
+        ValidateUserPasswordRequest, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
+        WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
+        WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput,
+        WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord,
+        WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
+        WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
+        WorkspaceProxyHealthRecord, WorkspaceProxyRow, WorkspaceRecord,
+        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -1656,6 +1683,7 @@ pub(crate) mod tests {
         stats_builds: Mutex<HashMap<Uuid, WorkspaceBuildStatsInput>>,
         stats_agents: Mutex<Vec<WorkspaceAgentStatInput>>,
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
+        workspace_proxy_rows: Mutex<HashMap<Uuid, WorkspaceProxyRow>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
         tasks: Mutex<HashMap<Uuid, TaskRecord>>,
         task_snapshots: Mutex<HashMap<Uuid, TaskSnapshotRecord>>,
@@ -1768,6 +1796,7 @@ pub(crate) mod tests {
                 stats_builds: Mutex::new(HashMap::new()),
                 stats_agents: Mutex::new(Vec::new()),
                 workspace_proxies: Mutex::new(HashMap::new()),
+                workspace_proxy_rows: Mutex::new(HashMap::new()),
                 provisioner_daemons: Mutex::new(HashMap::new()),
                 tasks: Mutex::new(HashMap::new()),
                 task_snapshots: Mutex::new(HashMap::new()),
@@ -9049,6 +9078,105 @@ pub(crate) mod tests {
                 .map_err(|error| StorageError::unavailable(error.to_string()))?
                 .remove(&id)
                 .is_some())
+        }
+
+        // ----- Workspace proxy CRUD -----
+
+        async fn create_workspace_proxy(
+            &self,
+            input: CreateWorkspaceProxyInput,
+        ) -> Result<WorkspaceProxyRow, StorageError> {
+            let row = WorkspaceProxyRow {
+                id: input.id,
+                name: input.name,
+                display_name: input.display_name,
+                icon: input.icon,
+                url: String::new(),
+                wildcard_hostname: String::new(),
+                derp_enabled: true,
+                derp_only: false,
+                created_at: input.created_at,
+                updated_at: input.updated_at,
+                deleted: false,
+                version: String::new(),
+                region_id: 0,
+                token_hashed: input.token_hashed,
+            };
+            self.workspace_proxy_rows
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?
+                .insert(row.id, row.clone());
+            Ok(row)
+        }
+
+        async fn list_workspace_proxies(&self) -> Result<Vec<WorkspaceProxyRow>, StorageError> {
+            let map = self
+                .workspace_proxy_rows
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map.values().filter(|r| !r.deleted).cloned().collect())
+        }
+
+        async fn find_workspace_proxy_by_id(
+            &self,
+            id: Uuid,
+        ) -> Result<Option<WorkspaceProxyRow>, StorageError> {
+            let map = self
+                .workspace_proxy_rows
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map.get(&id).filter(|r| !r.deleted).cloned())
+        }
+
+        async fn find_workspace_proxy_by_name(
+            &self,
+            name: &str,
+        ) -> Result<Option<WorkspaceProxyRow>, StorageError> {
+            let map = self
+                .workspace_proxy_rows
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map.values().find(|r| !r.deleted && r.name == name).cloned())
+        }
+
+        async fn update_workspace_proxy(
+            &self,
+            input: UpdateWorkspaceProxyInput,
+        ) -> Result<WorkspaceProxyRow, StorageError> {
+            let mut map = self
+                .workspace_proxy_rows
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let row = map
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::invalid_data("Workspace proxy not found"))?;
+            if row.deleted {
+                return Err(StorageError::invalid_data("Workspace proxy not found"));
+            }
+            row.name = input.name;
+            row.display_name = input.display_name;
+            row.icon = input.icon;
+            if let Some(hashed) = input.token_hashed {
+                row.token_hashed = hashed;
+            }
+            row.updated_at = input.updated_at;
+            Ok(row.clone())
+        }
+
+        async fn soft_delete_workspace_proxy(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut map = self
+                .workspace_proxy_rows
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(row) = map.get_mut(&id) {
+                if row.deleted {
+                    return Ok(false);
+                }
+                row.deleted = true;
+                Ok(true)
+            } else {
+                Ok(false)
+            }
         }
     }
 
@@ -37313,6 +37441,116 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         Ok(())
     }
+
+    // ----- Workspace proxy route tests -----
+
+    #[tokio::test]
+    async fn list_workspace_proxies_requires_enterprise() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/workspaceproxies", &session_token)?,
+        )
+        .await?;
+        // Enterprise feature not entitled → 403
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_workspace_proxy_requires_enterprise() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/workspaceproxies",
+                &session_token,
+                &serde_json::json!({ "name": "us-west" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_workspace_proxy_requires_enterprise() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspaceproxies/{}", Uuid::new_v4()),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn delete_workspace_proxy_requires_enterprise() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaceproxies/{}", Uuid::new_v4()),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_register_requires_enterprise() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceproxies/me/register",
+                &serde_json::json!({
+                    "access_url": "https://proxy.example.com",
+                    "replica_id": Uuid::new_v4(),
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_deregister_requires_enterprise() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+
+        let response = call(
+            app,
+            json_request(
+                Method::POST,
+                "/api/v2/workspaceproxies/me/deregister",
+                &serde_json::json!({ "replica_id": Uuid::new_v4() }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
     // -- IDP Sync (deployment-level) -----------------------------------------
 
     #[tokio::test]
