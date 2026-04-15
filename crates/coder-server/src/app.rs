@@ -190,6 +190,11 @@ pub struct AppState {
     pub http_client: reqwest::Client,
     /// Enterprise feature entitlements for gating enterprise-only routes.
     pub entitlements: std::sync::Arc<EntitlementSet>,
+    /// Random signing key for workspace-app tokens (e.g. reconnecting PTY).
+    /// Generated once at startup; tokens will not survive server restarts.
+    /// Will be replaced by the CryptoKeys DB-backed system when workspace-proxy
+    /// infrastructure is fully ported.
+    pub app_signing_key: [u8; 32],
 }
 
 impl AppState {
@@ -226,6 +231,9 @@ impl AppState {
         let oauth2_provider = OAuth2ProviderService::new(store.clone());
         let http_client = reqwest::Client::new();
 
+        let mut app_signing_key = [0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut app_signing_key);
+
         Ok(Self {
             config,
             build_metadata,
@@ -247,6 +255,7 @@ impl AppState {
             oauth2_provider,
             http_client,
             entitlements,
+            app_signing_key,
         })
     }
 

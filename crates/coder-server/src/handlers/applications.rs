@@ -88,11 +88,10 @@ pub(crate) async fn post_reconnecting_pty_signed_token(
         app_slug_or_port: String::new(),
     };
 
-    // Derive a signing key from the deployment identifier.  A dedicated
-    // signing-key field will be added to AppState when the full workspace-proxy
-    // infrastructure is ported.
-    let signing_key = format!("coder-signing-{}", state.deployment_id);
-    let token = create_signed_app_token(signing_key.as_bytes(), &app_request, context.user.id)
+    // Use the random signing key from AppState.  This key is generated at
+    // startup and will be replaced by the CryptoKeys DB-backed system when
+    // the full workspace-proxy infrastructure is ported.
+    let token = create_signed_app_token(&state.app_signing_key, &app_request, context.user.id)
         .map_err(|e| AppError::InternalError {
             message: "Failed to sign reconnecting PTY token.".to_owned(),
             detail: e.to_string(),
