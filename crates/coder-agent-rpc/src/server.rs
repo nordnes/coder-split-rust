@@ -23,11 +23,11 @@ use crate::wire::{self, Kind, Packet};
 /// DRPC error code used for unimplemented methods. Matches
 /// `drpcerr.Unimplemented` from the Go library (a sentinel value used by
 /// the official client to detect missing handlers).
-const DRPC_ERR_UNIMPLEMENTED: u32 = 12;
+const DRPC_ERR_UNIMPLEMENTED: u64 = 12;
 /// DRPC error code used for malformed request messages.
-const DRPC_ERR_INVALID_ARGUMENT: u32 = 3;
+const DRPC_ERR_INVALID_ARGUMENT: u64 = 3;
 /// Generic internal-server-error DRPC code.
-const DRPC_ERR_INTERNAL: u32 = 13;
+const DRPC_ERR_INTERNAL: u64 = 13;
 
 /// Drives a single DRPC stream to completion against `handler`.
 ///
@@ -108,7 +108,7 @@ where
     Ok(())
 }
 
-fn rpc_error_to_drpc(err: &RpcError) -> (u32, String) {
+fn rpc_error_to_drpc(err: &RpcError) -> (u64, String) {
     match err {
         RpcError::Unimplemented(m) => (DRPC_ERR_UNIMPLEMENTED, format!("unimplemented: {m}")),
         RpcError::InvalidArgument(m) => {
@@ -298,7 +298,9 @@ mod tests {
 
         let resp = wire::read_packet(&mut client).await?;
         assert_eq!(resp.kind, Kind::Error);
-        let code = u32::from_be_bytes([resp.data[0], resp.data[1], resp.data[2], resp.data[3]]);
+        assert!(resp.data.len() >= 8, "error body too short");
+        let code_bytes: [u8; 8] = resp.data[..8].try_into().unwrap_or([0; 8]);
+        let code = u64::from_be_bytes(code_bytes);
         assert_eq!(code, DRPC_ERR_UNIMPLEMENTED);
         drop(client);
         let _ = server_task.await;

@@ -21,6 +21,7 @@ yamux.workspace = true
 
 [build-dependencies]
 prost-build.workspace = true
+protoc-bin-vendored.workspace = true
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["io-util", "macros", "rt", "sync", "time"] }

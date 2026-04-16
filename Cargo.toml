@@ -49,6 +49,7 @@ pbkdf2 = "0.12"
 prost = "0.14"
 prost-build = "0.14"
 prost-types = "0.14"
+protoc-bin-vendored = "3.1"
 rand = "0.8"
 regex = "1.11"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }

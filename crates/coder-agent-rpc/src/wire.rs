@@ -159,14 +159,15 @@ pub async fn write_packet<W: AsyncWrite + Unpin>(w: &mut W, packet: &Packet) -> 
 }
 
 /// Writes a DRPC error packet. The Go wire format prefixes the error body
-/// with a 4-byte big-endian error code; a code of zero means "unknown".
+/// with an 8-byte big-endian error code (see `drpcwire.MarshalError` in the
+/// upstream `storj.io/drpc` library); a code of zero means "unknown".
 pub async fn write_error<W: AsyncWrite + Unpin>(
     w: &mut W,
     id: PacketId,
-    code: u32,
+    code: u64,
     message: &str,
 ) -> DrpcResult<()> {
-    let mut data = Vec::with_capacity(4 + message.len());
+    let mut data = Vec::with_capacity(8 + message.len());
     data.extend_from_slice(&code.to_be_bytes());
     data.extend_from_slice(message.as_bytes());
     write_packet(
