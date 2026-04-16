@@ -479,7 +479,7 @@ For the generated route-parity inventories (which Go routes are ported), see:
 
 ### Template ACLs & Prebuilds
 
-3/3 complete
+4/4 complete
 
 | Route Path | Method | Handler Function | Status | Notes |
 |------------|--------|------------------|--------|-------|
@@ -530,7 +530,7 @@ For the generated route-parity inventories (which Go routes are ported), see:
 
 ### IDP Sync — Organization
 
-3/3 complete
+4/4 complete
 
 | Route Path | Method | Handler Function | Status | Notes |
 |------------|--------|------------------|--------|-------|
@@ -573,7 +573,7 @@ For the generated route-parity inventories (which Go routes are ported), see:
 
 ### Workspace Proxies
 
-4/10 complete
+5/11 complete
 
 | Route Path | Method | Handler Function | Status | Notes |
 |------------|--------|------------------|--------|-------|
