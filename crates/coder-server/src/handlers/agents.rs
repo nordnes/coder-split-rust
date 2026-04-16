@@ -2216,8 +2216,15 @@ async fn handle_push_logs(
             .and_then(Value::as_str)
             .unwrap_or("info")
             .to_owned();
+        let created_at = log_entry
+            .get("created_at")
+            .and_then(Value::as_str)
+            .and_then(|s| {
+                OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+            })
+            .unwrap_or(now);
         entries.push(coder_core::InsertAgentLogInput {
-            created_at: now,
+            created_at,
             output,
             level,
         });
@@ -2228,14 +2235,19 @@ async fn handle_push_logs(
         .await
     {
         Ok(inserted) => {
-            // Publish the lowest inserted log ID so streaming endpoints
-            // know where to pick up.
-            if let Some(first) = inserted.first() {
-                let notify = serde_json::json!({ "created_after": first.id - 1 });
-                let channel = coder_core::pubsub::workspace_agent_logs_channel(agent_id);
-                if let Ok(payload) = serde_json::to_vec(&notify) {
-                    let _ = pubsub.publish(&channel, &payload).await;
-                }
+            // Publish each new log entry individually so follow-mode
+            // subscribers receive the same format as patch_workspace_agent_logs.
+            let channel = coder_core::pubsub::workspace_agent_logs_channel(agent_id);
+            for log_row in &inserted {
+                let api_log = coder_core::WorkspaceAgentLog {
+                    id: log_row.id,
+                    created_at: log_row.created_at,
+                    output: log_row.output.clone(),
+                    level: convert_log_level(&log_row.level),
+                    source_id: log_row.log_source_id,
+                };
+                let payload = serde_json::to_vec(&api_log).unwrap_or_default();
+                let _ = pubsub.publish(&channel, &payload).await;
             }
             debug!(agent_id = %agent_id, count = inserted.len(), "inserted agent logs");
         }
