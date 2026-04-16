@@ -6012,6 +6012,7 @@ impl AppStore for PostgresStore {
         agent_id: Uuid,
         entries: &[UpsertAgentMetadataEntry],
     ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
         for entry in entries {
             sqlx::query(
                 "UPDATE workspace_agent_metadata
@@ -6023,10 +6024,11 @@ impl AppStore for PostgresStore {
             .bind(&entry.value)
             .bind(&entry.error)
             .bind(entry.collected_at)
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await
             .map_err(storage_error)?;
         }
+        tx.commit().await.map_err(storage_error)?;
         Ok(())
     }
 
