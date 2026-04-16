@@ -861,6 +861,8 @@ pub(crate) async fn post_oauth2_register(
 
     // Generate a registration access token for RFC 7592 client management
     // and persist its SHA-256 hash so the token can be verified later.
+    // This is a hard error: returning a token that can never be validated
+    // violates RFC 7591 §3.2 (the returned token must be usable).
     let registration_access_token = generate_registration_token();
     {
         use sha2::Digest;
@@ -870,7 +872,12 @@ pub(crate) async fn post_oauth2_register(
             .update_oauth2_provider_app_registration_token(app.id, &token_hash)
             .await
         {
-            tracing::warn!(app_id = %app.id, error = %e, "failed to persist registration access token hash");
+            tracing::error!(app_id = %app.id, error = %e, "failed to persist registration access token hash");
+            return Ok(oauth2_registration_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to persist registration access token",
+            ));
         }
     }
     let registration_client_uri = format!("{access_url}/oauth2/clients/{}", app.id);
@@ -1449,10 +1456,13 @@ async fn validate_registration_token(
     };
 
     let Some(stored_hash) = app.registration_access_token else {
+        // Apps created before the migration or via the admin API have no
+        // stored hash.  Per RFC 6750 §3.1, return 401 — this is an auth
+        // failure, not a server error.
         return Some(oauth2_registration_error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "server_error",
-            "Client has no registration access token",
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid registration access token",
         ));
     };
 
