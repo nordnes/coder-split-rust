@@ -9680,6 +9680,161 @@ impl AppStore for PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_coderd_replica(
+        &self,
+        input: coder_core::InsertCoderdReplicaInput,
+    ) -> Result<coder_core::CoderdReplicaRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            hostname: String,
+            relay_address: String,
+            region_id: i32,
+            version: String,
+            error: String,
+            database_latency: i32,
+            created_at: OffsetDateTime,
+            started_at: OffsetDateTime,
+            stopped_at: Option<OffsetDateTime>,
+            updated_at: OffsetDateTime,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "INSERT INTO replicas (
+                 id, proxy_id, hostname, relay_address, region_id, version,
+                 error, database_latency, primary_replica, started_at,
+                 stopped_at, created_at, updated_at
+             ) VALUES ($1, NULL, $2, $3, $4, $5, '', $6, TRUE, $7, NULL, $8, $9)
+             RETURNING id, hostname, relay_address, region_id, version,
+                       error, database_latency, created_at, started_at,
+                       stopped_at, updated_at",
+        )
+        .bind(input.id)
+        .bind(&input.hostname)
+        .bind(&input.relay_address)
+        .bind(input.region_id)
+        .bind(&input.version)
+        .bind(input.database_latency)
+        .bind(input.started_at)
+        .bind(input.created_at)
+        .bind(input.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(coder_core::CoderdReplicaRow {
+            id: row.id,
+            hostname: row.hostname,
+            relay_address: row.relay_address,
+            region_id: row.region_id,
+            version: row.version,
+            error: row.error,
+            database_latency: row.database_latency,
+            created_at: row.created_at,
+            started_at: row.started_at,
+            stopped_at: row.stopped_at,
+            updated_at: row.updated_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn refresh_coderd_replica(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE replicas SET updated_at = $2
+             WHERE id = $1 AND proxy_id IS NULL AND stopped_at IS NULL",
+        )
+        .bind(id)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_coderd_replica(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM replicas WHERE id = $1 AND proxy_id IS NULL")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_coderd_replicas(
+        &self,
+        updated_after: OffsetDateTime,
+    ) -> Result<Vec<coder_core::CoderdReplicaRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            hostname: String,
+            relay_address: String,
+            region_id: i32,
+            version: String,
+            error: String,
+            database_latency: i32,
+            created_at: OffsetDateTime,
+            started_at: OffsetDateTime,
+            stopped_at: Option<OffsetDateTime>,
+            updated_at: OffsetDateTime,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT id, hostname, relay_address, region_id, version,
+                    error, database_latency, created_at, started_at,
+                    stopped_at, updated_at
+             FROM replicas
+             WHERE proxy_id IS NULL
+               AND stopped_at IS NULL
+               AND updated_at > $1
+             ORDER BY created_at ASC",
+        )
+        .bind(updated_after)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| coder_core::CoderdReplicaRow {
+                id: r.id,
+                hostname: r.hostname,
+                relay_address: r.relay_address,
+                region_id: r.region_id,
+                version: r.version,
+                error: r.error,
+                database_latency: r.database_latency,
+                created_at: r.created_at,
+                started_at: r.started_at,
+                stopped_at: r.stopped_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn prune_stale_coderd_replicas(
+        &self,
+        older_than: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query("DELETE FROM replicas WHERE proxy_id IS NULL AND updated_at < $1")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected())
+    }
+
     // ----- Crypto keys -----
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]

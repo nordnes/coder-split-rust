@@ -40,6 +40,8 @@ pub(crate) mod helpers;
 pub mod metrics;
 pub(crate) mod middleware;
 pub mod rate_limit;
+pub mod replica_manager;
 
 pub use app::{AppState, build_router};
 pub use rate_limit::RateLimitState;
+pub use replica_manager::{ReplicaManager, ReplicaManagerOptions};

@@ -1,13 +1,22 @@
 //! Replica listing handler.
 
 use super::*;
+use crate::replica_manager::replica_from_row;
 use coder_core::api::Replica;
+use std::time::Duration;
+use time::OffsetDateTime;
+
+/// Default staleness cutoff when the replica manager is disabled.
+/// Mirrors `3 × DEFAULT_UPDATE_INTERVAL` from the Go implementation
+/// (`coder/enterprise/replicasync/replicasync.go` — `DefaultUpdateInterval`).
+const DEFAULT_REPLICA_STALENESS_SECS: u64 = 45;
 
 /// GET /api/v2/replicas — list active Coder replicas.
 ///
-/// In a high-availability deployment this would return all primary replicas
-/// from the replica manager.  Since the replica manager service is not yet
-/// implemented, we return an empty array.
+/// Ports `coder/enterprise/coderd/replicas.go:22`
+/// (`(*API).replicas`).  In the Go code the set of replicas is provided
+/// by the in-memory `replicasync.Manager`; here we query the database
+/// view that the manager populates, which is equivalent for `AllPrimary`.
 pub(crate) async fn get_replicas(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -30,10 +39,11 @@ pub(crate) async fn get_replicas(
         return Ok(resource_not_found_response());
     }
 
-    // TODO: Once a replicaManager service exists, query it for all primary
-    // replicas and convert them to `Replica` responses.  For now, return an
-    // empty array matching the Go single-replica / no-HA behaviour.
-    let replicas: Vec<Replica> = Vec::new();
+    let staleness = time::Duration::try_from(Duration::from_secs(DEFAULT_REPLICA_STALENESS_SECS))
+        .unwrap_or(time::Duration::seconds(45));
+    let threshold = OffsetDateTime::now_utc() - staleness;
+    let rows = state.store.list_coderd_replicas(threshold).await?;
+    let replicas: Vec<Replica> = rows.iter().map(replica_from_row).collect();
 
     Ok((StatusCode::OK, Json(replicas)).into_response())
 }

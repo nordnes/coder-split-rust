@@ -2218,7 +2218,7 @@ pub struct Replica {
     pub region_id: i32,
     /// Error message if the replica is unhealthy (empty string if healthy).
     pub error: String,
-    /// Database latency in nanoseconds.
+    /// Database latency in microseconds (matches Go `codersdk.Replica.DatabaseLatency`).
     pub database_latency: i64,
 }
 

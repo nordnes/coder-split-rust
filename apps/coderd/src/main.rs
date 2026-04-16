@@ -887,6 +887,23 @@ async fn run() -> Result<(), MainError> {
         CancellationToken::new(),
     );
 
+    // Start the replica manager: registers this coderd instance in the
+    // `replicas` table on startup, refreshes the row every
+    // `replica_update_interval`, and unregisters it on graceful shutdown.
+    // This powers the `/api/v2/replicas` HA view.
+    let replica_manager = coder_server::ReplicaManager::start(
+        store.clone(),
+        coder_server::ReplicaManagerOptions {
+            relay_address: config.access_url.to_string(),
+            region_id: 0,
+            version: BuildMetadata::default().version.clone(),
+            update_interval: Duration::from_secs(15),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| MainError::Config(format!("start replica manager: {error}")))?;
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -997,6 +1014,14 @@ async fn run() -> Result<(), MainError> {
         if let Err(e) = autobuild_handle.await {
             warn!(error = %e, "autobuild executor task panicked during shutdown");
         }
+    });
+
+    // 5b. Stop the replica manager: cancel the heartbeat loop and delete
+    //     this instance's row from the `replicas` table before the pool is
+    //     closed, so other replicas see us disappear promptly.
+    coordinator.register("replica_manager", async move {
+        let mut replica_manager = replica_manager;
+        replica_manager.shutdown().await;
     });
 
     // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
