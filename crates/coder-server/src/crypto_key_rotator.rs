@@ -20,6 +20,7 @@ use coder_core::enums::CryptoKeyFeature;
 use coder_core::ports::{AppStore, CryptoKeyRow, StorageError};
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, warn};
 
 /// Default interval between rotation sweeps in production.
@@ -158,8 +159,8 @@ impl CryptoKeyRotator {
     /// Spawns the rotator loop on the current Tokio runtime. Runs an initial
     /// sweep synchronously (as Go's `StartRotator` does) so newly-booted
     /// deployments always have at least one key per feature before serving
-    /// traffic.
-    pub async fn start(self) -> JoinHandle<()> {
+    /// traffic. The loop exits cleanly when `cancel` is triggered.
+    pub async fn start(self, cancel: CancellationToken) -> JoinHandle<()> {
         if let Err(error) = rotate_once(
             self.store.as_ref(),
             &self.options,
@@ -175,15 +176,23 @@ impl CryptoKeyRotator {
             // ran a sweep above.
             ticker.tick().await;
             loop {
-                ticker.tick().await;
-                if let Err(error) = rotate_once(
-                    self.store.as_ref(),
-                    &self.options,
-                    OffsetDateTime::now_utc(),
-                )
-                .await
-                {
-                    error!(%error, "crypto-key rotation sweep failed");
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => {
+                        debug!("crypto-key rotator shutting down");
+                        break;
+                    }
+                    _ = ticker.tick() => {
+                        if let Err(error) = rotate_once(
+                            self.store.as_ref(),
+                            &self.options,
+                            OffsetDateTime::now_utc(),
+                        )
+                        .await
+                        {
+                            error!(%error, "crypto-key rotation sweep failed");
+                        }
+                    }
                 }
             }
         })
@@ -263,16 +272,23 @@ async fn rotate_key<S: CryptoKeyStore + ?Sized>(
     options: &RotatorOptions,
 ) -> Result<(), StorageError> {
     let starts_at = min_starts_at(old, now, options.key_duration, options.interval);
-    insert_new_key(store, old.feature, starts_at).await?;
     // Give downstream services time to pick up the new key before we stop
     // honoring the old one. Mirrors Go's
     // `startsAt + 1h + tokenDuration(feature)`.
     let deletes_at = starts_at
         + time::Duration::hours(1)
         + duration_to_time_duration(token_duration(old.feature));
+    // Stamp the old key's `deletes_at` FIRST, then insert the successor.
+    // If the insert fails, the old key is already marked and `should_rotate_key`
+    // will skip it on subsequent sweeps; the "ensure at least one valid key"
+    // fallback in `rotate_once` will mint a fresh successor from now. Reversing
+    // the order risks leaving a successor in place with the old key still
+    // rotatable (deletes_at = None), which would cause unbounded key
+    // accumulation under persistent `update_deletes_at` failures.
     store
         .update_deletes_at(old.feature, old.sequence, Some(deletes_at))
         .await?;
+    insert_new_key(store, old.feature, starts_at).await?;
     debug!(
         feature = old.feature.as_str(),
         sequence = old.sequence,
@@ -286,8 +302,19 @@ async fn insert_new_key<S: CryptoKeyStore + ?Sized>(
     feature: CryptoKeyFeature,
     starts_at: OffsetDateTime,
 ) -> Result<(), StorageError> {
-    let existing = store.list_by_feature(feature).await?;
-    let max_sequence = existing.iter().map(|k| k.sequence).max().unwrap_or(0);
+    // Use `list_all()` (unfiltered) rather than `list_by_feature()`, which in
+    // production applies a `starts_at <= NOW() AND deletes_at IS NULL OR
+    // deletes_at > NOW()` filter. After `rotate_key` inserts a successor with a
+    // future `starts_at`, that row must still be visible here so we do not
+    // reuse its sequence and hit the `(feature, sequence)` PRIMARY KEY.
+    let max_sequence = store
+        .list_all()
+        .await?
+        .into_iter()
+        .filter(|k| k.feature == feature)
+        .map(|k| k.sequence)
+        .max()
+        .unwrap_or(0);
     let mut secret = vec![0u8; secret_byte_length(feature)];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
     store
@@ -370,12 +397,19 @@ mod tests {
             &self,
             feature: CryptoKeyFeature,
         ) -> Result<Vec<CryptoKeyRow>, StorageError> {
+            // Mirror production SQL: filter on `starts_at <= NOW()` and
+            // `deletes_at IS NULL OR deletes_at > NOW()`. Tests that need the
+            // unfiltered list should call `list_all`. This prevents the mock
+            // from silently masking TOCTOU bugs in rotator callers.
+            let now = OffsetDateTime::now_utc();
             Ok(self
                 .inner
                 .lock()
                 .expect("lock poisoned")
                 .iter()
                 .filter(|k| k.feature == feature)
+                .filter(|k| k.starts_at <= now)
+                .filter(|k| k.deletes_at.is_none_or(|d| d > now))
                 .cloned()
                 .collect())
         }

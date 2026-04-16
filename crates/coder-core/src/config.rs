@@ -364,6 +364,12 @@ impl ServerConfig {
                 default: Some("[]"),
                 description: "JSON array of DERP region probe metadata used by deployment health checks.",
             },
+            ConfigOption {
+                name: "derp-force-websockets",
+                env: "CODER_DERP_FORCE_WEBSOCKETS",
+                default: Some("false"),
+                description: "Force all DERP connections to use WebSockets instead of raw UDP/TCP.",
+            },
             // -- Server Lifecycle --
             ConfigOption {
                 name: "shutdown-grace-period-secs",

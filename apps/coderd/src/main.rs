@@ -40,6 +40,7 @@ use coder_core::{
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
+use coder_server::crypto_key_rotator::{CryptoKeyRotator, RotatorOptions};
 use coder_server::{AppState, build_router};
 use coder_workspaces::{
     ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker, LifecycleScheduler,
@@ -882,6 +883,14 @@ async fn run() -> Result<(), MainError> {
     let (_autobuild_executor, autobuild_handle) =
         AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
 
+    // Start the crypto-key rotator so proxy-facing signing keys are
+    // periodically rotated, retired, and hard-deleted past their grace
+    // window. Mirrors Go's `coderd/cryptokeys/rotate.go` StartRotator.
+    let crypto_key_rotator_cancel = CancellationToken::new();
+    let crypto_key_rotator_handle = CryptoKeyRotator::new(store.clone(), RotatorOptions::default())
+        .start(crypto_key_rotator_cancel.clone())
+        .await;
+
     // Start the lifecycle scheduler (autostart/autostop/failed-stop retry).
     let quiet_hours = parse_quiet_hours_schedule(&config.workspace.default_quiet_hours_schedule);
     let lifecycle_scheduler = LifecycleScheduler::start(
@@ -1000,6 +1009,15 @@ async fn run() -> Result<(), MainError> {
         autobuild_cancel.cancel();
         if let Err(e) = autobuild_handle.await {
             warn!(error = %e, "autobuild executor task panicked during shutdown");
+        }
+    });
+
+    // 5b. Cancel the crypto-key rotator and await completion so any in-flight
+    //     sweep finishes before the DB pool is closed.
+    coordinator.register("crypto_key_rotator", async move {
+        crypto_key_rotator_cancel.cancel();
+        if let Err(e) = crypto_key_rotator_handle.await {
+            warn!(error = %e, "crypto-key rotator task panicked during shutdown");
         }
     });
 
