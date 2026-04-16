@@ -1550,7 +1550,7 @@ pub(crate) mod tests {
         routing::{get, post},
     };
     use base64::Engine as _;
-    use coder_audit::{AuditEvent, AuditSink};
+    use coder_audit::{AuditAction, AuditEvent, AuditSink};
     use coder_auth::{
         OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_TOKEN_HEADER,
         hash_password,
@@ -1617,6 +1617,7 @@ pub(crate) mod tests {
         WorkspaceProxyHealthRecord, WorkspaceProxyRow, WorkspaceRecord,
         WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
     };
+    use coder_rbac::ResourceKind;
     use serde::Serialize;
     use serde_json::{Value, json};
     use time::OffsetDateTime;
@@ -1636,6 +1637,16 @@ pub(crate) mod tests {
     #[derive(Debug, Default)]
     struct MemoryAuditSink {
         events: Mutex<Vec<AuditEvent>>,
+    }
+
+    impl MemoryAuditSink {
+        /// Returns a snapshot of the events captured so far.
+        fn events(&self) -> Vec<AuditEvent> {
+            self.events
+                .lock()
+                .map(|events| events.clone())
+                .unwrap_or_default()
+        }
     }
 
     #[async_trait]
@@ -23879,6 +23890,369 @@ pub(crate) mod tests {
             response.status(),
             StatusCode::OK,
             "RFC 7009: always return 200 OK regardless of token validity"
+        );
+
+        Ok(())
+    }
+
+    // =====================================================================
+    // RFC 7009 — cascade invalidation + audit (gap-doc §5 #13)
+    //
+    // Ports from coder/coderd/oauth2provider/revoke.go: successful revocation
+    // must (1) delete the derived api_key row so dependent sessions cannot be
+    // reused, and (2) emit exactly one audit_logs entry per revocation.
+    // Unknown / wrong-owner / malformed requests remain silent per RFC 7009.
+    // =====================================================================
+
+    /// Builds an `AppState` plus handles to the `FakeStore` and the capturing
+    /// `MemoryAuditSink`. Mirrors `test_state_with_store` but preserves an
+    /// `Arc<MemoryAuditSink>` so tests can inspect emitted audit events.
+    fn test_state_with_memory_audit()
+    -> Result<(AppState, Arc<FakeStore>, Arc<MemoryAuditSink>), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        let store = Arc::new(FakeStore::new(true));
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let audit_sink = Arc::new(MemoryAuditSink::default());
+        let audit: Arc<dyn AuditSink> = audit_sink.clone();
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        let derp_server = coder_connectivity::derp::DerpServer::new(
+            coder_connectivity::derp::NodeKey::new([0u8; 32]),
+        );
+
+        // Force immediate flushing so tests don't race the batched sink.
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
+        config.audit_batch_flush_interval_ms = 1;
+        let state = AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store_trait,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            derp_server,
+            None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
+        )?;
+        Ok((state, store, audit_sink))
+    }
+
+    /// Test fixture: an OAuth2 provider app, its secret, an API key that was
+    /// minted for the user, and the `oauth2_provider_app_tokens` row that
+    /// links them. Mirrors the shape produced by `postTokens` in Go.
+    struct RevokeFixture {
+        app_id: Uuid,
+        user_id: Uuid,
+        api_key_id: String,
+        access_token: String,
+        refresh_token: String,
+        token_id: Uuid,
+        hash_prefix: Vec<u8>,
+    }
+
+    async fn seed_revoke_fixture(store: &FakeStore) -> Result<RevokeFixture, Box<dyn Error>> {
+        use sha2::{Digest, Sha256};
+
+        // 1) User
+        let user_input = coder_core::identity::CreateUserInput {
+            email: "oauth2-revoke@example.com".to_owned(),
+            username: "oauth2-revoke".to_owned(),
+            name: "OAuth2 Revoke".to_owned(),
+            password_hash: None,
+            login_type: coder_core::identity::LoginType::Oauth2ProviderApp,
+            status: coder_core::identity::UserStatus::Active,
+            organization_ids: Vec::new(),
+        };
+        let user = store.create_user(user_input).await?;
+
+        // 2) App
+        let app = store
+            .create_oauth2_provider_app(&coder_core::identity::CreateOAuth2ProviderAppInput {
+                name: "Revoke Cascade App".to_owned(),
+                icon: String::new(),
+                callback_url: "https://example.com/cb".to_owned(),
+                created_by: Some(user.id),
+            })
+            .await?;
+
+        // 3) Secret
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, b"sprefix1", b"shash1", "disp1")
+            .await?;
+
+        // 4) API key + token.  The access token IS the api-key secret: the
+        //    api-key's hashed_secret = SHA-256(access_token), and the token
+        //    record's hash_prefix = first 8 bytes of the raw access token.
+        let access_token = "access-token-bytes-are-at-least-16-chars".to_owned();
+        let refresh_token = "refresh-token-bytes-differ-from-access".to_owned();
+        let api_key_id = "revoke-ak-1".to_owned();
+        let hashed_secret = Sha256::digest(access_token.as_bytes()).to_vec();
+        let refresh_hash = Sha256::digest(refresh_token.as_bytes()).to_vec();
+        let hash_prefix = access_token.as_bytes()[..8].to_vec();
+        let now = OffsetDateTime::now_utc();
+        let expires = now + time::Duration::hours(1);
+
+        store
+            .create_api_key(coder_core::identity::CreateApiKeyInput {
+                id: api_key_id.clone(),
+                hashed_secret: hashed_secret.clone(),
+                user_id: user.id,
+                last_used: now,
+                expires_at: expires,
+                created_at: now,
+                updated_at: now,
+                login_type: coder_core::identity::LoginType::Oauth2ProviderApp,
+                scopes: Vec::new(),
+                token_name: "oauth2".to_owned(),
+                lifetime_seconds: 3600,
+                allow_list: Vec::new(),
+            })
+            .await?;
+
+        let token = store
+            .create_oauth2_provider_app_token(
+                &coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+                    expires_at: expires,
+                    hash_prefix: hash_prefix.clone(),
+                    refresh_hash,
+                    app_secret_id: secret.id,
+                    api_key_id: api_key_id.clone(),
+                    audience: String::new(),
+                    user_id: user.id,
+                },
+            )
+            .await?;
+
+        Ok(RevokeFixture {
+            app_id: app.id,
+            user_id: user.id,
+            api_key_id,
+            access_token,
+            refresh_token,
+            token_id: token.id,
+            hash_prefix,
+        })
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_access_token_cascades_and_emits_audit() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        // The fixture deliberately uses only URL-safe characters so we can
+        // format the body without escaping.
+        let body = format!(
+            "token={}&client_id={}",
+            fixture.access_token, fixture.app_id
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Cascade: derived API key and token row are both gone.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_none(),
+            "derived api_key must be invalidated"
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_none(),
+            "oauth2 token row must be removed"
+        );
+
+        // Allow the BatchedAuditSink background task to flush the event.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Exactly one audit event for this revocation.
+        let events = audit.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly one audit event, got {events:?}"
+        );
+        let event = &events[0];
+        assert_eq!(event.action, AuditAction::Delete);
+        assert_eq!(event.resource, ResourceKind::Oauth2ProviderAppToken);
+        assert_eq!(event.actor_user_id, Some(fixture.user_id));
+        assert_eq!(
+            event.target_id.as_deref(),
+            Some(fixture.token_id.to_string().as_str())
+        );
+        assert!(
+            !event.summary.contains(&fixture.access_token),
+            "audit summary must not leak the token secret, got: {}",
+            event.summary
+        );
+        assert!(event.summary.contains("access_token"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_refresh_token_cascades_and_emits_audit() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        let body = format!(
+            "token={}&client_id={}",
+            &fixture.refresh_token, fixture.app_id
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Cascade: revoking the refresh token invalidates the session
+        // api_key that was minted from it.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_none(),
+            "session api_key derived from refresh token must be invalidated"
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_none(),
+        );
+
+        // Allow the BatchedAuditSink background task to flush the event.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let events = audit.events();
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly one audit event, got {events:?}"
+        );
+        assert_eq!(events[0].resource, ResourceKind::Oauth2ProviderAppToken);
+        assert_eq!(events[0].action, AuditAction::Delete);
+        assert_eq!(events[0].actor_user_id, Some(fixture.user_id));
+        assert!(events[0].summary.contains("refresh_token"));
+        assert!(
+            !events[0].summary.contains(&fixture.refresh_token),
+            "audit summary must not leak the refresh token secret"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_unknown_token_returns_200_without_audit() -> Result<(), Box<dyn Error>>
+    {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "token=not-a-real-token-xxxxxxxxxxxxxx&client_id={}",
+                fixture.app_id
+            )))?;
+        let response = call(app, req).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "RFC 7009 requires 200 for unknown tokens to avoid disclosure"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Nothing was touched.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_some()
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_some(),
+        );
+
+        // No audit event — unknown tokens must be silent.
+        assert!(
+            audit.events().is_empty(),
+            "unknown-token revocation must not emit an audit event, got {:?}",
+            audit.events()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_wrong_client_is_silent() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        // A second app with no relation to the token.
+        let other_app = store
+            .create_oauth2_provider_app(&coder_core::identity::CreateOAuth2ProviderAppInput {
+                name: "Other App".to_owned(),
+                icon: String::new(),
+                callback_url: "https://example.com/other".to_owned(),
+                created_by: Some(fixture.user_id),
+            })
+            .await?;
+
+        let body = format!("token={}&client_id={}", &fixture.access_token, other_app.id);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Token and api_key remain because client_id did not own the token.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_some(),
+            "api_key must remain when client_id does not own the token"
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_some(),
+        );
+        assert!(
+            audit.events().is_empty(),
+            "wrong-client revocation must not emit an audit event"
         );
 
         Ok(())

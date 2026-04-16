@@ -24,7 +24,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use coder_audit::AuditAction;
+use coder_audit::{AuditAction, AuditEvent};
 use coder_auth::{
     OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError, cookie_from_headers,
     supported_auth_methods,
