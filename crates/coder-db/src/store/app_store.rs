@@ -1263,6 +1263,46 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        sqlx::query_scalar::<_, bool>(
+            "SELECT workspace_sharing_disabled
+             FROM organizations
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(organization_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        workspace_sharing_disabled: bool,
+    ) -> Result<Option<bool>, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        let updated = sqlx::query_scalar::<_, bool>(
+            "UPDATE organizations
+             SET workspace_sharing_disabled = $2, updated_at = NOW()
+             WHERE id = $1 AND deleted = false
+             RETURNING workspace_sharing_disabled",
+        )
+        .bind(organization_id)
+        .bind(workspace_sharing_disabled)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+        Ok(updated)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_organization_resource_counts(
         &self,
         id: Uuid,

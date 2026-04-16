@@ -2138,6 +2138,21 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn get_organization_sharing_settings(
+        &self,
+        _organization_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        _organization_id: Uuid,
+        _workspace_sharing_disabled: bool,
+    ) -> Result<Option<bool>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn batch_insert_workspace_build_parameters(
         &self,
         _params: Vec<WorkspaceBuildParameterRecord>,

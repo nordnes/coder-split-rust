@@ -1797,6 +1797,27 @@ pub trait IdentityStore: Send + Sync {
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
 
+    /// Reads the workspace sharing settings for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` where `disabled`
+    /// is the value of the `workspace_sharing_disabled` column.
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<bool>, StorageError>;
+
+    /// Updates the workspace sharing settings for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` with the newly
+    /// persisted value.
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        workspace_sharing_disabled: bool,
+    ) -> Result<Option<bool>, StorageError>;
+
     /// Lists members for an organization.
     async fn list_organization_members(
         &self,
@@ -3043,6 +3064,27 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
+
+    /// Reads the workspace sharing settings for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` where `disabled`
+    /// is the value of the `workspace_sharing_disabled` column.
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<bool>, StorageError>;
+
+    /// Updates the workspace sharing settings for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` with the newly
+    /// persisted value.
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        workspace_sharing_disabled: bool,
+    ) -> Result<Option<bool>, StorageError>;
 
     /// Lists members for an organization.
     async fn list_organization_members(
@@ -5760,6 +5802,26 @@ where
         AppStore::get_organization_resource_counts(self, id).await
     }
 
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        AppStore::get_organization_sharing_settings(self, organization_id).await
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        workspace_sharing_disabled: bool,
+    ) -> Result<Option<bool>, StorageError> {
+        AppStore::update_organization_sharing_settings(
+            self,
+            organization_id,
+            workspace_sharing_disabled,
+        )
+        .await
+    }
+
     async fn list_organization_members(
         &self,
         filter: OrganizationMemberListFilter,
@@ -6334,6 +6396,25 @@ where
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError> {
         (**self).get_organization_resource_counts(id).await
+    }
+
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        (**self)
+            .get_organization_sharing_settings(organization_id)
+            .await
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        workspace_sharing_disabled: bool,
+    ) -> Result<Option<bool>, StorageError> {
+        (**self)
+            .update_organization_sharing_settings(organization_id, workspace_sharing_disabled)
+            .await
     }
 
     async fn list_organization_members(

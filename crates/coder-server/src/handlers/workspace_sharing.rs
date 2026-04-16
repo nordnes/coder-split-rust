@@ -1,8 +1,41 @@
 //! Workspace sharing settings handlers.
+//!
+//! Ported from `coder/enterprise/coderd/workspacesharing.go`.
 
 use super::templates::resolve_organization;
 use super::*;
 use coder_core::api::{UpdateWorkspaceSharingSettingsRequest, WorkspaceSharingSettings};
+
+/// Translates a `shareable_workspace_owners` string into the persisted
+/// `workspace_sharing_disabled` boolean.
+///
+/// The Go upstream stores only a boolean — the `shareable_workspace_owners`
+/// enum is derived: `"none"` ↔ disabled, any other accepted value maps to
+/// enabled (not disabled).
+fn owners_to_disabled(owners: &str) -> bool {
+    owners == "none"
+}
+
+/// Renders the settings response for the given organization-level value.
+///
+/// Globally disabled sharing is OR-ed with the per-org flag so clients see the
+/// effective state.
+fn render_settings(
+    globally_disabled: bool,
+    organization_disabled: bool,
+) -> WorkspaceSharingSettings {
+    let effective_disabled = globally_disabled || organization_disabled;
+    let shareable_workspace_owners = if effective_disabled {
+        "none".to_owned()
+    } else {
+        "everyone".to_owned()
+    };
+    WorkspaceSharingSettings {
+        sharing_globally_disabled: globally_disabled,
+        sharing_disabled: effective_disabled,
+        shareable_workspace_owners,
+    }
+}
 
 /// GET /api/v2/organizations/{organization}/settings/workspace-sharing
 pub(crate) async fn get_workspace_sharing_settings(
@@ -34,24 +67,15 @@ pub(crate) async fn get_workspace_sharing_settings(
     }
 
     let globally_disabled = state.config.disable_workspace_sharing;
-
-    // TODO: Read `shareable_workspace_owners` from the organization record once
-    // the field is added to `OrganizationRecord` and `StoredOrganizationRow`.
-    // For now, default to "everyone" (sharing enabled) unless globally disabled.
-    let shareable_workspace_owners = if globally_disabled {
-        "none".to_owned()
-    } else {
-        "everyone".to_owned()
-    };
-    let sharing_disabled = shareable_workspace_owners == "none";
+    let organization_disabled = state
+        .store
+        .get_organization_sharing_settings(org.id)
+        .await?
+        .unwrap_or(false);
 
     Ok((
         StatusCode::OK,
-        Json(WorkspaceSharingSettings {
-            sharing_globally_disabled: globally_disabled,
-            sharing_disabled: sharing_disabled || globally_disabled,
-            shareable_workspace_owners,
-        }),
+        Json(render_settings(globally_disabled, organization_disabled)),
     )
         .into_response())
 }
@@ -108,53 +132,54 @@ pub(crate) async fn patch_workspace_sharing_settings(
 
     let globally_disabled = state.config.disable_workspace_sharing;
 
-    // Determine the new value for shareable_workspace_owners.
-    // `shareable_workspace_owners` takes precedence over the deprecated
-    // `sharing_disabled` boolean.
-    let new_owners = if let Some(owners) = request.shareable_workspace_owners {
-        owners
-    } else if let Some(disabled) = request.sharing_disabled {
-        if disabled {
-            "none".to_owned()
-        } else {
-            "everyone".to_owned()
-        }
+    // Determine the new value. `shareable_workspace_owners` takes precedence
+    // over the deprecated `sharing_disabled` boolean. When neither is present
+    // we simply return the current settings without any write.
+    let new_disabled: Option<bool> = if let Some(owners) = request.shareable_workspace_owners {
+        Some(owners_to_disabled(&owners))
     } else {
-        // No changes requested — return current state.
-        let current_owners = if globally_disabled {
-            "none".to_owned()
-        } else {
-            "everyone".to_owned()
-        };
-        let sharing_disabled = current_owners == "none";
+        request.sharing_disabled
+    };
+
+    let Some(new_disabled) = new_disabled else {
+        let organization_disabled = state
+            .store
+            .get_organization_sharing_settings(org.id)
+            .await?
+            .unwrap_or(false);
         return Ok((
             StatusCode::OK,
-            Json(WorkspaceSharingSettings {
-                sharing_globally_disabled: globally_disabled,
-                sharing_disabled: sharing_disabled || globally_disabled,
-                shareable_workspace_owners: current_owners,
-            }),
+            Json(render_settings(globally_disabled, organization_disabled)),
         )
             .into_response());
     };
 
-    // TODO: Inside a transaction:
-    //   1. Acquire advisory lock LockIDReconcileSystemRoles
-    //   2. Update the organization's shareable_workspace_owners column
-    //   3. Reconcile system roles
-    //   4. If sharing disabled, delete workspace ACLs for this org
-    //
-    // The actual database update requires adding the shareable_workspace_owners
-    // field to OrganizationRecord and the store layer.  Until that is wired,
-    // return 501 to avoid a false audit trail and misleading clients.
-    let _ = new_owners; // suppress unused-variable warning
+    let persisted = state
+        .store
+        .update_organization_sharing_settings(org.id, new_disabled)
+        .await?;
+
+    let Some(organization_disabled) = persisted else {
+        return Ok(not_found_response("Organization not found."));
+    };
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Organization,
+        Some(&context.user),
+        Some(org.id.to_string()),
+        if organization_disabled {
+            "disabled workspace sharing for organization"
+        } else {
+            "enabled workspace sharing for organization"
+        },
+    )
+    .await;
+
     Ok((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(ApiResponse::error(
-            "Not implemented.",
-            "Updating workspace sharing settings is not yet supported. \
-             The persistence layer for shareable_workspace_owners has not been wired.",
-        )),
+        StatusCode::OK,
+        Json(render_settings(globally_disabled, organization_disabled)),
     )
         .into_response())
 }
