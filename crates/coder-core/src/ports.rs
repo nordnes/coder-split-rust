@@ -4663,6 +4663,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         filter: crate::api::AIBridgeModelsFilter,
     ) -> Result<Vec<String>, StorageError>;
+
+    /// Returns the total quota allowance for a user in an organization.
+    ///
+    /// Mirrors `GetQuotaAllowanceForUser` in `coder/coderd/database/queries/quotas.sql`.
+    /// Sums `quota_allowance` across all groups the user is a member of in the
+    /// organization (including the implicit "Everyone" group).
+    async fn get_quota_allowance_for_user(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError>;
+
+    /// Returns the total quota consumed for a user in an organization.
+    ///
+    /// Mirrors `GetQuotaConsumedForUser` in `coder/coderd/database/queries/quotas.sql`.
+    /// Sums `daily_cost` across the latest build of each non-deleted workspace
+    /// owned by the user in the organization.
+    async fn get_quota_consumed_for_user(
+        &self,
+        owner_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError>;
 }
 
 /// Stored webpush subscription record.

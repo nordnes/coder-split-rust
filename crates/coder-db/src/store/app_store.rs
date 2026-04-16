@@ -9858,4 +9858,67 @@ impl AppStore for PostgresStore {
         let _ = filter;
         Ok(Vec::new())
     }
+
+    // -----------------------------------------------------------------------
+    // Workspace quotas (enterprise)
+    //
+    // Ports `GetQuotaAllowanceForUser` / `GetQuotaConsumedForUser` from
+    // `coder/coderd/database/queries/quotas.sql`.  The Go implementation uses
+    // the `group_members_expanded` view which unions `group_members` with
+    // `organization_members` (the implicit "Everyone" group has `id ==
+    // organization_id`).  We inline that union here rather than add a view.
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_quota_allowance_for_user(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(groups.quota_allowance), 0)::BIGINT
+             FROM groups
+             WHERE groups.organization_id = $2
+               AND (
+                   groups.id IN (
+                       SELECT group_id FROM group_members WHERE user_id = $1
+                   )
+                   OR groups.id IN (
+                       SELECT organization_id FROM organization_members WHERE user_id = $1
+                   )
+               )",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_quota_consumed_for_user(
+        &self,
+        owner_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar::<_, i64>(
+            "WITH latest_builds AS (
+                 SELECT DISTINCT ON (wb.workspace_id)
+                        wb.workspace_id,
+                        wb.daily_cost
+                 FROM workspace_builds wb
+                 INNER JOIN workspaces ON wb.workspace_id = workspaces.id
+                 WHERE NOT workspaces.deleted
+                   AND workspaces.owner_id = $1
+                   AND workspaces.organization_id = $2
+                 ORDER BY wb.workspace_id, wb.build_number DESC
+             )
+             SELECT COALESCE(SUM(daily_cost), 0)::BIGINT FROM latest_builds",
+        )
+        .bind(owner_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)
+    }
 }

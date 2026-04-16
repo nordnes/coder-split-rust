@@ -2365,4 +2365,20 @@ impl AppStore for BenchStore {
     ) -> Result<Vec<String>, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
+
+    async fn get_quota_allowance_for_user(
+        &self,
+        _user_id: Uuid,
+        _organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn get_quota_consumed_for_user(
+        &self,
+        _owner_id: Uuid,
+        _organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
 }
