@@ -2191,11 +2191,17 @@ async fn handle_push_logs(
         return;
     }
 
-    let log_source_id = msg
+    let log_source_id = match msg
         .get("log_source_id")
         .and_then(Value::as_str)
         .and_then(|s| Uuid::parse_str(s).ok())
-        .unwrap_or_else(Uuid::nil);
+    {
+        Some(id) => id,
+        None => {
+            debug!(agent_id = %agent_id, "push_logs missing or invalid log_source_id");
+            return;
+        }
+    };
 
     let now = OffsetDateTime::now_utc();
     let mut entries = Vec::with_capacity(logs.len());
