@@ -9412,6 +9412,356 @@ impl AppStore for PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
+    // ----- Workspace proxy registration -----
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn update_workspace_proxy_registration(
+        &self,
+        input: UpdateWorkspaceProxyRegistrationInput,
+    ) -> Result<WorkspaceProxyRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            name: String,
+            display_name: String,
+            icon: String,
+            url: String,
+            wildcard_hostname: String,
+            derp_enabled: bool,
+            derp_only: bool,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+            deleted: bool,
+            version: String,
+            region_id: i32,
+            token_hashed_secret: Vec<u8>,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "UPDATE workspace_proxies
+             SET url = $2, wildcard_hostname = $3, derp_enabled = $4, derp_only = $5,
+                 version = $6, updated_at = $7
+             WHERE id = $1
+             RETURNING id, name, display_name, icon,
+                       COALESCE(url, '') AS url,
+                       COALESCE(wildcard_hostname, '') AS wildcard_hostname,
+                       derp_enabled, derp_only,
+                       created_at, updated_at, deleted,
+                       COALESCE(version, '') AS version,
+                       region_id, token_hashed_secret",
+        )
+        .bind(input.id)
+        .bind(&input.url)
+        .bind(&input.wildcard_hostname)
+        .bind(input.derp_enabled)
+        .bind(input.derp_only)
+        .bind(&input.version)
+        .bind(input.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(WorkspaceProxyRow {
+            id: row.id,
+            name: row.name,
+            display_name: row.display_name,
+            icon: row.icon,
+            url: row.url,
+            wildcard_hostname: row.wildcard_hostname,
+            derp_enabled: row.derp_enabled,
+            derp_only: row.derp_only,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+            deleted: row.deleted,
+            version: row.version,
+            region_id: row.region_id,
+            token_hashed: row.token_hashed_secret,
+        })
+    }
+
+    // ----- Replicas -----
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn upsert_replica(&self, input: UpsertReplicaInput) -> Result<ReplicaRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            proxy_id: Uuid,
+            hostname: String,
+            relay_address: String,
+            region_id: i32,
+            version: String,
+            error: String,
+            database_latency: i32,
+            primary_replica: bool,
+            started_at: OffsetDateTime,
+            stopped_at: Option<OffsetDateTime>,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "INSERT INTO replicas (id, proxy_id, hostname, relay_address, region_id, version, error, database_latency, started_at, updated_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             ON CONFLICT (id) DO UPDATE SET
+                 hostname = EXCLUDED.hostname,
+                 relay_address = EXCLUDED.relay_address,
+                 region_id = EXCLUDED.region_id,
+                 version = EXCLUDED.version,
+                 error = EXCLUDED.error,
+                 database_latency = EXCLUDED.database_latency,
+                 updated_at = EXCLUDED.updated_at
+             RETURNING id, proxy_id, hostname, relay_address, region_id, version,
+                       error, database_latency, primary_replica, started_at, stopped_at,
+                       created_at, updated_at",
+        )
+        .bind(input.id)
+        .bind(input.proxy_id)
+        .bind(&input.hostname)
+        .bind(&input.relay_address)
+        .bind(input.region_id)
+        .bind(&input.version)
+        .bind(&input.error)
+        .bind(input.database_latency)
+        .bind(input.started_at)
+        .bind(input.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(ReplicaRow {
+            id: row.id,
+            proxy_id: row.proxy_id,
+            hostname: row.hostname,
+            relay_address: row.relay_address,
+            region_id: row.region_id,
+            version: row.version,
+            error: row.error,
+            database_latency: row.database_latency,
+            primary_replica: row.primary_replica,
+            started_at: row.started_at,
+            stopped_at: row.stopped_at,
+            created_at: row.created_at,
+            updated_at: row.updated_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_replicas_by_proxy_excluding(
+        &self,
+        proxy_id: Uuid,
+        exclude_id: Uuid,
+    ) -> Result<Vec<ReplicaRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            proxy_id: Uuid,
+            hostname: String,
+            relay_address: String,
+            region_id: i32,
+            version: String,
+            error: String,
+            database_latency: i32,
+            primary_replica: bool,
+            started_at: OffsetDateTime,
+            stopped_at: Option<OffsetDateTime>,
+            created_at: OffsetDateTime,
+            updated_at: OffsetDateTime,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT id, proxy_id, hostname, relay_address, region_id, version,
+                    error, database_latency, primary_replica, started_at, stopped_at,
+                    created_at, updated_at
+             FROM replicas
+             WHERE proxy_id = $1 AND id != $2 AND stopped_at IS NULL
+             ORDER BY created_at ASC",
+        )
+        .bind(proxy_id)
+        .bind(exclude_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| ReplicaRow {
+                id: r.id,
+                proxy_id: r.proxy_id,
+                hostname: r.hostname,
+                relay_address: r.relay_address,
+                region_id: r.region_id,
+                version: r.version,
+                error: r.error,
+                database_latency: r.database_latency,
+                primary_replica: r.primary_replica,
+                started_at: r.started_at,
+                stopped_at: r.stopped_at,
+                created_at: r.created_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_replica(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM replicas WHERE id = $1")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    // ----- Crypto keys -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_crypto_keys_by_feature(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+    ) -> Result<Vec<CryptoKeyRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            secret: Vec<u8>,
+            starts_at: OffsetDateTime,
+            deletes_at: Option<OffsetDateTime>,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT feature, sequence, secret, starts_at, deletes_at
+             FROM crypto_keys
+             WHERE feature = $1::crypto_key_feature
+               AND starts_at <= NOW()
+               AND (deletes_at IS NULL OR deletes_at > NOW())
+             ORDER BY sequence ASC",
+        )
+        .bind(feature)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| CryptoKeyRow {
+                feature: r.feature,
+                sequence: r.sequence,
+                secret: r.secret,
+                starts_at: r.starts_at,
+                deletes_at: r.deletes_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self, row), err(level = tracing::Level::WARN))]
+    async fn insert_crypto_key(&self, row: CryptoKeyRow) -> Result<CryptoKeyRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct StoredRow {
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            secret: Vec<u8>,
+            starts_at: OffsetDateTime,
+            deletes_at: Option<OffsetDateTime>,
+        }
+
+        let result = sqlx::query_as::<_, StoredRow>(
+            "INSERT INTO crypto_keys (feature, sequence, secret, starts_at, deletes_at)
+             VALUES ($1::crypto_key_feature, $2, $3, $4, $5)
+             RETURNING feature, sequence, secret, starts_at, deletes_at",
+        )
+        .bind(row.feature)
+        .bind(row.sequence)
+        .bind(&row.secret)
+        .bind(row.starts_at)
+        .bind(row.deletes_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(CryptoKeyRow {
+            feature: result.feature,
+            sequence: result.sequence,
+            secret: result.secret,
+            starts_at: result.starts_at,
+            deletes_at: result.deletes_at,
+        })
+    }
+
+    // ----- Workspace app stats -----
+
+    #[instrument(skip(self, stats), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_app_stats(&self, stats: &[Value]) -> Result<(), StorageError> {
+        for stat in stats {
+            let user_id: Option<Uuid> = stat
+                .get("user_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let workspace_id: Option<Uuid> = stat
+                .get("workspace_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let agent_id: Option<Uuid> = stat
+                .get("agent_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let access_method = stat
+                .get("access_method")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let slug_or_port = stat
+                .get("slug_or_port")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let session_id: Option<Uuid> = stat
+                .get("session_id")
+                .and_then(|v| v.as_str())
+                .and_then(|s| Uuid::parse_str(s).ok());
+            let requests: i32 = stat
+                .get("requests")
+                .and_then(|v| v.as_i64())
+                .map(|v| v as i32)
+                .unwrap_or(0);
+
+            // Parse timestamps or fall back to now.
+            let now = OffsetDateTime::now_utc();
+            let session_started_at = stat
+                .get("session_started_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+                })
+                .unwrap_or(now);
+            let session_ended_at = stat
+                .get("session_ended_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| {
+                    OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+                })
+                .unwrap_or(now);
+
+            sqlx::query(
+                "INSERT INTO workspace_app_stats (user_id, workspace_id, agent_id, access_method, slug_or_port, session_id, session_started_at, session_ended_at, requests)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)",
+            )
+            .bind(user_id.unwrap_or_default())
+            .bind(workspace_id.unwrap_or_default())
+            .bind(agent_id.unwrap_or_default())
+            .bind(access_method)
+            .bind(slug_or_port)
+            .bind(session_id.unwrap_or_default())
+            .bind(session_started_at)
+            .bind(session_ended_at)
+            .bind(requests)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        }
+
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // AI Bridge
     // -----------------------------------------------------------------------

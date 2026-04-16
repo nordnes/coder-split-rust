@@ -1712,6 +1712,8 @@ pub(crate) mod tests {
         stats_agents: Mutex<Vec<WorkspaceAgentStatInput>>,
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
         workspace_proxy_rows: Mutex<HashMap<Uuid, WorkspaceProxyRow>>,
+        replicas: Mutex<HashMap<Uuid, coder_core::ReplicaRow>>,
+        crypto_keys: Mutex<Vec<coder_core::CryptoKeyRow>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
         tasks: Mutex<HashMap<Uuid, TaskRecord>>,
         task_snapshots: Mutex<HashMap<Uuid, TaskSnapshotRecord>>,
@@ -1825,6 +1827,8 @@ pub(crate) mod tests {
                 stats_agents: Mutex::new(Vec::new()),
                 workspace_proxies: Mutex::new(HashMap::new()),
                 workspace_proxy_rows: Mutex::new(HashMap::new()),
+                replicas: Mutex::new(HashMap::new()),
+                crypto_keys: Mutex::new(Vec::new()),
                 provisioner_daemons: Mutex::new(HashMap::new()),
                 tasks: Mutex::new(HashMap::new()),
                 task_snapshots: Mutex::new(HashMap::new()),
@@ -9205,6 +9209,122 @@ pub(crate) mod tests {
             } else {
                 Ok(false)
             }
+        }
+
+        async fn update_workspace_proxy_registration(
+            &self,
+            input: coder_core::UpdateWorkspaceProxyRegistrationInput,
+        ) -> Result<WorkspaceProxyRow, StorageError> {
+            let mut map = self
+                .workspace_proxy_rows
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let row = map
+                .get_mut(&input.id)
+                .ok_or_else(|| StorageError::invalid_data("Workspace proxy not found"))?;
+            row.url = input.url;
+            row.wildcard_hostname = input.wildcard_hostname;
+            row.derp_enabled = input.derp_enabled;
+            row.derp_only = input.derp_only;
+            row.version = input.version;
+            row.updated_at = input.updated_at;
+            Ok(row.clone())
+        }
+
+        async fn upsert_replica(
+            &self,
+            input: coder_core::UpsertReplicaInput,
+        ) -> Result<coder_core::ReplicaRow, StorageError> {
+            let mut map = self
+                .replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let now = OffsetDateTime::now_utc();
+            let row = map
+                .entry(input.id)
+                .or_insert_with(|| coder_core::ReplicaRow {
+                    id: input.id,
+                    proxy_id: input.proxy_id,
+                    hostname: String::new(),
+                    relay_address: String::new(),
+                    region_id: 0,
+                    version: String::new(),
+                    error: String::new(),
+                    database_latency: 0,
+                    primary_replica: false,
+                    started_at: now,
+                    stopped_at: None,
+                    created_at: now,
+                    updated_at: now,
+                });
+            row.hostname = input.hostname;
+            row.relay_address = input.relay_address;
+            row.region_id = input.region_id;
+            row.version = input.version;
+            row.error = input.error;
+            row.database_latency = input.database_latency;
+            row.updated_at = input.updated_at;
+            Ok(row.clone())
+        }
+
+        async fn list_replicas_by_proxy_excluding(
+            &self,
+            proxy_id: Uuid,
+            exclude_id: Uuid,
+        ) -> Result<Vec<coder_core::ReplicaRow>, StorageError> {
+            let map = self
+                .replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map
+                .values()
+                .filter(|r| r.proxy_id == proxy_id && r.id != exclude_id && r.stopped_at.is_none())
+                .cloned()
+                .collect())
+        }
+
+        async fn delete_replica(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut map = self
+                .replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map.remove(&id).is_some())
+        }
+
+        async fn list_crypto_keys_by_feature(
+            &self,
+            feature: coder_core::enums::CryptoKeyFeature,
+        ) -> Result<Vec<coder_core::CryptoKeyRow>, StorageError> {
+            let keys = self
+                .crypto_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let now = OffsetDateTime::now_utc();
+            Ok(keys
+                .iter()
+                .filter(|k| {
+                    k.feature == feature
+                        && k.starts_at <= now
+                        && k.deletes_at.map_or(true, |d| d > now)
+                })
+                .cloned()
+                .collect())
+        }
+
+        async fn insert_crypto_key(
+            &self,
+            row: coder_core::CryptoKeyRow,
+        ) -> Result<coder_core::CryptoKeyRow, StorageError> {
+            let mut keys = self
+                .crypto_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            keys.push(row.clone());
+            Ok(row)
+        }
+
+        async fn insert_workspace_app_stats(&self, _stats: &[Value]) -> Result<(), StorageError> {
+            Ok(())
         }
 
         async fn list_aibridge_interceptions(

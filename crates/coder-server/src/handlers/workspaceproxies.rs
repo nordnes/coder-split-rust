@@ -3,17 +3,32 @@
 
 use super::*;
 use coder_core::api::{
-    CreateWorkspaceProxyRequest, CryptoKeysResponse, DeregisterWorkspaceProxyRequest,
-    IssueSignedAppTokenRequest, IssueSignedAppTokenResponse, PatchWorkspaceProxyRequest,
-    ProxyHealthReport, RegisterWorkspaceProxyRequest, RegisterWorkspaceProxyResponse,
-    ReportAppStatsRequest, UpdateWorkspaceProxyResponse, WorkspaceProxyResponse,
-    WorkspaceProxyStatus,
+    CreateWorkspaceProxyRequest, CryptoKeyResponse, CryptoKeysResponse,
+    DeregisterWorkspaceProxyRequest, IssueSignedAppTokenRequest, IssueSignedAppTokenResponse,
+    PatchWorkspaceProxyRequest, ProxyHealthReport, RegisterWorkspaceProxyRequest,
+    RegisterWorkspaceProxyResponse, ReplicaResponse, ReportAppStatsRequest,
+    UpdateWorkspaceProxyResponse, WorkspaceProxyResponse, WorkspaceProxyStatus,
 };
-use coder_core::ports::{CreateWorkspaceProxyInput, UpdateWorkspaceProxyInput, WorkspaceProxyRow};
+use coder_core::ports::{
+    CreateWorkspaceProxyInput, UpdateWorkspaceProxyInput, UpdateWorkspaceProxyRegistrationInput,
+    UpsertReplicaInput, WorkspaceProxyRow,
+};
 use coder_license::FeatureName;
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 use crate::handlers::licenses::{is_feature_entitled, require_enterprise_feature};
+use crate::handlers::workspace_apps::{AppRequest, create_signed_app_token};
+
+/// Hex-encodes a byte slice (lowercase).
+fn hex_encode(bytes: &[u8]) -> String {
+    use std::fmt::Write;
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for b in bytes {
+        let _ = write!(s, "{b:02x}");
+    }
+    s
+}
 
 /// Length of the random secret portion of a workspace proxy token.
 const PROXY_TOKEN_SECRET_LENGTH: usize = 64;
@@ -78,6 +93,69 @@ fn proxy_row_to_response(row: &WorkspaceProxyRow) -> WorkspaceProxyResponse {
         updated_at: row.updated_at,
         deleted: row.deleted,
         version: row.version.clone(),
+    }
+}
+
+/// Authenticates a proxy request by parsing the `Coder-Session-Token` header
+/// as `<proxy_id>:<secret>`, looking up the proxy, and comparing the hashed
+/// secret using constant-time comparison.
+///
+/// Returns the [`WorkspaceProxyRow`] on success, or an unauthorized response
+/// on failure.
+async fn authenticate_proxy_request(
+    state: &AppState,
+    headers: &HeaderMap,
+) -> Result<Result<WorkspaceProxyRow, Response>, AppError> {
+    let raw_token = headers
+        .get("Coder-Session-Token")
+        .or_else(|| headers.get("coder-session-token"))
+        .and_then(|v| v.to_str().ok());
+
+    let token_str = match raw_token {
+        Some(s) if !s.is_empty() => s,
+        _ => {
+            return Ok(Err(unauthorized_response(
+                "Missing proxy authentication token.",
+            )));
+        }
+    };
+
+    // Parse as "<proxy_id>:<secret>"
+    let (id_str, secret) = match token_str.split_once(':') {
+        Some(parts) => parts,
+        None => {
+            return Ok(Err(unauthorized_response(
+                "Invalid proxy authentication token format.",
+            )));
+        }
+    };
+
+    let proxy_id = match Uuid::parse_str(id_str) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok(Err(unauthorized_response(
+                "Invalid proxy authentication token.",
+            )));
+        }
+    };
+
+    let proxy = match state.store.find_workspace_proxy_by_id(proxy_id).await? {
+        Some(p) if !p.deleted => p,
+        _ => {
+            return Ok(Err(unauthorized_response(
+                "Workspace proxy not found or deleted.",
+            )));
+        }
+    };
+
+    // Hash the provided secret and compare with the stored hash.
+    let provided_hash = hash_proxy_secret(secret);
+    if provided_hash.ct_eq(&proxy.token_hashed).into() {
+        Ok(Ok(proxy))
+    } else {
+        Ok(Err(unauthorized_response(
+            "Invalid proxy authentication token.",
+        )))
     }
 }
 
@@ -404,9 +482,11 @@ pub(crate) async fn delete_workspace_proxy(
 
 /// `POST /api/v2/workspaceproxies/me/register` — register or refresh a proxy.
 ///
-/// In the Go reference this performs complex replica management and DERP mesh
-/// setup. The Rust port provides a stub that validates the request and returns
-/// a minimal response so the route exists and proxies can call it.
+/// Go reference: `coder/enterprise/coderd/workspaceproxy.go` →
+/// `workspaceProxyRegister()`.
+///
+/// Called periodically (every ~30s) by each proxy replica to update its
+/// registration and refresh the replica entry.
 pub(crate) async fn workspace_proxy_register(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -418,15 +498,10 @@ pub(crate) async fn workspace_proxy_register(
         return Ok(require_enterprise_feature(&FeatureName::WorkspaceProxy));
     }
 
-    // Proxy auth: validate that a proxy token header is present.
-    // Full proxy-token authentication is not yet wired; for now we just
-    // check the header exists so the route shape is correct.
-    let _proxy_token = match headers
-        .get("Coder-Session-Token")
-        .or_else(|| headers.get("coder-session-token"))
-    {
-        Some(v) => v.clone(),
-        None => return Ok(unauthorized_response("Missing proxy authentication token.")),
+    // Authenticate proxy token.
+    let proxy = match authenticate_proxy_request(&state, &headers).await? {
+        Ok(p) => p,
+        Err(resp) => return Ok(resp),
     };
 
     let Json(request) = match payload {
@@ -465,20 +540,85 @@ pub(crate) async fn workspace_proxy_register(
             .into_response());
     }
 
-    // Return a minimal registration response (stub).
+    let now = OffsetDateTime::now_utc();
+
+    // 1. Update the proxy's registration fields.
+    state
+        .store
+        .update_workspace_proxy_registration(UpdateWorkspaceProxyRegistrationInput {
+            id: proxy.id,
+            url: request.access_url,
+            wildcard_hostname: request.wildcard_hostname,
+            derp_enabled: request.derp_enabled,
+            derp_only: request.derp_only,
+            version: request.version.clone(),
+            updated_at: now,
+        })
+        .await?;
+
+    // Compute the effective region_id for this proxy's replicas.
+    let region_id = proxy.region_id;
+
+    // 2. Upsert the replica record.
+    state
+        .store
+        .upsert_replica(UpsertReplicaInput {
+            id: request.replica_id,
+            proxy_id: proxy.id,
+            hostname: request.hostname,
+            relay_address: request.replica_relay_address,
+            region_id,
+            version: request.version,
+            error: request.replica_error,
+            database_latency: 0,
+            started_at: now,
+            updated_at: now,
+        })
+        .await?;
+
+    // 3. Query sibling replicas (same proxy, excluding current).
+    let siblings = state
+        .store
+        .list_replicas_by_proxy_excluding(proxy.id, request.replica_id)
+        .await?;
+
+    let sibling_responses: Vec<ReplicaResponse> = siblings
+        .iter()
+        .map(|r| ReplicaResponse {
+            id: r.id,
+            hostname: r.hostname.clone(),
+            created_at: r.created_at,
+            relay_address: r.relay_address.clone(),
+            region_id: r.region_id,
+            error: r.error.clone(),
+            database_latency: r.database_latency,
+        })
+        .collect();
+
+    // 4. Build the DERP mesh key. In Go this comes from the DB
+    // (`GetDERPMeshKey`). For now, use the hex-encoded app_signing_key.
+    let derp_mesh_key = if request.derp_enabled {
+        hex_encode(&state.app_signing_key)
+    } else {
+        String::new()
+    };
+
     Ok((
         StatusCode::CREATED,
         Json(RegisterWorkspaceProxyResponse {
-            derp_mesh_key: String::new(),
-            derp_region_id: 0,
+            derp_mesh_key,
+            derp_region_id: region_id,
             derp_force_websockets: false,
-            sibling_replicas: Vec::new(),
+            sibling_replicas: sibling_responses,
         }),
     )
         .into_response())
 }
 
 /// `POST /api/v2/workspaceproxies/me/deregister` — deregister a proxy replica.
+///
+/// Go reference: `coder/enterprise/coderd/workspaceproxy.go` →
+/// `workspaceProxyDeregister()`.
 pub(crate) async fn workspace_proxy_deregister(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -490,12 +630,10 @@ pub(crate) async fn workspace_proxy_deregister(
         return Ok(require_enterprise_feature(&FeatureName::WorkspaceProxy));
     }
 
-    let _proxy_token = match headers
-        .get("Coder-Session-Token")
-        .or_else(|| headers.get("coder-session-token"))
-    {
-        Some(v) => v.clone(),
-        None => return Ok(unauthorized_response("Missing proxy authentication token.")),
+    // Authenticate proxy token.
+    let _proxy = match authenticate_proxy_request(&state, &headers).await? {
+        Ok(p) => p,
+        Err(resp) => return Ok(resp),
     };
 
     let Json(request) = match payload {
@@ -511,17 +649,21 @@ pub(crate) async fn workspace_proxy_deregister(
             .into_response());
     }
 
-    // Stub: in production this would update the replica table and publish
-    // replicasync events. For now just acknowledge.
+    // Delete the replica record.
+    state.store.delete_replica(request.replica_id).await?;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
 /// `GET /api/v2/workspaceproxies/me/coordinate` — WebSocket endpoint for
 /// proxy-to-coderd coordination (tailnet multi-agent).
 ///
-/// This is a WebSocket upgrade endpoint. The full tailnet coordination
-/// protocol is not yet implemented; the handler accepts the upgrade and
-/// immediately closes the connection with a message.
+/// Go reference: `coder/enterprise/coderd/workspaceproxycoordinate.go` →
+/// `workspaceProxyCoordinate()`.
+///
+/// Keeps the WebSocket alive with ping/pong and logs received messages.
+/// Full tailnet coordination will be implemented when the connectivity
+/// crate supports multi-agent proxy coordination.
 pub(crate) async fn workspace_proxy_coordinate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -533,26 +675,44 @@ pub(crate) async fn workspace_proxy_coordinate(
         return Ok(require_enterprise_feature(&FeatureName::WorkspaceProxy));
     }
 
-    let _proxy_token = match headers
-        .get("Coder-Session-Token")
-        .or_else(|| headers.get("coder-session-token"))
-    {
-        Some(v) => v.clone(),
-        None => return Ok(unauthorized_response("Missing proxy authentication token.")),
+    // Authenticate proxy token.
+    let _proxy = match authenticate_proxy_request(&state, &headers).await? {
+        Ok(p) => p,
+        Err(resp) => return Ok(resp),
     };
 
     Ok(ws.on_upgrade(|mut socket| async move {
-        // Stub: close immediately. Full tailnet coordination will be
-        // implemented when the connectivity crate is complete.
+        // Minimal coordinate loop: keep alive with ping/pong, log messages.
+        loop {
+            match socket.recv().await {
+                Some(Ok(Message::Ping(data))) => {
+                    if socket.send(Message::Pong(data)).await.is_err() {
+                        break;
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => {
+                    break;
+                }
+                Some(Ok(msg)) => {
+                    tracing::debug!("proxy coordinate received: {msg:?}");
+                }
+                Some(Err(_)) => {
+                    break;
+                }
+            }
+        }
         let close = CloseFrame {
             code: axum::extract::ws::close_code::NORMAL,
-            reason: "coordinate stub — not yet implemented".into(),
+            reason: "coordinate session ended".into(),
         };
         let _ = socket.send(Message::Close(Some(close))).await;
     }))
 }
 
 /// `GET /api/v2/workspaceproxies/me/crypto-keys` — fetch signing keys.
+///
+/// Go reference: `coder/enterprise/coderd/workspaceproxy.go` →
+/// `workspaceProxyCryptoKeys()`.
 pub(crate) async fn workspace_proxy_crypto_keys(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -564,16 +724,14 @@ pub(crate) async fn workspace_proxy_crypto_keys(
         return Ok(require_enterprise_feature(&FeatureName::WorkspaceProxy));
     }
 
-    let _proxy_token = match headers
-        .get("Coder-Session-Token")
-        .or_else(|| headers.get("coder-session-token"))
-    {
-        Some(v) => v.clone(),
-        None => return Ok(unauthorized_response("Missing proxy authentication token.")),
+    // Authenticate proxy token.
+    let _proxy = match authenticate_proxy_request(&state, &headers).await? {
+        Ok(p) => p,
+        Err(resp) => return Ok(resp),
     };
 
-    let feature = params.get("feature").cloned().unwrap_or_default();
-    if feature.is_empty() {
+    let feature_str = params.get("feature").cloned().unwrap_or_default();
+    if feature_str.is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
@@ -586,30 +744,68 @@ pub(crate) async fn workspace_proxy_crypto_keys(
 
     // Allowed features (matches Go whitelistedCryptoKeyFeatures).
     let allowed = ["workspace_apps_token", "workspace_apps_api_key"];
-    if !allowed.contains(&feature.as_str()) {
+    if !allowed.contains(&feature_str.as_str()) {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                format!("Invalid feature: \"{feature}\""),
+                format!("Invalid feature: \"{feature_str}\""),
                 "",
             )),
         )
             .into_response());
     }
 
-    // Stub: return an empty key set. Real implementation will query the
-    // crypto_keys table once it is ported.
-    Ok((
-        StatusCode::OK,
-        Json(CryptoKeysResponse {
-            crypto_keys: Vec::new(),
-        }),
-    )
-        .into_response())
+    let feature = match coder_core::enums::CryptoKeyFeature::from_str(&feature_str) {
+        Ok(f) => f,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    format!("Invalid feature: \"{feature_str}\""),
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Query active keys for the feature.
+    let mut keys = state.store.list_crypto_keys_by_feature(feature).await?;
+
+    // If no keys exist, auto-generate one (lazy creation, matches Go behavior).
+    if keys.is_empty() {
+        let mut secret = vec![0u8; 32];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+        let new_key = coder_core::CryptoKeyRow {
+            feature,
+            sequence: 1,
+            secret,
+            starts_at: OffsetDateTime::now_utc(),
+            deletes_at: None,
+        };
+        let inserted = state.store.insert_crypto_key(new_key).await?;
+        keys.push(inserted);
+    }
+
+    let crypto_keys: Vec<CryptoKeyResponse> = keys
+        .iter()
+        .map(|k| CryptoKeyResponse {
+            feature: k.feature.as_str().to_owned(),
+            secret: hex_encode(&k.secret),
+            sequence: k.sequence,
+            starts_at: k.starts_at,
+            deletes_at: k.deletes_at,
+        })
+        .collect();
+
+    Ok((StatusCode::OK, Json(CryptoKeysResponse { crypto_keys })).into_response())
 }
 
 /// `POST /api/v2/workspaceproxies/me/issue-signed-app-token` — issue a
 /// signed app token on behalf of a user via the proxy.
+///
+/// Go reference: `coder/enterprise/coderd/workspaceproxy.go` →
+/// `issueSignedAppTokenFromProxy()`.
 pub(crate) async fn workspace_proxy_issue_signed_app_token(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -621,25 +817,74 @@ pub(crate) async fn workspace_proxy_issue_signed_app_token(
         return Ok(require_enterprise_feature(&FeatureName::WorkspaceProxy));
     }
 
-    let _proxy_token = match headers
-        .get("Coder-Session-Token")
-        .or_else(|| headers.get("coder-session-token"))
-    {
-        Some(v) => v.clone(),
-        None => return Ok(unauthorized_response("Missing proxy authentication token.")),
+    // Authenticate proxy token.
+    let _proxy = match authenticate_proxy_request(&state, &headers).await? {
+        Ok(p) => p,
+        Err(resp) => return Ok(resp),
     };
 
-    let Json(_request) = match payload {
+    let Json(request) = match payload {
         Ok(r) => r,
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // Stub: the full token issuance flow requires the WorkspaceAppsProvider
-    // which is not yet ported. Return a placeholder.
+    // Validate the session token from the request body: look up the user.
+    if request.session_token.is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Missing session_token.".to_string(), "")),
+        )
+            .into_response());
+    }
+
+    // Build a temporary HeaderMap with the user's session token so we can
+    // authenticate them via the existing helper.
+    let mut user_headers = HeaderMap::new();
+    if let Ok(hv) = HeaderValue::from_str(&request.session_token) {
+        user_headers.insert("Coder-Session-Token", hv);
+    } else {
+        return Ok(unauthorized_response("Invalid session token."));
+    }
+
+    let Some(user_context) = authenticate_request(&state, &user_headers).await? else {
+        return Ok(unauthorized_response("Invalid or expired session token."));
+    };
+
+    // Parse the app request from the JSON value.
+    let app_request: AppRequest = match serde_json::from_value(request.app_request) {
+        Ok(r) => r,
+        Err(e) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(format!("Invalid app_request: {e}"), "")),
+            )
+                .into_response());
+        }
+    };
+
+    // Create the signed app token.
+    let signed_token = match create_signed_app_token(
+        &state.app_signing_key,
+        &app_request,
+        user_context.actor.user_id,
+    ) {
+        Ok(token) => token,
+        Err(e) => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    format!("Failed to create signed app token: {e}"),
+                    "",
+                )),
+            )
+                .into_response());
+        }
+    };
+
     Ok((
         StatusCode::CREATED,
         Json(IssueSignedAppTokenResponse {
-            signed_token_str: String::new(),
+            signed_token_str: signed_token,
         }),
     )
         .into_response())
@@ -647,6 +892,9 @@ pub(crate) async fn workspace_proxy_issue_signed_app_token(
 
 /// `POST /api/v2/workspaceproxies/me/app-stats` — report app usage stats
 /// from a workspace proxy.
+///
+/// Go reference: `coder/enterprise/coderd/workspaceproxy.go` →
+/// `workspaceProxyReportAppStats()`.
 pub(crate) async fn workspace_proxy_report_app_stats(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -658,19 +906,24 @@ pub(crate) async fn workspace_proxy_report_app_stats(
         return Ok(require_enterprise_feature(&FeatureName::WorkspaceProxy));
     }
 
-    let _proxy_token = match headers
-        .get("Coder-Session-Token")
-        .or_else(|| headers.get("coder-session-token"))
-    {
-        Some(v) => v.clone(),
-        None => return Ok(unauthorized_response("Missing proxy authentication token.")),
+    // Authenticate proxy token.
+    let _proxy = match authenticate_proxy_request(&state, &headers).await? {
+        Ok(p) => p,
+        Err(resp) => return Ok(resp),
     };
 
-    let Json(_request) = match payload {
+    let Json(request) = match payload {
         Ok(r) => r,
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // Stub: in production this would forward stats to the stats reporter.
+    // Insert stats into the database.
+    if !request.stats.is_empty() {
+        state
+            .store
+            .insert_workspace_app_stats(&request.stats)
+            .await?;
+    }
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }

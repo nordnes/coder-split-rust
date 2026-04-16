@@ -834,6 +834,96 @@ pub struct WorkspaceProxyRow {
     pub token_hashed: Vec<u8>,
 }
 
+/// Input for updating a workspace proxy's registration fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpdateWorkspaceProxyRegistrationInput {
+    /// Proxy identifier.
+    pub id: Uuid,
+    /// Access URL.
+    pub url: String,
+    /// Wildcard hostname.
+    pub wildcard_hostname: String,
+    /// Whether DERP is enabled.
+    pub derp_enabled: bool,
+    /// Whether DERP-only.
+    pub derp_only: bool,
+    /// Running version string.
+    pub version: String,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+}
+
+/// Stored replica record for workspace proxy instances.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReplicaRow {
+    /// Replica identifier.
+    pub id: Uuid,
+    /// Parent proxy identifier.
+    pub proxy_id: Uuid,
+    /// OS hostname.
+    pub hostname: String,
+    /// DERP relay address.
+    pub relay_address: String,
+    /// DERP region ID.
+    pub region_id: i32,
+    /// Running version.
+    pub version: String,
+    /// Error message (for debugging).
+    pub error: String,
+    /// Database latency in microseconds.
+    pub database_latency: i32,
+    /// Whether this is the primary replica.
+    pub primary_replica: bool,
+    /// When the replica started.
+    pub started_at: OffsetDateTime,
+    /// When the replica was stopped (if applicable).
+    pub stopped_at: Option<OffsetDateTime>,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Last update time.
+    pub updated_at: OffsetDateTime,
+}
+
+/// Input for upserting a replica record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpsertReplicaInput {
+    /// Replica identifier.
+    pub id: Uuid,
+    /// Parent proxy identifier.
+    pub proxy_id: Uuid,
+    /// OS hostname.
+    pub hostname: String,
+    /// DERP relay address.
+    pub relay_address: String,
+    /// DERP region ID.
+    pub region_id: i32,
+    /// Running version.
+    pub version: String,
+    /// Error message.
+    pub error: String,
+    /// Database latency in microseconds.
+    pub database_latency: i32,
+    /// When the replica started.
+    pub started_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+}
+
+/// Stored crypto key record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CryptoKeyRow {
+    /// Feature the key is for.
+    pub feature: crate::enums::CryptoKeyFeature,
+    /// Key sequence number.
+    pub sequence: i32,
+    /// Secret key material.
+    pub secret: Vec<u8>,
+    /// When the key becomes active.
+    pub starts_at: OffsetDateTime,
+    /// When the key can no longer be used.
+    pub deletes_at: Option<OffsetDateTime>,
+}
+
 /// Upsert payload for one provisioner daemon health record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProvisionerDaemonHealthInput {
@@ -4490,6 +4580,43 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     /// Soft-deletes a workspace proxy.
     async fn soft_delete_workspace_proxy(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Updates a workspace proxy's registration fields (URL, wildcard, DERP, version).
+    async fn update_workspace_proxy_registration(
+        &self,
+        input: UpdateWorkspaceProxyRegistrationInput,
+    ) -> Result<WorkspaceProxyRow, StorageError>;
+
+    // ----- Replicas -----
+
+    /// Upserts a replica record (insert or update on conflict).
+    async fn upsert_replica(&self, input: UpsertReplicaInput) -> Result<ReplicaRow, StorageError>;
+
+    /// Lists replicas belonging to a proxy, excluding one by ID.
+    async fn list_replicas_by_proxy_excluding(
+        &self,
+        proxy_id: Uuid,
+        exclude_id: Uuid,
+    ) -> Result<Vec<ReplicaRow>, StorageError>;
+
+    /// Deletes a replica record by its ID.
+    async fn delete_replica(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    // ----- Crypto keys -----
+
+    /// Lists active crypto keys for a given feature.
+    async fn list_crypto_keys_by_feature(
+        &self,
+        feature: crate::enums::CryptoKeyFeature,
+    ) -> Result<Vec<CryptoKeyRow>, StorageError>;
+
+    /// Inserts a new crypto key record.
+    async fn insert_crypto_key(&self, row: CryptoKeyRow) -> Result<CryptoKeyRow, StorageError>;
+
+    // ----- Workspace app stats -----
+
+    /// Inserts workspace app stats entries.
+    async fn insert_workspace_app_stats(&self, stats: &[Value]) -> Result<(), StorageError>;
 
     // -----------------------------------------------------------------------
     // AI Bridge domain
