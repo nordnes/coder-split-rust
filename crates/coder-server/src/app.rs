@@ -144,6 +144,214 @@ pub(crate) const PUBLIC_API_KEY_SCOPES: &[&str] = &[
     "workspace:stop",
     "workspace:update",
 ];
+
+/// Descriptive metadata for each public API key scope: `(name, description, resources)`.
+///
+/// `PUBLIC_API_KEY_SCOPES` is the ordering source of truth; this table enriches
+/// every entry with a human-readable description and the list of resources the
+/// scope unlocks. A unit test asserts that every scope in
+/// `PUBLIC_API_KEY_SCOPES` has a matching entry here.
+pub(crate) const PUBLIC_API_KEY_SCOPE_METADATA: &[(&str, &str, &[&str])] = &[
+    (
+        "audit_log:*",
+        "Full access to audit log resources.",
+        &["audit_log"],
+    ),
+    (
+        "audit_log:create",
+        "Create audit log entries.",
+        &["audit_log"],
+    ),
+    ("audit_log:read", "Read audit log entries.", &["audit_log"]),
+    (
+        "api_key:*",
+        "Full access to API key resources.",
+        &["api_key"],
+    ),
+    ("api_key:create", "Create API keys.", &["api_key"]),
+    ("api_key:delete", "Delete API keys.", &["api_key"]),
+    ("api_key:read", "Read API keys.", &["api_key"]),
+    ("api_key:update", "Update API keys.", &["api_key"]),
+    (
+        "coder:all",
+        "Full API access across all Coder resources.",
+        &["*"],
+    ),
+    (
+        "coder:apikeys.manage_self",
+        "Manage the caller's own API keys.",
+        &["api_key"],
+    ),
+    (
+        "coder:application_connect",
+        "Connect to workspace-hosted applications.",
+        &["workspace"],
+    ),
+    (
+        "deployment_stats:*",
+        "Full access to deployment statistics.",
+        &["deployment_stats"],
+    ),
+    (
+        "deployment_stats:read",
+        "Read deployment statistics.",
+        &["deployment_stats"],
+    ),
+    (
+        "coder:templates.author",
+        "Author and publish templates and upload supporting files.",
+        &["template", "file"],
+    ),
+    (
+        "coder:templates.build",
+        "Build templates and upload supporting files.",
+        &["template", "file"],
+    ),
+    (
+        "coder:workspaces.access",
+        "Access workspaces, including SSH and application connections.",
+        &["workspace"],
+    ),
+    (
+        "coder:workspaces.create",
+        "Create new workspaces from templates.",
+        &["workspace", "template"],
+    ),
+    (
+        "coder:workspaces.delete",
+        "Delete existing workspaces.",
+        &["workspace"],
+    ),
+    (
+        "coder:workspaces.operate",
+        "Start, stop, and manage the lifecycle of workspaces.",
+        &["workspace"],
+    ),
+    ("file:*", "Full access to file resources.", &["file"]),
+    ("file:create", "Upload files.", &["file"]),
+    ("file:read", "Read file contents and metadata.", &["file"]),
+    (
+        "organization:*",
+        "Full access to organization resources.",
+        &["organization"],
+    ),
+    (
+        "organization:delete",
+        "Delete organizations.",
+        &["organization"],
+    ),
+    (
+        "organization:read",
+        "Read organization resources.",
+        &["organization"],
+    ),
+    (
+        "organization:update",
+        "Update organization resources.",
+        &["organization"],
+    ),
+    ("task:*", "Full access to task resources.", &["task"]),
+    ("task:create", "Create tasks.", &["task"]),
+    ("task:delete", "Delete tasks.", &["task"]),
+    ("task:read", "Read tasks.", &["task"]),
+    ("task:update", "Update tasks.", &["task"]),
+    (
+        "template:*",
+        "Full access to template resources.",
+        &["template"],
+    ),
+    ("template:create", "Create templates.", &["template"]),
+    ("template:delete", "Delete templates.", &["template"]),
+    ("template:read", "Read templates.", &["template"]),
+    ("template:update", "Update templates.", &["template"]),
+    (
+        "template:use",
+        "Use templates to create workspaces.",
+        &["template"],
+    ),
+    (
+        "user:read_personal",
+        "Read the caller's own profile.",
+        &["user"],
+    ),
+    (
+        "user:update_personal",
+        "Update the caller's own profile.",
+        &["user"],
+    ),
+    (
+        "user_secret:*",
+        "Full access to user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:create",
+        "Create user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:delete",
+        "Delete user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:read",
+        "Read user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:update",
+        "Update user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "workspace:*",
+        "Full access to workspace resources.",
+        &["workspace"],
+    ),
+    (
+        "workspace:application_connect",
+        "Connect to workspace-hosted applications.",
+        &["workspace"],
+    ),
+    ("workspace:create", "Create workspaces.", &["workspace"]),
+    ("workspace:delete", "Delete workspaces.", &["workspace"]),
+    (
+        "workspace:read",
+        "Read workspace resources.",
+        &["workspace"],
+    ),
+    (
+        "workspace:ssh",
+        "Open SSH sessions to workspaces.",
+        &["workspace"],
+    ),
+    (
+        "workspace:start",
+        "Start stopped workspaces.",
+        &["workspace"],
+    ),
+    ("workspace:stop", "Stop running workspaces.", &["workspace"]),
+    (
+        "workspace:update",
+        "Update workspace resources.",
+        &["workspace"],
+    ),
+];
+
+/// Looks up descriptive metadata for a public API key scope by name.
+///
+/// Returns `None` if the scope name is not present in
+/// `PUBLIC_API_KEY_SCOPE_METADATA`. Callers that iterate
+/// `PUBLIC_API_KEY_SCOPES` are guaranteed a match (enforced by unit test).
+pub(crate) fn public_api_key_scope_metadata(
+    name: &str,
+) -> Option<(&'static str, &'static [&'static str])> {
+    PUBLIC_API_KEY_SCOPE_METADATA
+        .iter()
+        .find(|(scope_name, _, _)| *scope_name == name)
+        .map(|(_, description, resources)| (*description, *resources))
+}
 pub(crate) const VALID_HEALTH_SECTIONS: &[&str] = &[
     "DERP",
     "AccessURL",

@@ -10,14 +10,22 @@ pub(crate) struct TokenListQuery {
     include_expired: bool,
 }
 
-/// GET /api/v2/auth/scopes — list available API key scopes.
+/// GET /api/v2/auth/scopes — list available API key scopes, each with its
+/// human-readable description and the set of resources it unlocks.
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
-    Json(ExternalApiKeyScopes {
-        external: PUBLIC_API_KEY_SCOPES
-            .iter()
-            .map(|scope| (*scope).to_owned())
-            .collect(),
-    })
+    let external = PUBLIC_API_KEY_SCOPES
+        .iter()
+        .map(|scope| {
+            let (description, resources) =
+                public_api_key_scope_metadata(scope).unwrap_or(("", &[] as &[&str]));
+            ApiKeyScopeMetadata {
+                name: (*scope).to_owned(),
+                description: description.to_owned(),
+                resources: resources.iter().map(|r| (*r).to_owned()).collect(),
+            }
+        })
+        .collect();
+    Json(ExternalApiKeyScopes { external })
 }
 
 /// GET /api/v2/users/authmethods — return the supported authentication methods.
@@ -1365,4 +1373,96 @@ pub(crate) async fn post_authcheck(
     }
 
     Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    #[tokio::test]
+    async fn list_api_key_scopes_enriches_every_public_scope() {
+        let Json(body) = list_api_key_scopes().await;
+
+        assert_eq!(
+            body.external.len(),
+            PUBLIC_API_KEY_SCOPES.len(),
+            "every public scope must appear in the response",
+        );
+
+        for (index, scope) in PUBLIC_API_KEY_SCOPES.iter().enumerate() {
+            let entry = &body.external[index];
+            assert_eq!(entry.name, *scope, "order must match PUBLIC_API_KEY_SCOPES");
+            assert!(
+                !entry.description.trim().is_empty(),
+                "scope {scope} must have a non-empty description",
+            );
+            assert!(
+                !entry.resources.is_empty(),
+                "scope {scope} must unlock at least one resource",
+            );
+            for resource in &entry.resources {
+                assert!(
+                    !resource.trim().is_empty(),
+                    "scope {scope} has an empty resource entry",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_api_key_scopes_uses_snake_case_json_field_names() {
+        let Json(body) = list_api_key_scopes().await;
+        let value = serde_json::to_value(&body).expect("serialize response");
+
+        let external = value
+            .get("external")
+            .and_then(Value::as_array)
+            .expect("response must have an `external` array");
+
+        let Some(first) = external.first() else {
+            panic!("response must contain at least one scope");
+        };
+
+        let first_obj = first.as_object().expect("scope entries are JSON objects");
+        assert!(
+            first_obj.contains_key("name"),
+            "scope entries must have a snake_case `name` field",
+        );
+        assert!(
+            first_obj.contains_key("description"),
+            "scope entries must have a snake_case `description` field",
+        );
+        assert!(
+            first_obj.contains_key("resources"),
+            "scope entries must have a snake_case `resources` field",
+        );
+        // Guard against camelCase regressions.
+        assert!(!first_obj.contains_key("resourceList"));
+        assert!(!first_obj.contains_key("resourcesList"));
+    }
+
+    #[test]
+    fn public_api_key_scope_metadata_covers_every_public_scope() {
+        for scope in PUBLIC_API_KEY_SCOPES {
+            let metadata = public_api_key_scope_metadata(scope);
+            assert!(
+                metadata.is_some(),
+                "PUBLIC_API_KEY_SCOPE_METADATA is missing an entry for {scope}",
+            );
+            let (description, resources) = match metadata {
+                Some(value) => value,
+                None => continue,
+            };
+            assert!(
+                !description.trim().is_empty(),
+                "scope {scope} has an empty description in the metadata table",
+            );
+            assert!(
+                !resources.is_empty(),
+                "scope {scope} has no resources in the metadata table",
+            );
+        }
+    }
 }
