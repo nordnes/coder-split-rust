@@ -5991,7 +5991,9 @@ impl AppStore for PostgresStore {
     ) -> Result<(), StorageError> {
         sqlx::query(
             "UPDATE workspace_agents
-             SET lifecycle_state = $2, started_at = $3, ready_at = $4
+             SET lifecycle_state = $2::workspace_agent_lifecycle_state,
+                 started_at = COALESCE($3, started_at),
+                 ready_at = COALESCE($4, ready_at)
              WHERE id = $1",
         )
         .bind(agent_id)
@@ -6012,11 +6014,9 @@ impl AppStore for PostgresStore {
     ) -> Result<(), StorageError> {
         for entry in entries {
             sqlx::query(
-                "INSERT INTO workspace_agent_metadata
-                     (workspace_agent_id, key, value, error, collected_at)
-                 VALUES ($1, $2, $3, $4, $5)
-                 ON CONFLICT (workspace_agent_id, key)
-                 DO UPDATE SET value = $3, error = $4, collected_at = $5",
+                "UPDATE workspace_agent_metadata
+                 SET value = $3, error = $4, collected_at = $5
+                 WHERE workspace_agent_id = $1 AND key = $2",
             )
             .bind(agent_id)
             .bind(&entry.key)

@@ -1969,6 +1969,18 @@ async fn handle_report_stats(
         }
     };
 
+    // Look up the workspace associated with this agent to populate
+    // user_id, workspace_id, and template_id for analytics queries.
+    let workspace = store
+        .find_workspace_by_agent_id(agent_id)
+        .await
+        .ok()
+        .flatten();
+    let (user_id, workspace_id, template_id) = match workspace {
+        Some(ref w) => (Some(w.owner_id), Some(w.id), Some(w.template_id)),
+        None => (None, None, None),
+    };
+
     let connections_by_proto = stats
         .get("connections_by_proto")
         .cloned()
@@ -1977,9 +1989,9 @@ async fn handle_report_stats(
     let input = coder_core::WorkspaceAgentStatInput {
         id: Uuid::new_v4(),
         created_at: now,
-        user_id: None,
-        workspace_id: None,
-        template_id: None,
+        user_id,
+        workspace_id,
+        template_id,
         agent_id,
         connections_by_proto,
         connection_count: stats
@@ -2070,7 +2082,7 @@ async fn handle_report_lifecycle(
         WorkspaceAgentLifecycleState::Starting => (Some(now), None),
         WorkspaceAgentLifecycleState::Ready
         | WorkspaceAgentLifecycleState::StartTimeout
-        | WorkspaceAgentLifecycleState::StartError => (Some(now), Some(now)),
+        | WorkspaceAgentLifecycleState::StartError => (None, Some(now)),
         _ => (None, None),
     };
 
@@ -2124,11 +2136,18 @@ async fn handle_update_metadata(
             .and_then(Value::as_str)
             .unwrap_or_default()
             .to_owned();
+        let collected_at = entry
+            .get("collected_at")
+            .and_then(Value::as_str)
+            .and_then(|s| {
+                OffsetDateTime::parse(s, &time::format_description::well_known::Rfc3339).ok()
+            })
+            .unwrap_or(now);
         entries.push(coder_core::UpsertAgentMetadataEntry {
             key,
             value,
             error,
-            collected_at: now,
+            collected_at,
         });
     }
 
