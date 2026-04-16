@@ -126,6 +126,12 @@ pub struct ServerConfig {
     pub scim_api_key: String,
     /// Message displayed to users suggesting they upgrade the CLI.
     pub cli_upgrade_message: String,
+    /// Whether to cryptographically verify cloud-provider instance-identity
+    /// documents submitted to the `/workspaceagents/{aws,azure,google}-instance-identity`
+    /// endpoints. Disabled by default for local development and for the
+    /// existing in-memory test harness, which cannot produce platform-signed
+    /// payloads. Production deployments SHOULD set this to `true`.
+    pub verify_instance_identity: bool,
 }
 
 impl ServerConfig {
@@ -1491,6 +1497,7 @@ mod tests {
             docs_url: "https://coder.com/docs/coder-oss".to_owned(),
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
+            verify_instance_identity: false,
         }
     }
 

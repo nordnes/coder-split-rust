@@ -100,6 +100,7 @@ fn bench_app_state() -> AppState {
         docs_url: String::new(),
         scim_api_key: String::new(),
         cli_upgrade_message: String::new(),
+        verify_instance_identity: false,
     };
 
     AppState::new(

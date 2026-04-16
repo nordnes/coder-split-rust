@@ -1410,6 +1410,7 @@ mod tests {
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
             worker: coder_core::config::WorkerConfig::default(),
+            verify_instance_identity: false,
         }
     }
 

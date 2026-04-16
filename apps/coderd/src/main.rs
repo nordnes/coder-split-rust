@@ -209,6 +209,12 @@ struct ServerArgs {
     #[arg(long, env = "CODER_SESSION_CACHE_TTL_SECS", default_value_t = 30)]
     session_cache_ttl_secs: u64,
 
+    /// Cryptographically verify AWS/Azure/GCP instance-identity tokens on the
+    /// workspace-agent bootstrap endpoints. Off by default for local
+    /// development; strongly recommended in production.
+    #[arg(long, env = "CODER_VERIFY_INSTANCE_IDENTITY", default_value_t = false)]
+    verify_instance_identity: bool,
+
     /// Audit batch flush interval in milliseconds.
     #[arg(
         long,
@@ -1219,6 +1225,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         docs_url: args.docs_url,
         scim_api_key: args.scim_api_key,
         cli_upgrade_message: args.cli_upgrade_message,
+        verify_instance_identity: args.verify_instance_identity,
     })
 }
 
