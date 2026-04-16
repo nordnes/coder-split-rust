@@ -1246,10 +1246,13 @@ pub(crate) async fn post_oauth2_revoke(
                         .await;
                 }
             }
-        }
 
-        // RFC 7009: always return 200 OK.
-        return Ok(StatusCode::OK.into_response());
+            // Token was verified (even if ownership didn't match) — no need
+            // to try the refresh-token path.  RFC 7009: always return 200 OK.
+            return Ok(StatusCode::OK.into_response());
+        }
+        // If verification failed (prefix collision), fall through to the
+        // refresh-token path below.
     }
 
     // --- Refresh token path ---
