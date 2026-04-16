@@ -6924,8 +6924,13 @@ pub(crate) mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             if let Some(agent) = agents.get_mut(&agent_id) {
                 agent.lifecycle_state = lifecycle_state.to_owned();
-                agent.started_at = started_at;
-                agent.ready_at = ready_at;
+                // Mirror COALESCE behavior: only overwrite if Some.
+                if started_at.is_some() {
+                    agent.started_at = started_at;
+                }
+                if ready_at.is_some() {
+                    agent.ready_at = ready_at;
+                }
             }
             Ok(())
         }
