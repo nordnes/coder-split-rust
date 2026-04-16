@@ -859,12 +859,20 @@ pub(crate) async fn post_oauth2_register(
     let access_url = state.config.access_url.to_string();
     let access_url = access_url.trim_end_matches('/');
 
-    // Generate a random registration access token for RFC 7592 client management.
-    // NOTE: This token is NOT persisted or verified — the RFC 7592 endpoints
-    // (GET/PUT/DELETE /oauth2/clients/{client_id}) currently reject all requests
-    // because the DB lacks a registration_access_token_hash column.
-    // A future migration will add token storage and hash verification.
+    // Generate a registration access token for RFC 7592 client management
+    // and persist its SHA-256 hash so the token can be verified later.
     let registration_access_token = generate_registration_token();
+    {
+        use sha2::Digest;
+        let token_hash = sha2::Sha256::digest(registration_access_token.as_bytes()).to_vec();
+        if let Err(e) = state
+            .store
+            .update_oauth2_provider_app_registration_token(app.id, &token_hash)
+            .await
+        {
+            tracing::warn!(app_id = %app.id, error = %e, "failed to persist registration access token hash");
+        }
+    }
     let registration_client_uri = format!("{access_url}/oauth2/clients/{}", app.id);
 
     let now = OffsetDateTime::now_utc().unix_timestamp();
@@ -912,11 +920,6 @@ pub(crate) async fn get_oauth2_client_configuration(
     Path(client_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    // Validate registration access token
-    if let Some(err_response) = validate_registration_token(&headers) {
-        return Ok(err_response);
-    }
-
     let client_uuid = match Uuid::parse_str(&client_id) {
         Ok(id) => id,
         Err(_) => {
@@ -927,6 +930,13 @@ pub(crate) async fn get_oauth2_client_configuration(
             ));
         }
     };
+
+    // Validate registration access token against stored hash.
+    if let Some(err_response) =
+        validate_registration_token(&headers, &*state.store, client_uuid).await
+    {
+        return Ok(err_response);
+    }
 
     let app = match state.oauth2_provider.get_app(client_uuid).await {
         Ok(app) => app,
@@ -978,11 +988,6 @@ pub(crate) async fn put_oauth2_client_configuration(
     headers: HeaderMap,
     payload: Result<Json<OAuth2ClientRegistrationRequest>, JsonRejection>,
 ) -> Result<Response, AppError> {
-    // Validate registration access token
-    if let Some(err_response) = validate_registration_token(&headers) {
-        return Ok(err_response);
-    }
-
     let client_uuid = match Uuid::parse_str(&client_id) {
         Ok(id) => id,
         Err(_) => {
@@ -993,6 +998,13 @@ pub(crate) async fn put_oauth2_client_configuration(
             ));
         }
     };
+
+    // Validate registration access token against stored hash.
+    if let Some(err_response) =
+        validate_registration_token(&headers, &*state.store, client_uuid).await
+    {
+        return Ok(err_response);
+    }
 
     let Json(req) = match payload {
         Ok(r) => r,
@@ -1081,11 +1093,6 @@ pub(crate) async fn delete_oauth2_client_configuration(
     Path(client_id): Path<String>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
-    // Validate registration access token
-    if let Some(err_response) = validate_registration_token(&headers) {
-        return Ok(err_response);
-    }
-
     let client_uuid = match Uuid::parse_str(&client_id) {
         Ok(id) => id,
         Err(_) => {
@@ -1096,6 +1103,13 @@ pub(crate) async fn delete_oauth2_client_configuration(
             ));
         }
     };
+
+    // Validate registration access token against stored hash.
+    if let Some(err_response) =
+        validate_registration_token(&headers, &*state.store, client_uuid).await
+    {
+        return Ok(err_response);
+    }
 
     // Verify app exists before deleting
     match state.oauth2_provider.get_app(client_uuid).await {
@@ -1176,20 +1190,99 @@ pub(crate) async fn post_oauth2_revoke(
         }
     }
 
-    // Token revocation is not yet fully implemented. The Go reference
-    // implementation looks up tokens by hash and revokes the associated
-    // API key + refresh token, but the Rust store lacks the necessary
-    // token-to-user lookup.  Return `unsupported_token_type` so callers
-    // know the token was NOT revoked, instead of silently returning 200
-    // which would mislead clients into believing revocation succeeded.
-    Ok((
-        StatusCode::BAD_REQUEST,
-        Json(OAuth2ErrorResponse {
-            error: "unsupported_token_type".to_owned(),
-            error_description: "Token revocation is not yet implemented".to_owned(),
-        }),
-    )
-        .into_response())
+    // Try to revoke the token. We attempt both access-token and
+    // refresh-token lookups since the two formats are not easily
+    // distinguishable in the Rust backend (both are opaque base64).
+
+    // --- Access token path ---
+    // The hash_prefix stored in the token record is the first 8 bytes
+    // of the raw access token string (not hashed).
+    let access_prefix = if req.token.len() >= 8 {
+        &req.token.as_bytes()[..8]
+    } else {
+        req.token.as_bytes()
+    };
+
+    if let Ok(Some(token_record)) = state
+        .store
+        .find_oauth2_provider_app_token_by_prefix(access_prefix)
+        .await
+    {
+        // Verify the full token matches the API key's hashed secret
+        // (the access token IS the API key secret — see generate_token_pair).
+        use sha2::Digest;
+        use subtle::ConstantTimeEq;
+
+        let mut verified = false;
+        if let Ok(Some(api_key)) = state
+            .store
+            .find_api_key_by_id(&token_record.api_key_id)
+            .await
+        {
+            let token_hash = sha2::Sha256::digest(req.token.as_bytes());
+            if bool::from(
+                api_key
+                    .hashed_secret
+                    .as_slice()
+                    .ct_eq(token_hash.as_slice()),
+            ) {
+                verified = true;
+            }
+        }
+
+        if verified {
+            // Verify ownership: the token's app must match the requesting client.
+            if let Ok(Some(secret)) = state
+                .store
+                .find_oauth2_provider_app_secret_by_id(token_record.app_secret_id)
+                .await
+            {
+                if secret.app_id == client_id {
+                    // Delete the API key first (cascades in Go; explicit here).
+                    let _ = state.store.delete_api_key(&token_record.api_key_id).await;
+                    let _ = state
+                        .store
+                        .delete_oauth2_provider_app_token(token_record.id)
+                        .await;
+                }
+            }
+        }
+
+        // RFC 7009: always return 200 OK.
+        return Ok(StatusCode::OK.into_response());
+    }
+
+    // --- Refresh token path ---
+    // The refresh_hash stored in the token record is SHA-256(refresh_token).
+    {
+        use sha2::Digest;
+
+        let refresh_hash = sha2::Sha256::digest(req.token.as_bytes()).to_vec();
+        if let Ok(Some(token_record)) = state
+            .store
+            .find_oauth2_provider_app_token_by_refresh_hash(&refresh_hash)
+            .await
+        {
+            // Verify ownership.
+            if let Ok(Some(secret)) = state
+                .store
+                .find_oauth2_provider_app_secret_by_id(token_record.app_secret_id)
+                .await
+            {
+                if secret.app_id == client_id {
+                    let _ = state.store.delete_api_key(&token_record.api_key_id).await;
+                    let _ = state
+                        .store
+                        .delete_oauth2_provider_app_token(token_record.id)
+                        .await;
+                }
+            }
+        }
+    }
+
+    // RFC 7009: always return 200 OK regardless of whether the token
+    // was found, invalid, or belonged to another client.
+    Ok(StatusCode::OK.into_response())
 }
 
 // ---------------------------------------------------------------------------
@@ -1296,11 +1389,16 @@ fn oauth2_registration_error(status: StatusCode, error_code: &str, description: 
 
 /// Validate the Authorization: Bearer <token> header for RFC 7592 endpoints.
 ///
-/// Currently **always rejects** because registration access tokens are not
-/// persisted (the DB has no `registration_access_token_hash` column yet).
-/// Once token storage is added, this should verify the token's SHA-256 hash
-/// against the stored value, matching Go's `apikey.ValidateHash()` approach.
-fn validate_registration_token(headers: &HeaderMap) -> Option<Response> {
+/// Extracts the Bearer token, hashes it with SHA-256, looks up the app
+/// by `app_id`, and compares the hash against the stored
+/// `registration_access_token` using constant-time comparison.
+///
+/// Returns `None` on success, or `Some(error_response)` on failure.
+async fn validate_registration_token(
+    headers: &HeaderMap,
+    store: &dyn AppStore,
+    app_id: Uuid,
+) -> Option<Response> {
     let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok());
 
     let Some(auth_header) = auth_header else {
@@ -1328,17 +1426,47 @@ fn validate_registration_token(headers: &HeaderMap) -> Option<Response> {
         ));
     }
 
-    // Registration access token verification is not yet implemented.
-    // The token generated during POST /oauth2/register is not persisted,
-    // so we cannot verify it. Reject all requests until a DB migration
-    // adds the `registration_access_token_hash` column and the store
-    // gains verification support.
-    let _ = token;
-    Some(oauth2_registration_error(
-        StatusCode::UNAUTHORIZED,
-        "invalid_token",
-        "Registration access token verification is not yet implemented",
-    ))
+    // Look up the app to get the stored registration access token hash.
+    let app = match store.find_oauth2_provider_app_by_id(app_id).await {
+        Ok(Some(app)) => app,
+        Ok(None) => {
+            return Some(oauth2_registration_error(
+                StatusCode::UNAUTHORIZED,
+                "invalid_token",
+                "Client not found",
+            ));
+        }
+        Err(_) => {
+            return Some(oauth2_registration_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to retrieve client",
+            ));
+        }
+    };
+
+    let Some(stored_hash) = app.registration_access_token else {
+        return Some(oauth2_registration_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "server_error",
+            "Client has no registration access token",
+        ));
+    };
+
+    // Compare the provided token's SHA-256 hash against the stored hash.
+    use sha2::Digest;
+    use subtle::ConstantTimeEq;
+
+    let provided_hash = sha2::Sha256::digest(token.as_bytes());
+    if !bool::from(stored_hash.as_slice().ct_eq(provided_hash.as_slice())) {
+        return Some(oauth2_registration_error(
+            StatusCode::UNAUTHORIZED,
+            "invalid_token",
+            "Invalid registration access token",
+        ));
+    }
+
+    None
 }
 
 pub(crate) fn handle_oauth2_provider_error(

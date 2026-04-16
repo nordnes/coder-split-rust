@@ -1227,6 +1227,14 @@ mod tests {
             Err(StorageError::unavailable("not implemented in MockStore"))
         }
 
+        async fn update_oauth2_provider_app_registration_token(
+            &self,
+            _app_id: Uuid,
+            _hash: &[u8],
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
         async fn list_oauth2_provider_app_secrets(
             &self,
             _app_id: Uuid,

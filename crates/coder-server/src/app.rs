@@ -7220,6 +7220,7 @@ pub(crate) mod tests {
                 callback_url: input.callback_url.clone(),
                 redirect_uris: Vec::new(),
                 created_by: input.created_by,
+                registration_access_token: None,
             };
             self.oauth2_apps
                 .lock()
@@ -7291,6 +7292,21 @@ pub(crate) mod tests {
                     .retain(|_, t| !secret_ids.contains(&t.app_secret_id));
             }
             Ok(removed)
+        }
+
+        async fn update_oauth2_provider_app_registration_token(
+            &self,
+            app_id: Uuid,
+            hash: &[u8],
+        ) -> Result<(), StorageError> {
+            let mut apps = self
+                .oauth2_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(app) = apps.get_mut(&app_id) {
+                app.registration_access_token = Some(hash.to_vec());
+            }
+            Ok(())
         }
 
         async fn list_oauth2_provider_app_secrets(
@@ -23594,8 +23610,8 @@ pub(crate) mod tests {
             .and_then(Value::as_str)
             .ok_or("no desc")?;
         assert!(
-            desc.contains("not yet implemented"),
-            "should say not yet implemented, got: {desc}"
+            desc.contains("Client not found"),
+            "should say Client not found for non-existent app, got: {desc}"
         );
 
         Ok(())
@@ -23658,7 +23674,7 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn rfc7009_revoke_valid_format_returns_unsupported() -> Result<(), Box<dyn Error>> {
+    async fn rfc7009_revoke_unknown_token_returns_200() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
@@ -23682,18 +23698,18 @@ pub(crate) mod tests {
             .and_then(Value::as_str)
             .ok_or("missing id")?;
 
+        // RFC 7009: server MUST respond with 200 even if the token is
+        // invalid, expired, or was never issued.
         let req = Request::builder()
             .method(Method::POST)
             .uri("/oauth2/revoke")
             .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
             .body(Body::from(format!("token=some-token&client_id={app_id}")))?;
         let response = call(app, req).await?;
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-        let body = response_json(response).await?;
         assert_eq!(
-            body.get("error").and_then(Value::as_str),
-            Some("unsupported_token_type"),
-            "should return unsupported_token_type"
+            response.status(),
+            StatusCode::OK,
+            "RFC 7009: always return 200 OK regardless of token validity"
         );
 
         Ok(())

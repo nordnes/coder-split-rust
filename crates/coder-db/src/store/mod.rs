@@ -828,6 +828,7 @@ struct StoredOAuth2ProviderAppRow {
     callback_url: String,
     redirect_uris: Vec<String>,
     created_by: Option<Uuid>,
+    registration_access_token: Option<Vec<u8>>,
 }
 
 #[derive(Debug, FromRow)]
@@ -2183,6 +2184,7 @@ fn oauth2_provider_app_from_row(row: StoredOAuth2ProviderAppRow) -> OAuth2Provid
         callback_url: row.callback_url,
         redirect_uris: row.redirect_uris,
         created_by: row.created_by,
+        registration_access_token: row.registration_access_token,
     }
 }
 
