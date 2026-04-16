@@ -543,11 +543,7 @@ fn collect_rust_handler_routes_from_content(
                 if let Some(router_start) = block.find("Router::new()") {
                     let nested_prefix = join_path(prefix, &captures["path"]);
                     let nested = &block[router_start + "Router::new()".len()..];
-                    collect_rust_handler_routes_from_content(
-                        nested,
-                        &nested_prefix,
-                        routes,
-                    )?;
+                    collect_rust_handler_routes_from_content(nested, &nested_prefix, routes)?;
                 }
             }
             index = next_index;
