@@ -805,6 +805,11 @@ pub struct OAuth2ProviderAppRecord {
     /// user context. The Go reference uses `InsertOAuth2ProviderApp` without
     /// a `created_by` column for dynamic registrations.
     pub created_by: Option<Uuid>,
+    /// SHA-256 hash of the registration access token (RFC 7592).
+    ///
+    /// `None` for apps that were not dynamically registered or for apps
+    /// created before the migration that adds this column.
+    pub registration_access_token: Option<Vec<u8>>,
 }
 
 /// Input for creating an OAuth2 provider app.

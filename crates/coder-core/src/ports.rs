@@ -2020,6 +2020,13 @@ pub trait IdentityStore: Send + Sync {
     /// Deletes an OAuth2 provider app.
     async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError>;
 
+    /// Updates the registration access token hash for an OAuth2 provider app (RFC 7592).
+    async fn update_oauth2_provider_app_registration_token(
+        &self,
+        app_id: Uuid,
+        hash: &[u8],
+    ) -> Result<(), StorageError>;
+
     /// Lists secrets for an OAuth2 provider app.
     async fn list_oauth2_provider_app_secrets(
         &self,
@@ -4374,6 +4381,13 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Deletes an OAuth2 provider app.
     async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError>;
 
+    /// Updates the registration access token hash for an OAuth2 provider app (RFC 7592).
+    async fn update_oauth2_provider_app_registration_token(
+        &self,
+        app_id: Uuid,
+        hash: &[u8],
+    ) -> Result<(), StorageError>;
+
     /// Lists secrets for an OAuth2 provider app.
     async fn list_oauth2_provider_app_secrets(
         &self,
@@ -5878,6 +5892,14 @@ where
         AppStore::delete_oauth2_provider_app(self, app_id).await
     }
 
+    async fn update_oauth2_provider_app_registration_token(
+        &self,
+        app_id: Uuid,
+        hash: &[u8],
+    ) -> Result<(), StorageError> {
+        AppStore::update_oauth2_provider_app_registration_token(self, app_id, hash).await
+    }
+
     async fn list_oauth2_provider_app_secrets(
         &self,
         app_id: Uuid,
@@ -6454,6 +6476,16 @@ where
 
     async fn delete_oauth2_provider_app(&self, app_id: Uuid) -> Result<bool, StorageError> {
         (**self).delete_oauth2_provider_app(app_id).await
+    }
+
+    async fn update_oauth2_provider_app_registration_token(
+        &self,
+        app_id: Uuid,
+        hash: &[u8],
+    ) -> Result<(), StorageError> {
+        (**self)
+            .update_oauth2_provider_app_registration_token(app_id, hash)
+            .await
     }
 
     async fn list_oauth2_provider_app_secrets(

@@ -7038,7 +7038,7 @@ impl AppStore for PostgresStore {
         &self,
     ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
-            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by
+            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token
              FROM oauth2_provider_apps
              ORDER BY (name, id) ASC",
         )
@@ -7057,7 +7057,7 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
             "INSERT INTO oauth2_provider_apps (name, icon, callback_url, created_by)
              VALUES ($1, $2, $3, $4)
-             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by",
+             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token",
         )
         .bind(&input.name)
         .bind(&input.icon)
@@ -7076,7 +7076,7 @@ impl AppStore for PostgresStore {
         app_id: Uuid,
     ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
         sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
-            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by
+            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token
              FROM oauth2_provider_apps WHERE id = $1",
         )
         .bind(app_id)
@@ -7099,7 +7099,7 @@ impl AppStore for PostgresStore {
                 callback_url = $4,
                 redirect_uris = $5
              WHERE id = $1
-             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by",
+             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token",
         )
         .bind(input.id)
         .bind(&input.name)
@@ -7120,6 +7120,21 @@ impl AppStore for PostgresStore {
             .await
             .map_err(storage_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self, hash), err(level = tracing::Level::WARN))]
+    async fn update_oauth2_provider_app_registration_token(
+        &self,
+        app_id: Uuid,
+        hash: &[u8],
+    ) -> Result<(), StorageError> {
+        sqlx::query("UPDATE oauth2_provider_apps SET registration_access_token = $2 WHERE id = $1")
+            .bind(app_id)
+            .bind(hash)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+        Ok(())
     }
 
     // ----- OAuth2 Provider App Secrets -----

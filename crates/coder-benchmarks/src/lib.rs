@@ -1592,6 +1592,14 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn update_oauth2_provider_app_registration_token(
+        &self,
+        _app_id: Uuid,
+        _hash: &[u8],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn list_oauth2_provider_app_secrets(
         &self,
         _app_id: Uuid,
