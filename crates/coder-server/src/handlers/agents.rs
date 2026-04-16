@@ -1797,8 +1797,11 @@ pub(crate) async fn get_workspace_agent_rpc(
     let agent_id = agent.id;
     let provider = state.agent_provider.clone();
     let store = state.store.clone();
+    let pubsub = state.pubsub.clone();
 
-    Ok(ws.on_upgrade(move |socket| handle_agent_rpc_socket(socket, agent_id, provider, store)))
+    Ok(ws.on_upgrade(move |socket| {
+        handle_agent_rpc_socket(socket, agent_id, provider, store, pubsub)
+    }))
 }
 
 /// Runs the WebSocket message loop for one connected agent.
@@ -1810,6 +1813,7 @@ pub(crate) async fn handle_agent_rpc_socket(
     agent_id: Uuid,
     provider: Arc<dyn AgentProvider>,
     store: Arc<dyn AppStore>,
+    pubsub: Arc<dyn PubSub>,
 ) {
     let now = OffsetDateTime::now_utc();
 
@@ -1834,7 +1838,10 @@ pub(crate) async fn handle_agent_rpc_socket(
             msg = socket.recv() => {
                 match msg {
                     Some(Ok(Message::Text(text))) => {
-                        handle_agent_message(&store, &provider, agent_id, &text).await;
+                        let reply = handle_agent_message(&store, &provider, &pubsub, agent_id, &text).await;
+                        if let Some(reply_text) = reply {
+                            let _ = socket.send(Message::Text(reply_text.into())).await;
+                        }
                     }
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Ok(Message::Ping(data))) => {
@@ -1889,14 +1896,17 @@ pub(crate) async fn handle_agent_rpc_socket(
 }
 
 /// Processes a single inbound text message from the agent.
+///
+/// Returns an optional reply string to send back over the WebSocket.
 pub(crate) async fn handle_agent_message(
-    _store: &Arc<dyn AppStore>,
+    store: &Arc<dyn AppStore>,
     provider: &Arc<dyn AgentProvider>,
+    pubsub: &Arc<dyn PubSub>,
     agent_id: Uuid,
     text: &str,
-) {
+) -> Option<String> {
     let Ok(msg) = serde_json::from_str::<Value>(text) else {
-        return;
+        return None;
     };
     let msg_type = msg.get("type").and_then(Value::as_str).unwrap_or_default();
     match msg_type {
@@ -1912,14 +1922,300 @@ pub(crate) async fn handle_agent_message(
                     debug!(agent_id = %agent_id, "failed to parse listening ports payload");
                 }
             }
+            None
         }
-        "report_stats" | "report_lifecycle" | "update_metadata" | "push_logs" => {
-            // These message types will be fully handled once the dRPC service
-            // layer is ported.  For now we log the receipt.
-            debug!(agent_id = %agent_id, msg_type = msg_type, "received agent message");
+        "report_stats" => handle_report_stats(store, agent_id, &msg).await,
+        "report_lifecycle" => {
+            handle_report_lifecycle(store, pubsub, agent_id, &msg).await;
+            None
+        }
+        "update_metadata" => {
+            handle_update_metadata(store, pubsub, agent_id, &msg).await;
+            None
+        }
+        "push_logs" => {
+            handle_push_logs(store, pubsub, agent_id, &msg).await;
+            None
         }
         _ => {
             debug!(agent_id = %agent_id, msg_type = msg_type, "unknown agent message type");
+            None
+        }
+    }
+}
+
+/// Handles the `report_stats` message from an agent.
+///
+/// Parses the stats payload, inserts it into the database, and returns a
+/// JSON acknowledgment with the report interval.
+async fn handle_report_stats(
+    store: &Arc<dyn AppStore>,
+    agent_id: Uuid,
+    msg: &Value,
+) -> Option<String> {
+    // Default report interval of 10 seconds.
+    const REPORT_INTERVAL_SECS: u64 = 10;
+
+    let now = OffsetDateTime::now_utc();
+    let stats = match msg.get("stats") {
+        Some(s) => s,
+        None => {
+            // No stats payload — the agent is just asking for the report interval.
+            let reply = serde_json::json!({
+                "type": "stats_response",
+                "report_interval": REPORT_INTERVAL_SECS,
+            });
+            return Some(reply.to_string());
+        }
+    };
+
+    let connections_by_proto = stats
+        .get("connections_by_proto")
+        .cloned()
+        .unwrap_or(Value::Object(serde_json::Map::new()));
+
+    let input = coder_core::WorkspaceAgentStatInput {
+        id: Uuid::new_v4(),
+        created_at: now,
+        user_id: None,
+        workspace_id: None,
+        template_id: None,
+        agent_id,
+        connections_by_proto,
+        connection_count: stats
+            .get("connection_count")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        rx_packets: stats.get("rx_packets").and_then(Value::as_i64).unwrap_or(0),
+        rx_bytes: stats.get("rx_bytes").and_then(Value::as_i64).unwrap_or(0),
+        tx_packets: stats.get("tx_packets").and_then(Value::as_i64).unwrap_or(0),
+        tx_bytes: stats.get("tx_bytes").and_then(Value::as_i64).unwrap_or(0),
+        session_count_vscode: stats
+            .get("session_count_vscode")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        session_count_jetbrains: stats
+            .get("session_count_jetbrains")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        session_count_reconnecting_pty: stats
+            .get("session_count_reconnecting_pty")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        session_count_ssh: stats
+            .get("session_count_ssh")
+            .and_then(Value::as_i64)
+            .unwrap_or(0),
+        connection_median_latency_ms: stats
+            .get("connection_median_latency_ms")
+            .and_then(Value::as_f64)
+            .unwrap_or(0.0),
+        usage: false,
+    };
+
+    if let Err(e) = store.insert_workspace_agent_stat(&input).await {
+        debug!(agent_id = %agent_id, error = %e, "failed to insert agent stats");
+    }
+
+    let reply = serde_json::json!({
+        "type": "stats_response",
+        "report_interval": REPORT_INTERVAL_SECS,
+    });
+    Some(reply.to_string())
+}
+
+/// Handles the `report_lifecycle` message from an agent.
+///
+/// Parses the lifecycle state, updates the database, and publishes a
+/// lifecycle-change event via pubsub.
+async fn handle_report_lifecycle(
+    store: &Arc<dyn AppStore>,
+    pubsub: &Arc<dyn PubSub>,
+    agent_id: Uuid,
+    msg: &Value,
+) {
+    let lifecycle = match msg.get("lifecycle") {
+        Some(l) => l,
+        None => {
+            debug!(agent_id = %agent_id, "report_lifecycle missing lifecycle field");
+            return;
+        }
+    };
+
+    let state_str = match lifecycle.get("state").and_then(Value::as_str) {
+        Some(s) => s,
+        None => {
+            debug!(agent_id = %agent_id, "report_lifecycle missing state field");
+            return;
+        }
+    };
+
+    // Validate that the state is a known lifecycle state by deserializing
+    // via serde (the enum uses `rename_all = "snake_case"`).
+    use coder_core::enums::WorkspaceAgentLifecycleState;
+    let lifecycle_state: WorkspaceAgentLifecycleState =
+        match serde_json::from_value(Value::String(state_str.to_owned())) {
+            Ok(s) => s,
+            Err(_) => {
+                debug!(agent_id = %agent_id, state = state_str, "unknown lifecycle state");
+                return;
+            }
+        };
+
+    let now = OffsetDateTime::now_utc();
+
+    // Determine started_at and ready_at based on the lifecycle transition,
+    // mirroring the Go implementation.
+    let (started_at, ready_at) = match lifecycle_state {
+        WorkspaceAgentLifecycleState::Starting => (Some(now), None),
+        WorkspaceAgentLifecycleState::Ready
+        | WorkspaceAgentLifecycleState::StartTimeout
+        | WorkspaceAgentLifecycleState::StartError => (Some(now), Some(now)),
+        _ => (None, None),
+    };
+
+    if let Err(e) = store
+        .update_workspace_agent_lifecycle_state(agent_id, state_str, started_at, ready_at)
+        .await
+    {
+        debug!(agent_id = %agent_id, error = %e, "failed to update lifecycle state");
+        return;
+    }
+
+    // Publish a lifecycle update event on the generic agent channel so
+    // watchers (e.g., workspace watch endpoints) are notified.
+    let channel = coder_core::pubsub::workspace_agent_channel(agent_id);
+    let _ = pubsub.publish(&channel, b"lifecycle_update").await;
+    debug!(agent_id = %agent_id, state = state_str, "updated agent lifecycle state");
+}
+
+/// Handles the `update_metadata` message from an agent.
+///
+/// Parses the metadata entries, upserts them in the database, and publishes
+/// a metadata-update event via pubsub.
+async fn handle_update_metadata(
+    store: &Arc<dyn AppStore>,
+    pubsub: &Arc<dyn PubSub>,
+    agent_id: Uuid,
+    msg: &Value,
+) {
+    let metadata = match msg.get("metadata") {
+        Some(Value::Array(arr)) => arr,
+        _ => {
+            debug!(agent_id = %agent_id, "update_metadata missing metadata array");
+            return;
+        }
+    };
+
+    let now = OffsetDateTime::now_utc();
+    let mut entries = Vec::with_capacity(metadata.len());
+    for entry in metadata {
+        let key = match entry.get("key").and_then(Value::as_str) {
+            Some(k) => k.to_owned(),
+            None => continue,
+        };
+        let value = entry
+            .get("value")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let error = entry
+            .get("error")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        entries.push(coder_core::UpsertAgentMetadataEntry {
+            key,
+            value,
+            error,
+            collected_at: now,
+        });
+    }
+
+    if entries.is_empty() {
+        return;
+    }
+
+    if let Err(e) = store
+        .upsert_workspace_agent_metadata(agent_id, &entries)
+        .await
+    {
+        debug!(agent_id = %agent_id, error = %e, "failed to upsert agent metadata");
+        return;
+    }
+
+    // Publish a metadata update event so the watch-metadata SSE endpoint picks it up.
+    let channel = coder_core::pubsub::workspace_agent_metadata_channel(agent_id);
+    let _ = pubsub.publish(&channel, b"metadata_update").await;
+    debug!(agent_id = %agent_id, count = entries.len(), "upserted agent metadata");
+}
+
+/// Handles the `push_logs` message from an agent.
+///
+/// Parses the log entries, inserts them into the database, and publishes
+/// a log event via pubsub.
+async fn handle_push_logs(
+    store: &Arc<dyn AppStore>,
+    pubsub: &Arc<dyn PubSub>,
+    agent_id: Uuid,
+    msg: &Value,
+) {
+    let logs = match msg.get("logs") {
+        Some(Value::Array(arr)) => arr,
+        _ => {
+            debug!(agent_id = %agent_id, "push_logs missing logs array");
+            return;
+        }
+    };
+
+    if logs.is_empty() {
+        return;
+    }
+
+    let log_source_id = msg
+        .get("log_source_id")
+        .and_then(Value::as_str)
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .unwrap_or_else(Uuid::nil);
+
+    let now = OffsetDateTime::now_utc();
+    let mut entries = Vec::with_capacity(logs.len());
+    for log_entry in logs {
+        let output = log_entry
+            .get("output")
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_owned();
+        let level = log_entry
+            .get("level")
+            .and_then(Value::as_str)
+            .unwrap_or("info")
+            .to_owned();
+        entries.push(coder_core::InsertAgentLogInput {
+            created_at: now,
+            output,
+            level,
+        });
+    }
+
+    match store
+        .insert_workspace_agent_logs(agent_id, log_source_id, &entries)
+        .await
+    {
+        Ok(inserted) => {
+            // Publish the lowest inserted log ID so streaming endpoints
+            // know where to pick up.
+            if let Some(first) = inserted.first() {
+                let notify = serde_json::json!({ "created_after": first.id - 1 });
+                let channel = coder_core::pubsub::workspace_agent_logs_channel(agent_id);
+                if let Ok(payload) = serde_json::to_vec(&notify) {
+                    let _ = pubsub.publish(&channel, &payload).await;
+                }
+            }
+            debug!(agent_id = %agent_id, count = inserted.len(), "inserted agent logs");
+        }
+        Err(e) => {
+            debug!(agent_id = %agent_id, error = %e, "failed to insert agent logs");
         }
     }
 }
@@ -3021,6 +3317,7 @@ mod tests {
         handle_agent_message(
             &(state.store.clone()),
             &provider,
+            &state.pubsub,
             agent_id,
             &msg.to_string(),
         )
@@ -3047,7 +3344,14 @@ mod tests {
             "type": "report_listening_ports",
             "ports": [{"port": 8080, "network": "tcp"}]
         });
-        handle_agent_message(&state.store, &provider, agent_id, &msg1.to_string()).await;
+        handle_agent_message(
+            &state.store,
+            &provider,
+            &state.pubsub,
+            agent_id,
+            &msg1.to_string(),
+        )
+        .await;
         assert_eq!(provider.get_listening_ports(agent_id).await.len(), 1);
 
         let msg2 = serde_json::json!({
@@ -3057,7 +3361,14 @@ mod tests {
                 {"port": 4000, "network": "tcp", "process_name": "go"}
             ]
         });
-        handle_agent_message(&state.store, &provider, agent_id, &msg2.to_string()).await;
+        handle_agent_message(
+            &state.store,
+            &provider,
+            &state.pubsub,
+            agent_id,
+            &msg2.to_string(),
+        )
+        .await;
 
         let ports = provider.get_listening_ports(agent_id).await;
         assert_eq!(ports.len(), 2);
@@ -3078,7 +3389,14 @@ mod tests {
             "type": "report_listening_ports",
             "ports": "not-an-array"
         });
-        handle_agent_message(&state.store, &provider, agent_id, &msg.to_string()).await;
+        handle_agent_message(
+            &state.store,
+            &provider,
+            &state.pubsub,
+            agent_id,
+            &msg.to_string(),
+        )
+        .await;
         assert!(provider.get_listening_ports(agent_id).await.is_empty());
         Ok(())
     }
@@ -3091,7 +3409,14 @@ mod tests {
         let agent_id = seed_agent(&store)?;
 
         let msg = serde_json::json!({"type": "report_listening_ports"});
-        handle_agent_message(&state.store, &provider, agent_id, &msg.to_string()).await;
+        handle_agent_message(
+            &state.store,
+            &provider,
+            &state.pubsub,
+            agent_id,
+            &msg.to_string(),
+        )
+        .await;
         assert!(provider.get_listening_ports(agent_id).await.is_empty());
         Ok(())
     }

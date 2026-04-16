@@ -6911,6 +6911,60 @@ pub(crate) mod tests {
                 })
         }
 
+        async fn update_workspace_agent_lifecycle_state(
+            &self,
+            agent_id: Uuid,
+            lifecycle_state: &str,
+            started_at: Option<OffsetDateTime>,
+            ready_at: Option<OffsetDateTime>,
+        ) -> Result<(), StorageError> {
+            let mut agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(agent) = agents.get_mut(&agent_id) {
+                agent.lifecycle_state = lifecycle_state.to_owned();
+                agent.started_at = started_at;
+                agent.ready_at = ready_at;
+            }
+            Ok(())
+        }
+
+        async fn upsert_workspace_agent_metadata(
+            &self,
+            agent_id: Uuid,
+            entries: &[coder_core::UpsertAgentMetadataEntry],
+        ) -> Result<(), StorageError> {
+            let mut metadata = self
+                .workspace_agent_metadata
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for entry in entries {
+                if let Some(existing) = metadata
+                    .iter_mut()
+                    .find(|m| m.workspace_agent_id == agent_id && m.key == entry.key)
+                {
+                    existing.value = entry.value.clone();
+                    existing.error = entry.error.clone();
+                    existing.collected_at = entry.collected_at;
+                } else {
+                    metadata.push(WorkspaceAgentMetadataRow {
+                        workspace_agent_id: agent_id,
+                        display_name: entry.key.clone(),
+                        key: entry.key.clone(),
+                        script: String::new(),
+                        value: entry.value.clone(),
+                        error: entry.error.clone(),
+                        timeout: 0,
+                        interval: 0,
+                        collected_at: entry.collected_at,
+                        display_order: 0,
+                    });
+                }
+            }
+            Ok(())
+        }
+
         async fn list_workspace_agent_devcontainers(
             &self,
             agent_id: Uuid,

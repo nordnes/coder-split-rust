@@ -3718,6 +3718,22 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         agent_id: Uuid,
     ) -> Result<Vec<WorkspaceAgentMetadataRow>, StorageError>;
 
+    /// Updates the lifecycle state of a workspace agent.
+    async fn update_workspace_agent_lifecycle_state(
+        &self,
+        agent_id: Uuid,
+        lifecycle_state: &str,
+        started_at: Option<OffsetDateTime>,
+        ready_at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError>;
+
+    /// Upserts workspace agent metadata entries.
+    async fn upsert_workspace_agent_metadata(
+        &self,
+        agent_id: Uuid,
+        entries: &[UpsertAgentMetadataEntry],
+    ) -> Result<(), StorageError>;
+
     /// Lists devcontainers for a given agent.
     async fn list_workspace_agent_devcontainers(
         &self,
@@ -4895,6 +4911,19 @@ pub struct InsertAgentLogInput {
     pub output: String,
     /// Log level.
     pub level: String,
+}
+
+/// A single metadata entry for upsert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UpsertAgentMetadataEntry {
+    /// Metadata key.
+    pub key: String,
+    /// Metadata value.
+    pub value: String,
+    /// Error message (empty if none).
+    pub error: String,
+    /// Collected-at timestamp.
+    pub collected_at: OffsetDateTime,
 }
 
 /// Input for inserting a workspace app status.

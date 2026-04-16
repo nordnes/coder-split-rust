@@ -1458,6 +1458,24 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn update_workspace_agent_lifecycle_state(
+        &self,
+        _agent_id: Uuid,
+        _lifecycle_state: &str,
+        _started_at: Option<OffsetDateTime>,
+        _ready_at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn upsert_workspace_agent_metadata(
+        &self,
+        _agent_id: Uuid,
+        _entries: &[coder_core::UpsertAgentMetadataEntry],
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn list_workspace_agent_devcontainers(
         &self,
         _agent_id: Uuid,

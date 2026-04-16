@@ -31,6 +31,7 @@ use coder_auth::{
 };
 use coder_connectivity::agents::{AgentConnection, AgentError, AgentProvider};
 use coder_core::StorageError;
+use coder_core::pubsub::PubSub;
 use coder_core::api::{
     ACLAvailableResponse, GroupResponse, InvalidatePresetsResponse, InvalidatedPreset, ReducedUser,
     TemplateACLGroup, TemplateACLResponse, TemplateACLUser, TemplateRole, UpdateTemplateACLRequest,
