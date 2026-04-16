@@ -595,10 +595,25 @@ pub(crate) async fn workspace_proxy_register(
         })
         .collect();
 
-    // 4. Build the DERP mesh key. In Go this comes from the DB
-    // (`GetDERPMeshKey`). For now, use the hex-encoded app_signing_key.
+    // 4. Build the DERP mesh key. Mirrors Go's `GetDERPMeshKey` lookup in
+    // `coder/enterprise/coderd/workspaceproxy.go` (~L612). The mesh key lives
+    // in `site_configs` under the `derp_mesh_key` row and is lazily
+    // provisioned the first time a proxy with DERP enabled registers, so
+    // existing deployments migrate seamlessly.
     let derp_mesh_key = if request.derp_enabled {
-        hex_encode(&state.app_signing_key)
+        let existing = state.store.get_derp_mesh_key().await?;
+        match existing {
+            Some(v) if !v.is_empty() => v,
+            _ => {
+                let mut buf = [0u8; 32];
+                rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut buf);
+                let encoded = hex_encode(&buf);
+                // Best-effort insert; if a concurrent registration won the
+                // race, re-read the stored value instead of returning ours.
+                state.store.insert_derp_mesh_key(&encoded).await?;
+                state.store.get_derp_mesh_key().await?.unwrap_or(encoded)
+            }
+        }
     } else {
         String::new()
     };
@@ -608,7 +623,7 @@ pub(crate) async fn workspace_proxy_register(
         Json(RegisterWorkspaceProxyResponse {
             derp_mesh_key,
             derp_region_id: region_id,
-            derp_force_websockets: false,
+            derp_force_websockets: state.config.derp_force_websockets,
             sibling_replicas: sibling_responses,
         }),
     )
@@ -651,6 +666,25 @@ pub(crate) async fn workspace_proxy_deregister(
 
     // Delete the replica record.
     state.store.delete_replica(request.replica_id).await?;
+
+    // Publish a replica-sync event so every other replica (and this one)
+    // refreshes its replicas list. Mirrors Go's
+    // `api.Pubsub.Publish(replicasync.PubsubEvent, []byte(uuid.Nil.String()))`
+    // in `coder/enterprise/coderd/workspaceproxy.go` (~L847). We log but do
+    // not fail the request if the publish fails — the replica row is already
+    // gone and siblings will reconcile on their next register tick.
+    let payload = Uuid::nil().to_string().into_bytes();
+    if let Err(error) = state
+        .pubsub
+        .publish(coder_core::pubsub::REPLICA_EVENTS_CHANNEL, &payload)
+        .await
+    {
+        tracing::warn!(
+            %error,
+            replica_id = %request.replica_id,
+            "failed to publish replica-sync event"
+        );
+    }
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }

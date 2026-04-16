@@ -803,7 +803,9 @@ pub enum ResourceType {
 // ---------------------------------------------------------------------------
 
 /// Feature a crypto key is used for.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize, sqlx::Type)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Deserialize, serde::Serialize, sqlx::Type,
+)]
 #[serde(rename_all = "snake_case")]
 #[sqlx(type_name = "crypto_key_feature", rename_all = "snake_case")]
 pub enum CryptoKeyFeature {

@@ -2348,6 +2348,35 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn list_all_crypto_keys(&self) -> Result<Vec<CryptoKeyRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_crypto_key_deletes_at(
+        &self,
+        _feature: coder_core::enums::CryptoKeyFeature,
+        _sequence: i32,
+        _deletes_at: Option<time::OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn delete_crypto_key(
+        &self,
+        _feature: coder_core::enums::CryptoKeyFeature,
+        _sequence: i32,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn insert_derp_mesh_key(&self, _value: &str) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn insert_workspace_app_stats(&self, _stats: &[Value]) -> Result<(), StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }

@@ -1370,6 +1370,7 @@ mod tests {
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
+            derp_force_websockets: false,
             shutdown_grace_period_secs: 5,
             log_format: coder_core::LogFormat::Pretty,
             logging: coder_core::config::LoggingConfig::default(),

@@ -244,6 +244,12 @@ pub fn inbox_notification_channel(user_id: Uuid) -> String {
     format!("inbox_notification:owner:{user_id}")
 }
 
+/// Name of the pub/sub channel carrying replica-sync events. Mirrors Go's
+/// `replicasync.PubsubEvent` constant. Publishing any value (typically a
+/// replica UUID or `Uuid::nil()` for a broadcast refresh) asks every replica
+/// to refresh its view of the replica table.
+pub const REPLICA_EVENTS_CHANNEL: &str = "replica";
+
 /// The kind of workspace event broadcast over the pub/sub channel.
 ///
 /// String representations match the Go `wspubsub.WorkspaceEventKind` constants.

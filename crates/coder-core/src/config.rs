@@ -46,6 +46,12 @@ pub struct ServerConfig {
     pub external_auth_providers: Vec<ExternalAuthLinkProvider>,
     /// Configured DERP regions used by deployment health probes.
     pub derp_regions: Vec<DerpRegionConfig>,
+    /// Whether DERP connections should be forced over WebSockets instead of
+    /// using the native `Upgrade: derp` path. Mirrors the Go
+    /// `DeploymentValues.DERP.Config.ForceWebSockets` deployment flag and is
+    /// forwarded to workspace proxies via the `/workspaceproxies/me/register`
+    /// response.
+    pub derp_force_websockets: bool,
     /// Grace period for HTTP shutdown.
     pub shutdown_grace_period_secs: u64,
     /// Log format used by the binary.
@@ -1451,6 +1457,7 @@ mod tests {
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
+            derp_force_websockets: false,
             shutdown_grace_period_secs: 10,
             log_format: LogFormat::Pretty,
             logging: LoggingConfig::default(),

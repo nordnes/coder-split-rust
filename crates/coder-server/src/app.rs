@@ -1714,6 +1714,7 @@ pub(crate) mod tests {
         workspace_proxy_rows: Mutex<HashMap<Uuid, WorkspaceProxyRow>>,
         replicas: Mutex<HashMap<Uuid, coder_core::ReplicaRow>>,
         crypto_keys: Mutex<Vec<coder_core::CryptoKeyRow>>,
+        derp_mesh_key: Mutex<Option<String>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
         tasks: Mutex<HashMap<Uuid, TaskRecord>>,
         task_snapshots: Mutex<HashMap<Uuid, TaskSnapshotRecord>>,
@@ -1829,6 +1830,7 @@ pub(crate) mod tests {
                 workspace_proxy_rows: Mutex::new(HashMap::new()),
                 replicas: Mutex::new(HashMap::new()),
                 crypto_keys: Mutex::new(Vec::new()),
+                derp_mesh_key: Mutex::new(None),
                 provisioner_daemons: Mutex::new(HashMap::new()),
                 tasks: Mutex::new(HashMap::new()),
                 task_snapshots: Mutex::new(HashMap::new()),
@@ -9388,6 +9390,69 @@ pub(crate) mod tests {
             Ok(row)
         }
 
+        async fn list_all_crypto_keys(
+            &self,
+        ) -> Result<Vec<coder_core::CryptoKeyRow>, StorageError> {
+            let keys = self
+                .crypto_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(keys.clone())
+        }
+
+        async fn update_crypto_key_deletes_at(
+            &self,
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            deletes_at: Option<OffsetDateTime>,
+        ) -> Result<bool, StorageError> {
+            let mut keys = self
+                .crypto_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            for k in keys.iter_mut() {
+                if k.feature == feature && k.sequence == sequence {
+                    k.deletes_at = deletes_at;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+
+        async fn delete_crypto_key(
+            &self,
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+        ) -> Result<bool, StorageError> {
+            let mut keys = self
+                .crypto_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let before = keys.len();
+            keys.retain(|k| !(k.feature == feature && k.sequence == sequence));
+            Ok(keys.len() != before)
+        }
+
+        async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError> {
+            let key = self
+                .derp_mesh_key
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(key.clone())
+        }
+
+        async fn insert_derp_mesh_key(&self, value: &str) -> Result<bool, StorageError> {
+            let mut key = self
+                .derp_mesh_key
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if key.is_some() {
+                return Ok(false);
+            }
+            *key = Some(value.to_owned());
+            Ok(true)
+        }
+
         async fn insert_workspace_app_stats(&self, _stats: &[Value]) -> Result<(), StorageError> {
             Ok(())
         }
@@ -9435,6 +9500,7 @@ pub(crate) mod tests {
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
+            derp_force_websockets: false,
             shutdown_grace_period_secs: 10,
             log_format: LogFormat::Pretty,
             logging: coder_core::config::LoggingConfig::default(),
@@ -37778,6 +37844,212 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    // -- Workspace proxy internal endpoints (behaviour) ------------------------
+
+    /// Builds an AppState with WorkspaceProxy entitlement pre-applied and an
+    /// optional `derp_force_websockets` override on the embedded config.
+    fn workspace_proxy_entitled_state(
+        derp_force_websockets: bool,
+    ) -> Result<(AppState, Arc<FakeStore>), Box<dyn Error>> {
+        let (mut state, store) = test_state_with_store(true)?;
+        state.config.derp_force_websockets = derp_force_websockets;
+        let mut ent = coder_license::Entitlements::new_unlicensed();
+        ent.features.insert(
+            coder_license::FeatureName::WorkspaceProxy
+                .as_str()
+                .to_owned(),
+            coder_license::Feature {
+                entitlement: coder_license::Entitlement::Entitled,
+                enabled: true,
+                limit: None,
+                actual: None,
+            },
+        );
+        state.entitlements.update(ent);
+        Ok((state, store))
+    }
+
+    /// Creates an owner user and a workspace proxy, returning the admin
+    /// session token and the raw proxy token for subsequent replica calls.
+    async fn create_proxy_with_token(
+        app: &Router,
+        name: &str,
+    ) -> Result<(String, String), Box<dyn Error>> {
+        let session_token = create_and_login(app).await?;
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/workspaceproxies",
+                &session_token,
+                &serde_json::json!({
+                    "name": name,
+                    "display_name": name,
+                    "icon": "",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let proxy_token = body
+            .get("proxy_token")
+            .and_then(Value::as_str)
+            .ok_or("missing proxy_token in create response")?
+            .to_owned();
+        Ok((session_token, proxy_token))
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_register_returns_mesh_key_and_force_websockets()
+    -> Result<(), Box<dyn Error>> {
+        let (state, _store) = workspace_proxy_entitled_state(true)?;
+        let app = build_router(state, None);
+        let (_session_token, proxy_token) = create_proxy_with_token(&app, "proxy-a").await?;
+
+        let replica_id = Uuid::new_v4();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/workspaceproxies/me/register")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Coder-Session-Token", &proxy_token)
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "access_url": "https://proxy-a.example.com",
+                "wildcard_hostname": "*.proxy-a.example.com",
+                "derp_enabled": true,
+                "derp_only": false,
+                "replica_id": replica_id,
+                "hostname": "proxy-a-host",
+                "replica_relay_address": "tcp://10.0.0.1:9999",
+                "version": "v2.0.0",
+            }))?))?;
+        let response = call(app.clone(), request).await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let mesh = body
+            .get("derp_mesh_key")
+            .and_then(Value::as_str)
+            .ok_or("derp_mesh_key missing")?;
+        // 32 random bytes, hex-encoded → 64 hex chars.
+        assert_eq!(mesh.len(), 64, "mesh key must be hex-encoded 32 bytes");
+        assert_eq!(
+            body.get("derp_force_websockets").and_then(Value::as_bool),
+            Some(true),
+            "derp_force_websockets must reflect ServerConfig"
+        );
+
+        // Re-register from a second replica and confirm the mesh key is stable
+        // (i.e. pulled from the dedicated store row, not regenerated).
+        let replica_id_b = Uuid::new_v4();
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/workspaceproxies/me/register")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Coder-Session-Token", &proxy_token)
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "access_url": "https://proxy-a.example.com",
+                "derp_enabled": true,
+                "replica_id": replica_id_b,
+            }))?))?;
+        let response = call(app, request).await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let mesh_b = body
+            .get("derp_mesh_key")
+            .and_then(Value::as_str)
+            .ok_or("derp_mesh_key missing on 2nd register")?;
+        assert_eq!(mesh, mesh_b, "mesh key must be stable across registers");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_register_omits_mesh_key_when_derp_disabled()
+    -> Result<(), Box<dyn Error>> {
+        let (state, _store) = workspace_proxy_entitled_state(false)?;
+        let app = build_router(state, None);
+        let (_session_token, proxy_token) = create_proxy_with_token(&app, "proxy-b").await?;
+
+        let request = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/workspaceproxies/me/register")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Coder-Session-Token", &proxy_token)
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "access_url": "https://proxy-b.example.com",
+                "derp_enabled": false,
+                "replica_id": Uuid::new_v4(),
+            }))?))?;
+        let response = call(app, request).await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("derp_mesh_key").and_then(Value::as_str),
+            Some(""),
+            "mesh key must be empty when DERP disabled"
+        );
+        assert_eq!(
+            body.get("derp_force_websockets").and_then(Value::as_bool),
+            Some(false),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_proxy_deregister_publishes_replica_event() -> Result<(), Box<dyn Error>> {
+        let (state, _store) = workspace_proxy_entitled_state(false)?;
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let (_session_token, proxy_token) = create_proxy_with_token(&app, "proxy-c").await?;
+
+        // Subscribe BEFORE issuing deregister so the broadcast is captured.
+        let mut sub = pubsub
+            .subscribe(coder_core::pubsub::REPLICA_EVENTS_CHANNEL)
+            .await?;
+
+        // Register a replica first so deregister has something to delete.
+        let replica_id = Uuid::new_v4();
+        let register = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/workspaceproxies/me/register")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Coder-Session-Token", &proxy_token)
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "access_url": "https://proxy-c.example.com",
+                "derp_enabled": false,
+                "replica_id": replica_id,
+            }))?))?;
+        let resp = call(app.clone(), register).await?;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+
+        let deregister = Request::builder()
+            .method(Method::POST)
+            .uri("/api/v2/workspaceproxies/me/deregister")
+            .header(CONTENT_TYPE, "application/json")
+            .header("Coder-Session-Token", &proxy_token)
+            .body(Body::from(serde_json::to_vec(&serde_json::json!({
+                "replica_id": replica_id,
+            }))?))?;
+        let resp = call(app, deregister).await?;
+        assert_eq!(resp.status(), StatusCode::NO_CONTENT);
+
+        // Exactly one event is expected within a short window.
+        let payload = tokio::time::timeout(std::time::Duration::from_secs(2), sub.recv())
+            .await
+            .map_err(|_| "timed out waiting for replica-sync event")??;
+        assert_eq!(
+            String::from_utf8(payload)?,
+            Uuid::nil().to_string(),
+            "deregister must publish Uuid::nil() refresh sentinel"
+        );
+        // No further events should arrive.
+        let second = tokio::time::timeout(std::time::Duration::from_millis(200), sub.recv()).await;
+        assert!(
+            second.is_err(),
+            "deregister should publish exactly one replica-sync event"
+        );
         Ok(())
     }
 

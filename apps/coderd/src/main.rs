@@ -197,6 +197,10 @@ struct ServerArgs {
     #[arg(long, env = "CODER_DERP_REGIONS_JSON", default_value = "[]")]
     derp_regions_json: String,
 
+    /// Force all DERP connections to use WebSockets.
+    #[arg(long, env = "CODER_DERP_FORCE_WEBSOCKETS", default_value_t = false)]
+    derp_force_websockets: bool,
+
     /// Grace period for shutdown.
     #[arg(long, env = "CODER_SHUTDOWN_GRACE_PERIOD_SECS", default_value_t = 10)]
     shutdown_grace_period_secs: u64,
@@ -1088,6 +1092,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         })?,
         derp_regions: serde_json::from_str::<Vec<DerpRegionConfig>>(&args.derp_regions_json)
             .map_err(|error| MainError::Config(format!("invalid DERP regions JSON: {error}")))?,
+        derp_force_websockets: args.derp_force_websockets,
         shutdown_grace_period_secs: args.shutdown_grace_period_secs,
         log_format: match args.log_format {
             LogFormatArg::Pretty => LogFormat::Pretty,

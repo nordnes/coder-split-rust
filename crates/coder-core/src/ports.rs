@@ -4640,8 +4640,45 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         feature: crate::enums::CryptoKeyFeature,
     ) -> Result<Vec<CryptoKeyRow>, StorageError>;
 
+    /// Lists **all** crypto key rows (active or scheduled for deletion) used by
+    /// the rotation scheduler. Mirrors the Go `GetCryptoKeys` query and
+    /// includes keys whose `starts_at` is in the past but whose `deletes_at`
+    /// may already have elapsed.
+    async fn list_all_crypto_keys(&self) -> Result<Vec<CryptoKeyRow>, StorageError>;
+
     /// Inserts a new crypto key record.
     async fn insert_crypto_key(&self, row: CryptoKeyRow) -> Result<CryptoKeyRow, StorageError>;
+
+    /// Sets the `deletes_at` timestamp on a crypto key (marks it as retired).
+    /// Mirrors the Go `UpdateCryptoKeyDeletesAt` query. Returns `true` if a row
+    /// was affected.
+    async fn update_crypto_key_deletes_at(
+        &self,
+        feature: crate::enums::CryptoKeyFeature,
+        sequence: i32,
+        deletes_at: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError>;
+
+    /// Deletes (zeroes) a crypto key's secret material once it is past its
+    /// `deletes_at` horizon. Mirrors the Go `DeleteCryptoKey` query which
+    /// `NULL`s out the secret column. Returns `true` if a row was affected.
+    async fn delete_crypto_key(
+        &self,
+        feature: crate::enums::CryptoKeyFeature,
+        sequence: i32,
+    ) -> Result<bool, StorageError>;
+
+    // ----- DERP mesh -----
+
+    /// Reads the deployment's persisted DERP mesh key from `site_configs`.
+    /// Mirrors the Go `GetDERPMeshKey` query. Returns `None` if no mesh key
+    /// has been stored yet.
+    async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError>;
+
+    /// Persists a new DERP mesh key in `site_configs`. Mirrors the Go
+    /// `InsertDERPMeshKey` query. Returns `true` if a new row was inserted,
+    /// `false` if one already existed.
+    async fn insert_derp_mesh_key(&self, value: &str) -> Result<bool, StorageError>;
 
     // ----- Workspace app stats -----
 
