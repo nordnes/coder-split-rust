@@ -5982,6 +5982,57 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_agent_lifecycle_state(
+        &self,
+        agent_id: Uuid,
+        lifecycle_state: &str,
+        started_at: Option<OffsetDateTime>,
+        ready_at: Option<OffsetDateTime>,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE workspace_agents
+             SET lifecycle_state = $2::workspace_agent_lifecycle_state,
+                 started_at = COALESCE($3, started_at),
+                 ready_at = COALESCE($4, ready_at)
+             WHERE id = $1",
+        )
+        .bind(agent_id)
+        .bind(lifecycle_state)
+        .bind(started_at)
+        .bind(ready_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self, entries), err(level = tracing::Level::WARN))]
+    async fn upsert_workspace_agent_metadata(
+        &self,
+        agent_id: Uuid,
+        entries: &[UpsertAgentMetadataEntry],
+    ) -> Result<(), StorageError> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+        for entry in entries {
+            sqlx::query(
+                "UPDATE workspace_agent_metadata
+                 SET value = $3, error = $4, collected_at = $5
+                 WHERE workspace_agent_id = $1 AND key = $2",
+            )
+            .bind(agent_id)
+            .bind(&entry.key)
+            .bind(&entry.value)
+            .bind(&entry.error)
+            .bind(entry.collected_at)
+            .execute(&mut *tx)
+            .await
+            .map_err(storage_error)?;
+        }
+        tx.commit().await.map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_agent_devcontainers(
         &self,
         agent_id: Uuid,

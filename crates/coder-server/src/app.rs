@@ -6911,6 +6911,55 @@ pub(crate) mod tests {
                 })
         }
 
+        async fn update_workspace_agent_lifecycle_state(
+            &self,
+            agent_id: Uuid,
+            lifecycle_state: &str,
+            started_at: Option<OffsetDateTime>,
+            ready_at: Option<OffsetDateTime>,
+        ) -> Result<(), StorageError> {
+            let mut agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(agent) = agents.get_mut(&agent_id) {
+                agent.lifecycle_state = lifecycle_state.to_owned();
+                // Mirror COALESCE behavior: only overwrite if Some.
+                if started_at.is_some() {
+                    agent.started_at = started_at;
+                }
+                if ready_at.is_some() {
+                    agent.ready_at = ready_at;
+                }
+            }
+            Ok(())
+        }
+
+        async fn upsert_workspace_agent_metadata(
+            &self,
+            agent_id: Uuid,
+            entries: &[coder_core::UpsertAgentMetadataEntry],
+        ) -> Result<(), StorageError> {
+            let mut metadata = self
+                .workspace_agent_metadata
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            for entry in entries {
+                // Only update existing entries — metadata keys are pre-seeded during
+                // provisioning.  This matches the PostgresStore which issues UPDATE
+                // (not INSERT … ON CONFLICT), silently skipping unknown keys.
+                if let Some(existing) = metadata
+                    .iter_mut()
+                    .find(|m| m.workspace_agent_id == agent_id && m.key == entry.key)
+                {
+                    existing.value = entry.value.clone();
+                    existing.error = entry.error.clone();
+                    existing.collected_at = entry.collected_at;
+                }
+            }
+            Ok(())
+        }
+
         async fn list_workspace_agent_devcontainers(
             &self,
             agent_id: Uuid,

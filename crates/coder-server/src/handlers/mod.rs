@@ -54,6 +54,7 @@ use coder_core::ports::UpdateWorkspaceACLInput;
 use coder_core::ports::{
     InvalidatedPresetRow, TemplateGroupRoleRow, TemplateUserRoleRow, UpdateTemplateACLInput,
 };
+use coder_core::pubsub::PubSub;
 use coder_core::template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
     CreateTemplateVersionInput, ProvisionerJobRecord as TemplateProvisionerJobRecord,

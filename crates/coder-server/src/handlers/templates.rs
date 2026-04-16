@@ -1444,16 +1444,46 @@ pub(crate) async fn get_template_version_dry_run_matched_provisioners(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    let _job = match state.store.find_provisioner_job(job_id).await? {
+    let job = match state.store.find_provisioner_job(job_id).await? {
         Some(j) => j,
         None => return Ok(not_found_response("Dry-run job not found.")),
     };
 
-    // Matched provisioners require daemon tag matching which is not yet implemented.
+    // Fetch all provisioner daemons in the same organization.
+    let daemons = state
+        .store
+        .get_provisioner_daemons_by_organization(job.organization_id)
+        .await?;
+
+    // A daemon matches when the job's tags are a subset of the daemon's tags.
+    let now = OffsetDateTime::now_utc();
+    let stale_threshold = now - time::Duration::minutes(5);
+    let mut count: i32 = 0;
+    let mut available: i32 = 0;
+    let mut most_recently_seen: Option<OffsetDateTime> = None;
+
+    for daemon in &daemons {
+        let tags_match = job.tags.iter().all(|(k, v)| daemon.tags.get(k) == Some(v));
+        if !tags_match {
+            continue;
+        }
+        count += 1;
+
+        if let Some(last_seen) = daemon.last_seen_at {
+            if last_seen > stale_threshold {
+                available += 1;
+            }
+            most_recently_seen = Some(match most_recently_seen {
+                Some(prev) if prev >= last_seen => prev,
+                _ => last_seen,
+            });
+        }
+    }
+
     let response = MatchedProvisioners {
-        count: 0,
-        available: 0,
-        most_recently_seen: None,
+        count,
+        available,
+        most_recently_seen,
     };
     Ok((StatusCode::OK, Json(response)).into_response())
 }
