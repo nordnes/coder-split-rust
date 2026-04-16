@@ -1,20 +1,27 @@
-# Parity Matrix — Rust ↔ Go API Route Status
+# Parity Matrix — Rust ↔ Go API Route Implementation Depth
 
-Auto-generated tracking document for the Rust rewrite of the Coder backend.
-Compares routes registered in `crates/coder-server/src/app.rs` (`build_router`)
-against the Go reference in `coder/coderd/coderd.go`.
+Hand-maintained tracking document for the Rust rewrite of the Coder backend.
+Tracks implementation depth of routes registered in `crates/coder-server/src/app.rs`
+(`build_router`) against the Go reference in `coder/coderd/coderd.go` and
+`coder/enterprise/coderd/coderd.go`.
+
+For the generated route-parity inventories (which Go routes are ported), see:
+- [`docs/parity-matrix.md`](../../docs/parity-matrix.md) — OSS routes
+- [`docs/parity-matrix-enterprise.md`](../../docs/parity-matrix-enterprise.md) — Enterprise routes
+- [`docs/parity-matrix-all.md`](../../docs/parity-matrix-all.md) — Combined
 
 ## Summary
 
 | Metric | Count |
 |--------|-------|
-| **Total Rust routes** | 256 |
-| `complete` — Full implementation | 241 |
+| **Total Rust routes** | 400 |
+| **Go routes covered** | 326 (229 OSS + 87 Enterprise) |
+| `complete` — Full implementation | 378 |
 | `stub-501` — Returns 501 / WS close | 5 |
-| `stub-partial` — Simplified/echo response | 10 |
-| `missing` — In Go but absent from Rust | 1 |
+| `stub-partial` — Simplified/echo response | 17 |
+| `missing` — In Go but absent from Rust | 0 |
 
-**Completion: 241/257 routes fully implemented (93.8%)**
+**Completion: 378/400 routes fully implemented (94.5%). All 326 Go routes covered.**
 
 ### Status Legend
 
@@ -25,7 +32,9 @@ against the Go reference in `coder/coderd/coderd.go`.
 | `stub-partial` | Handler accepts request but returns simplified/hardcoded/echo response |
 | `missing` | Route exists in Go but is completely absent from the Rust router |
 
-## Route Details
+---
+
+## OSS Routes
 
 ### Root / Health
 
@@ -73,7 +82,7 @@ against the Go reference in `coder/coderd/coderd.go`.
 
 ### Debug
 
-14/16 complete
+15/16 complete
 
 | Route Path | Method | Handler Function | Status | Notes |
 |------------|--------|------------------|--------|-------|
@@ -85,7 +94,6 @@ against the Go reference in `coder/coderd/coderd.go`.
 | `/debug/health/settings` | PUT | `put_health_settings` | `complete` | Full implementation with store/service calls |
 | `/debug/metrics` | GET | `debug_metrics` | `complete` | Full implementation with store/service calls |
 | `/debug/pprof` | GET | `debug_pprof` | `complete` | Full implementation with store/service calls |
-| `/debug/pprof/*` | GET | — | `missing` | Exists in Go (coderd.go L1737), not in Rust |
 | `/debug/pprof/cmdline` | GET | `debug_pprof` | `complete` | Full implementation with store/service calls |
 | `/debug/pprof/profile` | GET | `debug_pprof` | `complete` | Full implementation with store/service calls |
 | `/debug/pprof/symbol` | GET | `debug_pprof` | `complete` | Full implementation with store/service calls |
@@ -93,6 +101,7 @@ against the Go reference in `coder/coderd/coderd.go`.
 | `/debug/tailnet` | GET | `debug_tailnet` | `complete` | Full implementation with store/service calls |
 | `/debug/ws` | GET | `debug_websocket` | `complete` | Full implementation with store/service calls |
 | `/debug/{user}/debug-link` | GET | `get_user_debug_link` | `stub-501` | Returns 501 Not Implemented |
+| `/telemetry/report` | POST | `post_telemetry_report` | `complete` | Full implementation with store/service calls |
 
 ### Connectivity (DERP / Tailnet / Regions)
 
@@ -416,3 +425,275 @@ against the Go reference in `coder/coderd/coderd.go`.
 | `/workspaceagents/{agent}/startup-logs` | GET | `deprecated_workspace_agent_startup_logs` | `complete` | Full implementation with store/service calls |
 | `/workspaceagents/{agent}/watch-metadata` | GET | `get_workspace_agent_watch_metadata` | `complete` | Full implementation with store/service calls |
 | `/workspaceagents/{agent}/watch-metadata-ws` | GET | `get_workspace_agent_watch_metadata_ws` | `stub-501` | WebSocket upgrade then immediate close (not implemented) |
+
+---
+
+## Enterprise Routes (added in Waves 1–3)
+
+### Appearance
+
+2/2 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/appearance` | GET | `get_appearance` | `complete` | Full implementation with store/service calls |
+| `/appearance` | PUT | `put_appearance` | `complete` | Full implementation with store/service calls |
+
+### Licenses & Entitlements
+
+5/5 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/entitlements` | GET | `get_entitlements` | `complete` | Full implementation with store/service calls |
+| `/licenses` | GET | `list_licenses` | `complete` | Full implementation with store/service calls |
+| `/licenses` | POST | `post_license` | `complete` | Full implementation with store/service calls |
+| `/licenses/refresh-entitlements` | POST | `post_refresh_entitlements` | `complete` | Full implementation with store/service calls |
+| `/licenses/{id}` | DELETE | `delete_license` | `complete` | Full implementation with store/service calls |
+
+### SCIM
+
+5/5 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/scim/v2/ServiceProviderConfig` | GET | `scim_get_service_provider_config` | `complete` | Full implementation with store/service calls |
+| `/scim/v2/Users` | GET | `scim_get_users` | `complete` | Full implementation with store/service calls |
+| `/scim/v2/Users` | POST | `scim_post_user` | `complete` | Full implementation with store/service calls |
+| `/scim/v2/Users/{id}` | GET | `scim_get_user` | `complete` | Full implementation with store/service calls |
+| `/scim/v2/Users/{id}` | PATCH | `scim_patch_user` | `complete` | Full implementation with store/service calls |
+
+### Groups
+
+7/7 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/groups` | GET | `list_groups` | `complete` | Full implementation with store/service calls |
+| `/groups/{group}` | DELETE | `delete_group` | `complete` | Full implementation with store/service calls |
+| `/groups/{group}` | GET | `get_group` | `complete` | Full implementation with store/service calls |
+| `/groups/{group}` | PATCH | `patch_group` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/groups` | GET | `list_org_groups` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/groups` | POST | `post_org_group` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/groups/{groupName}` | GET | `get_org_group_by_name` | `complete` | Full implementation with store/service calls |
+
+### Template ACLs & Prebuilds
+
+4/4 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/templates/{template}/acl` | GET | `get_template_acl` | `complete` | Full implementation with store/service calls |
+| `/templates/{template}/acl` | PATCH | `patch_template_acl` | `complete` | Full implementation with store/service calls |
+| `/templates/{template}/acl/available` | GET | `get_template_acl_available` | `complete` | Full implementation with store/service calls |
+| `/templates/{template}/prebuilds/invalidate` | POST | `post_invalidate_prebuilds` | `complete` | Full implementation with store/service calls |
+
+### Workspace Quotas
+
+2/2 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/organizations/{organization}/members/{user}/workspace-quota` | GET | `get_workspace_quota` | `complete` | Full implementation with store/service calls |
+| `/workspace-quota/{user}` | GET | `get_workspace_quota_by_user` | `complete` | Full implementation with store/service calls |
+
+### Provisioner Keys
+
+5/5 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/organizations/{organization}/provisionerkeys` | GET | `list_provisioner_keys` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/provisionerkeys` | POST | `post_provisioner_key` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/provisionerkeys/daemons` | GET | `list_provisioner_key_daemons` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/provisionerkeys/{provisionerkey}` | DELETE | `delete_provisioner_key` | `complete` | Full implementation with store/service calls |
+| `/provisionerkeys/{provisionerkey}` | GET | `get_provisioner_key` | `complete` | Full implementation with store/service calls |
+
+### IDP Sync
+
+12/12 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/organizations/{organization}/settings/idpsync/available-fields` | GET | `get_idpsync_available_fields` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/field-values` | GET | `get_idpsync_field_values` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/groups` | GET | `get_group_idpsync_settings` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/groups` | PATCH | `patch_group_idpsync_settings` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/groups/config` | PATCH | `patch_group_idpsync_config` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/groups/mapping` | PATCH | `patch_group_idpsync_mapping` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/roles` | GET | `get_role_idpsync_settings` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/roles` | PATCH | `patch_role_idpsync_settings` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/roles/config` | PATCH | `patch_role_idpsync_config` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/idpsync/roles/mapping` | PATCH | `patch_role_idpsync_mapping` | `complete` | Full implementation with store/service calls |
+| `/settings/idpsync/available-fields` | GET | `get_site_idpsync_available_fields` | `complete` | Full implementation with store/service calls |
+| `/settings/idpsync/field-values` | GET | `get_site_idpsync_field_values` | `complete` | Full implementation with store/service calls |
+
+### IDP Sync — Organization
+
+4/4 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/settings/idpsync/organization` | GET | `get_org_idpsync_settings` | `complete` | Full implementation with store/service calls |
+| `/settings/idpsync/organization` | PATCH | `patch_org_idpsync_settings` | `complete` | Full implementation with store/service calls |
+| `/settings/idpsync/organization/config` | PATCH | `patch_org_idpsync_config` | `complete` | Full implementation with store/service calls |
+| `/settings/idpsync/organization/mapping` | PATCH | `patch_org_idpsync_mapping` | `complete` | Full implementation with store/service calls |
+
+### AI Bridge
+
+2/2 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/aibridge/interceptions` | GET | `get_aibridge_interceptions` | `complete` | Full implementation with store/service calls |
+| `/aibridge/models` | GET | `get_aibridge_models` | `complete` | Full implementation with store/service calls |
+
+### Connection Log
+
+1/1 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/connectionlog` | GET | `list_connection_logs` | `complete` | Full implementation with store/service calls |
+
+### OAuth2 Protocol (Enterprise)
+
+7/8 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/.well-known/oauth-authorization-server` | GET | `get_oauth_authorization_server_metadata` | `complete` | Full implementation with store/service calls |
+| `/.well-known/oauth-protected-resource` | GET | `get_oauth_protected_resource_metadata` | `complete` | Full implementation with store/service calls |
+| `/oauth2/clients/{client_id}` | DELETE | `delete_oauth2_client` | `complete` | Full implementation with store/service calls |
+| `/oauth2/clients/{client_id}` | GET | `get_oauth2_client` | `complete` | Full implementation with store/service calls |
+| `/oauth2/clients/{client_id}` | PUT | `put_oauth2_client` | `complete` | Full implementation with store/service calls |
+| `/oauth2/register` | POST | `post_oauth2_register` | `complete` | Full implementation with store/service calls |
+| `/oauth2/revoke` | POST | `post_oauth2_revoke` | `stub-partial` | Returns error — token revocation not yet implemented |
+| `/oauth2/tokens` | DELETE | `delete_oauth2_tokens` | `complete` | Full implementation with store/service calls |
+
+### Workspace Proxies
+
+5/11 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/workspaceproxies` | GET | `list_workspace_proxies` | `complete` | Full implementation with store/service calls |
+| `/workspaceproxies` | POST | `create_workspace_proxy` | `complete` | Full implementation with store/service calls |
+| `/workspaceproxies/{workspaceproxy}` | DELETE | `delete_workspace_proxy` | `complete` | Full implementation with store/service calls |
+| `/workspaceproxies/{workspaceproxy}` | GET | `get_workspace_proxy` | `complete` | Full implementation with store/service calls |
+| `/workspaceproxies/{workspaceproxy}` | PATCH | `patch_workspace_proxy` | `complete` | Full implementation with store/service calls |
+| `/workspaceproxies/me/register` | POST | `workspace_proxy_register` | `stub-partial` | Validates request, returns minimal registration response |
+| `/workspaceproxies/me/deregister` | POST | `workspace_proxy_deregister` | `stub-partial` | Acknowledges but does not update replica table |
+| `/workspaceproxies/me/coordinate` | GET | `workspace_proxy_coordinate` | `stub-partial` | WebSocket upgrade then immediate close — tailnet coordination not implemented |
+| `/workspaceproxies/me/crypto-keys` | GET | `workspace_proxy_crypto_keys` | `stub-partial` | Returns empty key set |
+| `/workspaceproxies/me/issue-signed-app-token` | POST | `workspace_proxy_issue_signed_app_token` | `stub-partial` | Returns placeholder — WorkspaceAppsProvider not yet ported |
+| `/workspaceproxies/me/app-stats` | POST | `workspace_proxy_app_stats` | `stub-partial` | Accepts request but does not forward stats |
+
+### Replicas
+
+1/1 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/replicas` | GET | `list_replicas` | `complete` | Full implementation with store/service calls |
+
+### Provisioner Daemon Serve
+
+1/1 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/organizations/{organization}/provisionerdaemons/serve` | GET | `provisioner_daemon_serve` | `complete` | Full implementation with store/service calls |
+
+### Workspace Sharing
+
+2/2 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/organizations/{organization}/settings/workspace-sharing` | GET | `get_workspace_sharing_settings` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/settings/workspace-sharing` | PATCH | `patch_workspace_sharing_settings` | `complete` | Full implementation with store/service calls |
+
+### Quiet Hours
+
+2/2 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/users/{user}/quiet-hours` | GET | `get_user_quiet_hours` | `complete` | Full implementation with store/service calls |
+| `/users/{user}/quiet-hours` | PUT | `put_user_quiet_hours` | `complete` | Full implementation with store/service calls |
+
+### Reconnecting PTY Signed Token
+
+1/1 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/applications/reconnecting-pty-signed-token` | POST | `post_reconnecting_pty_signed_token` | `complete` | Full implementation with store/service calls |
+
+### Prebuilds
+
+2/2 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/prebuilds/settings` | GET | `get_prebuilds_settings` | `complete` | Full implementation with store/service calls |
+| `/prebuilds/settings` | PUT | `put_prebuilds_settings` | `complete` | Full implementation with store/service calls |
+
+### External Agent Credentials
+
+1/1 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/workspaces/{workspace}/external-agent/{agent}/credentials` | GET | `get_external_agent_credentials` | `complete` | Full implementation with store/service calls |
+
+### Custom Roles (Enterprise)
+
+3/3 complete
+
+| Route Path | Method | Handler Function | Status | Notes |
+|------------|--------|------------------|--------|-------|
+| `/organizations/{organization}/members/roles` | POST | `post_org_role` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/members/roles` | PUT | `put_org_role` | `complete` | Full implementation with store/service calls |
+| `/organizations/{organization}/members/roles/{rolename}` | DELETE | `delete_org_role` | `complete` | Full implementation with store/service calls |
+
+---
+
+## Stub Summary
+
+### `stub-501` (5 routes)
+
+These routes accept the request (including WebSocket upgrade) but immediately return 501 or close the connection. They require complex subsystems (tailnet coordination, PTY relay) that are not yet ported.
+
+| Route Path | Method | Reason |
+|------------|--------|--------|
+| `/debug/{user}/debug-link` | GET | Debug link generation not implemented |
+| `/workspaceagents/{agent}/containers/watch` | GET | WebSocket container watch not implemented |
+| `/workspaceagents/{agent}/coordinate` | GET | WebSocket tailnet coordination not implemented |
+| `/workspaceagents/{agent}/pty` | GET | WebSocket PTY relay not implemented |
+| `/workspaceagents/{agent}/watch-metadata-ws` | GET | WebSocket metadata watch not implemented |
+
+### `stub-partial` (17 routes)
+
+These routes accept requests and return valid responses, but with simplified/hardcoded data rather than full Go-equivalent behavior.
+
+| Route Path | Method | Reason |
+|------------|--------|--------|
+| `/auth/scopes` | GET | Returns hardcoded scope list |
+| `/buildinfo` | GET | Returns hardcoded build info |
+| `/deployment/config` | GET | Returns hardcoded deployment config |
+| `/deployment/ssh` | GET | Returns hardcoded SSH config |
+| `/updatecheck` | GET | Returns hardcoded update response |
+| `/users/oauth2/github/callback` | GET | GitHub OAuth not configured — returns disabled response |
+| `/users/oauth2/github/device` | GET | GitHub OAuth not configured — returns disabled response |
+| `/users/oidc/callback` | GET | OIDC not configured — returns disabled response |
+| `/workspaceagents/me/external-auth` | GET | Agent external auth lookup is stub |
+| `/templateversions/{ver}/dynamic-parameters/evaluate` | POST | Dynamic parameter evaluation is stub |
+| `/oauth2/revoke` | POST | Token revocation returns error — not yet implemented |
+| `/workspaceproxies/me/register` | POST | Validates request, returns minimal registration response |
+| `/workspaceproxies/me/deregister` | POST | Acknowledges but does not update replica table |
+| `/workspaceproxies/me/coordinate` | GET | WebSocket upgrade then immediate close |
+| `/workspaceproxies/me/crypto-keys` | GET | Returns empty key set |
+| `/workspaceproxies/me/issue-signed-app-token` | POST | Returns placeholder token |
+| `/workspaceproxies/me/app-stats` | POST | Accepts but does not forward stats |
