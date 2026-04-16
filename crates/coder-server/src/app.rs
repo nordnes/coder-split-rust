@@ -6945,6 +6945,9 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
             for entry in entries {
+                // Only update existing entries — metadata keys are pre-seeded during
+                // provisioning.  This matches the PostgresStore which issues UPDATE
+                // (not INSERT … ON CONFLICT), silently skipping unknown keys.
                 if let Some(existing) = metadata
                     .iter_mut()
                     .find(|m| m.workspace_agent_id == agent_id && m.key == entry.key)
@@ -6952,19 +6955,6 @@ pub(crate) mod tests {
                     existing.value = entry.value.clone();
                     existing.error = entry.error.clone();
                     existing.collected_at = entry.collected_at;
-                } else {
-                    metadata.push(WorkspaceAgentMetadataRow {
-                        workspace_agent_id: agent_id,
-                        display_name: entry.key.clone(),
-                        key: entry.key.clone(),
-                        script: String::new(),
-                        value: entry.value.clone(),
-                        error: entry.error.clone(),
-                        timeout: 0,
-                        interval: 0,
-                        collected_at: entry.collected_at,
-                        display_order: 0,
-                    });
                 }
             }
             Ok(())
