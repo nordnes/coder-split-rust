@@ -1,5 +1,15 @@
 # Parity Matrix — Rust ↔ Go API Route Implementation Depth
 
+> ⚠️ **Partially stale.** This file is hand-maintained and was last fully
+> regenerated before Waves 1–4 (groups, template ACL, provisioner keys,
+> IDP sync, workspace proxies, AI bridge, connection log, OAuth2
+> revocation, agent WebSocket subsystems). The Summary below has been
+> refreshed, but individual per-route rows still tag some handlers as
+> `stub-501` / `stub-partial` that are actually `complete`. For the
+> authoritative analysis of what remains behaviorally, see
+> **[`docs/remaining-behavioral-gaps.md`](../../docs/remaining-behavioral-gaps.md)**.
+> A full regeneration via `apps/coder-parity` is pending.
+
 Hand-maintained tracking document for the Rust rewrite of the Coder backend.
 Tracks implementation depth of routes registered in `crates/coder-server/src/app.rs`
 (`build_router`) against the Go reference in `coder/coderd/coderd.go` and
@@ -16,12 +26,18 @@ For the generated route-parity inventories (which Go routes are ported), see:
 |--------|-------|
 | **Total Rust routes** | 400 |
 | **Go routes covered** | 326 (229 OSS + 87 Enterprise) |
-| `complete` — Full implementation | 378 |
-| `stub-501` — Returns 501 / WS close | 5 |
-| `stub-partial` — Simplified/echo response | 17 |
+| `complete` — Full implementation | ~378 |
+| `stub-501` — Returns 501 / WS close | 5 (all have real implementations now — classification drift; see §2 of the gaps doc) |
+| `stub-partial` — Simplified/echo response | ~10 (down from 17 after Wave 4; see §3 and §4 of the gaps doc) |
 | `missing` — In Go but absent from Rust | 0 |
 
-**Completion: 378/400 routes fully implemented (94.5%). All 326 Go routes covered.**
+**Completion: ~378/400 routes fully implemented (94.5%). All 326 Go routes covered.**
+
+The per-route tables below have **not** been rewritten; several rows remain
+marked `stub-501` / `stub-partial` but correspond to handlers that are now
+complete in `crates/coder-server/src/handlers/`. Trust
+[`docs/remaining-behavioral-gaps.md`](../../docs/remaining-behavioral-gaps.md)
+over the tables until the next regeneration.
 
 ### Status Legend
 
