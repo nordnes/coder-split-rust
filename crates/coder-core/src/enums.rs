@@ -816,3 +816,29 @@ pub enum CryptoKeyFeature {
     /// TailnetResume.
     TailnetResume,
 }
+
+impl CryptoKeyFeature {
+    /// Returns the snake_case string representation.
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::WorkspaceAppsToken => "workspace_apps_token",
+            Self::WorkspaceAppsApiKey => "workspace_apps_api_key",
+            Self::OidcConvert => "oidc_convert",
+            Self::TailnetResume => "tailnet_resume",
+        }
+    }
+}
+
+impl std::str::FromStr for CryptoKeyFeature {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s {
+            "workspace_apps_token" => Ok(Self::WorkspaceAppsToken),
+            "workspace_apps_api_key" => Ok(Self::WorkspaceAppsApiKey),
+            "oidc_convert" => Ok(Self::OidcConvert),
+            "tailnet_resume" => Ok(Self::TailnetResume),
+            _ => Err(format!("unknown crypto key feature: {s}")),
+        }
+    }
+}

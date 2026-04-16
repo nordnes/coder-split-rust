@@ -2288,6 +2288,44 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn update_workspace_proxy_registration(
+        &self,
+        _input: UpdateWorkspaceProxyRegistrationInput,
+    ) -> Result<WorkspaceProxyRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn upsert_replica(&self, _input: UpsertReplicaInput) -> Result<ReplicaRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn list_replicas_by_proxy_excluding(
+        &self,
+        _proxy_id: Uuid,
+        _exclude_id: Uuid,
+    ) -> Result<Vec<ReplicaRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn delete_replica(&self, _id: Uuid) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn list_crypto_keys_by_feature(
+        &self,
+        _feature: coder_core::enums::CryptoKeyFeature,
+    ) -> Result<Vec<CryptoKeyRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn insert_crypto_key(&self, _row: CryptoKeyRow) -> Result<CryptoKeyRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn insert_workspace_app_stats(&self, _stats: &[Value]) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn list_aibridge_interceptions(
         &self,
         _filter: coder_core::api::AIBridgeInterceptionsFilter,
