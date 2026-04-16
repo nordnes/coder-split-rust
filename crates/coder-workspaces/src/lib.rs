@@ -1718,6 +1718,9 @@ async fn trigger_workspace_start<S: LifecycleStore>(
         .ok_or_else(|| StorageError::not_found("workspace not found"))?;
 
     let job_id = uuid::Uuid::new_v4();
+    // Normalize tags to `{scope: organization, owner: ""}` so untagged
+    // daemons can acquire lifecycle builds (ports `provisionersdk.MutateTags`).
+    let tags = coder_core::mutate_tags(ws.owner_id, &[]);
     let _job = store
         .create_provisioner_job(coder_core::CreateProvisionerJobInput {
             id: job_id,
@@ -1729,7 +1732,7 @@ async fn trigger_workspace_start<S: LifecycleStore>(
             file_id: None,
             job_type: "workspace_build".to_owned(),
             input: serde_json::json!({}),
-            tags: std::collections::HashMap::new(),
+            tags,
         })
         .await?;
 
@@ -1774,6 +1777,9 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
         .ok_or_else(|| StorageError::not_found("workspace not found"))?;
 
     let job_id = uuid::Uuid::new_v4();
+    // Normalize tags to `{scope: organization, owner: ""}` so untagged
+    // daemons can acquire lifecycle builds (ports `provisionersdk.MutateTags`).
+    let tags = coder_core::mutate_tags(ws.owner_id, &[]);
     let _job = store
         .create_provisioner_job(coder_core::CreateProvisionerJobInput {
             id: job_id,
@@ -1785,7 +1791,7 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
             file_id: None,
             job_type: "workspace_build".to_owned(),
             input: serde_json::json!({}),
-            tags: std::collections::HashMap::new(),
+            tags,
         })
         .await?;
 

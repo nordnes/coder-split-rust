@@ -12,7 +12,11 @@ impl ProvisionerStore for PostgresStore {
         let provisioner_types: Vec<String> = input.types.iter().map(|t| t.to_string()).collect();
 
         // Atomically find and lock one pending job using FOR UPDATE SKIP LOCKED.
-        // Tag matching: the job's tags must be a subset of the daemon's tags.
+        // Tag matching mirrors Go's SQL function `provisioner_tagset_contains`
+        // (see migration 000275): untagged org-scoped jobs
+        // (`{"scope":"organization","owner":""}`) require the daemon's tag set
+        // to be exactly equal; otherwise the job's tags must be a subset of
+        // the daemon's tags.
         let row = sqlx::query_as::<_, StoredProvisionerJobRow>(
             "UPDATE provisioner_jobs
              SET started_at = $1,
@@ -26,7 +30,11 @@ impl ProvisionerStore for PostgresStore {
                    AND canceled_at IS NULL
                    AND organization_id = $3
                    AND provisioner::TEXT = ANY($4)
-                   AND tags <@ $5::JSONB
+                   AND CASE
+                       WHEN tags::jsonb = '{\"scope\": \"organization\", \"owner\": \"\"}'::jsonb
+                           THEN tags::jsonb = $5::jsonb
+                       ELSE tags <@ $5::JSONB
+                   END
                  ORDER BY created_at ASC
                  LIMIT 1
                  FOR UPDATE SKIP LOCKED

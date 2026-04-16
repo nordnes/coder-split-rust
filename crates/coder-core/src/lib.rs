@@ -177,7 +177,9 @@ pub use provisioner::{
     GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
     InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, ProvisionerDaemonRecord,
     ProvisionerJobRecord, ProvisionerJobStatus, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType, UpsertProvisionerDaemonInput,
+    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType, SCOPE_ORGANIZATION,
+    SCOPE_USER, TAG_OWNER, TAG_SCOPE, UpsertProvisionerDaemonInput, mutate_tags,
+    provisioner_tagset_matches, tags_from_json,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
