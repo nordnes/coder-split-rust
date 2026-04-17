@@ -4668,6 +4668,32 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         sequence: i32,
     ) -> Result<bool, StorageError>;
 
+    /// Returns the maximum `sequence` across **all** rows for the given feature,
+    /// ignoring `starts_at` / `deletes_at` filters. Used by the rotator to pick
+    /// the next sequence when inserting a successor key whose `starts_at` may
+    /// be in the future (and therefore invisible to `list_crypto_keys_by_feature`).
+    /// Returns `0` if no rows exist for the feature.
+    async fn max_crypto_key_sequence_for_feature(
+        &self,
+        feature: crate::enums::CryptoKeyFeature,
+    ) -> Result<i32, StorageError>;
+
+    /// Atomically retires an old crypto key and inserts its successor in a
+    /// single database transaction. If either step fails, neither persists.
+    /// Mirrors the `UPDATE ... + INSERT ...` pair inside Go's
+    /// `coderd/cryptokeys/rotate.go::rotateKey`, which relies on PostgreSQL's
+    /// implicit per-statement transaction under a surrounding `BEGIN`.
+    ///
+    /// Returns the inserted successor row. On error, the transaction rolls
+    /// back and neither the old key's `deletes_at` nor the new key survive.
+    async fn rotate_crypto_key_transactional(
+        &self,
+        old_feature: crate::enums::CryptoKeyFeature,
+        old_sequence: i32,
+        old_deletes_at: OffsetDateTime,
+        new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError>;
+
     // ----- DERP mesh -----
 
     /// Reads the deployment's persisted DERP mesh key from `site_configs`.

@@ -9433,6 +9433,68 @@ pub(crate) mod tests {
             Ok(keys.len() != before)
         }
 
+        async fn max_crypto_key_sequence_for_feature(
+            &self,
+            feature: coder_core::enums::CryptoKeyFeature,
+        ) -> Result<i32, StorageError> {
+            let keys = self
+                .crypto_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(keys
+                .iter()
+                .filter(|k| k.feature == feature)
+                .map(|k| k.sequence)
+                .max()
+                .unwrap_or(0))
+        }
+
+        async fn rotate_crypto_key_transactional(
+            &self,
+            old_feature: coder_core::enums::CryptoKeyFeature,
+            old_sequence: i32,
+            old_deletes_at: OffsetDateTime,
+            new_row: coder_core::CryptoKeyRow,
+        ) -> Result<coder_core::CryptoKeyRow, StorageError> {
+            // Simulate the Postgres transaction: take the lock for the full
+            // duration so either both writes land or neither does.
+            let mut keys = self
+                .crypto_keys
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+
+            // Primary-key check — matches Postgres `(feature, sequence)` PK.
+            if keys
+                .iter()
+                .any(|k| k.feature == new_row.feature && k.sequence == new_row.sequence)
+            {
+                return Err(StorageError::invalid_data(format!(
+                    "duplicate crypto key sequence {} for feature {:?}",
+                    new_row.sequence, new_row.feature
+                )));
+            }
+
+            // Locate the old key.
+            let Some(index) = keys
+                .iter()
+                .position(|k| k.feature == old_feature && k.sequence == old_sequence)
+            else {
+                return Err(StorageError::invalid_data(format!(
+                    "crypto key {old_feature:?}#{old_sequence} vanished mid-rotation"
+                )));
+            };
+
+            // Apply both writes atomically while the lock is held.
+            let previous_deletes_at = keys[index].deletes_at;
+            keys[index].deletes_at = Some(old_deletes_at);
+            keys.push(new_row.clone());
+            // Sanity-check invariant: the insert succeeded — roll back only if
+            // a future extension pushes a fallible step between the two writes.
+            let _ = previous_deletes_at;
+
+            Ok(new_row)
+        }
+
         async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError> {
             let key = self
                 .derp_mesh_key

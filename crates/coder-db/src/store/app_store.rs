@@ -9833,6 +9833,87 @@ impl AppStore for PostgresStore {
         Ok(result.rows_affected() > 0)
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn max_crypto_key_sequence_for_feature(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+    ) -> Result<i32, StorageError> {
+        let max: Option<i32> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM crypto_keys WHERE feature = $1::crypto_key_feature",
+        )
+        .bind(feature)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(max.unwrap_or(0))
+    }
+
+    #[instrument(skip(self, new_row), err(level = tracing::Level::WARN))]
+    async fn rotate_crypto_key_transactional(
+        &self,
+        old_feature: coder_core::enums::CryptoKeyFeature,
+        old_sequence: i32,
+        old_deletes_at: OffsetDateTime,
+        new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct StoredRow {
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            secret: Vec<u8>,
+            starts_at: OffsetDateTime,
+            deletes_at: Option<OffsetDateTime>,
+        }
+
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        // Stamp `deletes_at` on the old key. If no row matches, the caller
+        // raced against another rotator; roll back and surface an error.
+        let affected = sqlx::query(
+            "UPDATE crypto_keys
+             SET deletes_at = $3
+             WHERE feature = $1::crypto_key_feature AND sequence = $2",
+        )
+        .bind(old_feature)
+        .bind(old_sequence)
+        .bind(old_deletes_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(StorageError::invalid_data(format!(
+                "crypto key {old_feature:?}#{old_sequence} vanished mid-rotation"
+            )));
+        }
+
+        // Insert the successor. A `(feature, sequence)` primary-key violation
+        // rolls back the UPDATE above, guaranteeing no orphan accumulation.
+        let inserted = sqlx::query_as::<_, StoredRow>(
+            "INSERT INTO crypto_keys (feature, sequence, secret, starts_at, deletes_at)
+             VALUES ($1::crypto_key_feature, $2, $3, $4, $5)
+             RETURNING feature, sequence, secret, starts_at, deletes_at",
+        )
+        .bind(new_row.feature)
+        .bind(new_row.sequence)
+        .bind(&new_row.secret)
+        .bind(new_row.starts_at)
+        .bind(new_row.deletes_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+
+        Ok(CryptoKeyRow {
+            feature: inserted.feature,
+            sequence: inserted.sequence,
+            secret: inserted.secret,
+            starts_at: inserted.starts_at,
+            deletes_at: inserted.deletes_at,
+        })
+    }
+
     // ----- DERP mesh -----
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]

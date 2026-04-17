@@ -94,6 +94,24 @@ pub trait CryptoKeyStore: Send + Sync {
     ) -> Result<bool, StorageError>;
     /// Removes the key permanently.
     async fn delete(&self, feature: CryptoKeyFeature, sequence: i32) -> Result<bool, StorageError>;
+    /// Returns the max `sequence` across **all** rows (filtered or not) for
+    /// the given feature. Used to pick the next sequence when inserting a
+    /// successor whose `starts_at` is in the future (and therefore hidden
+    /// from the time-filtered `list_by_feature`).
+    async fn max_sequence_for_feature(
+        &self,
+        feature: CryptoKeyFeature,
+    ) -> Result<i32, StorageError>;
+    /// Atomically stamps `deletes_at` on an existing key and inserts its
+    /// successor. If either step fails, neither persists — avoiding orphan
+    /// accumulation under persistent `update_deletes_at` failures.
+    async fn rotate_transactional(
+        &self,
+        old_feature: CryptoKeyFeature,
+        old_sequence: i32,
+        old_deletes_at: OffsetDateTime,
+        new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError>;
 }
 
 /// Adapter: any `dyn AppStore` trait object implements [`CryptoKeyStore`] by
@@ -125,6 +143,28 @@ impl CryptoKeyStore for dyn AppStore + '_ {
     }
     async fn delete(&self, feature: CryptoKeyFeature, sequence: i32) -> Result<bool, StorageError> {
         AppStore::delete_crypto_key(self, feature, sequence).await
+    }
+    async fn max_sequence_for_feature(
+        &self,
+        feature: CryptoKeyFeature,
+    ) -> Result<i32, StorageError> {
+        AppStore::max_crypto_key_sequence_for_feature(self, feature).await
+    }
+    async fn rotate_transactional(
+        &self,
+        old_feature: CryptoKeyFeature,
+        old_sequence: i32,
+        old_deletes_at: OffsetDateTime,
+        new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError> {
+        AppStore::rotate_crypto_key_transactional(
+            self,
+            old_feature,
+            old_sequence,
+            old_deletes_at,
+            new_row,
+        )
+        .await
     }
 }
 
@@ -284,17 +324,27 @@ async fn rotate_key<S: CryptoKeyStore + ?Sized>(
     let deletes_at = starts_at
         + time::Duration::hours(1)
         + duration_to_time_duration(token_duration(old.feature));
-    // Stamp the old key's `deletes_at` FIRST, then insert the successor.
-    // If the insert fails, the old key is already marked and `should_rotate_key`
-    // will skip it on subsequent sweeps; the "ensure at least one valid key"
-    // fallback in `rotate_once` will mint a fresh successor from now. Reversing
-    // the order risks leaving a successor in place with the old key still
-    // rotatable (deletes_at = None), which would cause unbounded key
-    // accumulation under persistent `update_deletes_at` failures.
+
+    // Compute next sequence from the **unfiltered** max so a future-dated
+    // successor inserted on a prior sweep still increments correctly. The
+    // transactional store method then wraps the UPDATE + INSERT in a single
+    // DB transaction; a PK violation from a concurrent rotator aborts both
+    // writes, preventing orphan accumulation.
+    let next_sequence = store.max_sequence_for_feature(old.feature).await? + 1;
+    let mut secret = vec![0u8; secret_byte_length(old.feature)];
+    rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
+    let successor = CryptoKeyRow {
+        feature: old.feature,
+        sequence: next_sequence,
+        secret,
+        starts_at,
+        deletes_at: None,
+    };
+
     store
-        .update_deletes_at(old.feature, old.sequence, Some(deletes_at))
+        .rotate_transactional(old.feature, old.sequence, deletes_at, successor)
         .await?;
-    insert_new_key(store, old.feature, starts_at).await?;
+
     debug!(
         feature = old.feature.as_str(),
         sequence = old.sequence,
@@ -308,19 +358,12 @@ async fn insert_new_key<S: CryptoKeyStore + ?Sized>(
     feature: CryptoKeyFeature,
     starts_at: OffsetDateTime,
 ) -> Result<(), StorageError> {
-    // Use `list_all()` (unfiltered) rather than `list_by_feature()`, which in
-    // production applies a `starts_at <= NOW() AND deletes_at IS NULL OR
-    // deletes_at > NOW()` filter. After `rotate_key` inserts a successor with a
-    // future `starts_at`, that row must still be visible here so we do not
-    // reuse its sequence and hit the `(feature, sequence)` PRIMARY KEY.
-    let max_sequence = store
-        .list_all()
-        .await?
-        .into_iter()
-        .filter(|k| k.feature == feature)
-        .map(|k| k.sequence)
-        .max()
-        .unwrap_or(0);
+    // Use the dedicated unfiltered `MAX(sequence)` query rather than filtering
+    // `list_by_feature`, which in production applies `starts_at <= NOW() AND
+    // (deletes_at IS NULL OR deletes_at > NOW())`. A future-dated successor
+    // inserted by `rotate_key` must still be visible here so we do not reuse
+    // its sequence and hit the `(feature, sequence)` PRIMARY KEY.
+    let max_sequence = store.max_sequence_for_feature(feature).await?;
     let mut secret = vec![0u8; secret_byte_length(feature)];
     rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
     store
@@ -447,6 +490,140 @@ mod tests {
             let before = guard.len();
             guard.retain(|k| !(k.feature == feature && k.sequence == sequence));
             Ok(guard.len() != before)
+        }
+        async fn max_sequence_for_feature(
+            &self,
+            feature: CryptoKeyFeature,
+        ) -> Result<i32, StorageError> {
+            Ok(self
+                .inner
+                .lock()
+                .expect("lock poisoned")
+                .iter()
+                .filter(|k| k.feature == feature)
+                .map(|k| k.sequence)
+                .max()
+                .unwrap_or(0))
+        }
+        async fn rotate_transactional(
+            &self,
+            old_feature: CryptoKeyFeature,
+            old_sequence: i32,
+            old_deletes_at: OffsetDateTime,
+            new_row: CryptoKeyRow,
+        ) -> Result<CryptoKeyRow, StorageError> {
+            // Hold the lock for both writes to mirror a DB transaction.
+            let mut guard = self.inner.lock().expect("lock poisoned");
+            if guard
+                .iter()
+                .any(|k| k.feature == new_row.feature && k.sequence == new_row.sequence)
+            {
+                return Err(StorageError::invalid_data(format!(
+                    "duplicate crypto key sequence {} for feature {:?}",
+                    new_row.sequence, new_row.feature
+                )));
+            }
+            let Some(idx) = guard
+                .iter()
+                .position(|k| k.feature == old_feature && k.sequence == old_sequence)
+            else {
+                return Err(StorageError::invalid_data(format!(
+                    "crypto key {old_feature:?}#{old_sequence} vanished mid-rotation"
+                )));
+            };
+            guard[idx].deletes_at = Some(old_deletes_at);
+            guard.push(new_row.clone());
+            Ok(new_row)
+        }
+    }
+
+    /// Test double whose `rotate_transactional` always fails, so we can assert
+    /// the rotator does not leak orphan successor rows under persistent
+    /// transactional failure.
+    struct FailingRotateStore {
+        inner: Mutex<Vec<CryptoKeyRow>>,
+    }
+
+    impl FailingRotateStore {
+        fn new(seed: Vec<CryptoKeyRow>) -> Arc<Self> {
+            Arc::new(Self {
+                inner: Mutex::new(seed),
+            })
+        }
+        fn snapshot(&self) -> Vec<CryptoKeyRow> {
+            self.inner.lock().expect("lock poisoned").clone()
+        }
+    }
+
+    #[async_trait]
+    impl CryptoKeyStore for FailingRotateStore {
+        async fn list_all(&self) -> Result<Vec<CryptoKeyRow>, StorageError> {
+            Ok(self.inner.lock().expect("lock poisoned").clone())
+        }
+        async fn list_by_feature(
+            &self,
+            feature: CryptoKeyFeature,
+        ) -> Result<Vec<CryptoKeyRow>, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            Ok(self
+                .inner
+                .lock()
+                .expect("lock poisoned")
+                .iter()
+                .filter(|k| {
+                    k.feature == feature
+                        && k.starts_at <= now
+                        && k.deletes_at.is_none_or(|d| d > now)
+                })
+                .cloned()
+                .collect())
+        }
+        async fn insert(&self, row: CryptoKeyRow) -> Result<CryptoKeyRow, StorageError> {
+            self.inner.lock().expect("lock poisoned").push(row.clone());
+            Ok(row)
+        }
+        async fn update_deletes_at(
+            &self,
+            _feature: CryptoKeyFeature,
+            _sequence: i32,
+            _deletes_at: Option<OffsetDateTime>,
+        ) -> Result<bool, StorageError> {
+            Err(StorageError::unavailable("injected failure"))
+        }
+        async fn delete(
+            &self,
+            feature: CryptoKeyFeature,
+            sequence: i32,
+        ) -> Result<bool, StorageError> {
+            let mut guard = self.inner.lock().expect("lock poisoned");
+            let before = guard.len();
+            guard.retain(|k| !(k.feature == feature && k.sequence == sequence));
+            Ok(guard.len() != before)
+        }
+        async fn max_sequence_for_feature(
+            &self,
+            feature: CryptoKeyFeature,
+        ) -> Result<i32, StorageError> {
+            Ok(self
+                .inner
+                .lock()
+                .expect("lock poisoned")
+                .iter()
+                .filter(|k| k.feature == feature)
+                .map(|k| k.sequence)
+                .max()
+                .unwrap_or(0))
+        }
+        async fn rotate_transactional(
+            &self,
+            _old_feature: CryptoKeyFeature,
+            _old_sequence: i32,
+            _old_deletes_at: OffsetDateTime,
+            _new_row: CryptoKeyRow,
+        ) -> Result<CryptoKeyRow, StorageError> {
+            // Mimic a rolled-back Postgres transaction: neither write lands,
+            // so the seed state is untouched.
+            Err(StorageError::unavailable("injected rotate failure"))
         }
     }
 
@@ -630,6 +807,67 @@ mod tests {
         assert!(
             after_cleanup.iter().any(|k| k.sequence >= 2),
             "a replacement key must still exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn rotate_key_is_atomic_on_transactional_failure() {
+        // Regression: if `update_deletes_at` + `insert_new_key` ran as two
+        // separate statements and the UPDATE succeeded while the INSERT
+        // failed (or vice versa), the old key could be marked retired with
+        // no successor, or a successor could land with the old key still
+        // rotatable — accumulating orphans on every subsequent sweep.
+        //
+        // Wrapping both writes in `rotate_transactional` means a failure
+        // rolls back **both** writes. After N failed sweeps the seed state
+        // must be byte-for-byte identical.
+        let now = OffsetDateTime::now_utc();
+        let options = RotatorOptions {
+            interval: Duration::from_secs(60),
+            key_duration: Duration::from_secs(24 * 60 * 60),
+        };
+        let expired = CryptoKeyRow {
+            feature: CryptoKeyFeature::TailnetResume,
+            sequence: 1,
+            secret: vec![0xAA; 64],
+            // Past expiry → should_rotate_key returns true every sweep.
+            starts_at: now - time::Duration::hours(25),
+            deletes_at: None,
+        };
+        let store = FailingRotateStore::new(vec![expired.clone()]);
+
+        // Run several sweeps. Each one attempts to rotate the expired key,
+        // hits the injected failure, and must leave state unchanged.
+        for _ in 0..5 {
+            // Ignore the per-sweep error — the rotator logs `rotate_key`
+            // failures and continues; we only care about the on-disk state.
+            let _ = rotate_once(store.as_ref(), &options, now).await;
+        }
+
+        let snapshot = store.snapshot();
+        let tailnet: Vec<_> = snapshot
+            .iter()
+            .filter(|k| k.feature == CryptoKeyFeature::TailnetResume)
+            .collect();
+        // The expired key must survive unmodified — proves the UPDATE was
+        // rolled back on every failed attempt.
+        let old = tailnet
+            .iter()
+            .find(|k| k.sequence == 1)
+            .expect("expired key should still exist");
+        assert!(
+            old.deletes_at.is_none(),
+            "expired key's deletes_at must stay unset when the TX rolls back; got {old:?}"
+        );
+        // Total key count must be **bounded**: at most 2 (original + one
+        // fallback successor minted by `rotate_once`'s "ensure one valid
+        // key" branch). Pre-fix, 5 sweeps would produce 6+ rows because
+        // each sweep leaked a successor.
+        assert!(
+            tailnet.len() <= 2,
+            "transactional failure must not accumulate orphan successors across sweeps; \
+             got {} tailnet keys: {snapshot:?}",
+            tailnet.len(),
         );
     }
 

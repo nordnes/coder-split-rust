@@ -2369,6 +2369,23 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn max_crypto_key_sequence_for_feature(
+        &self,
+        _feature: coder_core::enums::CryptoKeyFeature,
+    ) -> Result<i32, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn rotate_crypto_key_transactional(
+        &self,
+        _old_feature: coder_core::enums::CryptoKeyFeature,
+        _old_sequence: i32,
+        _old_deletes_at: time::OffsetDateTime,
+        _new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
