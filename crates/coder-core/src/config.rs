@@ -1758,6 +1758,7 @@ mod tests {
         assert!(names.contains(&"experiments"));
         assert!(names.contains(&"cache-dir"));
         assert!(names.contains(&"default-quiet-hours-schedule"));
+        assert!(names.contains(&"allow-custom-quiet-hours"));
 
         // Security headers
         assert!(names.contains(&"x-content-type-options"));
