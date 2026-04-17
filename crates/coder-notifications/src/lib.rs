@@ -1413,6 +1413,23 @@ mod tests {
             Err(StorageError::unavailable("not implemented in MockStore"))
         }
 
+        async fn get_organization_sharing_settings(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Option<coder_core::WorkspaceSharingMode>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
+        async fn update_organization_sharing_settings(
+            &self,
+            _organization_id: Uuid,
+            _mode: coder_core::WorkspaceSharingMode,
+        ) -> Result<Option<coder_core::WorkspaceSharingMode>, StorageError> {
+            self.maybe_err()?;
+            Ok(None)
+        }
+
         async fn list_groups(
             &self,
             _organization_id: Uuid,

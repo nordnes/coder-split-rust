@@ -275,6 +275,65 @@ pub struct OrganizationRecord {
     pub is_default: bool,
     /// Whether the organization is soft-deleted.
     pub deleted: bool,
+    /// Persisted mode controlling who may share workspaces within the
+    /// organization. Drives both the legacy `sharing_disabled` boolean (via
+    /// [`WorkspaceSharingMode::disables_sharing`]) and the richer
+    /// `shareable_workspace_owners` enum exposed over the HTTP API.
+    pub workspace_sharing_mode: WorkspaceSharingMode,
+}
+
+/// Persisted workspace-sharing mode for an organization.
+///
+/// Mirrors the `shareable_workspace_owners` enum exposed by the enterprise
+/// workspace-sharing API (see `coder/enterprise/coderd/workspacesharing.go`).
+/// Stored as a `TEXT` column alongside the legacy
+/// `workspace_sharing_disabled` boolean; the boolean is kept in sync on write
+/// so old reads continue to function until it is dropped in a follow-up PR.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceSharingMode {
+    /// Sharing is disabled entirely.
+    None,
+    /// Any workspace owner in the organization may share their workspaces.
+    #[default]
+    Everyone,
+    /// Only service accounts may share workspaces.
+    ServiceAccounts,
+}
+
+impl WorkspaceSharingMode {
+    /// Returns the wire-format string value used on the HTTP API and in the
+    /// `workspace_sharing_mode` DB column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Everyone => "everyone",
+            Self::ServiceAccounts => "service_accounts",
+        }
+    }
+
+    /// Whether this mode disables workspace sharing (mirrors the legacy
+    /// `workspace_sharing_disabled` boolean column).
+    #[must_use]
+    pub const fn disables_sharing(self) -> bool {
+        matches!(self, Self::None)
+    }
+}
+
+impl FromStr for WorkspaceSharingMode {
+    type Err = IdentityParseError;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "none" => Ok(Self::None),
+            "everyone" => Ok(Self::Everyone),
+            "service_accounts" => Ok(Self::ServiceAccounts),
+            _ => Err(IdentityParseError::UnknownWorkspaceSharingMode(
+                value.to_owned(),
+            )),
+        }
+    }
 }
 
 /// Resource counts for an organization, used for detailed delete-failure messages.
@@ -541,6 +600,9 @@ pub enum IdentityParseError {
     /// An unknown user status was loaded from storage.
     #[error("unknown user status: {0}")]
     UnknownUserStatus(String),
+    /// An unknown workspace sharing mode was loaded from storage.
+    #[error("unknown workspace sharing mode: {0}")]
+    UnknownWorkspaceSharingMode(String),
 }
 
 /// First-user creation failures surfaced by the store layer.

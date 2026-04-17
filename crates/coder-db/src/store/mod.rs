@@ -71,7 +71,7 @@ use coder_core::{
     WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
     WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceProxyRow,
     WorkspaceRecord, WorkspaceResourceMetadataRecord, WorkspaceResourceRecord,
-    WorkspaceStatsWorkspaceInput,
+    WorkspaceSharingMode, WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -185,6 +185,7 @@ struct StoredOrganizationRow {
     updated_at: OffsetDateTime,
     is_default: bool,
     deleted: bool,
+    workspace_sharing_mode: String,
 }
 
 #[derive(Debug, FromRow)]
@@ -1315,6 +1316,11 @@ fn organization_record_from_row(
         ));
     }
 
+    let workspace_sharing_mode = WorkspaceSharingMode::from_str(&row.workspace_sharing_mode)
+        .map_err(|error| {
+            StorageError::invalid_data(format!("organizations.workspace_sharing_mode: {error}"))
+        })?;
+
     Ok(OrganizationRecord {
         id: row.id,
         name: row.name,
@@ -1325,6 +1331,7 @@ fn organization_record_from_row(
         updated_at: row.updated_at,
         is_default: row.is_default,
         deleted: row.deleted,
+        workspace_sharing_mode,
     })
 }
 

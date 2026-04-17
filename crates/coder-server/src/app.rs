@@ -1772,7 +1772,8 @@ pub(crate) mod tests {
         WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
         WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
         WorkspaceProxyHealthRecord, WorkspaceProxyRow, WorkspaceRecord,
-        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceSharingMode,
+        WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -1849,6 +1850,7 @@ pub(crate) mod tests {
         health_ok: bool,
         users: Mutex<HashMap<Uuid, UserRecord>>,
         organizations: Mutex<HashMap<Uuid, OrganizationRecord>>,
+        organization_sharing: Mutex<HashMap<Uuid, WorkspaceSharingMode>>,
         organization_members: Mutex<HashMap<(Uuid, Uuid), OrganizationMemberRecord>>,
         sessions: Mutex<HashMap<Vec<u8>, AuthenticatedUser>>,
         api_keys: Mutex<HashMap<String, ApiKeyRecord>>,
@@ -1964,6 +1966,7 @@ pub(crate) mod tests {
                 health_ok,
                 users: Mutex::new(HashMap::new()),
                 organizations: Mutex::new(HashMap::new()),
+                organization_sharing: Mutex::new(HashMap::new()),
                 organization_members: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 api_keys: Mutex::new(HashMap::new()),
@@ -2802,6 +2805,7 @@ pub(crate) mod tests {
                 updated_at: now,
                 is_default: true,
                 deleted: false,
+                workspace_sharing_mode: WorkspaceSharingMode::default(),
             };
             let member = OrganizationMemberRecord {
                 user_id,
@@ -3466,6 +3470,7 @@ pub(crate) mod tests {
                 updated_at: now,
                 is_default: false,
                 deleted: false,
+                workspace_sharing_mode: WorkspaceSharingMode::default(),
             };
             organizations.insert(org.id, org.clone());
 
@@ -3557,6 +3562,63 @@ pub(crate) mod tests {
                 group_count,
                 provisioner_key_count: 0,
             })
+        }
+
+        async fn get_organization_sharing_settings(
+            &self,
+            organization_id: Uuid,
+        ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+            let organizations = self
+                .organizations
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let Some(org) = organizations.get(&organization_id) else {
+                return Ok(None);
+            };
+            if org.deleted {
+                return Ok(None);
+            }
+            let default_mode = org.workspace_sharing_mode;
+            drop(organizations);
+            let sharing = self
+                .organization_sharing
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(Some(
+                sharing
+                    .get(&organization_id)
+                    .copied()
+                    .unwrap_or(default_mode),
+            ))
+        }
+
+        async fn update_organization_sharing_settings(
+            &self,
+            organization_id: Uuid,
+            mode: WorkspaceSharingMode,
+        ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+            let mut organizations = self
+                .organizations
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let Some(org) = organizations.get_mut(&organization_id) else {
+                return Ok(None);
+            };
+            if org.deleted {
+                return Ok(None);
+            }
+            org.updated_at = OffsetDateTime::now_utc();
+            // Keep the OrganizationRecord in lock-step with the sharing map
+            // so the denormalised record mirrors what the PostgresStore
+            // returns after the same update.
+            org.workspace_sharing_mode = mode;
+            drop(organizations);
+            let mut sharing = self
+                .organization_sharing
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            sharing.insert(organization_id, mode);
+            Ok(Some(mode))
         }
 
         async fn find_custom_role(
@@ -30864,6 +30926,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: false,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
         let deleted_id = Uuid::from_u128(200);
@@ -30883,6 +30946,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: true,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
 
@@ -30917,6 +30981,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: true,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
         let result = store.find_organization_by_id(org_id).await?;
@@ -36643,6 +36708,257 @@ pub(crate) mod tests {
             .and_then(Value::as_array)
             .ok_or("expected audit_logs array")?;
         assert!(!logs.is_empty(), "expected at least 1 audit log entry");
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace-sharing settings handlers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_sharing_default_and_patch_persists() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        // Default: sharing enabled.
+        let get = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = response_json(get).await?;
+        assert_eq!(
+            body.get("sharing_disabled").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            body.get("shareable_workspace_owners")
+                .and_then(Value::as_str),
+            Some("everyone"),
+        );
+
+        // PATCH disables sharing.
+        let patch = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+                &serde_json::json!({ "shareable_workspace_owners": "none" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch.status(), StatusCode::OK);
+        let body = response_json(patch).await?;
+        assert_eq!(
+            body.get("sharing_disabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("shareable_workspace_owners")
+                .and_then(Value::as_str),
+            Some("none"),
+        );
+
+        // Subsequent GET reflects persisted value.
+        let get2 = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get2.status(), StatusCode::OK);
+        let body = response_json(get2).await?;
+        assert_eq!(
+            body.get("sharing_disabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("shareable_workspace_owners")
+                .and_then(Value::as_str),
+            Some("none"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_sharing_patch_records_audit_event() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        let store = Arc::new(FakeStore::new(true));
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let audit: Arc<dyn AuditSink> = Arc::new(FakeStoreAuditSink {
+            store: store.clone(),
+        });
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
+        let state = AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store_trait,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
+            None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
+        )?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let patch = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+                &serde_json::json!({ "sharing_disabled": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch.status(), StatusCode::OK);
+
+        // Allow the BatchedAuditSink background task to flush the event.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/audit", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        let logs = body
+            .get("audit_logs")
+            .and_then(Value::as_array)
+            .ok_or("expected audit_logs array")?;
+        let found = logs.iter().any(|entry| {
+            entry
+                .get("resource_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == org_id.to_string())
+                && entry
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| d.contains("workspace sharing"))
+        });
+        assert!(
+            found,
+            "expected workspace-sharing audit entry; got {logs:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_sharing_patch_round_trips_all_modes() -> Result<(), Box<dyn Error>> {
+        // Round-trip each of the three `shareable_workspace_owners` enum
+        // values through the PATCH → GET path, asserting the new
+        // `workspace_sharing_mode` column preserves the exact value and
+        // keeps the legacy `sharing_disabled` boolean in sync (only `none`
+        // disables sharing).
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        for (mode, expected_disabled) in [
+            ("service_accounts", false),
+            ("none", true),
+            ("everyone", false),
+        ] {
+            let patch = call(
+                app.clone(),
+                authenticated_json_request(
+                    Method::PATCH,
+                    &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                    &session_token,
+                    &serde_json::json!({ "shareable_workspace_owners": mode }),
+                )?,
+            )
+            .await?;
+            assert_eq!(patch.status(), StatusCode::OK, "PATCH {mode} should be OK");
+            let body = response_json(patch).await?;
+            assert_eq!(
+                body.get("shareable_workspace_owners")
+                    .and_then(Value::as_str),
+                Some(mode),
+                "PATCH response should echo {mode}",
+            );
+            assert_eq!(
+                body.get("sharing_disabled").and_then(Value::as_bool),
+                Some(expected_disabled),
+                "sharing_disabled should be {expected_disabled} for {mode}",
+            );
+
+            let get = call(
+                app.clone(),
+                authenticated_request(
+                    Method::GET,
+                    &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                    &session_token,
+                )?,
+            )
+            .await?;
+            assert_eq!(get.status(), StatusCode::OK);
+            let body = response_json(get).await?;
+            assert_eq!(
+                body.get("shareable_workspace_owners")
+                    .and_then(Value::as_str),
+                Some(mode),
+                "GET should return persisted {mode}",
+            );
+            assert_eq!(
+                body.get("sharing_disabled").and_then(Value::as_bool),
+                Some(expected_disabled),
+                "GET sharing_disabled should stay in sync with {mode}",
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_sharing_patch_rejects_unknown_mode() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let patch = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+                &serde_json::json!({ "shareable_workspace_owners": "not_a_mode" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(patch).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("unsupported shareable_workspace_owners value"),
+        );
         Ok(())
     }
 

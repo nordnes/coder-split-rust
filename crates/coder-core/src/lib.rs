@@ -142,7 +142,7 @@ pub use identity::{
     UpdateOrganizationInput, UpdateOrganizationStoreError, UpsertCustomRoleInput,
     UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkClaims,
     UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord, UserStatus,
-    UserStatusChangeRecord,
+    UserStatusChangeRecord, WorkspaceSharingMode,
 };
 pub use password::{
     PasswordError, hash_password, hash_session_token, new_session_token, normalize_real_name,
