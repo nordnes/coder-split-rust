@@ -6,12 +6,22 @@ use super::templates::resolve_organization;
 use super::*;
 use coder_core::api::{UpdateWorkspaceSharingSettingsRequest, WorkspaceSharingSettings};
 
-/// Translates a `shareable_workspace_owners` string into the persisted
-/// `workspace_sharing_disabled` boolean.
+/// Accepted values for the Rust-layer `shareable_workspace_owners` enum.
 ///
-/// The Go upstream stores only a boolean — the `shareable_workspace_owners`
-/// enum is derived: `"none"` ↔ disabled, any other accepted value maps to
-/// enabled (not disabled).
+/// The Go upstream (`coder/enterprise/coderd/workspacesharing.go`) persists
+/// only a boolean `workspace_sharing_disabled`; it has no notion of this
+/// enum. We therefore accept `"none"` ↔ `disabled=true` and `"everyone"` ↔
+/// `disabled=false`, and reject `"service_accounts"` at the API boundary
+/// until upstream grows storage for the full enum. Silently coercing
+/// `"service_accounts"` to `"everyone"` would swallow the caller's intent,
+/// so it is safer to 400.
+const SUPPORTED_SHAREABLE_WORKSPACE_OWNERS: &[&str] = &["none", "everyone"];
+
+/// Translates an accepted `shareable_workspace_owners` string into the
+/// persisted `workspace_sharing_disabled` boolean.
+///
+/// Callers must validate the input against `SUPPORTED_SHAREABLE_WORKSPACE_OWNERS`
+/// first; unknown values fall through to `false` here.
 fn owners_to_disabled(owners: &str) -> bool {
     owners == "none"
 }
@@ -115,19 +125,24 @@ pub(crate) async fn patch_workspace_sharing_settings(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // Validate shareable_workspace_owners if provided.
-    if let Some(ref owners) = request.shareable_workspace_owners {
-        let valid = ["none", "everyone", "service_accounts"];
-        if !valid.contains(&owners.as_str()) {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(
-                    "Invalid shareable_workspace_owners value.",
-                    format!("Must be one of: {}", valid.join(", ")),
-                )),
-            )
-                .into_response());
-        }
+    // Validate shareable_workspace_owners if provided. Go upstream only stores
+    // a boolean, so we only accept the two values that map cleanly onto it.
+    // `service_accounts` and any other enum values are rejected with 400 until
+    // the storage column grows support for them.
+    if let Some(ref owners) = request.shareable_workspace_owners
+        && !SUPPORTED_SHAREABLE_WORKSPACE_OWNERS.contains(&owners.as_str())
+    {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "unsupported shareable_workspace_owners value",
+                format!(
+                    "Must be one of: {}",
+                    SUPPORTED_SHAREABLE_WORKSPACE_OWNERS.join(", ")
+                ),
+            )),
+        )
+            .into_response());
     }
 
     let globally_disabled = state.config.disable_workspace_sharing;

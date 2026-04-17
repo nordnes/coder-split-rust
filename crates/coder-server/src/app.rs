@@ -36614,6 +36614,56 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    #[tokio::test]
+    async fn workspace_sharing_patch_rejects_service_accounts() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        // Go upstream only stores a boolean, so `service_accounts` is rejected
+        // at the API boundary with 400 rather than silently coerced to
+        // `everyone` (which would swallow the caller's intent).
+        let patch = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+                &serde_json::json!({ "shareable_workspace_owners": "service_accounts" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(patch).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("unsupported shareable_workspace_owners value"),
+        );
+
+        // The rejected PATCH must not persist any change.
+        let get = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = response_json(get).await?;
+        assert_eq!(
+            body.get("sharing_disabled").and_then(Value::as_bool),
+            Some(false),
+        );
+        assert_eq!(
+            body.get("shareable_workspace_owners")
+                .and_then(Value::as_str),
+            Some("everyone"),
+        );
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Happy-path tests: File handlers
     // -----------------------------------------------------------------------
