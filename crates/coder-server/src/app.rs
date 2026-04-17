@@ -89,61 +89,201 @@ use crate::middleware::{
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
 pub(crate) const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
 const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
-pub(crate) const PUBLIC_API_KEY_SCOPES: &[&str] = &[
-    "audit_log:*",
-    "audit_log:create",
-    "audit_log:read",
-    "api_key:*",
-    "api_key:create",
-    "api_key:delete",
-    "api_key:read",
-    "api_key:update",
-    "coder:all",
-    "coder:apikeys.manage_self",
-    "coder:application_connect",
-    "deployment_stats:*",
-    "deployment_stats:read",
-    "coder:templates.author",
-    "coder:templates.build",
-    "coder:workspaces.access",
-    "coder:workspaces.create",
-    "coder:workspaces.delete",
-    "coder:workspaces.operate",
-    "file:*",
-    "file:create",
-    "file:read",
-    "organization:*",
-    "organization:delete",
-    "organization:read",
-    "organization:update",
-    "task:*",
-    "task:create",
-    "task:delete",
-    "task:read",
-    "task:update",
-    "template:*",
-    "template:create",
-    "template:delete",
-    "template:read",
-    "template:update",
-    "template:use",
-    "user:read_personal",
-    "user:update_personal",
-    "user_secret:*",
-    "user_secret:create",
-    "user_secret:delete",
-    "user_secret:read",
-    "user_secret:update",
-    "workspace:*",
-    "workspace:application_connect",
-    "workspace:create",
-    "workspace:delete",
-    "workspace:read",
-    "workspace:ssh",
-    "workspace:start",
-    "workspace:stop",
-    "workspace:update",
+
+/// Public API key scope catalog: `(name, description, resources)`.
+///
+/// This is the single source of truth for `GET /api/v2/auth/scopes` — it
+/// drives both the catalog's ordering and the per-scope metadata the handler
+/// returns. A unit test asserts that every entry has a non-empty description
+/// and at least one resource.
+pub(crate) const PUBLIC_API_KEY_SCOPE_METADATA: &[(&str, &str, &[&str])] = &[
+    (
+        "audit_log:*",
+        "Full access to audit log resources.",
+        &["audit_log"],
+    ),
+    (
+        "audit_log:create",
+        "Create audit log entries.",
+        &["audit_log"],
+    ),
+    ("audit_log:read", "Read audit log entries.", &["audit_log"]),
+    (
+        "api_key:*",
+        "Full access to API key resources.",
+        &["api_key"],
+    ),
+    ("api_key:create", "Create API keys.", &["api_key"]),
+    ("api_key:delete", "Delete API keys.", &["api_key"]),
+    ("api_key:read", "Read API keys.", &["api_key"]),
+    ("api_key:update", "Update API keys.", &["api_key"]),
+    (
+        "coder:all",
+        "Full API access across all Coder resources.",
+        &["*"],
+    ),
+    (
+        "coder:apikeys.manage_self",
+        "Manage the caller's own API keys.",
+        &["api_key"],
+    ),
+    (
+        "coder:application_connect",
+        "Connect to workspace-hosted applications.",
+        &["workspace"],
+    ),
+    (
+        "deployment_stats:*",
+        "Full access to deployment statistics.",
+        &["deployment_stats"],
+    ),
+    (
+        "deployment_stats:read",
+        "Read deployment statistics.",
+        &["deployment_stats"],
+    ),
+    (
+        "coder:templates.author",
+        "Author and publish templates and upload supporting files.",
+        &["template", "file"],
+    ),
+    (
+        "coder:templates.build",
+        "Build templates and upload supporting files.",
+        &["template", "file"],
+    ),
+    (
+        "coder:workspaces.access",
+        "Access workspaces, including SSH and application connections.",
+        &["workspace"],
+    ),
+    (
+        "coder:workspaces.create",
+        "Create new workspaces from templates.",
+        &["workspace", "template"],
+    ),
+    (
+        "coder:workspaces.delete",
+        "Delete existing workspaces.",
+        &["workspace"],
+    ),
+    (
+        "coder:workspaces.operate",
+        "Start, stop, and manage the lifecycle of workspaces.",
+        &["workspace"],
+    ),
+    ("file:*", "Full access to file resources.", &["file"]),
+    ("file:create", "Upload files.", &["file"]),
+    ("file:read", "Read file contents and metadata.", &["file"]),
+    (
+        "organization:*",
+        "Full access to organization resources.",
+        &["organization"],
+    ),
+    (
+        "organization:delete",
+        "Delete organizations.",
+        &["organization"],
+    ),
+    (
+        "organization:read",
+        "Read organization resources.",
+        &["organization"],
+    ),
+    (
+        "organization:update",
+        "Update organization resources.",
+        &["organization"],
+    ),
+    ("task:*", "Full access to task resources.", &["task"]),
+    ("task:create", "Create tasks.", &["task"]),
+    ("task:delete", "Delete tasks.", &["task"]),
+    ("task:read", "Read tasks.", &["task"]),
+    ("task:update", "Update tasks.", &["task"]),
+    (
+        "template:*",
+        "Full access to template resources.",
+        &["template"],
+    ),
+    ("template:create", "Create templates.", &["template"]),
+    ("template:delete", "Delete templates.", &["template"]),
+    ("template:read", "Read templates.", &["template"]),
+    ("template:update", "Update templates.", &["template"]),
+    (
+        "template:use",
+        "Use templates to create workspaces.",
+        &["template"],
+    ),
+    (
+        "user:read_personal",
+        "Read the caller's own profile.",
+        &["user"],
+    ),
+    (
+        "user:update_personal",
+        "Update the caller's own profile.",
+        &["user"],
+    ),
+    (
+        "user_secret:*",
+        "Full access to user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:create",
+        "Create user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:delete",
+        "Delete user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:read",
+        "Read user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:update",
+        "Update user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "workspace:*",
+        "Full access to workspace resources.",
+        &["workspace"],
+    ),
+    (
+        "workspace:application_connect",
+        "Connect to workspace-hosted applications.",
+        &["workspace"],
+    ),
+    ("workspace:create", "Create workspaces.", &["workspace"]),
+    ("workspace:delete", "Delete workspaces.", &["workspace"]),
+    (
+        "workspace:read",
+        "Read workspace resources.",
+        &["workspace"],
+    ),
+    (
+        "workspace:ssh",
+        "Open SSH sessions to workspaces.",
+        &["workspace"],
+    ),
+    (
+        "workspace:start",
+        "Start stopped workspaces.",
+        &["workspace"],
+    ),
+    ("workspace:stop", "Stop running workspaces.", &["workspace"]),
+    (
+        "workspace:update",
+        "Update workspace resources.",
+        &["workspace"],
+    ),
 ];
+
 pub(crate) const VALID_HEALTH_SECTIONS: &[&str] = &[
     "DERP",
     "AccessURL",
@@ -1625,7 +1765,8 @@ pub(crate) mod tests {
     use uuid::Uuid;
 
     use super::{
-        AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPES, SLIM_BUILD_MESSAGE, build_router,
+        AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPE_METADATA, SLIM_BUILD_MESSAGE,
+        build_router,
     };
     use coder_connectivity::tailnet::{
         CoordinateRequest, CoordinateResponse, NodeInfo, PeerUpdateKind,
@@ -9873,12 +10014,24 @@ pub(crate) mod tests {
             call(app.clone(), request(Method::GET, "/api/v2/auth/scopes")?).await?;
         assert_eq!(scopes_response.status(), StatusCode::OK);
         let scopes_body = response_json(scopes_response).await?;
-        assert_eq!(
-            scopes_body
-                .get("external")
+        let external = scopes_body
+            .get("external")
+            .and_then(Value::as_array)
+            .ok_or("scopes response must have an `external` array")?;
+        assert_eq!(external.len(), PUBLIC_API_KEY_SCOPE_METADATA.len());
+        let first_entry = external
+            .first()
+            .and_then(Value::as_object)
+            .ok_or("first scope entry must be a JSON object")?;
+        assert!(first_entry.contains_key("name"));
+        assert!(first_entry.contains_key("description"));
+        assert!(first_entry.contains_key("resources"));
+        assert!(
+            first_entry
+                .get("resources")
                 .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(PUBLIC_API_KEY_SCOPES.len())
+                .is_some_and(|resources| !resources.is_empty()),
+            "first scope entry must unlock at least one resource",
         );
 
         let experiments_response = call(

@@ -50,11 +50,11 @@ pub mod template;
 
 pub use api::{
     AWSInstanceIdentityToken, AccessUrlHealthReport, AgentLogEntry, AgentSubsystem,
-    ApiAllowListTarget, ApiKeyResponse, ApiKeyWithOwnerResponse, ApiResponse, AppHostResponse,
-    AppSharingLevel, AssignableRoleResponse, AuditDiff, AuditDiffField, AuditLog, AuditLogAction,
-    AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods, AuthorizationCheck,
-    AuthorizationObject, AuthorizationRequest, AuthorizationResponse, AvailableExperiments,
-    AzureInstanceIdentityToken, BaseHealthReport, BuildInfoResponse,
+    ApiAllowListTarget, ApiKeyResponse, ApiKeyScopeMetadata, ApiKeyWithOwnerResponse, ApiResponse,
+    AppHostResponse, AppSharingLevel, AssignableRoleResponse, AuditDiff, AuditDiffField, AuditLog,
+    AuditLogAction, AuditLogResponse, AuditResourceType, AuthMethod, AuthMethods,
+    AuthorizationCheck, AuthorizationObject, AuthorizationRequest, AuthorizationResponse,
+    AvailableExperiments, AzureInstanceIdentityToken, BaseHealthReport, BuildInfoResponse,
     ChangePasswordWithOneTimePasscodeRequest, ChatInputPart, ChatInputPartType, ChatMessagePart,
     ChatMessagePartType, ChatMessageResponse, ChatMessageUsage, ChatMessageVisibility,
     ChatModelCallConfig, ChatModelConfigResponse, ChatProviderConfigResponse,

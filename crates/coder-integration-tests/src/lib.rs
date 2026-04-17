@@ -2455,6 +2455,36 @@ mod tests {
         )
         .await?;
         assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = response_json(resp).await?;
+        let external = body
+            .get("external")
+            .and_then(Value::as_array)
+            .ok_or("response must contain an `external` array")?;
+        assert!(!external.is_empty(), "at least one scope must be returned");
+        let first = external
+            .first()
+            .and_then(Value::as_object)
+            .ok_or("scope entries must be JSON objects")?;
+        let name = first
+            .get("name")
+            .and_then(Value::as_str)
+            .ok_or("scope entry must have a string `name`")?;
+        assert!(!name.is_empty(), "scope `name` must be non-empty");
+        let description = first
+            .get("description")
+            .and_then(Value::as_str)
+            .ok_or("scope entry must have a string `description`")?;
+        assert!(
+            !description.is_empty(),
+            "scope `description` must be non-empty",
+        );
+        let resources = first
+            .get("resources")
+            .and_then(Value::as_array)
+            .ok_or("scope entry must have a `resources` array")?;
+        assert!(!resources.is_empty(), "scope `resources` must be non-empty",);
+
         h.cleanup().await;
         Ok(())
     }
