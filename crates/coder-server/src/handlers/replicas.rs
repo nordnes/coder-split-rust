@@ -1,7 +1,7 @@
 //! Replica listing handler.
 
 use super::*;
-use crate::replica_manager::{STALE_MULTIPLIER, replica_from_row};
+use crate::replica_manager::{replica_from_row, stale_cutoff};
 use coder_core::api::ReplicaResponse;
 use std::time::Duration;
 use time::OffsetDateTime;
@@ -42,9 +42,9 @@ pub(crate) async fn get_replicas(
     }
 
     let update_interval = Duration::from_secs(state.config.worker.replica_update_interval_secs);
-    let scaled = update_interval.saturating_mul(STALE_MULTIPLIER);
-    let staleness = time::Duration::try_from(scaled).unwrap_or(time::Duration::MAX);
-    let threshold = OffsetDateTime::now_utc() - staleness;
+    // Share the same staleness formula as the replica manager so the
+    // handler's filter and the manager's prune policy cannot drift.
+    let threshold = OffsetDateTime::now_utc() - stale_cutoff(update_interval);
     let rows = state.store.list_coderd_replicas(threshold).await?;
     let replicas: Vec<ReplicaResponse> = rows.iter().map(replica_from_row).collect();
 

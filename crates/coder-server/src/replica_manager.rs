@@ -319,7 +319,7 @@ async fn refresh_and_prune(
 /// pruning.  Go uses `3 * UpdateInterval`; we preserve the full
 /// sub-second precision of the configured interval so small test
 /// intervals don't truncate to zero.
-fn stale_cutoff(update_interval: Duration) -> time::Duration {
+pub(crate) fn stale_cutoff(update_interval: Duration) -> time::Duration {
     let scaled = update_interval.saturating_mul(STALE_MULTIPLIER);
     // `time::Duration::try_from` preserves nanosecond precision and
     // only errors when the std `Duration` exceeds `i64::MAX` seconds,
