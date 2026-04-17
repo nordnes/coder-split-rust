@@ -23947,6 +23947,26 @@ pub(crate) mod tests {
         Ok((state, store, audit_sink))
     }
 
+    /// Waits (polling) until the `MemoryAuditSink` has captured at least
+    /// `min_events` events, or returns the snapshot after `timeout`.  The
+    /// handler emits into a `BatchedAuditSink` whose flush task runs on
+    /// the tokio scheduler; this helper replaces fixed-duration sleeps
+    /// (flagged by review as timing-dependent) with a deterministic wait.
+    async fn await_audit_events(
+        sink: &MemoryAuditSink,
+        min_events: usize,
+        timeout: std::time::Duration,
+    ) -> Vec<AuditEvent> {
+        let start = std::time::Instant::now();
+        loop {
+            let events = sink.events();
+            if events.len() >= min_events || start.elapsed() >= timeout {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
     /// Test fixture: an OAuth2 provider app, its secret, an API key that was
     /// minted for the user, and the `oauth2_provider_app_tokens` row that
     /// links them. Mirrors the shape produced by `postTokens` in Go.
@@ -24080,11 +24100,10 @@ pub(crate) mod tests {
             "oauth2 token row must be removed"
         );
 
-        // Allow the BatchedAuditSink background task to flush the event.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Wait deterministically for the BatchedAuditSink to flush.
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
 
         // Exactly one audit event for this revocation.
-        let events = audit.events();
         assert_eq!(
             events.len(),
             1,
@@ -24142,10 +24161,9 @@ pub(crate) mod tests {
                 .is_none(),
         );
 
-        // Allow the BatchedAuditSink background task to flush the event.
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        // Wait deterministically for the BatchedAuditSink to flush.
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
 
-        let events = audit.events();
         assert_eq!(
             events.len(),
             1,
