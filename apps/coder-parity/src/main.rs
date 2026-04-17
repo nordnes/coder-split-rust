@@ -376,7 +376,7 @@ const STUB_PARTIAL_HANDLERS: &[(&str, &str)] = &[
     ),
     (
         "post_workspace_agent_instance_identity_azure",
-        "Extracts VM id from the JWT payload; PKCS7 signature verification not yet implemented.",
+        "PKCS7/Microsoft CA verification not yet implemented: the crypto verifier hard-fails every request, while the permissive path extracts `vmId` from the JWT payload without validating the signature.",
     ),
 ];
 
