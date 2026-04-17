@@ -24,7 +24,7 @@ use axum::{
     },
     response::{IntoResponse, Response},
 };
-use coder_audit::AuditAction;
+use coder_audit::{AuditAction, AuditEvent};
 use coder_auth::{
     OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, OAuth2ProviderError, cookie_from_headers,
     supported_auth_methods,
@@ -62,17 +62,17 @@ use coder_core::template::{
     UpdateTemplateMetaInput,
 };
 use coder_core::{
-    AWSInstanceIdentityToken, ApiResponse, AppHostResponse, AppStore, AuditLogListFilter,
-    AuthMethods, AuthorizationRequest, AvailableExperiments, AzureInstanceIdentityToken,
-    ChangePasswordWithOneTimePasscodeRequest, ChatMessagePart, ChatMessageRecord,
-    ChatMessageResponse, ChatMessageUsage, ChatMessageVisibility, ChatModelCallConfig,
-    ChatModelConfigRecord, ChatModelConfigResponse, ChatProviderConfigResponse,
-    ChatProviderConfigSource, ChatProviderRecord, ChatQueuedMessageRecord,
-    ChatQueuedMessageResponse, ChatRecord, ChatResponse, ChatWithMessagesResponse,
-    ConvertLoginRequest, CreateChatMessageApiResponse, CreateChatMessageRequest,
-    CreateChatModelConfigRequest, CreateChatProviderConfigRequest, CreateChatRequest,
-    CreateFirstUserRequest, CreateFirstUserResponse, CreateLogSourceRequest, CreateTaskRequest,
-    CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
+    AWSInstanceIdentityToken, ApiKeyScopeMetadata, ApiResponse, AppHostResponse, AppStore,
+    AuditLogListFilter, AuthMethods, AuthorizationRequest, AvailableExperiments,
+    AzureInstanceIdentityToken, ChangePasswordWithOneTimePasscodeRequest, ChatMessagePart,
+    ChatMessageRecord, ChatMessageResponse, ChatMessageUsage, ChatMessageVisibility,
+    ChatModelCallConfig, ChatModelConfigRecord, ChatModelConfigResponse,
+    ChatProviderConfigResponse, ChatProviderConfigSource, ChatProviderRecord,
+    ChatQueuedMessageRecord, ChatQueuedMessageResponse, ChatRecord, ChatResponse,
+    ChatWithMessagesResponse, ConvertLoginRequest, CreateChatMessageApiResponse,
+    CreateChatMessageRequest, CreateChatModelConfigRequest, CreateChatProviderConfigRequest,
+    CreateChatRequest, CreateFirstUserRequest, CreateFirstUserResponse, CreateLogSourceRequest,
+    CreateTaskRequest, CreateTestAuditLogRequest, CreateTokenRequest, CreateUserRequestWithOrgs,
     CreateWorkspaceBuildInput, CreateWorkspaceInput, DERPMap, DERPMapRegion, DERPNode,
     DeploymentConfigResponse, EditChatMessageRequest, ExternalApiKeyScopes,
     ExternalAuthDeviceExchangeRequest, GCPInstanceIdentityToken, GetUsersResponse, HealthSettings,

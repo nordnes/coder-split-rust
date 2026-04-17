@@ -130,11 +130,22 @@ pub struct ConfigOption {
     pub description: &'static str,
 }
 
+/// Metadata describing a single requestable API key scope.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ApiKeyScopeMetadata {
+    /// Scope identifier (e.g. `workspace:read`, `coder:all`).
+    pub name: String,
+    /// Human-readable description of what the scope grants.
+    pub description: String,
+    /// Resource names unlocked by this scope (e.g. `workspace`, `template`).
+    pub resources: Vec<String>,
+}
+
 /// Available low-level API key scopes.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct ExternalApiKeyScopes {
-    /// Requestable external scopes.
-    pub external: Vec<String>,
+    /// Requestable external scopes, each with its descriptive metadata.
+    pub external: Vec<ApiKeyScopeMetadata>,
 }
 
 /// Safe experiments exposed by the deployment.

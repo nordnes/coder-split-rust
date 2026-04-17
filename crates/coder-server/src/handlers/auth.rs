@@ -10,14 +10,25 @@ pub(crate) struct TokenListQuery {
     include_expired: bool,
 }
 
-/// GET /api/v2/auth/scopes — list available API key scopes.
+/// GET /api/v2/auth/scopes — list available API key scopes, each with its
+/// human-readable description and the set of resources it unlocks.
+///
+/// The response is driven by `PUBLIC_API_KEY_SCOPE_METADATA`, which is the
+/// single source of truth for both the catalog's ordering and the per-scope
+/// metadata.
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
-    Json(ExternalApiKeyScopes {
-        external: PUBLIC_API_KEY_SCOPES
-            .iter()
-            .map(|scope| (*scope).to_owned())
-            .collect(),
-    })
+    let external = PUBLIC_API_KEY_SCOPE_METADATA
+        .iter()
+        .map(|(name, description, resources)| ApiKeyScopeMetadata {
+            name: (*name).to_owned(),
+            description: (*description).to_owned(),
+            resources: resources
+                .iter()
+                .map(|resource| (*resource).to_owned())
+                .collect(),
+        })
+        .collect();
+    Json(ExternalApiKeyScopes { external })
 }
 
 /// GET /api/v2/users/authmethods — return the supported authentication methods.
@@ -1365,4 +1376,110 @@ pub(crate) async fn post_authcheck(
     }
 
     Ok((StatusCode::OK, Json(response)).into_response())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+    use std::collections::BTreeSet;
+
+    #[tokio::test]
+    async fn list_api_key_scopes_enriches_every_public_scope() {
+        let Json(body) = list_api_key_scopes().await;
+
+        assert_eq!(
+            body.external.len(),
+            PUBLIC_API_KEY_SCOPE_METADATA.len(),
+            "every catalog entry must appear in the response",
+        );
+
+        for (index, (name, _, _)) in PUBLIC_API_KEY_SCOPE_METADATA.iter().enumerate() {
+            let entry = &body.external[index];
+            assert_eq!(
+                entry.name, *name,
+                "order must match PUBLIC_API_KEY_SCOPE_METADATA",
+            );
+            assert!(
+                !entry.description.trim().is_empty(),
+                "scope {name} must have a non-empty description",
+            );
+            assert!(
+                !entry.resources.is_empty(),
+                "scope {name} must unlock at least one resource",
+            );
+            for resource in &entry.resources {
+                assert!(
+                    !resource.trim().is_empty(),
+                    "scope {name} has an empty resource entry",
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn list_api_key_scopes_uses_snake_case_json_field_names() {
+        let Json(body) = list_api_key_scopes().await;
+        let value = serde_json::to_value(&body).expect("serialize response");
+
+        let external = value
+            .get("external")
+            .and_then(Value::as_array)
+            .expect("response must have an `external` array");
+
+        let Some(first) = external.first() else {
+            panic!("response must contain at least one scope");
+        };
+
+        let first_obj = first.as_object().expect("scope entries are JSON objects");
+        assert!(
+            first_obj.contains_key("name"),
+            "scope entries must have a snake_case `name` field",
+        );
+        assert!(
+            first_obj.contains_key("description"),
+            "scope entries must have a snake_case `description` field",
+        );
+        assert!(
+            first_obj.contains_key("resources"),
+            "scope entries must have a snake_case `resources` field",
+        );
+        // Guard against camelCase regressions.
+        assert!(!first_obj.contains_key("resourceList"));
+        assert!(!first_obj.contains_key("resourcesList"));
+    }
+
+    #[test]
+    fn public_api_key_scope_metadata_entries_are_well_formed() {
+        // `PUBLIC_API_KEY_SCOPE_METADATA` is the sole catalog of public API
+        // key scopes. Every entry must carry a non-empty description and at
+        // least one non-empty resource name, and scope names must be unique.
+        assert!(
+            !PUBLIC_API_KEY_SCOPE_METADATA.is_empty(),
+            "the public scope catalog must not be empty",
+        );
+        let mut seen = BTreeSet::new();
+        for (name, description, resources) in PUBLIC_API_KEY_SCOPE_METADATA {
+            assert!(!name.trim().is_empty(), "scope names must be non-empty",);
+            assert!(
+                seen.insert(*name),
+                "scope {name} appears more than once in the catalog",
+            );
+            assert!(
+                !description.trim().is_empty(),
+                "scope {name} has an empty description in the catalog",
+            );
+            assert!(
+                !resources.is_empty(),
+                "scope {name} has no resources in the catalog",
+            );
+            for resource in *resources {
+                assert!(
+                    !resource.trim().is_empty(),
+                    "scope {name} has an empty resource entry in the catalog",
+                );
+            }
+        }
+    }
 }

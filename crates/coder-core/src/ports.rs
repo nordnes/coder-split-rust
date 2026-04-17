@@ -41,7 +41,7 @@ use crate::identity::{
     TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
     UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
     UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
-    UserRecord, UserStatus, UserStatusChangeRecord,
+    UserRecord, UserStatus, UserStatusChangeRecord, WorkspaceSharingMode,
 };
 use crate::provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
@@ -1851,6 +1851,28 @@ pub trait IdentityStore: Send + Sync {
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
 
+    /// Reads the workspace sharing mode for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(mode))` parsed from the
+    /// persisted `workspace_sharing_mode` column.
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
+
+    /// Updates the workspace sharing mode for an organization.
+    ///
+    /// Writes `mode` to the `workspace_sharing_mode` column and keeps the
+    /// legacy `workspace_sharing_disabled` boolean in sync. Returns
+    /// `Ok(None)` if the organization does not exist or is soft-deleted;
+    /// otherwise `Ok(Some(mode))` with the newly persisted value.
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
+
     /// Lists members for an organization.
     async fn list_organization_members(
         &self,
@@ -3097,6 +3119,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
+
+    /// Reads the workspace sharing mode for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(mode))` parsed from the
+    /// persisted `workspace_sharing_mode` column.
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
+
+    /// Updates the workspace sharing mode for an organization.
+    ///
+    /// Writes `mode` to the `workspace_sharing_mode` column and keeps the
+    /// legacy `workspace_sharing_disabled` boolean in sync. Returns
+    /// `Ok(None)` if the organization does not exist or is soft-deleted;
+    /// otherwise `Ok(Some(mode))` with the newly persisted value.
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
 
     /// Lists members for an organization.
     async fn list_organization_members(
@@ -4760,6 +4804,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         filter: crate::api::AIBridgeModelsFilter,
     ) -> Result<Vec<String>, StorageError>;
+
+    /// Returns the total quota allowance for a user in an organization.
+    ///
+    /// Mirrors `GetQuotaAllowanceForUser` in `coder/coderd/database/queries/quotas.sql`.
+    /// Sums `quota_allowance` across all groups the user is a member of in the
+    /// organization (including the implicit "Everyone" group).
+    async fn get_quota_allowance_for_user(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError>;
+
+    /// Returns the total quota consumed for a user in an organization.
+    ///
+    /// Mirrors `GetQuotaConsumedForUser` in `coder/coderd/database/queries/quotas.sql`.
+    /// Sums `daily_cost` across the latest build of each non-deleted workspace
+    /// owned by the user in the organization.
+    async fn get_quota_consumed_for_user(
+        &self,
+        owner_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError>;
 }
 
 /// Stored webpush subscription record.
@@ -5857,6 +5923,21 @@ where
         AppStore::get_organization_resource_counts(self, id).await
     }
 
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        AppStore::get_organization_sharing_settings(self, organization_id).await
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        AppStore::update_organization_sharing_settings(self, organization_id, mode).await
+    }
+
     async fn list_organization_members(
         &self,
         filter: OrganizationMemberListFilter,
@@ -6431,6 +6512,25 @@ where
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError> {
         (**self).get_organization_resource_counts(id).await
+    }
+
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        (**self)
+            .get_organization_sharing_settings(organization_id)
+            .await
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        (**self)
+            .update_organization_sharing_settings(organization_id, mode)
+            .await
     }
 
     async fn list_organization_members(

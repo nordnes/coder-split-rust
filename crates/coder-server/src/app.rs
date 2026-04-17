@@ -89,61 +89,201 @@ use crate::middleware::{
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
 pub(crate) const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
 const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
-pub(crate) const PUBLIC_API_KEY_SCOPES: &[&str] = &[
-    "audit_log:*",
-    "audit_log:create",
-    "audit_log:read",
-    "api_key:*",
-    "api_key:create",
-    "api_key:delete",
-    "api_key:read",
-    "api_key:update",
-    "coder:all",
-    "coder:apikeys.manage_self",
-    "coder:application_connect",
-    "deployment_stats:*",
-    "deployment_stats:read",
-    "coder:templates.author",
-    "coder:templates.build",
-    "coder:workspaces.access",
-    "coder:workspaces.create",
-    "coder:workspaces.delete",
-    "coder:workspaces.operate",
-    "file:*",
-    "file:create",
-    "file:read",
-    "organization:*",
-    "organization:delete",
-    "organization:read",
-    "organization:update",
-    "task:*",
-    "task:create",
-    "task:delete",
-    "task:read",
-    "task:update",
-    "template:*",
-    "template:create",
-    "template:delete",
-    "template:read",
-    "template:update",
-    "template:use",
-    "user:read_personal",
-    "user:update_personal",
-    "user_secret:*",
-    "user_secret:create",
-    "user_secret:delete",
-    "user_secret:read",
-    "user_secret:update",
-    "workspace:*",
-    "workspace:application_connect",
-    "workspace:create",
-    "workspace:delete",
-    "workspace:read",
-    "workspace:ssh",
-    "workspace:start",
-    "workspace:stop",
-    "workspace:update",
+
+/// Public API key scope catalog: `(name, description, resources)`.
+///
+/// This is the single source of truth for `GET /api/v2/auth/scopes` — it
+/// drives both the catalog's ordering and the per-scope metadata the handler
+/// returns. A unit test asserts that every entry has a non-empty description
+/// and at least one resource.
+pub(crate) const PUBLIC_API_KEY_SCOPE_METADATA: &[(&str, &str, &[&str])] = &[
+    (
+        "audit_log:*",
+        "Full access to audit log resources.",
+        &["audit_log"],
+    ),
+    (
+        "audit_log:create",
+        "Create audit log entries.",
+        &["audit_log"],
+    ),
+    ("audit_log:read", "Read audit log entries.", &["audit_log"]),
+    (
+        "api_key:*",
+        "Full access to API key resources.",
+        &["api_key"],
+    ),
+    ("api_key:create", "Create API keys.", &["api_key"]),
+    ("api_key:delete", "Delete API keys.", &["api_key"]),
+    ("api_key:read", "Read API keys.", &["api_key"]),
+    ("api_key:update", "Update API keys.", &["api_key"]),
+    (
+        "coder:all",
+        "Full API access across all Coder resources.",
+        &["*"],
+    ),
+    (
+        "coder:apikeys.manage_self",
+        "Manage the caller's own API keys.",
+        &["api_key"],
+    ),
+    (
+        "coder:application_connect",
+        "Connect to workspace-hosted applications.",
+        &["workspace"],
+    ),
+    (
+        "deployment_stats:*",
+        "Full access to deployment statistics.",
+        &["deployment_stats"],
+    ),
+    (
+        "deployment_stats:read",
+        "Read deployment statistics.",
+        &["deployment_stats"],
+    ),
+    (
+        "coder:templates.author",
+        "Author and publish templates and upload supporting files.",
+        &["template", "file"],
+    ),
+    (
+        "coder:templates.build",
+        "Build templates and upload supporting files.",
+        &["template", "file"],
+    ),
+    (
+        "coder:workspaces.access",
+        "Access workspaces, including SSH and application connections.",
+        &["workspace"],
+    ),
+    (
+        "coder:workspaces.create",
+        "Create new workspaces from templates.",
+        &["workspace", "template"],
+    ),
+    (
+        "coder:workspaces.delete",
+        "Delete existing workspaces.",
+        &["workspace"],
+    ),
+    (
+        "coder:workspaces.operate",
+        "Start, stop, and manage the lifecycle of workspaces.",
+        &["workspace"],
+    ),
+    ("file:*", "Full access to file resources.", &["file"]),
+    ("file:create", "Upload files.", &["file"]),
+    ("file:read", "Read file contents and metadata.", &["file"]),
+    (
+        "organization:*",
+        "Full access to organization resources.",
+        &["organization"],
+    ),
+    (
+        "organization:delete",
+        "Delete organizations.",
+        &["organization"],
+    ),
+    (
+        "organization:read",
+        "Read organization resources.",
+        &["organization"],
+    ),
+    (
+        "organization:update",
+        "Update organization resources.",
+        &["organization"],
+    ),
+    ("task:*", "Full access to task resources.", &["task"]),
+    ("task:create", "Create tasks.", &["task"]),
+    ("task:delete", "Delete tasks.", &["task"]),
+    ("task:read", "Read tasks.", &["task"]),
+    ("task:update", "Update tasks.", &["task"]),
+    (
+        "template:*",
+        "Full access to template resources.",
+        &["template"],
+    ),
+    ("template:create", "Create templates.", &["template"]),
+    ("template:delete", "Delete templates.", &["template"]),
+    ("template:read", "Read templates.", &["template"]),
+    ("template:update", "Update templates.", &["template"]),
+    (
+        "template:use",
+        "Use templates to create workspaces.",
+        &["template"],
+    ),
+    (
+        "user:read_personal",
+        "Read the caller's own profile.",
+        &["user"],
+    ),
+    (
+        "user:update_personal",
+        "Update the caller's own profile.",
+        &["user"],
+    ),
+    (
+        "user_secret:*",
+        "Full access to user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:create",
+        "Create user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:delete",
+        "Delete user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:read",
+        "Read user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "user_secret:update",
+        "Update user-scoped secrets.",
+        &["user_secret"],
+    ),
+    (
+        "workspace:*",
+        "Full access to workspace resources.",
+        &["workspace"],
+    ),
+    (
+        "workspace:application_connect",
+        "Connect to workspace-hosted applications.",
+        &["workspace"],
+    ),
+    ("workspace:create", "Create workspaces.", &["workspace"]),
+    ("workspace:delete", "Delete workspaces.", &["workspace"]),
+    (
+        "workspace:read",
+        "Read workspace resources.",
+        &["workspace"],
+    ),
+    (
+        "workspace:ssh",
+        "Open SSH sessions to workspaces.",
+        &["workspace"],
+    ),
+    (
+        "workspace:start",
+        "Start stopped workspaces.",
+        &["workspace"],
+    ),
+    ("workspace:stop", "Stop running workspaces.", &["workspace"]),
+    (
+        "workspace:update",
+        "Update workspace resources.",
+        &["workspace"],
+    ),
 ];
+
 pub(crate) const VALID_HEALTH_SECTIONS: &[&str] = &[
     "DERP",
     "AccessURL",
@@ -195,6 +335,12 @@ pub struct AppState {
     /// Will be replaced by the CryptoKeys DB-backed system when workspace-proxy
     /// infrastructure is fully ported.
     pub(crate) app_signing_key: [u8; 32],
+    /// Optional background-refreshed cache of the latest Coder release.
+    ///
+    /// `None` when `config.update_check` is disabled or the server is
+    /// running in test mode. The `/updatecheck` handler falls back to the
+    /// currently running version in that case, matching Go's behavior.
+    pub update_checker: Option<Arc<crate::update_check::UpdateChecker>>,
 }
 
 impl AppState {
@@ -256,7 +402,18 @@ impl AppState {
             http_client,
             entitlements,
             app_signing_key,
+            update_checker: None,
         })
+    }
+
+    /// Attaches an [`UpdateChecker`] to this state. The background poll loop
+    /// is expected to already be running (via
+    /// [`crate::update_check::UpdateChecker::spawn`]). Returns the mutated
+    /// state so call sites can use builder-style chaining at startup.
+    #[must_use]
+    pub fn with_update_checker(mut self, checker: Arc<crate::update_check::UpdateChecker>) -> Self {
+        self.update_checker = Some(checker);
+        self
     }
 
     /// Cancels the background deployment-stats refresh loop.
@@ -1550,7 +1707,7 @@ pub(crate) mod tests {
         routing::{get, post},
     };
     use base64::Engine as _;
-    use coder_audit::{AuditEvent, AuditSink};
+    use coder_audit::{AuditAction, AuditEvent, AuditSink};
     use coder_auth::{
         OAUTH2_REDIRECT_COOKIE, OAUTH2_STATE_COOKIE, SESSION_TOKEN_COOKIE, SESSION_TOKEN_HEADER,
         hash_password,
@@ -1615,8 +1772,10 @@ pub(crate) mod tests {
         WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
         WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
         WorkspaceProxyHealthRecord, WorkspaceProxyRow, WorkspaceRecord,
-        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceSharingMode,
+        WorkspaceStatsWorkspaceInput,
     };
+    use coder_rbac::ResourceKind;
     use serde::Serialize;
     use serde_json::{Value, json};
     use time::OffsetDateTime;
@@ -1625,7 +1784,8 @@ pub(crate) mod tests {
     use uuid::Uuid;
 
     use super::{
-        AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPES, SLIM_BUILD_MESSAGE, build_router,
+        AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPE_METADATA, SLIM_BUILD_MESSAGE,
+        build_router,
     };
     use coder_connectivity::tailnet::{
         CoordinateRequest, CoordinateResponse, NodeInfo, PeerUpdateKind,
@@ -1636,6 +1796,16 @@ pub(crate) mod tests {
     #[derive(Debug, Default)]
     struct MemoryAuditSink {
         events: Mutex<Vec<AuditEvent>>,
+    }
+
+    impl MemoryAuditSink {
+        /// Returns a snapshot of the events captured so far.
+        fn events(&self) -> Vec<AuditEvent> {
+            self.events
+                .lock()
+                .map(|events| events.clone())
+                .unwrap_or_default()
+        }
     }
 
     #[async_trait]
@@ -1691,6 +1861,7 @@ pub(crate) mod tests {
         health_ok: bool,
         users: Mutex<HashMap<Uuid, UserRecord>>,
         organizations: Mutex<HashMap<Uuid, OrganizationRecord>>,
+        organization_sharing: Mutex<HashMap<Uuid, WorkspaceSharingMode>>,
         organization_members: Mutex<HashMap<(Uuid, Uuid), OrganizationMemberRecord>>,
         sessions: Mutex<HashMap<Vec<u8>, AuthenticatedUser>>,
         api_keys: Mutex<HashMap<String, ApiKeyRecord>>,
@@ -1807,6 +1978,7 @@ pub(crate) mod tests {
                 health_ok,
                 users: Mutex::new(HashMap::new()),
                 organizations: Mutex::new(HashMap::new()),
+                organization_sharing: Mutex::new(HashMap::new()),
                 organization_members: Mutex::new(HashMap::new()),
                 sessions: Mutex::new(HashMap::new()),
                 api_keys: Mutex::new(HashMap::new()),
@@ -2002,16 +2174,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// Check if `inner` JSON object keys/values are all contained in `outer`.
-    /// Mirrors PostgreSQL `inner <@ outer` for JSONB objects (flat key-value maps).
-    fn json_tags_contained_by(inner: &Value, outer: &Value) -> bool {
-        match (inner, outer) {
-            (Value::Object(inner_map), Value::Object(outer_map)) => {
-                inner_map.iter().all(|(k, v)| outer_map.get(k) == Some(v))
-            }
-            // If both are equal scalars/arrays, containment holds.
-            _ => inner == outer,
-        }
+    /// Returns `true` when a daemon advertising `daemon_tags` may acquire a
+    /// job tagged with `job_tags`. Mirrors the SQL function
+    /// `provisioner_tagset_contains` via [`provisioner_tagset_matches`].
+    fn provisioner_tagset_matches_json(daemon_tags: &Value, job_tags: &Value) -> bool {
+        let daemon = coder_core::tags_from_json(daemon_tags);
+        let job = coder_core::tags_from_json(job_tags);
+        coder_core::provisioner_tagset_matches(&daemon, &job)
     }
 
     #[async_trait]
@@ -2065,9 +2234,11 @@ pub(crate) mod tests {
                     input.types.contains(&j.provisioner)
                 })
                 .filter(|j| {
-                    // Tag containment: job tags must be a subset of daemon tags
-                    // (mirrors PostgreSQL `tags <@ $5::JSONB`).
-                    json_tags_contained_by(&j.tags, &input.provisioner_tags)
+                    // Tag matching mirrors the Go SQL function
+                    // `provisioner_tagset_contains`: untagged jobs require
+                    // untagged daemons; otherwise the job's tags must be a
+                    // subset of the daemon's tags.
+                    provisioner_tagset_matches_json(&input.provisioner_tags, &j.tags)
                 })
                 .map(|j| (j.id, j.created_at))
                 .collect();
@@ -2647,6 +2818,7 @@ pub(crate) mod tests {
                 updated_at: now,
                 is_default: true,
                 deleted: false,
+                workspace_sharing_mode: WorkspaceSharingMode::default(),
             };
             let member = OrganizationMemberRecord {
                 user_id,
@@ -3311,6 +3483,7 @@ pub(crate) mod tests {
                 updated_at: now,
                 is_default: false,
                 deleted: false,
+                workspace_sharing_mode: WorkspaceSharingMode::default(),
             };
             organizations.insert(org.id, org.clone());
 
@@ -3402,6 +3575,63 @@ pub(crate) mod tests {
                 group_count,
                 provisioner_key_count: 0,
             })
+        }
+
+        async fn get_organization_sharing_settings(
+            &self,
+            organization_id: Uuid,
+        ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+            let organizations = self
+                .organizations
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let Some(org) = organizations.get(&organization_id) else {
+                return Ok(None);
+            };
+            if org.deleted {
+                return Ok(None);
+            }
+            let default_mode = org.workspace_sharing_mode;
+            drop(organizations);
+            let sharing = self
+                .organization_sharing
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(Some(
+                sharing
+                    .get(&organization_id)
+                    .copied()
+                    .unwrap_or(default_mode),
+            ))
+        }
+
+        async fn update_organization_sharing_settings(
+            &self,
+            organization_id: Uuid,
+            mode: WorkspaceSharingMode,
+        ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+            let mut organizations = self
+                .organizations
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let Some(org) = organizations.get_mut(&organization_id) else {
+                return Ok(None);
+            };
+            if org.deleted {
+                return Ok(None);
+            }
+            org.updated_at = OffsetDateTime::now_utc();
+            // Keep the OrganizationRecord in lock-step with the sharing map
+            // so the denormalised record mirrors what the PostgresStore
+            // returns after the same update.
+            org.workspace_sharing_mode = mode;
+            drop(organizations);
+            let mut sharing = self
+                .organization_sharing
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            sharing.insert(organization_id, mode);
+            Ok(Some(mode))
         }
 
         async fn find_custom_role(
@@ -9492,6 +9722,78 @@ pub(crate) mod tests {
         ) -> Result<Vec<String>, StorageError> {
             Ok(Vec::new())
         }
+
+        async fn get_quota_allowance_for_user(
+            &self,
+            user_id: Uuid,
+            organization_id: Uuid,
+        ) -> Result<i64, StorageError> {
+            // Expanded group membership: direct group members + implicit
+            // "Everyone" group (id == organization_id for any
+            // organization_members row).
+            let direct_group_ids: std::collections::HashSet<Uuid> = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .iter()
+                .filter(|m| m.user_id == user_id)
+                .map(|m| m.group_id)
+                .collect();
+            let is_org_member = self
+                .organization_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .contains_key(&(organization_id, user_id));
+            let groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut total: i64 = 0;
+            for group in groups.values() {
+                if group.organization_id != organization_id {
+                    continue;
+                }
+                let is_member = direct_group_ids.contains(&group.id)
+                    || (is_org_member && group.id == organization_id);
+                if is_member {
+                    total = total.saturating_add(i64::from(group.quota_allowance));
+                }
+            }
+            Ok(total)
+        }
+
+        async fn get_quota_consumed_for_user(
+            &self,
+            owner_id: Uuid,
+            organization_id: Uuid,
+        ) -> Result<i64, StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut total: i64 = 0;
+            for workspace in workspaces.values() {
+                if workspace.deleted
+                    || workspace.owner_id != owner_id
+                    || workspace.organization_id != organization_id
+                {
+                    continue;
+                }
+                // Find the latest build for this workspace (highest build_number).
+                let latest = builds
+                    .values()
+                    .filter(|b| b.workspace_id == workspace.id)
+                    .max_by_key(|b| b.build_number);
+                if let Some(build) = latest {
+                    total = total.saturating_add(i64::from(build.daily_cost));
+                }
+            }
+            Ok(total)
+        }
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -9541,6 +9843,8 @@ pub(crate) mod tests {
             worker: coder_core::config::WorkerConfig::default(),
             swagger_enabled: true,
             update_check: false,
+            update_check_interval_secs: 24 * 60 * 60,
+            update_check_url: "https://api.github.com/repos/coder/coder/releases/latest".to_owned(),
             ssh_keygen_algorithm: "ed25519".to_owned(),
             cache_dir: String::new(),
             browser_only: false,
@@ -9957,12 +10261,24 @@ pub(crate) mod tests {
             call(app.clone(), request(Method::GET, "/api/v2/auth/scopes")?).await?;
         assert_eq!(scopes_response.status(), StatusCode::OK);
         let scopes_body = response_json(scopes_response).await?;
-        assert_eq!(
-            scopes_body
-                .get("external")
+        let external = scopes_body
+            .get("external")
+            .and_then(Value::as_array)
+            .ok_or("scopes response must have an `external` array")?;
+        assert_eq!(external.len(), PUBLIC_API_KEY_SCOPE_METADATA.len());
+        let first_entry = external
+            .first()
+            .and_then(Value::as_object)
+            .ok_or("first scope entry must be a JSON object")?;
+        assert!(first_entry.contains_key("name"));
+        assert!(first_entry.contains_key("description"));
+        assert!(first_entry.contains_key("resources"));
+        assert!(
+            first_entry
+                .get("resources")
                 .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(PUBLIC_API_KEY_SCOPES.len())
+                .is_some_and(|resources| !resources.is_empty()),
+            "first scope entry must unlock at least one resource",
         );
 
         let experiments_response = call(
@@ -23969,6 +24285,387 @@ pub(crate) mod tests {
     }
 
     // =====================================================================
+    // RFC 7009 — cascade invalidation + audit (gap-doc §5 #13)
+    //
+    // Ports from coder/coderd/oauth2provider/revoke.go: successful revocation
+    // must (1) delete the derived api_key row so dependent sessions cannot be
+    // reused, and (2) emit exactly one audit_logs entry per revocation.
+    // Unknown / wrong-owner / malformed requests remain silent per RFC 7009.
+    // =====================================================================
+
+    /// Builds an `AppState` plus handles to the `FakeStore` and the capturing
+    /// `MemoryAuditSink`. Mirrors `test_state_with_store` but preserves an
+    /// `Arc<MemoryAuditSink>` so tests can inspect emitted audit events.
+    fn test_state_with_memory_audit()
+    -> Result<(AppState, Arc<FakeStore>, Arc<MemoryAuditSink>), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        let store = Arc::new(FakeStore::new(true));
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let audit_sink = Arc::new(MemoryAuditSink::default());
+        let audit: Arc<dyn AuditSink> = audit_sink.clone();
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        let derp_server = coder_connectivity::derp::DerpServer::new(
+            coder_connectivity::derp::NodeKey::new([0u8; 32]),
+        );
+
+        // Force immediate flushing so tests don't race the batched sink.
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
+        config.audit_batch_flush_interval_ms = 1;
+        let state = AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store_trait,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            derp_server,
+            None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
+        )?;
+        Ok((state, store, audit_sink))
+    }
+
+    /// Waits (polling) until the `MemoryAuditSink` has captured at least
+    /// `min_events` events, or returns the snapshot after `timeout`.  The
+    /// handler emits into a `BatchedAuditSink` whose flush task runs on
+    /// the tokio scheduler; this helper replaces fixed-duration sleeps
+    /// (flagged by review as timing-dependent) with a deterministic wait.
+    async fn await_audit_events(
+        sink: &MemoryAuditSink,
+        min_events: usize,
+        timeout: std::time::Duration,
+    ) -> Vec<AuditEvent> {
+        let start = std::time::Instant::now();
+        loop {
+            let events = sink.events();
+            if events.len() >= min_events || start.elapsed() >= timeout {
+                return events;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    /// Test fixture: an OAuth2 provider app, its secret, an API key that was
+    /// minted for the user, and the `oauth2_provider_app_tokens` row that
+    /// links them. Mirrors the shape produced by `postTokens` in Go.
+    struct RevokeFixture {
+        app_id: Uuid,
+        user_id: Uuid,
+        api_key_id: String,
+        access_token: String,
+        refresh_token: String,
+        token_id: Uuid,
+        hash_prefix: Vec<u8>,
+    }
+
+    async fn seed_revoke_fixture(store: &FakeStore) -> Result<RevokeFixture, Box<dyn Error>> {
+        use sha2::{Digest, Sha256};
+
+        // 1) User
+        let user_input = coder_core::identity::CreateUserInput {
+            email: "oauth2-revoke@example.com".to_owned(),
+            username: "oauth2-revoke".to_owned(),
+            name: "OAuth2 Revoke".to_owned(),
+            password_hash: None,
+            login_type: coder_core::identity::LoginType::Oauth2ProviderApp,
+            status: coder_core::identity::UserStatus::Active,
+            organization_ids: Vec::new(),
+        };
+        let user = store.create_user(user_input).await?;
+
+        // 2) App
+        let app = store
+            .create_oauth2_provider_app(&coder_core::identity::CreateOAuth2ProviderAppInput {
+                name: "Revoke Cascade App".to_owned(),
+                icon: String::new(),
+                callback_url: "https://example.com/cb".to_owned(),
+                created_by: Some(user.id),
+            })
+            .await?;
+
+        // 3) Secret
+        let secret = store
+            .create_oauth2_provider_app_secret(app.id, b"sprefix1", b"shash1", "disp1")
+            .await?;
+
+        // 4) API key + token.  The access token IS the api-key secret: the
+        //    api-key's hashed_secret = SHA-256(access_token), and the token
+        //    record's hash_prefix = first 8 bytes of the raw access token.
+        let access_token = "access-token-bytes-are-at-least-16-chars".to_owned();
+        let refresh_token = "refresh-token-bytes-differ-from-access".to_owned();
+        let api_key_id = "revoke-ak-1".to_owned();
+        let hashed_secret = Sha256::digest(access_token.as_bytes()).to_vec();
+        let refresh_hash = Sha256::digest(refresh_token.as_bytes()).to_vec();
+        let hash_prefix = access_token.as_bytes()[..8].to_vec();
+        let now = OffsetDateTime::now_utc();
+        let expires = now + time::Duration::hours(1);
+
+        store
+            .create_api_key(coder_core::identity::CreateApiKeyInput {
+                id: api_key_id.clone(),
+                hashed_secret: hashed_secret.clone(),
+                user_id: user.id,
+                last_used: now,
+                expires_at: expires,
+                created_at: now,
+                updated_at: now,
+                login_type: coder_core::identity::LoginType::Oauth2ProviderApp,
+                scopes: Vec::new(),
+                token_name: "oauth2".to_owned(),
+                lifetime_seconds: 3600,
+                allow_list: Vec::new(),
+            })
+            .await?;
+
+        let token = store
+            .create_oauth2_provider_app_token(
+                &coder_core::identity::CreateOAuth2ProviderAppTokenInput {
+                    expires_at: expires,
+                    hash_prefix: hash_prefix.clone(),
+                    refresh_hash,
+                    app_secret_id: secret.id,
+                    api_key_id: api_key_id.clone(),
+                    audience: String::new(),
+                    user_id: user.id,
+                },
+            )
+            .await?;
+
+        Ok(RevokeFixture {
+            app_id: app.id,
+            user_id: user.id,
+            api_key_id,
+            access_token,
+            refresh_token,
+            token_id: token.id,
+            hash_prefix,
+        })
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_access_token_cascades_and_emits_audit() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        // The fixture deliberately uses only URL-safe characters so we can
+        // format the body without escaping.
+        let body = format!(
+            "token={}&client_id={}",
+            fixture.access_token, fixture.app_id
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Cascade: derived API key and token row are both gone.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_none(),
+            "derived api_key must be invalidated"
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_none(),
+            "oauth2 token row must be removed"
+        );
+
+        // Wait deterministically for the BatchedAuditSink to flush.
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+
+        // Exactly one audit event for this revocation.
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly one audit event, got {events:?}"
+        );
+        let event = &events[0];
+        assert_eq!(event.action, AuditAction::Delete);
+        assert_eq!(event.resource, ResourceKind::Oauth2ProviderAppToken);
+        assert_eq!(event.actor_user_id, Some(fixture.user_id));
+        assert_eq!(
+            event.target_id.as_deref(),
+            Some(fixture.token_id.to_string().as_str())
+        );
+        assert!(
+            !event.summary.contains(&fixture.access_token),
+            "audit summary must not leak the token secret, got: {}",
+            event.summary
+        );
+        assert!(event.summary.contains("access_token"));
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_refresh_token_cascades_and_emits_audit() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        let body = format!(
+            "token={}&client_id={}",
+            &fixture.refresh_token, fixture.app_id
+        );
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Cascade: revoking the refresh token invalidates the session
+        // api_key that was minted from it.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_none(),
+            "session api_key derived from refresh token must be invalidated"
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_none(),
+        );
+
+        // Wait deterministically for the BatchedAuditSink to flush.
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+
+        assert_eq!(
+            events.len(),
+            1,
+            "expected exactly one audit event, got {events:?}"
+        );
+        assert_eq!(events[0].resource, ResourceKind::Oauth2ProviderAppToken);
+        assert_eq!(events[0].action, AuditAction::Delete);
+        assert_eq!(events[0].actor_user_id, Some(fixture.user_id));
+        assert!(events[0].summary.contains("refresh_token"));
+        assert!(
+            !events[0].summary.contains(&fixture.refresh_token),
+            "audit summary must not leak the refresh token secret"
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_unknown_token_returns_200_without_audit() -> Result<(), Box<dyn Error>>
+    {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(format!(
+                "token=not-a-real-token-xxxxxxxxxxxxxx&client_id={}",
+                fixture.app_id
+            )))?;
+        let response = call(app, req).await?;
+        assert_eq!(
+            response.status(),
+            StatusCode::OK,
+            "RFC 7009 requires 200 for unknown tokens to avoid disclosure"
+        );
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        // Nothing was touched.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_some()
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_some(),
+        );
+
+        // No audit event — unknown tokens must be silent.
+        assert!(
+            audit.events().is_empty(),
+            "unknown-token revocation must not emit an audit event, got {:?}",
+            audit.events()
+        );
+
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn rfc7009_revoke_wrong_client_is_silent() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let fixture = seed_revoke_fixture(store.as_ref()).await?;
+        let app = build_router(state, None);
+
+        // A second app with no relation to the token.
+        let other_app = store
+            .create_oauth2_provider_app(&coder_core::identity::CreateOAuth2ProviderAppInput {
+                name: "Other App".to_owned(),
+                icon: String::new(),
+                callback_url: "https://example.com/other".to_owned(),
+                created_by: Some(fixture.user_id),
+            })
+            .await?;
+
+        let body = format!("token={}&client_id={}", &fixture.access_token, other_app.id);
+        let req = Request::builder()
+            .method(Method::POST)
+            .uri("/oauth2/revoke")
+            .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+            .body(Body::from(body))?;
+        let response = call(app, req).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        // Token and api_key remain because client_id did not own the token.
+        assert!(
+            store
+                .find_api_key_by_id(&fixture.api_key_id)
+                .await?
+                .is_some(),
+            "api_key must remain when client_id does not own the token"
+        );
+        assert!(
+            store
+                .find_oauth2_provider_app_token_by_prefix(&fixture.hash_prefix)
+                .await?
+                .is_some(),
+        );
+        assert!(
+            audit.events().is_empty(),
+            "wrong-client revocation must not emit an audit event"
+        );
+
+        Ok(())
+    }
+
+    // =====================================================================
     // Happy-path integration tests — Insights
     // =====================================================================
 
@@ -30705,6 +31402,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: false,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
         let deleted_id = Uuid::from_u128(200);
@@ -30724,6 +31422,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: true,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
 
@@ -30758,6 +31457,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: true,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
         let result = store.find_organization_by_id(org_id).await?;
@@ -36488,6 +37188,257 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // Workspace-sharing settings handlers
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn workspace_sharing_default_and_patch_persists() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        // Default: sharing enabled.
+        let get = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get.status(), StatusCode::OK);
+        let body = response_json(get).await?;
+        assert_eq!(
+            body.get("sharing_disabled").and_then(Value::as_bool),
+            Some(false)
+        );
+        assert_eq!(
+            body.get("shareable_workspace_owners")
+                .and_then(Value::as_str),
+            Some("everyone"),
+        );
+
+        // PATCH disables sharing.
+        let patch = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+                &serde_json::json!({ "shareable_workspace_owners": "none" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch.status(), StatusCode::OK);
+        let body = response_json(patch).await?;
+        assert_eq!(
+            body.get("sharing_disabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("shareable_workspace_owners")
+                .and_then(Value::as_str),
+            Some("none"),
+        );
+
+        // Subsequent GET reflects persisted value.
+        let get2 = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(get2.status(), StatusCode::OK);
+        let body = response_json(get2).await?;
+        assert_eq!(
+            body.get("sharing_disabled").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(
+            body.get("shareable_workspace_owners")
+                .and_then(Value::as_str),
+            Some("none"),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_sharing_patch_records_audit_event() -> Result<(), Box<dyn Error>> {
+        use coder_connectivity::tailnet::{DerpTrafficTracker, InMemoryCoordinator};
+
+        let store = Arc::new(FakeStore::new(true));
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let audit: Arc<dyn AuditSink> = Arc::new(FakeStoreAuditSink {
+            store: store.clone(),
+        });
+        let pubsub: Arc<dyn coder_core::pubsub::PubSub> =
+            Arc::new(coder_core::pubsub::InMemoryPubSub::new());
+        let agent_provider: Arc<dyn coder_connectivity::agents::AgentProvider> =
+            Arc::new(coder_connectivity::agents::InMemoryAgentProvider::new());
+        let coordinator = InMemoryCoordinator::new(Default::default());
+        let derp_tracker = DerpTrafficTracker::new();
+        let mut config = test_config()?;
+        config.audit_batch_max_size = 1;
+        let state = AppState::new(
+            config,
+            BuildMetadata::default(),
+            Uuid::nil(),
+            store_trait,
+            audit,
+            pubsub,
+            agent_provider,
+            coordinator,
+            derp_tracker,
+            coder_connectivity::derp::DerpServer::new(coder_connectivity::derp::NodeKey::new(
+                [0u8; 32],
+            )),
+            None,
+            coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
+            std::sync::Arc::new(coder_license::EntitlementSet::new()),
+        )?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let patch = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+                &serde_json::json!({ "sharing_disabled": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch.status(), StatusCode::OK);
+
+        // Allow the BatchedAuditSink background task to flush the event.
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/audit", &session_token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        let logs = body
+            .get("audit_logs")
+            .and_then(Value::as_array)
+            .ok_or("expected audit_logs array")?;
+        let found = logs.iter().any(|entry| {
+            entry
+                .get("resource_id")
+                .and_then(Value::as_str)
+                .is_some_and(|id| id == org_id.to_string())
+                && entry
+                    .get("description")
+                    .and_then(Value::as_str)
+                    .is_some_and(|d| d.contains("workspace sharing"))
+        });
+        assert!(
+            found,
+            "expected workspace-sharing audit entry; got {logs:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_sharing_patch_round_trips_all_modes() -> Result<(), Box<dyn Error>> {
+        // Round-trip each of the three `shareable_workspace_owners` enum
+        // values through the PATCH → GET path, asserting the new
+        // `workspace_sharing_mode` column preserves the exact value and
+        // keeps the legacy `sharing_disabled` boolean in sync (only `none`
+        // disables sharing).
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        for (mode, expected_disabled) in [
+            ("service_accounts", false),
+            ("none", true),
+            ("everyone", false),
+        ] {
+            let patch = call(
+                app.clone(),
+                authenticated_json_request(
+                    Method::PATCH,
+                    &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                    &session_token,
+                    &serde_json::json!({ "shareable_workspace_owners": mode }),
+                )?,
+            )
+            .await?;
+            assert_eq!(patch.status(), StatusCode::OK, "PATCH {mode} should be OK");
+            let body = response_json(patch).await?;
+            assert_eq!(
+                body.get("shareable_workspace_owners")
+                    .and_then(Value::as_str),
+                Some(mode),
+                "PATCH response should echo {mode}",
+            );
+            assert_eq!(
+                body.get("sharing_disabled").and_then(Value::as_bool),
+                Some(expected_disabled),
+                "sharing_disabled should be {expected_disabled} for {mode}",
+            );
+
+            let get = call(
+                app.clone(),
+                authenticated_request(
+                    Method::GET,
+                    &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                    &session_token,
+                )?,
+            )
+            .await?;
+            assert_eq!(get.status(), StatusCode::OK);
+            let body = response_json(get).await?;
+            assert_eq!(
+                body.get("shareable_workspace_owners")
+                    .and_then(Value::as_str),
+                Some(mode),
+                "GET should return persisted {mode}",
+            );
+            assert_eq!(
+                body.get("sharing_disabled").and_then(Value::as_bool),
+                Some(expected_disabled),
+                "GET sharing_disabled should stay in sync with {mode}",
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_sharing_patch_rejects_unknown_mode() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
+        let patch = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                &session_token,
+                &serde_json::json!({ "shareable_workspace_owners": "not_a_mode" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(patch.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(patch).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("unsupported shareable_workspace_owners value"),
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Happy-path tests: File handlers
     // -----------------------------------------------------------------------
 
@@ -37548,8 +38499,14 @@ pub(crate) mod tests {
     /// Build an `AppState` with the `TemplateRbac` entitlement enabled so
     /// the enterprise group routes are reachable.
     fn test_state_with_template_rbac() -> Result<AppState, Box<dyn Error>> {
-        let (state, _store) = test_state_with_store(true)?;
-        // Enable the TemplateRbac feature.
+        Ok(test_state_with_template_rbac_and_store()?.0)
+    }
+
+    /// Build an `AppState` (with the `TemplateRbac` entitlement enabled)
+    /// alongside the underlying `FakeStore`, so tests can seed fixtures.
+    fn test_state_with_template_rbac_and_store()
+    -> Result<(AppState, Arc<FakeStore>), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
         let mut ents = coder_license::Entitlements::new_unlicensed();
         ents.has_license = true;
         if let Some(f) = ents
@@ -37560,7 +38517,7 @@ pub(crate) mod tests {
             f.enabled = true;
         }
         state.entitlements.update(ents);
-        Ok(state)
+        Ok((state, store))
     }
 
     #[tokio::test]
@@ -37753,6 +38710,250 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ----- Workspace quota route tests -----
+
+    /// GET the organization-scoped workspace-quota endpoint as the first
+    /// user and return the parsed JSON body.
+    async fn get_quota_body(
+        app: Router,
+        token: &str,
+        org_id: Uuid,
+        username: &str,
+    ) -> Result<Value, Box<dyn Error>> {
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/members/{username}/workspace-quota"),
+                token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    /// Helper: look up the first user's username from the FakeStore.
+    fn first_username(store: &FakeStore) -> Option<String> {
+        store
+            .users
+            .lock()
+            .ok()?
+            .values()
+            .next()
+            .map(|u| u.username.clone())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_unlicensed_returns_unlimited() -> Result<(), Box<dyn Error>> {
+        // Without the TemplateRbac entitlement the budget is -1 regardless
+        // of stored group allowances.
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+
+        // Seed a group with a nonzero allowance to prove it is ignored.
+        let uid = owner_user_id(&store);
+        let group_id = Uuid::new_v4();
+        if let Ok(mut groups) = store.groups.lock() {
+            groups.insert(
+                group_id,
+                GroupRecord {
+                    id: group_id,
+                    name: "developers".to_owned(),
+                    display_name: String::new(),
+                    organization_id: org_id,
+                    avatar_url: String::new(),
+                    quota_allowance: 500,
+                    source: "user".to_owned(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+        }
+        if let Ok(mut members) = store.group_members.lock() {
+            members.push(GroupMemberRecord {
+                user_id: uid,
+                group_id,
+            });
+        }
+
+        let body = get_quota_body(app, &token, org_id, &username).await?;
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(-1));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_licensed_no_builds_sums_allowance_only() -> Result<(), Box<dyn Error>>
+    {
+        // TemplateRbac entitlement on + user in groups with allowance but
+        // no workspace builds → nonzero budget, zero consumed.
+        let (state, store) = test_state_with_template_rbac_and_store()?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+        let uid = owner_user_id(&store);
+
+        // Grant 200 to the implicit Everyone group (id == org_id) — the
+        // user is in it via organization_members.
+        if let Ok(mut groups) = store.groups.lock() {
+            if let Some(g) = groups.get_mut(&org_id) {
+                g.quota_allowance = 200;
+            }
+        }
+        // Grant 50 to a second explicit group the user is a member of.
+        let group_id = Uuid::new_v4();
+        if let Ok(mut groups) = store.groups.lock() {
+            groups.insert(
+                group_id,
+                GroupRecord {
+                    id: group_id,
+                    name: "developers".to_owned(),
+                    display_name: String::new(),
+                    organization_id: org_id,
+                    avatar_url: String::new(),
+                    quota_allowance: 50,
+                    source: "user".to_owned(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+        }
+        if let Ok(mut members) = store.group_members.lock() {
+            members.push(GroupMemberRecord {
+                user_id: uid,
+                group_id,
+            });
+        }
+
+        let body = get_quota_body(app, &token, org_id, &username).await?;
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(250));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_licensed_sums_latest_builds() -> Result<(), Box<dyn Error>> {
+        // TemplateRbac entitlement on + multiple workspaces with multiple
+        // builds → consumed is the sum of the *latest* build per
+        // non-deleted workspace.
+        let (state, store) = test_state_with_template_rbac_and_store()?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+        let uid = owner_user_id(&store);
+
+        // Budget: 1000 on the Everyone group.
+        if let Ok(mut groups) = store.groups.lock() {
+            if let Some(g) = groups.get_mut(&org_id) {
+                g.quota_allowance = 1000;
+            }
+        }
+
+        // Seed a template and two workspaces + builds.
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws1 = seed_workspace(&store, uid, org_id, tmpl.id);
+        let ws2 = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // ws1: two builds (1 → daily_cost 3, 2 → daily_cost 7).
+        // Latest (build_number 2) contributes 7.
+        let now = OffsetDateTime::now_utc();
+        let insert_build = |wid: Uuid, build_number: i64, daily_cost: i32| {
+            let build = WorkspaceBuildRecord {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                workspace_id: wid,
+                build_number,
+                transition: "start".to_owned(),
+                job_id: Uuid::new_v4(),
+                template_version_id: Uuid::new_v4(),
+                initiator_id: uid,
+                provisioner_state: None,
+                deadline: None,
+                max_deadline: None,
+                reason: "initiator".to_owned(),
+                daily_cost,
+            };
+            if let Ok(mut builds) = store.workspace_builds.lock() {
+                builds.insert(build.id, build);
+            }
+        };
+        insert_build(ws1.id, 1, 3);
+        insert_build(ws1.id, 2, 7);
+        // ws2: one build, daily_cost 5.
+        insert_build(ws2.id, 1, 5);
+
+        // A deleted workspace whose latest build would otherwise count.
+        let ws_deleted = {
+            let mut w = seed_workspace(&store, uid, org_id, tmpl.id);
+            w.deleted = true;
+            if let Ok(mut workspaces) = store.workspaces.lock() {
+                workspaces.insert(w.id, w.clone());
+            }
+            w
+        };
+        insert_build(ws_deleted.id, 1, 99);
+
+        // A workspace owned by a different user — must be excluded.
+        let other_uid = Uuid::new_v4();
+        let other_ws = seed_workspace(&store, other_uid, org_id, tmpl.id);
+        insert_build(other_ws.id, 1, 42);
+
+        let body = get_quota_body(app, &token, org_id, &username).await?;
+        // 7 (latest ws1) + 5 (ws2) = 12, excluding deleted and foreign.
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(1000));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(12)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_deprecated_endpoint_uses_default_org() -> Result<(), Box<dyn Error>> {
+        // The deprecated /workspace-quota/{user} endpoint resolves to the
+        // default organization and runs the same computation.
+        let (state, store) = test_state_with_template_rbac_and_store()?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+
+        if let Ok(mut groups) = store.groups.lock() {
+            if let Some(g) = groups.get_mut(&org_id) {
+                g.quota_allowance = 123;
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspace-quota/{username}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(123));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(0)
+        );
         Ok(())
     }
 
