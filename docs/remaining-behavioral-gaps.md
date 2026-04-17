@@ -235,18 +235,21 @@ complete.
 | 1 | Port agent DRPC protocol (messages 1–4 + yamux + DRPC framing) | §6 | **L** (2–3 weeks) | Proto schema, yamux crate, tailnet DRPC types |
 | 2 | Wire provisioner tag matching to job creation sites | §7.1 | **M** (3–5 days) | Go `ProvisionerTagSet` semantics |
 | 3 | Dynamic-parameter evaluation via provisioner Plan | §3 / §7.2 | **M** (1 week) | Provisioner runtime in Rust |
-| 4 | Quota enforcement: entitlement check + allowance/consumed queries | §8 | **S** (1–2 days) | `state.entitlements` already wired |
-| 5 | Instance-identity cryptographic verification (AWS/Azure/GCP) | §3 | **M** (1 week) | Platform CA bundles, JWT verifier |
-| 6 | SMTP email dispatch (`lettre`) | §9.1 | **S** (1 day) | SMTP credentials in config (already present) |
-| 7 | Workspace-proxy coordinate multi-agent tailnet bridge | §4 | **M** (1 week) | Agent DRPC (§6) first |
-| 8 | Workspace-proxy signed app token: full `WorkspaceAppsProvider` chain | §4 | **M** (1 week) | Workspace-apps port from Go |
-| 9 | Token-revocation cascade + audit entry | §5.1 | **XS** (hours) | Existing audit sink |
-| 10 | Proxy crypto-keys rotation scheduler | §4 | **S** (1–2 days) | Background task runner |
-| 11 | Regenerate `crates/coder-server/PARITY_MATRIX.md` | §1, §2, §4 | **XS** (hours) | `apps/coder-parity` |
+| 4 | Azure instance-identity PKCS7/CA verification | §3 / Appendix A.1 | **M** (1 week) | Microsoft CA bundle, PKCS7 verifier |
+| 5 | SMTP email dispatch (`lettre`) | §9.1 | **S** (1 day) | SMTP credentials in config (already present) |
+| 6 | Workspace-proxy coordinate multi-agent tailnet bridge | §4 | **M** (1 week) | Agent DRPC (§6) first |
+| 7 | Workspace-proxy signed app token: full `WorkspaceAppsProvider` chain | §4 | **M** (1 week) | Workspace-apps port from Go |
+| 8 | Token-revocation cascade + audit entry | §5.1 | **XS** (hours) | Existing audit sink |
+| 9 | Proxy crypto-keys rotation scheduler | §4 | **S** (1–2 days) | Background task runner |
+| 10 | Regenerate `crates/coder-server/PARITY_MATRIX.md` | §1, §2, §4 | **XS** (hours) | `apps/coder-parity` |
 
-*Items #9–#12 in an earlier revision (`/replicas`, workspace-sharing
-PATCH persistence, `/updatecheck`, `/auth/scopes`) were closed by PRs
-#199, #200, #203 and #205 and are no longer listed here.*
+*Earlier revisions of this matrix listed additional items that have
+since landed and are therefore no longer tracked here:*
+- *`/replicas`, workspace-sharing PATCH persistence, `/updatecheck` and
+  `/auth/scopes` — closed by PRs #199, #200, #203, #205.*
+- *Quota enforcement (§8) — closed by PR #202.*
+- *AWS/GCP instance-identity cryptographic verification — closed by PR
+  #206. Only Azure remains (item #4 above).*
 
 Effort key: XS < 1 day · S = 1–3 days · M = ~1 week · L = ~3 weeks.
 
@@ -268,9 +271,9 @@ parallel.
 | §5 OAuth2 behavioral gaps | 2 items | Revocation cascade + RFC 7592 replay protection |
 | §6 Agent RPC protocol | ≥4 message types + DRPC/yamux framing | Largest single gap |
 | §7 Provisioner / template | 2 items | Tag matching, dynamic-parameter evaluation |
-| §8 Workspace quota | 1 item | Two routes affected |
+| ~~§8 Workspace quota~~ | — | **RESOLVED** (PR #202) |
 | §9 Notification dispatch | 2 items | SMTP not implemented, webhook retry policy |
-| **Total** | **~27 discrete work items** across ~16 routes and 3 subsystems |
+| **Total** | **~26 discrete work items** across ~16 routes and 3 subsystems |
 
 Most items are small (XS/S). The long pole is the agent DRPC port (§6).
 
