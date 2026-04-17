@@ -960,10 +960,14 @@ pub(crate) async fn post_custom_notification(
             .into_response());
     }
 
-    // Go's postCustomNotification targets the caller themselves: the
-    // EnqueueWithData call passes `user.ID` as both the recipient and the
-    // sole target. Mirror that behaviour here and deliver an inbox row to
-    // the caller.
+    // Go's `postCustomNotification` targets the caller themselves: the
+    // `EnqueueWithData` call at `coder/coderd/notifications.go:399-407`
+    // passes `user.ID` as the recipient, and the SDK request body
+    // `codersdk.CustomNotificationRequest` at
+    // `coder/codersdk/notifications.go:292-296` carries only `content` —
+    // there is no `user_ids`/`recipient_id`/roles field. A TODO on that
+    // struct (coder/coder#19768) tracks future multi-user/role targeting.
+    // Mirror that behaviour here and deliver an inbox row to the caller.
     let notification = coder_core::InboxNotification {
         id: Uuid::new_v4(),
         user_id: caller.id,
