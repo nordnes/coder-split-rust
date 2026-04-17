@@ -372,6 +372,8 @@ pub enum ResourceKind {
     Oauth2ProviderApp,
     /// An `OAuth2` provider application secret.
     Oauth2ProviderAppSecret,
+    /// An `OAuth2` provider application token.
+    Oauth2ProviderAppToken,
     /// A custom role.
     CustomRole,
     /// An organization member.
