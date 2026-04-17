@@ -9565,6 +9565,78 @@ pub(crate) mod tests {
         ) -> Result<Vec<String>, StorageError> {
             Ok(Vec::new())
         }
+
+        async fn get_quota_allowance_for_user(
+            &self,
+            user_id: Uuid,
+            organization_id: Uuid,
+        ) -> Result<i64, StorageError> {
+            // Expanded group membership: direct group members + implicit
+            // "Everyone" group (id == organization_id for any
+            // organization_members row).
+            let direct_group_ids: std::collections::HashSet<Uuid> = self
+                .group_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .iter()
+                .filter(|m| m.user_id == user_id)
+                .map(|m| m.group_id)
+                .collect();
+            let is_org_member = self
+                .organization_members
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .contains_key(&(organization_id, user_id));
+            let groups = self
+                .groups
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut total: i64 = 0;
+            for group in groups.values() {
+                if group.organization_id != organization_id {
+                    continue;
+                }
+                let is_member = direct_group_ids.contains(&group.id)
+                    || (is_org_member && group.id == organization_id);
+                if is_member {
+                    total = total.saturating_add(i64::from(group.quota_allowance));
+                }
+            }
+            Ok(total)
+        }
+
+        async fn get_quota_consumed_for_user(
+            &self,
+            owner_id: Uuid,
+            organization_id: Uuid,
+        ) -> Result<i64, StorageError> {
+            let workspaces = self
+                .workspaces
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let builds = self
+                .workspace_builds
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut total: i64 = 0;
+            for workspace in workspaces.values() {
+                if workspace.deleted
+                    || workspace.owner_id != owner_id
+                    || workspace.organization_id != organization_id
+                {
+                    continue;
+                }
+                // Find the latest build for this workspace (highest build_number).
+                let latest = builds
+                    .values()
+                    .filter(|b| b.workspace_id == workspace.id)
+                    .max_by_key(|b| b.build_number);
+                if let Some(build) = latest {
+                    total = total.saturating_add(i64::from(build.daily_cost));
+                }
+            }
+            Ok(total)
+        }
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -37635,8 +37707,14 @@ pub(crate) mod tests {
     /// Build an `AppState` with the `TemplateRbac` entitlement enabled so
     /// the enterprise group routes are reachable.
     fn test_state_with_template_rbac() -> Result<AppState, Box<dyn Error>> {
-        let (state, _store) = test_state_with_store(true)?;
-        // Enable the TemplateRbac feature.
+        Ok(test_state_with_template_rbac_and_store()?.0)
+    }
+
+    /// Build an `AppState` (with the `TemplateRbac` entitlement enabled)
+    /// alongside the underlying `FakeStore`, so tests can seed fixtures.
+    fn test_state_with_template_rbac_and_store()
+    -> Result<(AppState, Arc<FakeStore>), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
         let mut ents = coder_license::Entitlements::new_unlicensed();
         ents.has_license = true;
         if let Some(f) = ents
@@ -37647,7 +37725,7 @@ pub(crate) mod tests {
             f.enabled = true;
         }
         state.entitlements.update(ents);
-        Ok(state)
+        Ok((state, store))
     }
 
     #[tokio::test]
@@ -37840,6 +37918,250 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    // ----- Workspace quota route tests -----
+
+    /// GET the organization-scoped workspace-quota endpoint as the first
+    /// user and return the parsed JSON body.
+    async fn get_quota_body(
+        app: Router,
+        token: &str,
+        org_id: Uuid,
+        username: &str,
+    ) -> Result<Value, Box<dyn Error>> {
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/members/{username}/workspace-quota"),
+                token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        response_json(response).await
+    }
+
+    /// Helper: look up the first user's username from the FakeStore.
+    fn first_username(store: &FakeStore) -> Option<String> {
+        store
+            .users
+            .lock()
+            .ok()?
+            .values()
+            .next()
+            .map(|u| u.username.clone())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_unlicensed_returns_unlimited() -> Result<(), Box<dyn Error>> {
+        // Without the TemplateRbac entitlement the budget is -1 regardless
+        // of stored group allowances.
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+
+        // Seed a group with a nonzero allowance to prove it is ignored.
+        let uid = owner_user_id(&store);
+        let group_id = Uuid::new_v4();
+        if let Ok(mut groups) = store.groups.lock() {
+            groups.insert(
+                group_id,
+                GroupRecord {
+                    id: group_id,
+                    name: "developers".to_owned(),
+                    display_name: String::new(),
+                    organization_id: org_id,
+                    avatar_url: String::new(),
+                    quota_allowance: 500,
+                    source: "user".to_owned(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+        }
+        if let Ok(mut members) = store.group_members.lock() {
+            members.push(GroupMemberRecord {
+                user_id: uid,
+                group_id,
+            });
+        }
+
+        let body = get_quota_body(app, &token, org_id, &username).await?;
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(-1));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_licensed_no_builds_sums_allowance_only() -> Result<(), Box<dyn Error>>
+    {
+        // TemplateRbac entitlement on + user in groups with allowance but
+        // no workspace builds → nonzero budget, zero consumed.
+        let (state, store) = test_state_with_template_rbac_and_store()?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+        let uid = owner_user_id(&store);
+
+        // Grant 200 to the implicit Everyone group (id == org_id) — the
+        // user is in it via organization_members.
+        if let Ok(mut groups) = store.groups.lock() {
+            if let Some(g) = groups.get_mut(&org_id) {
+                g.quota_allowance = 200;
+            }
+        }
+        // Grant 50 to a second explicit group the user is a member of.
+        let group_id = Uuid::new_v4();
+        if let Ok(mut groups) = store.groups.lock() {
+            groups.insert(
+                group_id,
+                GroupRecord {
+                    id: group_id,
+                    name: "developers".to_owned(),
+                    display_name: String::new(),
+                    organization_id: org_id,
+                    avatar_url: String::new(),
+                    quota_allowance: 50,
+                    source: "user".to_owned(),
+                    created_at: OffsetDateTime::now_utc(),
+                },
+            );
+        }
+        if let Ok(mut members) = store.group_members.lock() {
+            members.push(GroupMemberRecord {
+                user_id: uid,
+                group_id,
+            });
+        }
+
+        let body = get_quota_body(app, &token, org_id, &username).await?;
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(250));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(0)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_licensed_sums_latest_builds() -> Result<(), Box<dyn Error>> {
+        // TemplateRbac entitlement on + multiple workspaces with multiple
+        // builds → consumed is the sum of the *latest* build per
+        // non-deleted workspace.
+        let (state, store) = test_state_with_template_rbac_and_store()?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+        let uid = owner_user_id(&store);
+
+        // Budget: 1000 on the Everyone group.
+        if let Ok(mut groups) = store.groups.lock() {
+            if let Some(g) = groups.get_mut(&org_id) {
+                g.quota_allowance = 1000;
+            }
+        }
+
+        // Seed a template and two workspaces + builds.
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws1 = seed_workspace(&store, uid, org_id, tmpl.id);
+        let ws2 = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        // ws1: two builds (1 → daily_cost 3, 2 → daily_cost 7).
+        // Latest (build_number 2) contributes 7.
+        let now = OffsetDateTime::now_utc();
+        let insert_build = |wid: Uuid, build_number: i64, daily_cost: i32| {
+            let build = WorkspaceBuildRecord {
+                id: Uuid::new_v4(),
+                created_at: now,
+                updated_at: now,
+                workspace_id: wid,
+                build_number,
+                transition: "start".to_owned(),
+                job_id: Uuid::new_v4(),
+                template_version_id: Uuid::new_v4(),
+                initiator_id: uid,
+                provisioner_state: None,
+                deadline: None,
+                max_deadline: None,
+                reason: "initiator".to_owned(),
+                daily_cost,
+            };
+            if let Ok(mut builds) = store.workspace_builds.lock() {
+                builds.insert(build.id, build);
+            }
+        };
+        insert_build(ws1.id, 1, 3);
+        insert_build(ws1.id, 2, 7);
+        // ws2: one build, daily_cost 5.
+        insert_build(ws2.id, 1, 5);
+
+        // A deleted workspace whose latest build would otherwise count.
+        let ws_deleted = {
+            let mut w = seed_workspace(&store, uid, org_id, tmpl.id);
+            w.deleted = true;
+            if let Ok(mut workspaces) = store.workspaces.lock() {
+                workspaces.insert(w.id, w.clone());
+            }
+            w
+        };
+        insert_build(ws_deleted.id, 1, 99);
+
+        // A workspace owned by a different user — must be excluded.
+        let other_uid = Uuid::new_v4();
+        let other_ws = seed_workspace(&store, other_uid, org_id, tmpl.id);
+        insert_build(other_ws.id, 1, 42);
+
+        let body = get_quota_body(app, &token, org_id, &username).await?;
+        // 7 (latest ws1) + 5 (ws2) = 12, excluding deleted and foreign.
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(1000));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(12)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_quota_deprecated_endpoint_uses_default_org() -> Result<(), Box<dyn Error>> {
+        // The deprecated /workspace-quota/{user} endpoint resolves to the
+        // default organization and runs the same computation.
+        let (state, store) = test_state_with_template_rbac_and_store()?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &token).await?;
+        let username = first_username(&store).ok_or("missing first user")?;
+
+        if let Ok(mut groups) = store.groups.lock() {
+            if let Some(g) = groups.get_mut(&org_id) {
+                g.quota_allowance = 123;
+            }
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/workspace-quota/{username}"),
+                &token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body.get("budget").and_then(Value::as_i64), Some(123));
+        assert_eq!(
+            body.get("credits_consumed").and_then(Value::as_i64),
+            Some(0)
+        );
         Ok(())
     }
 
