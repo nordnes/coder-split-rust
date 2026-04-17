@@ -339,19 +339,6 @@ pub(crate) const PUBLIC_API_KEY_SCOPE_METADATA: &[(&str, &str, &[&str])] = &[
     ),
 ];
 
-/// Looks up descriptive metadata for a public API key scope by name.
-///
-/// Returns `None` if the scope name is not present in
-/// `PUBLIC_API_KEY_SCOPE_METADATA`. Callers that iterate
-/// `PUBLIC_API_KEY_SCOPES` are guaranteed a match (enforced by unit test).
-pub(crate) fn public_api_key_scope_metadata(
-    name: &str,
-) -> Option<(&'static str, &'static [&'static str])> {
-    PUBLIC_API_KEY_SCOPE_METADATA
-        .iter()
-        .find(|(scope_name, _, _)| *scope_name == name)
-        .map(|(_, description, resources)| (*description, *resources))
-}
 pub(crate) const VALID_HEALTH_SECTIONS: &[&str] = &[
     "DERP",
     "AccessURL",
@@ -10081,12 +10068,24 @@ pub(crate) mod tests {
             call(app.clone(), request(Method::GET, "/api/v2/auth/scopes")?).await?;
         assert_eq!(scopes_response.status(), StatusCode::OK);
         let scopes_body = response_json(scopes_response).await?;
-        assert_eq!(
-            scopes_body
-                .get("external")
+        let external = scopes_body
+            .get("external")
+            .and_then(Value::as_array)
+            .ok_or("scopes response must have an `external` array")?;
+        assert_eq!(external.len(), PUBLIC_API_KEY_SCOPES.len());
+        let first_entry = external
+            .first()
+            .and_then(Value::as_object)
+            .ok_or("first scope entry must be a JSON object")?;
+        assert!(first_entry.contains_key("name"));
+        assert!(first_entry.contains_key("description"));
+        assert!(first_entry.contains_key("resources"));
+        assert!(
+            first_entry
+                .get("resources")
                 .and_then(Value::as_array)
-                .map(Vec::len),
-            Some(PUBLIC_API_KEY_SCOPES.len())
+                .is_some_and(|resources| !resources.is_empty()),
+            "first scope entry must unlock at least one resource",
         );
 
         let experiments_response = call(

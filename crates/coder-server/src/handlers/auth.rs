@@ -12,17 +12,21 @@ pub(crate) struct TokenListQuery {
 
 /// GET /api/v2/auth/scopes — list available API key scopes, each with its
 /// human-readable description and the set of resources it unlocks.
+///
+/// The response is driven by `PUBLIC_API_KEY_SCOPE_METADATA`, which is the
+/// single source of truth for both the catalog's ordering and the per-scope
+/// metadata. A unit test asserts it lists the same names as
+/// `PUBLIC_API_KEY_SCOPES` in the same order.
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
-    let external = PUBLIC_API_KEY_SCOPES
+    let external = PUBLIC_API_KEY_SCOPE_METADATA
         .iter()
-        .map(|scope| {
-            let (description, resources) =
-                public_api_key_scope_metadata(scope).unwrap_or(("", &[] as &[&str]));
-            ApiKeyScopeMetadata {
-                name: (*scope).to_owned(),
-                description: description.to_owned(),
-                resources: resources.iter().map(|r| (*r).to_owned()).collect(),
-            }
+        .map(|(name, description, resources)| ApiKeyScopeMetadata {
+            name: (*name).to_owned(),
+            description: (*description).to_owned(),
+            resources: resources
+                .iter()
+                .map(|resource| (*resource).to_owned())
+                .collect(),
         })
         .collect();
     Json(ExternalApiKeyScopes { external })
@@ -1444,25 +1448,36 @@ mod tests {
     }
 
     #[test]
-    fn public_api_key_scope_metadata_covers_every_public_scope() {
-        for scope in PUBLIC_API_KEY_SCOPES {
-            let metadata = public_api_key_scope_metadata(scope);
-            assert!(
-                metadata.is_some(),
-                "PUBLIC_API_KEY_SCOPE_METADATA is missing an entry for {scope}",
+    fn public_api_key_scope_metadata_matches_public_api_key_scopes_exactly() {
+        // The metadata table is the single source of truth used by the handler.
+        // This test pins it to `PUBLIC_API_KEY_SCOPES` — they must list the
+        // same scope names in the same order. If you add, remove, or reorder
+        // a scope in one list, you must update the other.
+        assert_eq!(
+            PUBLIC_API_KEY_SCOPE_METADATA.len(),
+            PUBLIC_API_KEY_SCOPES.len(),
+            "PUBLIC_API_KEY_SCOPE_METADATA and PUBLIC_API_KEY_SCOPES must have equal length",
+        );
+        for (index, expected) in PUBLIC_API_KEY_SCOPES.iter().enumerate() {
+            let (name, description, resources) = PUBLIC_API_KEY_SCOPE_METADATA[index];
+            assert_eq!(
+                name, *expected,
+                "entry {index} must be `{expected}` to match PUBLIC_API_KEY_SCOPES ordering",
             );
-            let (description, resources) = match metadata {
-                Some(value) => value,
-                None => continue,
-            };
             assert!(
                 !description.trim().is_empty(),
-                "scope {scope} has an empty description in the metadata table",
+                "scope {name} has an empty description in the metadata table",
             );
             assert!(
                 !resources.is_empty(),
-                "scope {scope} has no resources in the metadata table",
+                "scope {name} has no resources in the metadata table",
             );
+            for resource in resources {
+                assert!(
+                    !resource.trim().is_empty(),
+                    "scope {name} has an empty resource entry in the metadata table",
+                );
+            }
         }
     }
 }
