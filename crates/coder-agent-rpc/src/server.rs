@@ -18,7 +18,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use crate::error::{DrpcError, DrpcResult};
 use crate::handlers::{AgentRpcHandler, RpcError};
 use crate::proto::agent_v2 as agent;
-use crate::wire::{self, Kind, Packet};
+use crate::wire::{self, Kind, Packet, PacketId};
 
 /// DRPC error code used for unimplemented methods. Matches
 /// `drpcerr.Unimplemented` from the Go library (a sentinel value used by
@@ -76,11 +76,15 @@ where
         .to_owned();
 
     // -- 2. Request message ----------------------------------------------
-    // The response frames reuse the stream/message ID carried on the most
-    // recently received frame from the peer.
+    // Response frames carry the same `stream` ID as the client's request, but
+    // their `message` component is a server-side counter that increments per
+    // outgoing frame — matching Go's `drpcstream` (which does
+    // `s.write.ID.Message++` before every `MsgSend` / `SendError` / `Close`).
+    // We retain the stream ID from the client's first body frame and generate
+    // our own outbound message IDs starting at 1.
     let p = wire::read_packet(&mut stream).await?;
-    let (body, id) = match p.kind {
-        Kind::Message => (p.data, p.id),
+    let (body, stream_id) = match p.kind {
+        Kind::Message => (p.data, p.id.stream),
         Kind::CloseSend => {
             // Our RPCs are unary request/response; a CloseSend before any
             // body is a protocol error.
@@ -103,13 +107,21 @@ where
     let result = dispatch(handler.as_ref(), &method, &body).await;
 
     // -- 4. Reply ---------------------------------------------------------
+    let mut out_message = 0u64;
+    let mut next_id = || {
+        out_message += 1;
+        PacketId {
+            stream: stream_id,
+            message: out_message,
+        }
+    };
     match result {
         Ok(response_bytes) => {
             wire::write_packet(
                 &mut stream,
                 &Packet {
                     kind: Kind::Message,
-                    id,
+                    id: next_id(),
                     data: response_bytes,
                 },
             )
@@ -118,7 +130,7 @@ where
                 &mut stream,
                 &Packet {
                     kind: Kind::Close,
-                    id,
+                    id: next_id(),
                     data: Vec::new(),
                 },
             )
@@ -126,7 +138,7 @@ where
         }
         Err(err) => {
             let (code, msg) = rpc_error_to_drpc(&err);
-            wire::write_error(&mut stream, id, code, msg.as_str()).await?;
+            wire::write_error(&mut stream, next_id(), code, msg.as_str()).await?;
         }
     }
     Ok(())
@@ -231,6 +243,13 @@ mod tests {
         assert_eq!(resp.kind, Kind::Message);
         let close = wire::read_packet(&mut client).await?;
         assert_eq!(close.kind, Kind::Close);
+        // The server must use its own outbound message counter, not reuse the
+        // client's request IDs. Matches Go drpc's per-stream write counter:
+        // response Message=1, Close=2. Stream ID is inherited from the client.
+        assert_eq!(resp.id.stream, 1);
+        assert_eq!(resp.id.message, 1);
+        assert_eq!(close.id.stream, 1);
+        assert_eq!(close.id.message, 2);
 
         drop(client);
         let _ = server_task.await;
@@ -380,10 +399,69 @@ mod tests {
 
         let resp = wire::read_packet(&mut client).await?;
         assert_eq!(resp.kind, Kind::Error);
+        // Error packet uses the server-side counter: first outbound frame on
+        // this stream → message=1, inheriting the client's stream id.
+        assert_eq!(resp.id.stream, 1);
+        assert_eq!(resp.id.message, 1);
         assert!(resp.data.len() >= 8, "error body too short");
         let code_bytes: [u8; 8] = resp.data[..8].try_into().unwrap_or([0; 8]);
         let code = u64::from_be_bytes(code_bytes);
         assert_eq!(code, DRPC_ERR_UNIMPLEMENTED);
+        drop(client);
+        let _ = server_task.await;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn response_uses_server_side_message_counter() -> DrpcResult<()> {
+        // Regression test: even when the client's request packets have large,
+        // non-contiguous message IDs, the server's response must restart its
+        // own counter at 1 on the same stream (Go drpc behaviour).
+        let (mut client, server) = duplex(64 * 1024);
+        let server_task =
+            tokio::spawn(async move { serve_drpc_stream(server, Arc::new(StubHandler)).await });
+
+        wire::write_packet(
+            &mut client,
+            &Packet {
+                kind: Kind::Invoke,
+                id: PacketId {
+                    stream: 7,
+                    message: 42,
+                },
+                data: b"/coder.agent.v2.Agent/GetManifest".to_vec(),
+            },
+        )
+        .await?;
+        wire::write_packet(
+            &mut client,
+            &Packet {
+                kind: Kind::Message,
+                id: PacketId {
+                    stream: 7,
+                    message: 99,
+                },
+                data: agent::GetManifestRequest {}.encode_to_vec(),
+            },
+        )
+        .await?;
+
+        let resp = wire::read_packet(&mut client).await?;
+        assert_eq!(resp.kind, Kind::Message);
+        assert_eq!(resp.id.stream, 7, "response must inherit client stream id");
+        assert_eq!(
+            resp.id.message, 1,
+            "response must use server-side counter starting at 1"
+        );
+
+        let close = wire::read_packet(&mut client).await?;
+        assert_eq!(close.kind, Kind::Close);
+        assert_eq!(close.id.stream, 7);
+        assert_eq!(
+            close.id.message, 2,
+            "Close must use the next server-side message id"
+        );
+
         drop(client);
         let _ = server_task.await;
         Ok(())

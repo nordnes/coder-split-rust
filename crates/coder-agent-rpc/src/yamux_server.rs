@@ -22,6 +22,40 @@ use crate::error::{DrpcError, DrpcResult};
 use crate::handlers::AgentRpcHandler;
 use crate::server::serve_drpc_stream;
 
+/// Builds the yamux [`Config`] used for agent DRPC sessions.
+///
+/// The Go reference uses [`yamux.DefaultConfig()`] unmodified (only the
+/// logger fields are overridden) — see both endpoints:
+///
+/// * server: `coder/coderd/workspaceagentsrpc.go` L107-L111
+///   ```text
+///   ycfg := yamux.DefaultConfig()
+///   ycfg.LogOutput = nil
+///   ycfg.Logger = slog.Stdlib(ctx, logger.Named("yamux"), slog.LevelInfo)
+///   mux, err := yamux.Server(wsNetConn, ycfg)
+///   ```
+/// * client: `coder/codersdk/agentsdk/agentsdk.go` L345-L350 (same pattern).
+///
+/// Go `hashicorp/yamux` defaults:
+///   - `MaxStreamWindowSize` = 256 KiB
+///   - `AcceptBacklog` = 256
+///   - `EnableKeepAlive` = true, `KeepAliveInterval` = 30s
+///   - `ConnectionWriteTimeout` = 10s
+///
+/// The Rust `yamux` 0.13 crate's [`Config::default`] uses the same 256 KiB
+/// per-stream receive window (`DEFAULT_CREDIT`), which is the only knob with
+/// a direct on-wire consequence. It does not implement client-initiated
+/// keepalive PINGs, but it *does* automatically respond to incoming Ping
+/// frames (see `yamux/src/connection.rs::on_ping`), so the Go side's 30s
+/// keepalive continues to work against us. No other Go override would change
+/// behaviour observable on the wire, so the plain Rust default matches.
+///
+/// Keeping this as a dedicated constructor makes the verification easy to
+/// re-check if either side changes its config in the future.
+fn server_config() -> Config {
+    Config::default()
+}
+
 /// Runs a yamux server over `transport`, accepting DRPC streams and
 /// dispatching each to `handler`. Completes when the session closes.
 ///
@@ -34,7 +68,7 @@ where
 {
     let compat: Compat<T> = transport.compat();
     let mut connection: Connection<Compat<T>> =
-        Connection::new(compat, Config::default(), Mode::Server);
+        Connection::new(compat, server_config(), Mode::Server);
 
     loop {
         let next = poll_fn(|cx| connection.poll_next_inbound(cx)).await;
