@@ -15,8 +15,7 @@ pub(crate) struct TokenListQuery {
 ///
 /// The response is driven by `PUBLIC_API_KEY_SCOPE_METADATA`, which is the
 /// single source of truth for both the catalog's ordering and the per-scope
-/// metadata. A unit test asserts it lists the same names as
-/// `PUBLIC_API_KEY_SCOPES` in the same order.
+/// metadata.
 pub(crate) async fn list_api_key_scopes() -> Json<ExternalApiKeyScopes> {
     let external = PUBLIC_API_KEY_SCOPE_METADATA
         .iter()
@@ -1384,6 +1383,7 @@ pub(crate) async fn post_authcheck(
 mod tests {
     use super::*;
     use serde_json::Value;
+    use std::collections::BTreeSet;
 
     #[tokio::test]
     async fn list_api_key_scopes_enriches_every_public_scope() {
@@ -1391,25 +1391,28 @@ mod tests {
 
         assert_eq!(
             body.external.len(),
-            PUBLIC_API_KEY_SCOPES.len(),
-            "every public scope must appear in the response",
+            PUBLIC_API_KEY_SCOPE_METADATA.len(),
+            "every catalog entry must appear in the response",
         );
 
-        for (index, scope) in PUBLIC_API_KEY_SCOPES.iter().enumerate() {
+        for (index, (name, _, _)) in PUBLIC_API_KEY_SCOPE_METADATA.iter().enumerate() {
             let entry = &body.external[index];
-            assert_eq!(entry.name, *scope, "order must match PUBLIC_API_KEY_SCOPES");
+            assert_eq!(
+                entry.name, *name,
+                "order must match PUBLIC_API_KEY_SCOPE_METADATA",
+            );
             assert!(
                 !entry.description.trim().is_empty(),
-                "scope {scope} must have a non-empty description",
+                "scope {name} must have a non-empty description",
             );
             assert!(
                 !entry.resources.is_empty(),
-                "scope {scope} must unlock at least one resource",
+                "scope {name} must unlock at least one resource",
             );
             for resource in &entry.resources {
                 assert!(
                     !resource.trim().is_empty(),
-                    "scope {scope} has an empty resource entry",
+                    "scope {name} has an empty resource entry",
                 );
             }
         }
@@ -1448,34 +1451,33 @@ mod tests {
     }
 
     #[test]
-    fn public_api_key_scope_metadata_matches_public_api_key_scopes_exactly() {
-        // The metadata table is the single source of truth used by the handler.
-        // This test pins it to `PUBLIC_API_KEY_SCOPES` — they must list the
-        // same scope names in the same order. If you add, remove, or reorder
-        // a scope in one list, you must update the other.
-        assert_eq!(
-            PUBLIC_API_KEY_SCOPE_METADATA.len(),
-            PUBLIC_API_KEY_SCOPES.len(),
-            "PUBLIC_API_KEY_SCOPE_METADATA and PUBLIC_API_KEY_SCOPES must have equal length",
+    fn public_api_key_scope_metadata_entries_are_well_formed() {
+        // `PUBLIC_API_KEY_SCOPE_METADATA` is the sole catalog of public API
+        // key scopes. Every entry must carry a non-empty description and at
+        // least one non-empty resource name, and scope names must be unique.
+        assert!(
+            !PUBLIC_API_KEY_SCOPE_METADATA.is_empty(),
+            "the public scope catalog must not be empty",
         );
-        for (index, expected) in PUBLIC_API_KEY_SCOPES.iter().enumerate() {
-            let (name, description, resources) = PUBLIC_API_KEY_SCOPE_METADATA[index];
-            assert_eq!(
-                name, *expected,
-                "entry {index} must be `{expected}` to match PUBLIC_API_KEY_SCOPES ordering",
+        let mut seen = BTreeSet::new();
+        for (name, description, resources) in PUBLIC_API_KEY_SCOPE_METADATA {
+            assert!(!name.trim().is_empty(), "scope names must be non-empty",);
+            assert!(
+                seen.insert(*name),
+                "scope {name} appears more than once in the catalog",
             );
             assert!(
                 !description.trim().is_empty(),
-                "scope {name} has an empty description in the metadata table",
+                "scope {name} has an empty description in the catalog",
             );
             assert!(
                 !resources.is_empty(),
-                "scope {name} has no resources in the metadata table",
+                "scope {name} has no resources in the catalog",
             );
-            for resource in resources {
+            for resource in *resources {
                 assert!(
                     !resource.trim().is_empty(),
-                    "scope {name} has an empty resource entry in the metadata table",
+                    "scope {name} has an empty resource entry in the catalog",
                 );
             }
         }

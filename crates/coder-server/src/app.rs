@@ -89,68 +89,13 @@ use crate::middleware::{
 const TIMING_ALLOW_ORIGIN: &str = "timing-allow-origin";
 pub(crate) const BUILD_VERSION_HEADER: &str = "x-coder-build-version";
 const SLIM_BUILD_MESSAGE: &str = "Slim build of Coder, does not contain the frontend static files.";
-pub(crate) const PUBLIC_API_KEY_SCOPES: &[&str] = &[
-    "audit_log:*",
-    "audit_log:create",
-    "audit_log:read",
-    "api_key:*",
-    "api_key:create",
-    "api_key:delete",
-    "api_key:read",
-    "api_key:update",
-    "coder:all",
-    "coder:apikeys.manage_self",
-    "coder:application_connect",
-    "deployment_stats:*",
-    "deployment_stats:read",
-    "coder:templates.author",
-    "coder:templates.build",
-    "coder:workspaces.access",
-    "coder:workspaces.create",
-    "coder:workspaces.delete",
-    "coder:workspaces.operate",
-    "file:*",
-    "file:create",
-    "file:read",
-    "organization:*",
-    "organization:delete",
-    "organization:read",
-    "organization:update",
-    "task:*",
-    "task:create",
-    "task:delete",
-    "task:read",
-    "task:update",
-    "template:*",
-    "template:create",
-    "template:delete",
-    "template:read",
-    "template:update",
-    "template:use",
-    "user:read_personal",
-    "user:update_personal",
-    "user_secret:*",
-    "user_secret:create",
-    "user_secret:delete",
-    "user_secret:read",
-    "user_secret:update",
-    "workspace:*",
-    "workspace:application_connect",
-    "workspace:create",
-    "workspace:delete",
-    "workspace:read",
-    "workspace:ssh",
-    "workspace:start",
-    "workspace:stop",
-    "workspace:update",
-];
 
-/// Descriptive metadata for each public API key scope: `(name, description, resources)`.
+/// Public API key scope catalog: `(name, description, resources)`.
 ///
-/// `PUBLIC_API_KEY_SCOPES` is the ordering source of truth; this table enriches
-/// every entry with a human-readable description and the list of resources the
-/// scope unlocks. A unit test asserts that every scope in
-/// `PUBLIC_API_KEY_SCOPES` has a matching entry here.
+/// This is the single source of truth for `GET /api/v2/auth/scopes` — it
+/// drives both the catalog's ordering and the per-scope metadata the handler
+/// returns. A unit test asserts that every entry has a non-empty description
+/// and at least one resource.
 pub(crate) const PUBLIC_API_KEY_SCOPE_METADATA: &[(&str, &str, &[&str])] = &[
     (
         "audit_log:*",
@@ -1820,7 +1765,8 @@ pub(crate) mod tests {
     use uuid::Uuid;
 
     use super::{
-        AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPES, SLIM_BUILD_MESSAGE, build_router,
+        AppState, BUILD_VERSION_HEADER, PUBLIC_API_KEY_SCOPE_METADATA, SLIM_BUILD_MESSAGE,
+        build_router,
     };
     use coder_connectivity::tailnet::{
         CoordinateRequest, CoordinateResponse, NodeInfo, PeerUpdateKind,
@@ -10072,7 +10018,7 @@ pub(crate) mod tests {
             .get("external")
             .and_then(Value::as_array)
             .ok_or("scopes response must have an `external` array")?;
-        assert_eq!(external.len(), PUBLIC_API_KEY_SCOPES.len());
+        assert_eq!(external.len(), PUBLIC_API_KEY_SCOPE_METADATA.len());
         let first_entry = external
             .first()
             .and_then(Value::as_object)
