@@ -130,6 +130,24 @@ pub struct ServerConfig {
     pub scim_api_key: String,
     /// Message displayed to users suggesting they upgrade the CLI.
     pub cli_upgrade_message: String,
+    /// Whether to cryptographically verify cloud-provider instance-identity
+    /// documents submitted to the `/workspaceagents/{aws,azure,google}-instance-identity`
+    /// endpoints. Disabled by default for local development and for the
+    /// existing in-memory test harness, which cannot produce platform-signed
+    /// payloads. Production deployments SHOULD set this to `true`.
+    pub verify_instance_identity: bool,
+    /// Optional directory containing extra AWS EC2 instance-identity
+    /// certificates (PEM-encoded X.509) to load on top of the bundled
+    /// regional trust roots. Only files with a `.pem` or `.crt` extension
+    /// are loaded; invalid files are logged and skipped. Empty / unset
+    /// means "bundled certs only".
+    ///
+    /// This is how operators on partitions not covered by the bundled
+    /// defaults (e.g. `us-iso*`, sovereign clouds, freshly-launched
+    /// regions before we pick up new certs) supply their own trust
+    /// anchors. Maps to `--aws-instance-identity-certs-dir` /
+    /// `CODER_AWS_INSTANCE_IDENTITY_CERTS_DIR`.
+    pub aws_instance_identity_certs_dir: Option<std::path::PathBuf>,
 }
 
 impl ServerConfig {
@@ -1526,6 +1544,8 @@ mod tests {
             docs_url: "https://coder.com/docs/coder-oss".to_owned(),
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
+            verify_instance_identity: false,
+            aws_instance_identity_certs_dir: None,
         }
     }
 

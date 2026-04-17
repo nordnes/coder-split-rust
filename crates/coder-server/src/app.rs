@@ -335,6 +335,13 @@ pub struct AppState {
     /// Will be replaced by the CryptoKeys DB-backed system when workspace-proxy
     /// infrastructure is fully ported.
     pub(crate) app_signing_key: [u8; 32],
+    /// Cloud-provider instance-identity verifier used by the
+    /// `/workspaceagents/{aws,azure,google}-instance-identity` bootstrap
+    /// endpoints. Either a real cryptographic verifier (when
+    /// [`ServerConfig::verify_instance_identity`] is set) or a permissive
+    /// stub that only parses the document structurally.
+    pub(crate) instance_identity_verifier:
+        Arc<dyn crate::instance_identity::InstanceIdentityVerifier>,
     /// Optional background-refreshed cache of the latest Coder release.
     ///
     /// `None` when `config.update_check` is disabled or the server is
@@ -380,6 +387,12 @@ impl AppState {
         let mut app_signing_key = [0u8; 32];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut app_signing_key);
 
+        let instance_identity_verifier = crate::instance_identity::build_verifier(
+            config.verify_instance_identity,
+            http_client.clone(),
+            config.aws_instance_identity_certs_dir.as_deref(),
+        );
+
         Ok(Self {
             config,
             build_metadata,
@@ -402,6 +415,7 @@ impl AppState {
             http_client,
             entitlements,
             app_signing_key,
+            instance_identity_verifier,
             update_checker: None,
         })
     }
@@ -9863,6 +9877,8 @@ pub(crate) mod tests {
             docs_url: String::new(),
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
+            verify_instance_identity: false,
+            aws_instance_identity_certs_dir: None,
         })
     }
 

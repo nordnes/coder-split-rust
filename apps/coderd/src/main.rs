@@ -209,6 +209,21 @@ struct ServerArgs {
     #[arg(long, env = "CODER_SESSION_CACHE_TTL_SECS", default_value_t = 30)]
     session_cache_ttl_secs: u64,
 
+    /// Cryptographically verify AWS/Azure/GCP instance-identity tokens on the
+    /// workspace-agent bootstrap endpoints. Off by default for local
+    /// development; strongly recommended in production.
+    #[arg(long, env = "CODER_VERIFY_INSTANCE_IDENTITY", default_value_t = false)]
+    verify_instance_identity: bool,
+
+    /// Directory containing extra AWS EC2 instance-identity certificates
+    /// (PEM-encoded X.509) to load on top of the bundled regional trust
+    /// roots. Only files with a `.pem` or `.crt` extension are loaded;
+    /// invalid files are logged and skipped. Use this on AWS partitions
+    /// not covered by the bundled defaults (e.g. `us-iso*`, sovereign
+    /// clouds).
+    #[arg(long, env = "CODER_AWS_INSTANCE_IDENTITY_CERTS_DIR")]
+    aws_instance_identity_certs_dir: Option<std::path::PathBuf>,
+
     /// Audit batch flush interval in milliseconds.
     #[arg(
         long,
@@ -1086,7 +1101,6 @@ async fn run() -> Result<(), MainError> {
         });
     }
 
-
     // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
     //    sends to a remote collector (gRPC), not to the database, so this
@@ -1310,6 +1324,8 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         docs_url: args.docs_url,
         scim_api_key: args.scim_api_key,
         cli_upgrade_message: args.cli_upgrade_message,
+        verify_instance_identity: args.verify_instance_identity,
+        aws_instance_identity_certs_dir: args.aws_instance_identity_certs_dir,
     })
 }
 

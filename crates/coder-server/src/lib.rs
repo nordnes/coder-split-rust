@@ -37,6 +37,7 @@ mod error;
 mod extractors;
 mod handlers;
 pub(crate) mod helpers;
+pub(crate) mod instance_identity;
 pub mod metrics;
 pub(crate) mod middleware;
 pub mod rate_limit;
