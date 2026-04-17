@@ -244,6 +244,7 @@ impl AppState {
         let instance_identity_verifier = crate::instance_identity::build_verifier(
             config.verify_instance_identity,
             http_client.clone(),
+            config.aws_instance_identity_certs_dir.as_deref(),
         );
 
         Ok(Self {
@@ -9489,6 +9490,7 @@ pub(crate) mod tests {
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
             verify_instance_identity: false,
+            aws_instance_identity_certs_dir: None,
         })
     }
 

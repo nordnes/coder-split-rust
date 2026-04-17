@@ -126,15 +126,91 @@ pub(crate) struct CryptoVerifier {
 }
 
 impl CryptoVerifier {
-    /// Construct a verifier with the default platform key sources.
+    /// Construct a verifier with the default platform key sources, plus any
+    /// operator-supplied AWS certificates loaded from `extra_aws_certs_dir`.
+    ///
+    /// The extra-cert directory is scanned at startup only; files with a
+    /// `.pem` or `.crt` extension are read and appended to the bundled
+    /// AWS trust roots. I/O or parse errors are logged and skipped so a
+    /// misconfigured file cannot take down the server.
     #[must_use]
-    pub(crate) fn new(http_client: reqwest::Client) -> Self {
+    pub(crate) fn new(
+        http_client: reqwest::Client,
+        extra_aws_certs_dir: Option<&std::path::Path>,
+    ) -> Self {
+        let aws = match extra_aws_certs_dir {
+            Some(dir) => {
+                let extras = load_extra_aws_certs(dir);
+                if extras.is_empty() {
+                    AwsInstanceVerifier::with_default_certificates()
+                } else {
+                    let combined = aws::DEFAULT_CERTIFICATES
+                        .iter()
+                        .map(|s| (*s).to_owned())
+                        .chain(extras)
+                        .collect::<Vec<_>>();
+                    AwsInstanceVerifier::with_certificates(combined.iter().map(String::as_str))
+                }
+            }
+            None => AwsInstanceVerifier::with_default_certificates(),
+        };
+
         Self {
-            aws: Arc::new(AwsInstanceVerifier::with_default_certificates()),
+            aws: Arc::new(aws),
             azure: Arc::new(AzureInstanceVerifier::new(http_client.clone())),
             gcp: Arc::new(GcpInstanceVerifier::new(http_client)),
         }
     }
+}
+
+/// Reads every `*.pem` / `*.crt` file in `dir` and returns their contents.
+/// Unreadable files and non-PEM entries are logged at `WARN` and skipped;
+/// successful loads are logged at `INFO` with the filename so operators
+/// can verify which trust roots are live.
+fn load_extra_aws_certs(dir: &std::path::Path) -> Vec<String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(entries) => entries,
+        Err(err) => {
+            tracing::warn!(
+                target: "coder_server::instance_identity::aws",
+                directory = %dir.display(),
+                error = %err,
+                "failed to read AWS instance-identity certs directory; falling back to bundled certs only"
+            );
+            return Vec::new();
+        }
+    };
+
+    let mut out = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let ext = path
+            .extension()
+            .and_then(std::ffi::OsStr::to_str)
+            .map(str::to_ascii_lowercase);
+        if !matches!(ext.as_deref(), Some("pem") | Some("crt")) {
+            continue;
+        }
+        match std::fs::read_to_string(&path) {
+            Ok(contents) => {
+                tracing::info!(
+                    target: "coder_server::instance_identity::aws",
+                    path = %path.display(),
+                    "loaded extra AWS instance-identity certificate"
+                );
+                out.push(contents);
+            }
+            Err(err) => {
+                tracing::warn!(
+                    target: "coder_server::instance_identity::aws",
+                    path = %path.display(),
+                    error = %err,
+                    "failed to read AWS instance-identity cert; skipping"
+                );
+            }
+        }
+    }
+    out
 }
 
 #[async_trait]
@@ -158,13 +234,17 @@ impl InstanceIdentityVerifier for CryptoVerifier {
 
 /// Factory used by [`AppState`][crate::app::AppState] to construct the
 /// appropriate verifier based on runtime configuration.
+///
+/// `extra_aws_certs_dir` is only consulted when `verify_enabled` is true;
+/// the permissive verifier does not consult any trust roots.
 #[must_use]
 pub(crate) fn build_verifier(
     verify_enabled: bool,
     http_client: reqwest::Client,
+    extra_aws_certs_dir: Option<&std::path::Path>,
 ) -> Arc<dyn InstanceIdentityVerifier> {
     if verify_enabled {
-        Arc::new(CryptoVerifier::new(http_client))
+        Arc::new(CryptoVerifier::new(http_client, extra_aws_certs_dir))
     } else {
         Arc::new(PermissiveVerifier)
     }
@@ -309,5 +389,37 @@ mod tests {
         let verifier = PermissiveVerifier;
         let jwt = make_jwt(&serde_json::json!({ "google": {} }))?;
         assert_invalid_request(verifier.verify_gcp(&jwt).await)
+    }
+
+    /// The extra-cert loader skips non-PEM extensions, tolerates
+    /// unreadable files, and returns the PEM body for valid entries.
+    #[test]
+    fn load_extra_aws_certs_filters_and_tolerates_errors() -> TestResult {
+        let dir = std::env::temp_dir().join(format!(
+            "coder-extra-certs-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        std::fs::create_dir_all(&dir)?;
+
+        let valid_pem = "-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n";
+        std::fs::write(dir.join("good.pem"), valid_pem)?;
+        std::fs::write(dir.join("also-good.crt"), valid_pem)?;
+        std::fs::write(dir.join("ignored.txt"), "nope")?;
+        std::fs::write(dir.join("no-extension"), "nope")?;
+
+        let loaded = load_extra_aws_certs(&dir);
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(loaded.len(), 2, "only *.pem / *.crt should be loaded");
+        assert!(loaded.iter().all(|c| c == valid_pem));
+        Ok(())
+    }
+
+    #[test]
+    fn load_extra_aws_certs_missing_directory_returns_empty() {
+        let missing = std::path::Path::new("/definitely/does/not/exist/coder-extra-certs");
+        assert!(load_extra_aws_certs(missing).is_empty());
     }
 }
