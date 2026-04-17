@@ -31,6 +31,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
+use coder_core::ports::DeploymentStore;
 use coder_core::{AppStore, CoderdReplicaRow, InsertCoderdReplicaInput, StorageError};
 use thiserror::Error;
 use time::OffsetDateTime;
@@ -80,57 +81,33 @@ pub trait ReplicaManagerStore: Send + Sync + 'static {
     ) -> Result<u64, StorageError>;
 }
 
-/// Blanket impl: any `Arc<T>` where `T: ReplicaManagerStore` is itself a
-/// `ReplicaManagerStore`.  This lets tests pass `Arc<FakeReplicaStore>`
-/// without boilerplate.
-#[async_trait]
-impl<T: ReplicaManagerStore + ?Sized> ReplicaManagerStore for Arc<T> {
-    async fn ping(&self) -> Result<(), StorageError> {
-        (**self).ping().await
-    }
+/// Adapter that exposes an [`AppStore`] trait object as a
+/// [`ReplicaManagerStore`].  Callers that already hold an
+/// `Arc<dyn AppStore>` (e.g. the server main) can wrap it once in this
+/// newtype and pass the resulting `Arc<dyn ReplicaManagerStore>` to
+/// [`ReplicaManager::start`] without introducing an extra `Arc` layer.
+pub struct AppStoreReplicaAdapter(Arc<dyn AppStore>);
 
-    async fn insert_coderd_replica(
-        &self,
-        input: InsertCoderdReplicaInput,
-    ) -> Result<CoderdReplicaRow, StorageError> {
-        (**self).insert_coderd_replica(input).await
-    }
-
-    async fn refresh_coderd_replica(
-        &self,
-        id: Uuid,
-        updated_at: OffsetDateTime,
-    ) -> Result<bool, StorageError> {
-        (**self).refresh_coderd_replica(id, updated_at).await
-    }
-
-    async fn delete_coderd_replica(&self, id: Uuid) -> Result<bool, StorageError> {
-        (**self).delete_coderd_replica(id).await
-    }
-
-    async fn prune_stale_coderd_replicas(
-        &self,
-        older_than: OffsetDateTime,
-    ) -> Result<u64, StorageError> {
-        (**self).prune_stale_coderd_replicas(older_than).await
+impl AppStoreReplicaAdapter {
+    /// Wrap an existing `Arc<dyn AppStore>` so it can be used as a
+    /// replica-manager store.
+    #[must_use]
+    pub fn new(store: Arc<dyn AppStore>) -> Self {
+        Self(store)
     }
 }
 
-/// Explicit impl for `dyn AppStore` so that `Arc<dyn AppStore>` coerces to
-/// `Arc<dyn ReplicaManagerStore>` via the `Arc<T>` blanket above.  We use
-/// an explicit trait-object impl instead of a `T: AppStore` blanket to
-/// avoid coherence conflicts with the `Arc<T>` blanket.
 #[async_trait]
-impl ReplicaManagerStore for dyn AppStore {
+impl ReplicaManagerStore for AppStoreReplicaAdapter {
     async fn ping(&self) -> Result<(), StorageError> {
-        <Self as coder_core::ports::DeploymentStore>::ping(self).await
+        DeploymentStore::ping(self.0.as_ref()).await
     }
 
     async fn insert_coderd_replica(
         &self,
         input: InsertCoderdReplicaInput,
     ) -> Result<CoderdReplicaRow, StorageError> {
-        <Self as AppStore>::insert_coderd_replica(self, input).await
+        AppStore::insert_coderd_replica(self.0.as_ref(), input).await
     }
 
     async fn refresh_coderd_replica(
@@ -138,18 +115,18 @@ impl ReplicaManagerStore for dyn AppStore {
         id: Uuid,
         updated_at: OffsetDateTime,
     ) -> Result<bool, StorageError> {
-        <Self as AppStore>::refresh_coderd_replica(self, id, updated_at).await
+        AppStore::refresh_coderd_replica(self.0.as_ref(), id, updated_at).await
     }
 
     async fn delete_coderd_replica(&self, id: Uuid) -> Result<bool, StorageError> {
-        <Self as AppStore>::delete_coderd_replica(self, id).await
+        AppStore::delete_coderd_replica(self.0.as_ref(), id).await
     }
 
     async fn prune_stale_coderd_replicas(
         &self,
         older_than: OffsetDateTime,
     ) -> Result<u64, StorageError> {
-        <Self as AppStore>::prune_stale_coderd_replicas(self, older_than).await
+        AppStore::prune_stale_coderd_replicas(self.0.as_ref(), older_than).await
     }
 }
 
@@ -206,20 +183,13 @@ pub struct ReplicaManager {
 impl ReplicaManager {
     /// Registers a new replica row and spawns the heartbeat loop.
     ///
-    /// Returns once the initial `INSERT` has completed so that the row is
-    /// immediately visible to `/replicas` callers on other replicas.
-    pub async fn start<S>(
-        store: S,
-        options: ReplicaManagerOptions,
-    ) -> Result<Self, ReplicaManagerError>
-    where
-        S: ReplicaManagerStore + 'static,
-    {
-        let store: Arc<dyn ReplicaManagerStore> = Arc::new(store);
-        Self::start_with_arc(store, options).await
-    }
-
-    async fn start_with_arc(
+    /// Accepts an already-shared `Arc<dyn ReplicaManagerStore>` so
+    /// callers holding a trait-object store (e.g. `Arc<dyn AppStore>`
+    /// wrapped via [`AppStoreReplicaAdapter`]) don't pay for a second
+    /// `Arc` allocation.  Returns once the initial `INSERT` has
+    /// completed so that the row is immediately visible to `/replicas`
+    /// callers on other replicas.
+    pub async fn start(
         store: Arc<dyn ReplicaManagerStore>,
         options: ReplicaManagerOptions,
     ) -> Result<Self, ReplicaManagerError> {
@@ -343,15 +313,16 @@ async fn refresh_and_prune(
 }
 
 /// Returns the `time::Duration` used as the staleness threshold for
-/// pruning.  Go uses `3 * UpdateInterval`.
+/// pruning.  Go uses `3 * UpdateInterval`; we preserve the full
+/// sub-second precision of the configured interval so small test
+/// intervals don't truncate to zero.
 fn stale_cutoff(update_interval: Duration) -> time::Duration {
-    let secs = update_interval
-        .as_secs()
-        .saturating_mul(u64::from(STALE_MULTIPLIER));
-    // `time::Duration::seconds` takes an i64; clamp to i64::MAX to avoid
-    // panics from pathological configurations.
-    let clamped = i64::try_from(secs).unwrap_or(i64::MAX);
-    time::Duration::seconds(clamped)
+    let scaled = update_interval.saturating_mul(STALE_MULTIPLIER);
+    // `time::Duration::try_from` preserves nanosecond precision and
+    // only errors when the std `Duration` exceeds `i64::MAX` seconds,
+    // which is not physically achievable here but we guard against it
+    // anyway.
+    time::Duration::try_from(scaled).unwrap_or(time::Duration::MAX)
 }
 
 async fn measure_latency_micros(store: &dyn ReplicaManagerStore) -> i32 {
@@ -367,18 +338,20 @@ fn default_hostname() -> String {
     std::env::var("HOSTNAME").unwrap_or_else(|_| "unknown".to_string())
 }
 
-/// Build a [`Replica`][coder_core::api::Replica] response from a stored row.
+/// Build a [`ReplicaResponse`][coder_core::api::ReplicaResponse] from a
+/// stored row.  This is the same shape used by the workspace-proxy
+/// register endpoint and matches Go's `codersdk.Replica` JSON layout.
 ///
 /// Shared by the `/replicas` handler and by tests.
-pub(crate) fn replica_from_row(row: &CoderdReplicaRow) -> coder_core::api::Replica {
-    coder_core::api::Replica {
+pub(crate) fn replica_from_row(row: &CoderdReplicaRow) -> coder_core::api::ReplicaResponse {
+    coder_core::api::ReplicaResponse {
         id: row.id,
         hostname: row.hostname.clone(),
         created_at: row.created_at,
         relay_address: row.relay_address.clone(),
         region_id: row.region_id,
         error: row.error.clone(),
-        database_latency: i64::from(row.database_latency),
+        database_latency: row.database_latency,
     }
 }
 
@@ -477,10 +450,14 @@ mod tests {
         }
     }
 
+    fn as_replica_store(store: &Arc<FakeReplicaStore>) -> Arc<dyn ReplicaManagerStore> {
+        store.clone()
+    }
+
     #[tokio::test]
     async fn start_inserts_and_shutdown_deletes_row() {
         let store = Arc::new(FakeReplicaStore::default());
-        let mut manager = ReplicaManager::start(store.clone(), options(50))
+        let mut manager = ReplicaManager::start(as_replica_store(&store), options(50))
             .await
             .expect("start");
         assert_eq!(store.rows().len(), 1);
@@ -492,7 +469,7 @@ mod tests {
     #[tokio::test]
     async fn heartbeat_refreshes_updated_at() {
         let store = Arc::new(FakeReplicaStore::default());
-        let mut manager = ReplicaManager::start(store.clone(), options(20))
+        let mut manager = ReplicaManager::start(as_replica_store(&store), options(20))
             .await
             .expect("start");
         let initial = store.rows()[0].updated_at;
@@ -526,13 +503,14 @@ mod tests {
             updated_at: OffsetDateTime::now_utc() - time::Duration::hours(1),
         });
 
-        let mut manager = ReplicaManager::start(store.clone(), options(20))
+        let mut manager = ReplicaManager::start(as_replica_store(&store), options(20))
             .await
             .expect("start");
 
-        // Wait for at least one heartbeat tick + prune.  stale_cutoff rounds
-        // sub-second intervals down to 0, so any stale row older than `now`
-        // is deleted on the first prune pass.
+        // Wait for at least one heartbeat tick + prune.  With a 20 ms
+        // update interval the stale cutoff is 60 ms, so the hour-old
+        // row is well past that threshold and gets deleted on the first
+        // prune pass.
         for _ in 0..50 {
             tokio::time::sleep(Duration::from_millis(20)).await;
             if !store.rows().iter().any(|r| r.id == stale_id) {
@@ -549,9 +527,51 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn stale_cutoff_preserves_sub_second_precision() {
+        // A 100ms update interval should produce a 300ms stale cutoff,
+        // not truncate to 0.  Previously the implementation used
+        // `.as_secs()` which silently rounded this down to zero and
+        // caused all peer replicas to be pruned on every tick.
+        let cutoff = stale_cutoff(Duration::from_millis(100));
+        assert!(
+            cutoff > time::Duration::milliseconds(299)
+                && cutoff < time::Duration::milliseconds(301),
+            "expected ~300ms cutoff, got {cutoff}"
+        );
+
+        let fresh_id = Uuid::new_v4();
+        let store = Arc::new(FakeReplicaStore::default());
+        store.insert_raw(CoderdReplicaRow {
+            id: fresh_id,
+            hostname: "peer".into(),
+            relay_address: String::new(),
+            region_id: 0,
+            version: "0.0.0".into(),
+            error: String::new(),
+            database_latency: 0,
+            created_at: OffsetDateTime::now_utc(),
+            started_at: OffsetDateTime::now_utc(),
+            stopped_at: None,
+            // 50ms-old row: fresher than the 300ms cutoff, must NOT be pruned.
+            updated_at: OffsetDateTime::now_utc() - time::Duration::milliseconds(50),
+        });
+
+        let mut manager = ReplicaManager::start(as_replica_store(&store), options(100))
+            .await
+            .expect("start");
+        // Give the heartbeat loop at least one tick.
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        assert!(
+            store.rows().iter().any(|r| r.id == fresh_id),
+            "peer replica within the 3×interval window must not be pruned"
+        );
+        manager.shutdown().await;
+    }
+
+    #[tokio::test]
     async fn drop_cancels_background_task() {
         let store = Arc::new(FakeReplicaStore::default());
-        let manager = ReplicaManager::start(store.clone(), options(20))
+        let manager = ReplicaManager::start(as_replica_store(&store), options(20))
             .await
             .expect("start");
         let abort = manager.task.as_ref().map(|h| h.abort_handle());
@@ -569,7 +589,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replica_from_row_converts_latency_to_i64_microseconds() {
+    async fn replica_from_row_preserves_latency_microseconds() {
         let row = CoderdReplicaRow {
             id: Uuid::new_v4(),
             hostname: "h".into(),

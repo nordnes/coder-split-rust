@@ -44,4 +44,6 @@ pub mod replica_manager;
 
 pub use app::{AppState, build_router};
 pub use rate_limit::RateLimitState;
-pub use replica_manager::{ReplicaManager, ReplicaManagerOptions};
+pub use replica_manager::{
+    AppStoreReplicaAdapter, ReplicaManager, ReplicaManagerOptions, ReplicaManagerStore,
+};

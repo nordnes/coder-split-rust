@@ -630,6 +630,16 @@ struct ServerArgs {
     )]
     lifecycle_check_interval_secs: u64,
 
+    /// Heartbeat interval in seconds for the HA replica manager. The
+    /// `/replicas` handler uses `3 ×` this value as the staleness cut-off.
+    #[arg(
+        long,
+        env = "CODER_REPLICA_UPDATE_INTERVAL",
+        default_value_t = 15,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    replica_update_interval_secs: u64,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -889,15 +899,18 @@ async fn run() -> Result<(), MainError> {
 
     // Start the replica manager: registers this coderd instance in the
     // `replicas` table on startup, refreshes the row every
-    // `replica_update_interval`, and unregisters it on graceful shutdown.
-    // This powers the `/api/v2/replicas` HA view.
+    // `replica_update_interval_secs`, and unregisters it on graceful
+    // shutdown.  This powers the `/api/v2/replicas` HA view.  The
+    // `/replicas` handler derives its staleness cut-off from the same
+    // config field so the two can't drift out of sync.
+    let replica_store: Arc<dyn coder_server::ReplicaManagerStore> =
+        Arc::new(coder_server::AppStoreReplicaAdapter::new(store.clone()));
     let replica_manager = coder_server::ReplicaManager::start(
-        store.clone(),
+        replica_store,
         coder_server::ReplicaManagerOptions {
-            relay_address: config.access_url.to_string(),
             region_id: 0,
             version: BuildMetadata::default().version.clone(),
-            update_interval: Duration::from_secs(15),
+            update_interval: Duration::from_secs(config.worker.replica_update_interval_secs),
             ..Default::default()
         },
     )
@@ -1218,6 +1231,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             dormancy_check_interval_secs: args.dormancy_check_interval_secs,
             telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
             lifecycle_check_interval_secs: args.lifecycle_check_interval_secs,
+            replica_update_interval_secs: args.replica_update_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,
