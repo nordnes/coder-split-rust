@@ -2158,16 +2158,13 @@ pub(crate) mod tests {
         }
     }
 
-    /// Check if `inner` JSON object keys/values are all contained in `outer`.
-    /// Mirrors PostgreSQL `inner <@ outer` for JSONB objects (flat key-value maps).
-    fn json_tags_contained_by(inner: &Value, outer: &Value) -> bool {
-        match (inner, outer) {
-            (Value::Object(inner_map), Value::Object(outer_map)) => {
-                inner_map.iter().all(|(k, v)| outer_map.get(k) == Some(v))
-            }
-            // If both are equal scalars/arrays, containment holds.
-            _ => inner == outer,
-        }
+    /// Returns `true` when a daemon advertising `daemon_tags` may acquire a
+    /// job tagged with `job_tags`. Mirrors the SQL function
+    /// `provisioner_tagset_contains` via [`provisioner_tagset_matches`].
+    fn provisioner_tagset_matches_json(daemon_tags: &Value, job_tags: &Value) -> bool {
+        let daemon = coder_core::tags_from_json(daemon_tags);
+        let job = coder_core::tags_from_json(job_tags);
+        coder_core::provisioner_tagset_matches(&daemon, &job)
     }
 
     #[async_trait]
@@ -2221,9 +2218,11 @@ pub(crate) mod tests {
                     input.types.contains(&j.provisioner)
                 })
                 .filter(|j| {
-                    // Tag containment: job tags must be a subset of daemon tags
-                    // (mirrors PostgreSQL `tags <@ $5::JSONB`).
-                    json_tags_contained_by(&j.tags, &input.provisioner_tags)
+                    // Tag matching mirrors the Go SQL function
+                    // `provisioner_tagset_contains`: untagged jobs require
+                    // untagged daemons; otherwise the job's tags must be a
+                    // subset of the daemon's tags.
+                    provisioner_tagset_matches_json(&input.provisioner_tags, &j.tags)
                 })
                 .map(|j| (j.id, j.created_at))
                 .collect();
