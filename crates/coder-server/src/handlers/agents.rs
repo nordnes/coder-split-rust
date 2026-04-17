@@ -1368,7 +1368,11 @@ pub(crate) fn build_workspace_agent_connection_info(
 
     WorkspaceAgentConnectionInfo {
         derp_map: DERPMap { regions },
-        derp_force_websockets: false,
+        // Mirrors the `DeploymentValues.DERP.Config.ForceWebSockets` flag. Both
+        // the workspace-proxy register response and the agent connection-info
+        // endpoint must see the same value so proxy- and direct-connected
+        // clients behave identically.
+        derp_force_websockets: state.config.derp_force_websockets,
         disable_direct_connections: false,
         hostname_suffix: state.config.ssh.hostname_suffix.clone(),
     }
@@ -3524,6 +3528,33 @@ mod tests {
 
         let response = oneshot_call(app, req).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_info_reflects_derp_force_websockets_config() -> TestResult {
+        // Config flag off → agent connection info reports it off.
+        let (state_off, _store_off) = test_state_with_store(true)?;
+        assert!(
+            !state_off.config.derp_force_websockets,
+            "test fixture must default derp_force_websockets to false"
+        );
+        let info_off = build_workspace_agent_connection_info(&state_off);
+        assert!(
+            !info_off.derp_force_websockets,
+            "agent connection info must mirror ServerConfig.derp_force_websockets (off)"
+        );
+
+        // Config flag on → agent connection info reports it on. This is the
+        // regression guard for the old hardcoded `false` that made the agent
+        // endpoint disagree with the workspace-proxy register response.
+        let (mut state_on, _store_on) = test_state_with_store(true)?;
+        state_on.config.derp_force_websockets = true;
+        let info_on = build_workspace_agent_connection_info(&state_on);
+        assert!(
+            info_on.derp_force_websockets,
+            "agent connection info must mirror ServerConfig.derp_force_websockets (on)"
+        );
         Ok(())
     }
 }

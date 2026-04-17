@@ -33,6 +33,7 @@
 mod app;
 pub(crate) mod auth_middleware;
 pub mod connection_guard;
+pub mod crypto_key_rotator;
 mod error;
 mod extractors;
 mod handlers;

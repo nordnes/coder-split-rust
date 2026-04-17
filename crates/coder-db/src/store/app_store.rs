@@ -9993,6 +9993,192 @@ impl AppStore for PostgresStore {
         })
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_all_crypto_keys(&self) -> Result<Vec<CryptoKeyRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            secret: Vec<u8>,
+            starts_at: OffsetDateTime,
+            deletes_at: Option<OffsetDateTime>,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT feature, sequence, secret, starts_at, deletes_at
+             FROM crypto_keys
+             ORDER BY feature ASC, sequence ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| CryptoKeyRow {
+                feature: row.feature,
+                sequence: row.sequence,
+                secret: row.secret,
+                starts_at: row.starts_at,
+                deletes_at: row.deletes_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_crypto_key_deletes_at(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+        sequence: i32,
+        deletes_at: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE crypto_keys
+             SET deletes_at = $3
+             WHERE feature = $1::crypto_key_feature AND sequence = $2",
+        )
+        .bind(feature)
+        .bind(sequence)
+        .bind(deletes_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_crypto_key(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+        sequence: i32,
+    ) -> Result<bool, StorageError> {
+        // Go's `DeleteCryptoKey` sets `secret = NULL` (soft-delete preserving
+        // the sequence history), but our current schema keeps `secret` as
+        // NOT NULL and has no `secret_key_id` column, so we perform a hard
+        // delete once the key has passed its `deletes_at` horizon. The
+        // observable behaviour — the key is no longer usable — is identical.
+        let result = sqlx::query(
+            "DELETE FROM crypto_keys
+             WHERE feature = $1::crypto_key_feature AND sequence = $2",
+        )
+        .bind(feature)
+        .bind(sequence)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn max_crypto_key_sequence_for_feature(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+    ) -> Result<i32, StorageError> {
+        let max: Option<i32> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM crypto_keys WHERE feature = $1::crypto_key_feature",
+        )
+        .bind(feature)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(max.unwrap_or(0))
+    }
+
+    #[instrument(skip(self, new_row), err(level = tracing::Level::WARN))]
+    async fn rotate_crypto_key_transactional(
+        &self,
+        old_feature: coder_core::enums::CryptoKeyFeature,
+        old_sequence: i32,
+        old_deletes_at: OffsetDateTime,
+        new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct StoredRow {
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            secret: Vec<u8>,
+            starts_at: OffsetDateTime,
+            deletes_at: Option<OffsetDateTime>,
+        }
+
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        // Stamp `deletes_at` on the old key. If no row matches, the caller
+        // raced against another rotator; roll back and surface an error.
+        let affected = sqlx::query(
+            "UPDATE crypto_keys
+             SET deletes_at = $3
+             WHERE feature = $1::crypto_key_feature AND sequence = $2",
+        )
+        .bind(old_feature)
+        .bind(old_sequence)
+        .bind(old_deletes_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(StorageError::invalid_data(format!(
+                "crypto key {old_feature:?}#{old_sequence} vanished mid-rotation"
+            )));
+        }
+
+        // Insert the successor. A `(feature, sequence)` primary-key violation
+        // rolls back the UPDATE above, guaranteeing no orphan accumulation.
+        let inserted = sqlx::query_as::<_, StoredRow>(
+            "INSERT INTO crypto_keys (feature, sequence, secret, starts_at, deletes_at)
+             VALUES ($1::crypto_key_feature, $2, $3, $4, $5)
+             RETURNING feature, sequence, secret, starts_at, deletes_at",
+        )
+        .bind(new_row.feature)
+        .bind(new_row.sequence)
+        .bind(&new_row.secret)
+        .bind(new_row.starts_at)
+        .bind(new_row.deletes_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+
+        Ok(CryptoKeyRow {
+            feature: inserted.feature,
+            sequence: inserted.sequence,
+            secret: inserted.secret,
+            starts_at: inserted.starts_at,
+            deletes_at: inserted.deletes_at,
+        })
+    }
+
+    // ----- DERP mesh -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = 'derp_mesh_key'")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage_error)?;
+
+        Ok(value)
+    }
+
+    #[instrument(skip(self, value), err(level = tracing::Level::WARN))]
+    async fn insert_derp_mesh_key(&self, value: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "INSERT INTO site_configs (key, value) VALUES ('derp_mesh_key', $1)
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .bind(value)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
     // ----- Workspace app stats -----
 
     #[instrument(skip(self, stats), err(level = tracing::Level::WARN))]

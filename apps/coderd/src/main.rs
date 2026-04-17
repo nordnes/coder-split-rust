@@ -40,6 +40,7 @@ use coder_core::{
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
+use coder_server::crypto_key_rotator::{CryptoKeyRotator, RotatorOptions};
 use coder_server::{AppState, build_router};
 use coder_workspaces::{
     ActivityBumpWorker, AutobuildExecutor, DormancyCheckerWorker, LifecycleScheduler,
@@ -196,6 +197,10 @@ struct ServerArgs {
     /// JSON array of DERP regions used by the Rust health service.
     #[arg(long, env = "CODER_DERP_REGIONS_JSON", default_value = "[]")]
     derp_regions_json: String,
+
+    /// Force all DERP connections to use WebSockets.
+    #[arg(long, env = "CODER_DERP_FORCE_WEBSOCKETS", default_value_t = false)]
+    derp_force_websockets: bool,
 
     /// Grace period for shutdown.
     #[arg(long, env = "CODER_SHUTDOWN_GRACE_PERIOD_SECS", default_value_t = 10)]
@@ -919,6 +924,14 @@ async fn run() -> Result<(), MainError> {
     let (_autobuild_executor, autobuild_handle) =
         AutobuildExecutor::start(store.clone(), autobuild_cancel.clone());
 
+    // Start the crypto-key rotator so proxy-facing signing keys are
+    // periodically rotated, retired, and hard-deleted past their grace
+    // window. Mirrors Go's `coderd/cryptokeys/rotate.go` StartRotator.
+    let crypto_key_rotator_cancel = CancellationToken::new();
+    let crypto_key_rotator_handle = CryptoKeyRotator::new(store.clone(), RotatorOptions::default())
+        .start(crypto_key_rotator_cancel.clone())
+        .await;
+
     // Start the lifecycle scheduler (autostart/autostop/failed-stop retry).
     let quiet_hours = parse_quiet_hours_schedule(&config.workspace.default_quiet_hours_schedule);
     let lifecycle_scheduler = LifecycleScheduler::start(
@@ -1090,7 +1103,16 @@ async fn run() -> Result<(), MainError> {
         replica_manager.shutdown().await;
     });
 
-    // 5c. Cancel the update checker background poll loop and await the
+    // 5c. Cancel the crypto-key rotator and await completion so any in-flight
+    //     sweep finishes before the DB pool is closed.
+    coordinator.register("crypto_key_rotator", async move {
+        crypto_key_rotator_cancel.cancel();
+        if let Err(e) = crypto_key_rotator_handle.await {
+            warn!(error = %e, "crypto-key rotator task panicked during shutdown");
+        }
+    });
+
+    // 5d. Cancel the update checker background poll loop and await the
     //     task. No DB writes happen in the loop, so ordering relative to
     //     the database close step below is not load-bearing, but joining
     //     keeps graceful shutdown deterministic and matches the pattern
@@ -1190,6 +1212,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         })?,
         derp_regions: serde_json::from_str::<Vec<DerpRegionConfig>>(&args.derp_regions_json)
             .map_err(|error| MainError::Config(format!("invalid DERP regions JSON: {error}")))?,
+        derp_force_websockets: args.derp_force_websockets,
         shutdown_grace_period_secs: args.shutdown_grace_period_secs,
         log_format: match args.log_format {
             LogFormatArg::Pretty => LogFormat::Pretty,
