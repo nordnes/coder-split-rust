@@ -821,8 +821,12 @@ pub(crate) const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
 /// POST /api/v2/notifications/custom — send a custom notification.
 ///
 /// Validates the request body, ensures the caller is not a system user, and
-/// enqueues a custom notification.  Full dispatch is not yet wired, so the
-/// handler currently returns 204 No Content after validation succeeds.
+/// dispatches a custom notification to the caller's inbox (matching Go's
+/// `postCustomNotification`, which targets the caller themselves). After
+/// persisting the inbox row the handler publishes an
+/// [`InboxNotificationEvent`] on the caller's inbox pub/sub channel so that
+/// SSE subscribers (`/notifications/inbox/watch`) see the update in real
+/// time. Returns 204 No Content on success.
 ///
 /// The template UUID used for custom notifications is
 /// [`coder_core::TEMPLATE_CUSTOM_NOTIFICATION`], a compile-time constant
@@ -929,24 +933,71 @@ pub(crate) async fn post_custom_notification(
             .into_response());
     }
 
-    // In Go, system users are blocked from sending custom notifications.
-    // The Rust Actor type does not yet expose an is_system() flag; this
-    // check will be added once the identity layer tracks that attribute.
-    let _ = &context;
+    // In Go, system users are blocked from sending custom notifications via
+    // `user.IsSystem` on the resolved DB record. Mirror that by loading the
+    // caller's user record and refusing if it is a system user.
+    let caller = match state.store.find_user_by_id(context.user.id).await? {
+        Some(user) => user,
+        None => {
+            return Ok((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Failed to send custom notification",
+                    "caller user record not found",
+                )),
+            )
+                .into_response());
+        }
+    };
+    if caller.is_system {
+        return Ok((
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::error(
+                "Forbidden",
+                "System users cannot send custom notifications.",
+            )),
+        )
+            .into_response());
+    }
 
-    // NOTE: `enqueue_notification_message` is not yet implemented in the Rust
-    // backend.  The Go handler calls `api.NotificationsEnqueuer.EnqueueWithData`
-    // which inserts into the `notification_messages` table (defined by migration
-    // `20260308000000_notifications_domain.sql`).  When wired, use
-    // `coder_core::TEMPLATE_CUSTOM_NOTIFICATION` as the
-    // `notification_template_id` column value and publish to
-    // `inbox_notification_channel(target_user_id)` so SSE subscribers are
-    // notified of new notifications in real time.
-    //
-    // The Go `CustomNotificationRequest` does not currently include a `targets`
-    // field (tracked upstream: https://github.com/coder/coder/issues/19768).
-    // Once multi-user targeting is implemented, add a non-empty `targets`
-    // validation here.
+    // Go's postCustomNotification targets the caller themselves: the
+    // EnqueueWithData call passes `user.ID` as both the recipient and the
+    // sole target. Mirror that behaviour here and deliver an inbox row to
+    // the caller.
+    let notification = coder_core::InboxNotification {
+        id: Uuid::new_v4(),
+        user_id: caller.id,
+        template_id: coder_core::TEMPLATE_CUSTOM_NOTIFICATION,
+        targets: vec![caller.id],
+        title: content.title.clone(),
+        content: content.message.clone(),
+        icon: String::new(),
+        actions: Vec::new(),
+        read_at: None,
+        created_at: OffsetDateTime::now_utc(),
+    };
+
+    state.store.insert_inbox_notification(&notification).await?;
+
+    // Publish an inbox notification event so SSE subscribers on the
+    // caller's inbox channel see the new notification in real time. Match
+    // Go's `pubsub.InboxNotificationEvent` payload shape.
+    let event = coder_core::pubsub::InboxNotificationEvent {
+        kind: coder_core::pubsub::InboxNotificationEventKind::New,
+        inbox_notification: notification,
+    };
+    match serde_json::to_vec(&event) {
+        Ok(payload) => {
+            let channel = coder_core::pubsub::inbox_notification_channel(caller.id);
+            let _ = state.pubsub.publish(&channel, &payload).await;
+        }
+        Err(error) => {
+            debug!(
+                error = %error,
+                "failed to serialize inbox notification event; skipping pubsub publish"
+            );
+        }
+    }
 
     // Return 204 No Content to match the Go handler's success response.
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1451,5 +1502,196 @@ mod tests {
         assert!(!coder_core::TEMPLATE_CUSTOM_NOTIFICATION.is_nil());
         assert!(!coder_core::TEMPLATE_TEST_NOTIFICATION.is_nil());
         assert!(!coder_core::PREBUILDS_SYSTEM_USER_ID.is_nil());
+    }
+
+    /// After a successful `POST /api/v2/notifications/custom` the handler
+    /// should persist an inbox notification for the caller, targeted at
+    /// themselves and carrying the request's title/message as title/content.
+    #[tokio::test]
+    async fn post_custom_notification_inserts_inbox_row_for_caller() -> TestResult {
+        use crate::app::tests::{authenticated_json_request, call};
+        use axum::http::Method;
+        use serde_json::json;
+
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        // Resolve the authenticated caller's id.
+        let me_resp = call(
+            app.clone(),
+            crate::app::tests::authenticated_request(
+                Method::GET,
+                "/api/v2/users/me",
+                &session_token,
+            )?,
+        )
+        .await?;
+        let me_body = crate::app::tests::response_json(me_resp).await?;
+        let user_id = Uuid::from_str(
+            me_body
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing user id")?,
+        )?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &json!({
+                    "content": {
+                        "title": "Hello",
+                        "message": "World"
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let stored = store
+            .get_filtered_inbox_notifications(user_id, None, None, "all", None)
+            .await?;
+        assert_eq!(
+            stored.len(),
+            1,
+            "expected exactly one inbox notification for caller"
+        );
+        let row = &stored[0];
+        assert_eq!(row.user_id, user_id);
+        assert_eq!(row.template_id, coder_core::TEMPLATE_CUSTOM_NOTIFICATION);
+        assert_eq!(row.targets, vec![user_id]);
+        assert_eq!(row.title, "Hello");
+        assert_eq!(row.content, "World");
+        assert!(row.read_at.is_none());
+        Ok(())
+    }
+
+    /// On successful dispatch the handler should publish an
+    /// `InboxNotificationEvent` on the caller's inbox pub/sub channel so
+    /// that SSE subscribers on `/notifications/inbox/watch` receive an
+    /// update in real time.
+    #[tokio::test]
+    async fn post_custom_notification_publishes_inbox_pubsub_event() -> TestResult {
+        use crate::app::tests::{authenticated_json_request, call};
+        use axum::http::Method;
+        use serde_json::json;
+
+        let (state, _store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let me_resp = call(
+            app.clone(),
+            crate::app::tests::authenticated_request(
+                Method::GET,
+                "/api/v2/users/me",
+                &session_token,
+            )?,
+        )
+        .await?;
+        let me_body = crate::app::tests::response_json(me_resp).await?;
+        let user_id = Uuid::from_str(
+            me_body
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing user id")?,
+        )?;
+
+        // Subscribe before invoking the handler so we don't race the publish.
+        let mut subscription = pubsub
+            .subscribe(&coder_core::pubsub::inbox_notification_channel(user_id))
+            .await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &json!({
+                    "content": {
+                        "title": "Ping",
+                        "message": "From test"
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let payload = tokio::time::timeout(Duration::from_secs(2), subscription.recv()).await??;
+
+        let event: coder_core::pubsub::InboxNotificationEvent = serde_json::from_slice(&payload)?;
+        assert_eq!(
+            event.kind,
+            coder_core::pubsub::InboxNotificationEventKind::New
+        );
+        assert_eq!(event.inbox_notification.user_id, user_id);
+        assert_eq!(event.inbox_notification.title, "Ping");
+        assert_eq!(event.inbox_notification.content, "From test");
+        Ok(())
+    }
+
+    /// Go's `postCustomNotification` refuses requests from system users
+    /// (`user.IsSystem`). Verify the Rust handler does the same.
+    #[tokio::test]
+    async fn post_custom_notification_blocks_system_user() -> TestResult {
+        use crate::app::tests::{authenticated_json_request, call};
+        use axum::http::Method;
+        use serde_json::json;
+
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let me_resp = call(
+            app.clone(),
+            crate::app::tests::authenticated_request(
+                Method::GET,
+                "/api/v2/users/me",
+                &session_token,
+            )?,
+        )
+        .await?;
+        let me_body = crate::app::tests::response_json(me_resp).await?;
+        let user_id = Uuid::from_str(
+            me_body
+                .get("id")
+                .and_then(Value::as_str)
+                .ok_or("missing user id")?,
+        )?;
+
+        store.set_user_is_system(user_id, true)?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/notifications/custom",
+                &session_token,
+                &json!({
+                    "content": {
+                        "title": "Should not dispatch",
+                        "message": "System users are blocked"
+                    }
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let stored = store
+            .get_filtered_inbox_notifications(user_id, None, None, "all", None)
+            .await?;
+        assert!(
+            stored.is_empty(),
+            "system user should not produce inbox rows, got {stored:?}"
+        );
+        Ok(())
     }
 }

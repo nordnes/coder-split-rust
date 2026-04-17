@@ -5285,6 +5285,37 @@ impl AppStore for PostgresStore {
         Ok(())
     }
 
+    #[instrument(skip(self, notification), err(level = tracing::Level::WARN))]
+    async fn insert_inbox_notification(
+        &self,
+        notification: &InboxNotification,
+    ) -> Result<(), StorageError> {
+        let actions_json = serde_json::to_value(&notification.actions).map_err(|error| {
+            StorageError::invalid_data(format!("serialize inbox notification actions: {error}"))
+        })?;
+
+        sqlx::query(
+            r#"INSERT INTO inbox_notifications
+               (id, user_id, template_id, targets, title, content, icon, actions, read_at, created_at)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)"#,
+        )
+        .bind(notification.id)
+        .bind(notification.user_id)
+        .bind(notification.template_id)
+        .bind(&notification.targets)
+        .bind(&notification.title)
+        .bind(&notification.content)
+        .bind(&notification.icon)
+        .bind(actions_json)
+        .bind(notification.read_at)
+        .bind(notification.created_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_filtered_inbox_notifications(
         &self,

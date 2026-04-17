@@ -4392,6 +4392,16 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         disableds: &[bool],
     ) -> Result<(), StorageError>;
 
+    /// Inserts a new inbox notification.
+    ///
+    /// Used by the custom notification handler (and, once ported, the inbox
+    /// dispatcher) to persist an inbox notification row and make it visible
+    /// to the user through the inbox API.
+    async fn insert_inbox_notification(
+        &self,
+        notification: &InboxNotification,
+    ) -> Result<(), StorageError>;
+
     /// Lists inbox notifications for a user with optional filtering.
     async fn get_filtered_inbox_notifications(
         &self,
