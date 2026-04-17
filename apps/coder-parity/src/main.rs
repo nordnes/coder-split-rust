@@ -1,7 +1,14 @@
 //! Route parity comparison tool between the Go and Rust Coder backends.
 //!
-//! Provides `inventory` and `compare` subcommands for tracking and validating
-//! API route porting progress.
+//! Provides three subcommands:
+//!
+//! * `inventory` — scan the Go and Rust trees and emit a route parity matrix
+//!   (route existence: `ported` vs `missing`).
+//! * `compare` — drive a black-box HTTP comparison between a live Go coderd and
+//!   a live Rust coderd using a shared request corpus.
+//! * `depth` — scan the Rust tree and emit a per-route implementation-depth
+//!   matrix (`complete` / `stub-partial` / `stub-501`), used to maintain
+//!   `crates/coder-server/PARITY_MATRIX.md`.
 
 #![forbid(unsafe_code)]
 
@@ -31,6 +38,8 @@ enum Command {
     Inventory(InventoryArgs),
     /// Compare live Go and Rust HTTP responses from a corpus of requests.
     Compare(CompareArgs),
+    /// Scan the Rust tree and emit a per-route implementation-depth matrix.
+    Depth(DepthArgs),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -63,6 +72,17 @@ struct InventoryArgs {
     /// Defaults to ["codersdk"].
     #[arg(long, value_delimiter = ',')]
     sdk_dirs: Option<Vec<String>>,
+
+    /// Optional output file. Writes markdown when set.
+    #[arg(long)]
+    output: Option<PathBuf>,
+}
+
+#[derive(Debug, Args)]
+struct DepthArgs {
+    /// Path to the Rust rewrite root.
+    #[arg(long, default_value = ".")]
+    rust_root: PathBuf,
 
     /// Optional output file. Writes markdown when set.
     #[arg(long)]
@@ -267,6 +287,7 @@ async fn main() -> Result<(), ParityError> {
     match cli.command {
         Command::Inventory(args) => run_inventory(args),
         Command::Compare(args) => run_compare(args).await,
+        Command::Depth(args) => run_depth(args),
     }
 }
 
@@ -307,6 +328,801 @@ fn run_inventory(args: InventoryArgs) -> Result<(), ParityError> {
     }
 
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Depth command — scans the Rust tree and classifies each registered route by
+// implementation depth (`complete`, `stub-partial`, `stub-501`).  The output is
+// a markdown matrix used to maintain `crates/coder-server/PARITY_MATRIX.md`.
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum DepthStatus {
+    Complete,
+    StubPartial,
+    Stub501,
+}
+
+impl DepthStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Complete => "complete",
+            Self::StubPartial => "stub-partial",
+            Self::Stub501 => "stub-501",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+struct DepthRoute {
+    live_path: String,
+    method: String,
+    handler: String,
+    status: DepthStatus,
+    notes: Option<String>,
+    section: &'static str,
+}
+
+/// Authoritative list of handlers that are registered but still return
+/// simplified / placeholder responses.  Sourced from §3 of
+/// `docs/remaining-behavioral-gaps.md` and kept in-sync with that document.
+/// Each entry maps a handler function name to a short note describing the
+/// remaining behavioral gap.
+const STUB_PARTIAL_HANDLERS: &[(&str, &str)] = &[
+    (
+        "list_api_key_scopes",
+        "Returns the fixed `PUBLIC_API_KEY_SCOPES` list; full scope expansion not modelled yet.",
+    ),
+    (
+        "update_check",
+        "Always reports `current: true`; no remote version probe.",
+    ),
+    (
+        "post_template_version_dynamic_parameters_evaluate",
+        "Evaluates seeded parameters only; no Terraform module execution.",
+    ),
+    (
+        "post_workspace_agent_instance_identity_aws",
+        "Parses instance_id from the identity document without AWS certificate verification.",
+    ),
+    (
+        "post_workspace_agent_instance_identity_azure",
+        "Extracts VM id from the JWT payload without Microsoft signature verification.",
+    ),
+    (
+        "post_workspace_agent_instance_identity_google",
+        "Extracts instance id from the GCP JWT payload without Google token validation.",
+    ),
+    (
+        "get_workspace_quota_deprecated",
+        "Returns unlimited budget; quota allowance/consumed queries not wired.",
+    ),
+    (
+        "get_workspace_quota",
+        "Returns unlimited budget; quota allowance/consumed queries not wired.",
+    ),
+    (
+        "patch_workspace_sharing_settings",
+        "Validates payload but stores nothing; returns 501 until the store is wired.",
+    ),
+    (
+        "get_replicas",
+        "Returns an empty array; no replica manager service implemented.",
+    ),
+];
+
+fn run_depth(args: DepthArgs) -> Result<(), ParityError> {
+    let (routes, summary) = build_depth_matrix(&args.rust_root)?;
+    let markdown = render_depth_markdown(&routes, &summary);
+
+    if let Some(output) = args.output {
+        write_file(&output, &markdown)?;
+    } else {
+        print!("{markdown}");
+    }
+
+    Ok(())
+}
+
+#[derive(Clone, Debug)]
+struct DepthSummary {
+    total: usize,
+    complete: usize,
+    stub_partial: usize,
+    stub_501: usize,
+}
+
+fn build_depth_matrix(rust_root: &Path) -> Result<(Vec<DepthRoute>, DepthSummary), ParityError> {
+    let app_rs = rust_root.join("crates/coder-server/src/app.rs");
+    let app_content = read_to_string(&app_rs)?;
+    let router_body = extract_build_router_body(&app_content).ok_or_else(|| {
+        ParityError::Regex("could not locate build_router(...) body in app.rs".to_owned())
+    })?;
+
+    let mut handler_routes = Vec::new();
+    collect_rust_handler_routes_from_content(&router_body, "", &mut handler_routes)?;
+
+    let handler_bodies = collect_handler_bodies(rust_root)?;
+
+    let mut missing_bodies: BTreeSet<String> = BTreeSet::new();
+    let mut rows = Vec::with_capacity(handler_routes.len());
+    for entry in &handler_routes {
+        let body = handler_bodies
+            .get(entry.handler.as_str())
+            .map(String::as_str);
+        if body.is_none() {
+            missing_bodies.insert(entry.handler.clone());
+        }
+        let (status, notes) = classify_depth(&entry.handler, body);
+        rows.push(DepthRoute {
+            live_path: entry.live_path.clone(),
+            method: entry.method.clone(),
+            handler: entry.handler.clone(),
+            status,
+            notes,
+            section: classify_section(&entry.live_path),
+        });
+    }
+
+    // Surface a loud warning on stderr when any handler body couldn't be
+    // located under `crates/coder-server/src/{app.rs, handlers/**}`.  Missing
+    // bodies default to `complete` (see `classify_depth`), so they otherwise
+    // disappear silently and can mask regressions.
+    if !missing_bodies.is_empty() {
+        eprintln!(
+            "warning: {} handler body(ies) could not be located and were classified as complete by default:",
+            missing_bodies.len()
+        );
+        for name in &missing_bodies {
+            eprintln!("  - {name}");
+        }
+    }
+
+    rows.sort_by(|left, right| {
+        left.section
+            .cmp(right.section)
+            .then(left.live_path.cmp(&right.live_path))
+            .then(left.method.cmp(&right.method))
+    });
+
+    // Within each section/path, dedupe exact duplicates that can arise from
+    // aliased routes (e.g. `/gitauth/{id}/callback` == `/external-auth/{id}/callback`).
+    rows.dedup_by(|a, b| {
+        a.section == b.section
+            && a.live_path == b.live_path
+            && a.method == b.method
+            && a.handler == b.handler
+    });
+
+    let total = rows.len();
+    let complete = rows
+        .iter()
+        .filter(|row| matches!(row.status, DepthStatus::Complete))
+        .count();
+    let stub_partial = rows
+        .iter()
+        .filter(|row| matches!(row.status, DepthStatus::StubPartial))
+        .count();
+    let stub_501 = rows
+        .iter()
+        .filter(|row| matches!(row.status, DepthStatus::Stub501))
+        .count();
+
+    let summary = DepthSummary {
+        total,
+        complete,
+        stub_partial,
+        stub_501,
+    };
+    Ok((rows, summary))
+}
+
+#[derive(Clone, Debug)]
+struct HandlerRoute {
+    live_path: String,
+    method: String,
+    handler: String,
+}
+
+fn extract_build_router_body(content: &str) -> Option<String> {
+    let start = content.find("pub fn build_router(")?;
+    let rest = &content[start..];
+    // Strip strings, char literals, and comments so braces inside them don't
+    // throw off the brace-depth counter.  Offsets are preserved so slices of
+    // the *original* content are returned.
+    let stripped = strip_rust_code_noise(rest);
+    let open = stripped.iter().position(|b| *b == b'{')?;
+    let mut depth: i32 = 0;
+    let mut index = open;
+    while index < stripped.len() {
+        match stripped[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(rest[open..=index].to_owned());
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+fn collect_rust_handler_routes_from_content(
+    content: &str,
+    prefix: &str,
+    routes: &mut Vec<HandlerRoute>,
+) -> Result<(), ParityError> {
+    let path_re = compile_regex(r#"(?s)\.route\(\s*"(?P<path>/[^"]*)","#)?;
+    let nest_re = compile_regex(r#"(?s)\.nest\(\s*"(?P<path>/[^"]+)""#)?;
+    let lines = content.lines().collect::<Vec<_>>();
+    let mut index = 0usize;
+
+    while index < lines.len() {
+        let line = lines[index].trim();
+
+        if line.contains(".nest(") {
+            let (block, next_index) = collect_block(&lines, index);
+            if let Some(captures) = nest_re.captures(&block) {
+                if let Some(router_start) = block.find("Router::new()") {
+                    let nested_prefix = join_path(prefix, &captures["path"]);
+                    let nested = &block[router_start + "Router::new()".len()..];
+                    collect_rust_handler_routes_from_content(nested, &nested_prefix, routes)?;
+                }
+            }
+            index = next_index;
+            continue;
+        }
+
+        if line.contains(".merge(") {
+            let (block, next_index) = collect_block(&lines, index);
+            if let Some(router_start) = block.find("Router::new()") {
+                let nested = &block[router_start + "Router::new()".len()..];
+                collect_rust_handler_routes_from_content(nested, prefix, routes)?;
+            }
+            index = next_index;
+            continue;
+        }
+
+        if line.contains(".route(") {
+            let (block, next_index) = collect_block(&lines, index);
+            if let Some(captures) = path_re.captures(&block) {
+                let path_value = captures["path"].to_owned();
+                let live_path = join_path(prefix, &path_value);
+                for (method, handler) in extract_method_handlers(&block) {
+                    routes.push(HandlerRoute {
+                        live_path: live_path.clone(),
+                        method,
+                        handler,
+                    });
+                }
+            }
+            index = next_index;
+            continue;
+        }
+
+        index += 1;
+    }
+
+    Ok(())
+}
+
+fn extract_method_handlers(block: &str) -> Vec<(String, String)> {
+    // Matches `get(fn_name)`, `post(fn_name)`, ... where `fn_name` is a bare
+    // identifier.  Inline closures or trailing punctuation (e.g.
+    // `get(|| async { ... })`) are skipped.  The leading `\b` ensures we don't
+    // match longer identifiers that merely end in a method keyword (e.g.
+    // `forget(x)` must not be read as `get(x)`; `dispatch(y)` must not be
+    // read as `patch(y)`).
+    let Ok(regex) = compile_regex(
+        r"\b(?P<method>get|post|put|patch|delete|any)\(\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)\s*\)",
+    ) else {
+        return Vec::new();
+    };
+    let mut handlers = Vec::new();
+    for captures in regex.captures_iter(block) {
+        let method = captures["method"].to_ascii_uppercase();
+        let handler = captures["handler"].to_owned();
+        // Skip false positives where the identifier is obviously not a handler
+        // function (e.g. `State`, `Router`).
+        if handler.chars().next().is_some_and(|c| c.is_uppercase()) {
+            continue;
+        }
+        handlers.push((method, handler));
+    }
+    handlers
+}
+
+fn collect_handler_bodies(rust_root: &Path) -> Result<BTreeMap<String, String>, ParityError> {
+    let handlers_dir = rust_root.join("crates/coder-server/src/handlers");
+    let mut bodies = BTreeMap::new();
+
+    let mut rust_files = Vec::new();
+    if handlers_dir.is_dir() {
+        for path in collect_files(&handlers_dir, "rs")? {
+            rust_files.push(path);
+        }
+    }
+    let app_rs = rust_root.join("crates/coder-server/src/app.rs");
+    if app_rs.is_file() {
+        rust_files.push(app_rs);
+    }
+
+    let fn_re = compile_regex(
+        r"(?m)^\s*(?:pub(?:\([^)]+\))?\s+)?(?:async\s+)?fn\s+(?P<name>[a-z_][a-zA-Z0-9_]*)\s*\(",
+    )?;
+
+    for path in rust_files {
+        let content = read_to_string(&path)?;
+        // Strip strings / chars / comments once per file so each call to
+        // `extract_fn_body_with_stripped` below reuses the same buffer instead
+        // of re-walking the entire file.  `strip_rust_code_noise` is O(n), so
+        // doing it once collapses the overall cost from O(n*m) to O(n + m)
+        // where m is the number of function matches per file.
+        let stripped = strip_rust_code_noise(&content);
+        let matches: Vec<(usize, String)> = fn_re
+            .captures_iter(&content)
+            .filter_map(|captures| {
+                let full = captures.get(0)?;
+                let name = captures.name("name")?.as_str().to_owned();
+                Some((full.start(), name))
+            })
+            .collect();
+
+        for (match_start, name) in &matches {
+            // Only capture the first definition of a given name.  If the name
+            // is already registered, keep the earlier (likely-canonical) body.
+            if bodies.contains_key(name) {
+                continue;
+            }
+            if let Some(body) = extract_fn_body_with_stripped(&content, &stripped, *match_start) {
+                bodies.insert(name.clone(), body);
+            }
+        }
+    }
+
+    Ok(bodies)
+}
+
+#[cfg(test)]
+fn extract_fn_body(content: &str, match_start: usize) -> Option<String> {
+    // Convenience wrapper for tests that don't already have a stripped buffer
+    // on hand.  Production hot paths — namely `collect_handler_bodies` — strip
+    // once per file and call `extract_fn_body_with_stripped` directly to avoid
+    // O(n*m) re-stripping.
+    let stripped = strip_rust_code_noise(content);
+    extract_fn_body_with_stripped(content, &stripped, match_start)
+}
+
+fn extract_fn_body_with_stripped(
+    content: &str,
+    stripped: &[u8],
+    match_start: usize,
+) -> Option<String> {
+    // Advance from match_start to the first `{` at paren-depth 0 (ignoring
+    // generic / parameter parens) — i.e. the start of the function body.
+    // Braces / parens / semicolons that live inside strings, char literals, or
+    // comments must be ignored, so we walk over a noise-stripped copy of the
+    // byte buffer.  Offsets are preserved so slices of `content` are correct.
+    let bytes = stripped;
+    let mut index = match_start;
+    let mut paren: i32 = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'(' => paren += 1,
+            b')' => paren -= 1,
+            b'{' if paren == 0 => break,
+            b';' if paren == 0 => return None,
+            _ => {}
+        }
+        index += 1;
+    }
+    if index >= bytes.len() {
+        return None;
+    }
+    let body_start = index;
+    let mut depth: i32 = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(content[body_start..=index].to_owned());
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    None
+}
+
+/// Build a byte buffer of the same length as `content` where every byte that
+/// lives inside a string literal, char literal, `//` line comment, or
+/// `/* ... */` block comment (including nested block comments, per Rust's
+/// grammar) has been replaced with a space.  Newlines are preserved.  Byte
+/// offsets in the returned buffer are identical to those in `content`, so
+/// callers can use it for brace / paren / semicolon scanning and then index
+/// back into the original content.
+fn strip_rust_code_noise(content: &str) -> Vec<u8> {
+    let bytes = content.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let b = bytes[index];
+
+        // Line comment: `//` to end of line.
+        if b == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'/' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                out[index] = b' ';
+                index += 1;
+            }
+            continue;
+        }
+
+        // Block comment (Rust supports nesting).
+        if b == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
+            out[index] = b' ';
+            out[index + 1] = b' ';
+            index += 2;
+            let mut depth: i32 = 1;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index] == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
+                    depth += 1;
+                    out[index] = b' ';
+                    out[index + 1] = b' ';
+                    index += 2;
+                } else if bytes[index] == b'*'
+                    && index + 1 < bytes.len()
+                    && bytes[index + 1] == b'/'
+                {
+                    depth -= 1;
+                    out[index] = b' ';
+                    out[index + 1] = b' ';
+                    index += 2;
+                } else {
+                    if bytes[index] != b'\n' {
+                        out[index] = b' ';
+                    }
+                    index += 1;
+                }
+            }
+            continue;
+        }
+
+        // Raw string: `r"..."`, `r#"..."#`, `r##"..."##`, optionally prefixed
+        // with `b`.  Raw strings don't honor `\` escapes, so we only need to
+        // match the matching number of `#`s when looking for the close.
+        if let Some(prefix_len) = raw_string_prefix_len(bytes, index) {
+            let hashes = prefix_len
+                - 1
+                - usize::from(bytes[index] == b'b')
+                - usize::from(bytes[index] == b'r');
+            // Blank the opening delimiter.
+            for offset in 0..prefix_len {
+                if bytes[index + offset] != b'\n' {
+                    out[index + offset] = b' ';
+                }
+            }
+            index += prefix_len;
+            while index < bytes.len() {
+                if bytes[index] == b'"' {
+                    let mut ok = true;
+                    for k in 0..hashes {
+                        if index + 1 + k >= bytes.len() || bytes[index + 1 + k] != b'#' {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        out[index] = b' ';
+                        for k in 0..hashes {
+                            out[index + 1 + k] = b' ';
+                        }
+                        index += 1 + hashes;
+                        break;
+                    }
+                }
+                if bytes[index] != b'\n' {
+                    out[index] = b' ';
+                }
+                index += 1;
+            }
+            continue;
+        }
+
+        // Plain string literal: `"..."`, optionally prefixed with `b`.
+        if b == b'"' || (b == b'b' && index + 1 < bytes.len() && bytes[index + 1] == b'"') {
+            let open_len = if b == b'b' { 2 } else { 1 };
+            for offset in 0..open_len {
+                out[index + offset] = b' ';
+            }
+            index += open_len;
+            while index < bytes.len() && bytes[index] != b'"' {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    out[index] = b' ';
+                    if bytes[index + 1] != b'\n' {
+                        out[index + 1] = b' ';
+                    }
+                    index += 2;
+                    continue;
+                }
+                if bytes[index] != b'\n' {
+                    out[index] = b' ';
+                }
+                index += 1;
+            }
+            if index < bytes.len() {
+                out[index] = b' ';
+                index += 1;
+            }
+            continue;
+        }
+
+        // Char literal vs lifetime.  A lifetime is `'` followed by an
+        // identifier char and NOT a closing `'` shortly after.  A char literal
+        // is `'x'`, `'\x'`, `'\xHH'`, `'\u{...}'`, etc.
+        if b == b'\'' {
+            if let Some(close) = char_literal_close(bytes, index) {
+                for offset in index..=close {
+                    if bytes[offset] != b'\n' {
+                        out[offset] = b' ';
+                    }
+                }
+                index = close + 1;
+                continue;
+            }
+            // Otherwise treat as a lifetime — leave bytes alone and continue.
+        }
+
+        index += 1;
+    }
+    out
+}
+
+/// If `bytes[index..]` is the opening delimiter of a Rust raw string literal
+/// (optionally prefixed with `b`), return the length of that opener.
+/// Otherwise return `None`.
+fn raw_string_prefix_len(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut cursor = index;
+    if cursor < bytes.len() && bytes[cursor] == b'b' {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() || bytes[cursor] != b'r' {
+        return None;
+    }
+    cursor += 1;
+    while cursor < bytes.len() && bytes[cursor] == b'#' {
+        cursor += 1;
+    }
+    if cursor < bytes.len() && bytes[cursor] == b'"' {
+        Some(cursor + 1 - index)
+    } else {
+        None
+    }
+}
+
+/// If `bytes[index]` begins a char literal, return the index of the closing
+/// `'`.  Returns `None` for lifetimes or for malformed input.
+fn char_literal_close(bytes: &[u8], index: usize) -> Option<usize> {
+    // `'` must be followed by at least one byte.
+    let next = index + 1;
+    if next >= bytes.len() {
+        return None;
+    }
+    // If the next byte is `\`, this is an escape sequence.  Scan forward to
+    // the matching `'` with a reasonable bound (Rust's longest escape is
+    // `\u{10FFFF}` — 10 bytes after the opening quote).
+    if bytes[next] == b'\\' {
+        let mut cursor = next + 1;
+        let limit = (index + 12).min(bytes.len());
+        while cursor < limit {
+            if bytes[cursor] == b'\'' {
+                return Some(cursor);
+            }
+            cursor += 1;
+        }
+        return None;
+    }
+    // Otherwise, a char literal is exactly one character followed by `'`.
+    // (UTF-8 multi-byte characters are allowed.)  Skip to the end of the
+    // current UTF-8 scalar, then check for the closing quote.
+    let scalar_end = utf8_scalar_end(bytes, next);
+    if scalar_end < bytes.len() && bytes[scalar_end] == b'\'' {
+        return Some(scalar_end);
+    }
+    // Lifetime (e.g. `'a`, `'static`) — no closing quote.
+    None
+}
+
+/// Given `bytes[index]` is the first byte of a UTF-8 scalar, return the
+/// index immediately after that scalar.
+fn utf8_scalar_end(bytes: &[u8], index: usize) -> usize {
+    if index >= bytes.len() {
+        return index;
+    }
+    let first = bytes[index];
+    let len = if first < 0x80 {
+        1
+    } else if first < 0xC0 {
+        // Continuation byte — treat as length 1 to avoid infinite loops on
+        // malformed input.
+        1
+    } else if first < 0xE0 {
+        2
+    } else if first < 0xF0 {
+        3
+    } else {
+        4
+    };
+    index + len
+}
+
+fn classify_depth(handler_name: &str, body: Option<&str>) -> (DepthStatus, Option<String>) {
+    if let Some((_, note)) = STUB_PARTIAL_HANDLERS
+        .iter()
+        .find(|(name, _)| *name == handler_name)
+    {
+        return (DepthStatus::StubPartial, Some((*note).to_owned()));
+    }
+    if let Some(body) = body {
+        if body_returns_not_implemented(body) {
+            return (DepthStatus::Stub501, None);
+        }
+    }
+    (DepthStatus::Complete, None)
+}
+
+fn body_returns_not_implemented(body: &str) -> bool {
+    // Heuristic: consider any function that constructs a `StatusCode::NOT_IMPLEMENTED`
+    // response as a 501 stub.  String literals, char literals, line comments, and
+    // (nested) block comments are blanked before the search via
+    // `strip_rust_code_noise` so that a stray token inside a `"..."` or a `/* ... */`
+    // comment cannot false-positive.
+    let stripped = strip_rust_code_noise(body);
+    // Safety: `strip_rust_code_noise` only replaces bytes with ASCII spaces, so the
+    // resulting buffer stays valid UTF-8 and `from_utf8` succeeds.
+    let Ok(stripped_str) = std::str::from_utf8(&stripped) else {
+        return body.contains("StatusCode::NOT_IMPLEMENTED");
+    };
+    stripped_str.contains("StatusCode::NOT_IMPLEMENTED")
+}
+
+fn classify_section(live_path: &str) -> &'static str {
+    if live_path.starts_with("/scim/") || live_path == "/scim/v2" {
+        return "SCIM";
+    }
+    if live_path.starts_with("/external-auth/") || live_path.starts_with("/gitauth/") {
+        return "External Auth (OAuth/OIDC)";
+    }
+    if live_path.starts_with("/@") {
+        return "Workspace Apps";
+    }
+    let stripped = live_path.strip_prefix("/api/v2").unwrap_or(live_path);
+    let first = stripped
+        .trim_start_matches('/')
+        .split('/')
+        .next()
+        .unwrap_or("");
+    match first {
+        "" | "healthz" | "latency-check" | "derp" | "metrics" | "mcp" | "derp-map" => {
+            "Root / Health"
+        }
+        "audit" => "Audit",
+        "auth" | "authcheck" => "Auth",
+        "buildinfo" | "csp" | "deployment" | "experiments" | "init-script" | "updatecheck"
+        | "telemetry" => "Deployment & Config",
+        "debug" => "Debug",
+        "regions" | "tailnet" | "workspaceagents-server" | "workspaceagents-client" => {
+            "Connectivity (DERP / Tailnet / Regions)"
+        }
+        "external-auth" | "gitauth" => "External Auth (OAuth/OIDC)",
+        "files" => "Files",
+        "insights" => "Insights & Analytics",
+        "notifications" | "inbox" => "Notifications & Inbox",
+        "oauth2" | ".well-known" => "OAuth2 Provider",
+        "organizations" => "Organizations",
+        "applications" => "Applications",
+        "tasks" => "AI Tasks",
+        "chats" => "Chats",
+        "templates" | "templateversions" => "Templates & Template Versions",
+        "users" => "Users & Identity",
+        "workspaces" | "workspacebuilds" => "Workspaces & Builds",
+        "workspaceagents" | "workspaceresources" => "Workspace Agents",
+        "appearance" => "Appearance",
+        "licenses" | "entitlements" => "Licenses & Entitlements",
+        "scim" => "SCIM",
+        "groups" => "Groups",
+        "workspace-quota" => "Workspace Quotas",
+        "provisionerkeys" | "provisionerdaemons" | "organizations-provisioner" => "Provisioner",
+        "aibridge" => "AI Bridge",
+        "connectionlog" => "Connection Log",
+        "workspaceproxies" => "Workspace Proxies",
+        "replicas" => "Replicas",
+        "prebuilds" => "Prebuilds",
+        "oauth2-provider" => "OAuth2 Provider",
+        "settings" => "Deployment Settings & IDP Sync",
+        "external-agent-credentials" | "externalagentcredentials" => "External Agent Credentials",
+        _ => "Other",
+    }
+}
+
+fn render_depth_markdown(rows: &[DepthRoute], summary: &DepthSummary) -> String {
+    let mut out = String::new();
+    out.push_str("# `coder-server` Route Implementation Depth\n\n");
+    out.push_str(
+        "For the authoritative analysis of behavioral gaps, see `docs/remaining-behavioral-gaps.md`.\n\n",
+    );
+    out.push_str(
+        "Generated by `cargo run -p coder-parity -- depth --rust-root . --output \
+         crates/coder-server/PARITY_MATRIX.md`.  Re-run this command after adding or \
+         modifying a route handler; the classifier inspects `build_router` in \
+         `crates/coder-server/src/app.rs` and each handler body under \
+         `crates/coder-server/src/handlers/`.\n\n",
+    );
+    out.push_str("## Summary\n\n");
+    out.push_str(&format!(
+        "- Total registered routes: **{}**\n",
+        summary.total
+    ));
+    out.push_str(&format!("- `complete`: **{}**\n", summary.complete));
+    out.push_str(&format!(
+        "- `stub-partial`: **{}** (see §3 of the gap doc)\n",
+        summary.stub_partial
+    ));
+    out.push_str(&format!("- `stub-501`: **{}**\n\n", summary.stub_501));
+
+    out.push_str("### Status Legend\n\n");
+    out.push_str("| Status | Meaning |\n");
+    out.push_str("| --- | --- |\n");
+    out.push_str(
+        "| `complete` | Full behavioral parity with the Go handler — reads/writes the store, emits audit/notification events, enforces RBAC. |\n",
+    );
+    out.push_str(
+        "| `stub-partial` | Registered route that returns a simplified response (hard-coded value, empty list, or partial validation) while the full integration is pending.  Enumerated in §3 of `docs/remaining-behavioral-gaps.md`. |\n",
+    );
+    out.push_str(
+        "| `stub-501` | Registered route that returns `501 Not Implemented`.  The route exists to match the Go surface area but has no semantics yet. |\n\n",
+    );
+
+    // Group by section in sort order.
+    let mut current_section: Option<&str> = None;
+    for row in rows {
+        if current_section != Some(row.section) {
+            if current_section.is_some() {
+                out.push('\n');
+            }
+            current_section = Some(row.section);
+            out.push_str(&format!("## {}\n\n", row.section));
+            out.push_str("| Method | Route | Handler | Status | Notes |\n");
+            out.push_str("| --- | --- | --- | --- | --- |\n");
+        }
+        let notes = row.notes.as_deref().unwrap_or("");
+        out.push_str(&format!(
+            "| {} | `{}` | `{}` | `{}` | {} |\n",
+            row.method,
+            row.live_path,
+            row.handler,
+            row.status.as_str(),
+            notes,
+        ));
+    }
+
+    if rows
+        .iter()
+        .any(|row| matches!(row.status, DepthStatus::Stub501))
+    {
+        out.push_str(
+            "\nRoutes classified `stub-501` above currently return `501 Not Implemented` verbatim.  \
+             Promote them to `stub-partial` or `complete` as handler behavior evolves.\n",
+        );
+    }
+
+    out
 }
 
 async fn run_compare(args: CompareArgs) -> Result<(), ParityError> {
@@ -1103,9 +1919,11 @@ mod tests {
     use std::error::Error;
 
     use super::{
-        GoRoute, InventoryScope, RouteScope, collect_rust_routes_from_content,
-        extract_rust_methods, go_live_path, join_path, matches_scope, normalize_path,
-        parse_go_routes,
+        DepthStatus, GoRoute, InventoryScope, RouteScope, body_returns_not_implemented,
+        classify_depth, classify_section, collect_rust_handler_routes_from_content,
+        collect_rust_routes_from_content, extract_build_router_body, extract_fn_body,
+        extract_method_handlers, extract_rust_methods, go_live_path, join_path, matches_scope,
+        normalize_path, parse_go_routes, strip_rust_code_noise,
     };
 
     #[test]
@@ -1425,5 +2243,252 @@ mod tests {
         assert_eq!(routes.len(), 1);
         assert_eq!(routes[0].live_path, "/api/v2/orgs/groups");
         Ok(())
+    }
+
+    #[test]
+    fn depth_classifier_returns_complete_for_non_stub_body() {
+        let body = "{ let data = state.store.query().await?; Ok(Json(data).into_response()) }";
+        let (status, notes) = classify_depth("some_handler", Some(body));
+        assert_eq!(status, DepthStatus::Complete);
+        assert!(notes.is_none());
+    }
+
+    #[test]
+    fn depth_classifier_detects_501_body() {
+        let body = "{ Ok((StatusCode::NOT_IMPLEMENTED, Json(err)).into_response()) }";
+        let (status, _notes) = classify_depth("some_handler", Some(body));
+        assert_eq!(status, DepthStatus::Stub501);
+    }
+
+    #[test]
+    fn depth_classifier_ignores_comments_in_body() {
+        // A `// StatusCode::NOT_IMPLEMENTED` in a comment should NOT trigger the
+        // 501 classification — only real occurrences in code do.
+        let body = "{ // TODO: return StatusCode::NOT_IMPLEMENTED once wired\n Ok(Json(x).into_response()) }";
+        let (status, _notes) = classify_depth("some_handler", Some(body));
+        assert_eq!(status, DepthStatus::Complete);
+    }
+
+    #[test]
+    fn depth_classifier_flags_known_partial_handler() {
+        let body = "{ Ok(Json(quota).into_response()) }";
+        let (status, notes) = classify_depth("get_workspace_quota", Some(body));
+        assert_eq!(status, DepthStatus::StubPartial);
+        assert!(notes.is_some());
+    }
+
+    #[test]
+    fn depth_partial_list_is_stable() {
+        // Guard against accidental duplication / ordering regressions.
+        let (status, notes) = classify_depth("get_replicas", None);
+        assert_eq!(status, DepthStatus::StubPartial);
+        assert!(notes.is_some());
+    }
+
+    #[test]
+    fn body_returns_not_implemented_matches_token() {
+        assert!(body_returns_not_implemented(
+            "Ok((StatusCode::NOT_IMPLEMENTED, body).into_response())"
+        ));
+    }
+
+    #[test]
+    fn body_returns_not_implemented_skips_comment_only_occurrence() {
+        let body = "// could eventually return StatusCode::NOT_IMPLEMENTED\nreturn something;";
+        assert!(!body_returns_not_implemented(body));
+    }
+
+    #[test]
+    fn body_returns_not_implemented_skips_string_literal_occurrence() {
+        let body = r#"let msg = "StatusCode::NOT_IMPLEMENTED"; return Ok(());"#;
+        assert!(!body_returns_not_implemented(body));
+    }
+
+    #[test]
+    fn body_returns_not_implemented_skips_block_comment_occurrence() {
+        let body = "/* TODO: return StatusCode::NOT_IMPLEMENTED once wired */ return Ok(());";
+        assert!(!body_returns_not_implemented(body));
+    }
+
+    #[test]
+    fn extract_build_router_body_captures_matching_braces() {
+        let content = r#"
+            fn noise() { let _ = 1; }
+
+            pub fn build_router(state: AppState) -> Router {
+                Router::new()
+                    .route("/x", get(x))
+            }
+
+            fn trailer() {}
+        "#;
+        let body = extract_build_router_body(content).unwrap_or_default();
+        assert!(!body.is_empty(), "expected non-empty body");
+        assert!(body.contains("Router::new()"));
+        assert!(body.contains(".route(\"/x\", get(x))"));
+        // Make sure we didn't leak into `fn trailer`.
+        assert!(!body.contains("fn trailer"));
+    }
+
+    #[test]
+    fn extract_method_handlers_parses_basic_route() {
+        let handlers = extract_method_handlers(".route(\"/a\", get(list_a).post(create_a))");
+        assert!(handlers.contains(&("GET".to_owned(), "list_a".to_owned())));
+        assert!(handlers.contains(&("POST".to_owned(), "create_a".to_owned())));
+    }
+
+    #[test]
+    fn extract_method_handlers_skips_inline_closures() {
+        // Bare identifiers only — closures and non-identifier args are ignored.
+        let handlers = extract_method_handlers(".route(\"/a\", get(|| async { \"ok\" }))");
+        assert!(handlers.is_empty());
+    }
+
+    #[test]
+    fn extract_fn_body_handles_nested_braces() {
+        let content = "fn hello(x: i32) -> i32 { { x + 1 } }";
+        let body = extract_fn_body(content, 0).unwrap_or_default();
+        assert!(!body.is_empty(), "expected non-empty body");
+        assert_eq!(body, "{ { x + 1 } }");
+    }
+
+    #[test]
+    fn collect_rust_handler_routes_finds_nested_routes() -> Result<(), Box<dyn Error>> {
+        let content = r#"
+            Router::new()
+                .route("/top", get(top))
+                .nest("/api/v2", Router::new()
+                    .route("/users", get(list_users).post(create_user))
+                )
+        "#;
+        let mut routes = Vec::new();
+        collect_rust_handler_routes_from_content(content, "", &mut routes)?;
+        let paths: Vec<&str> = routes.iter().map(|r| r.live_path.as_str()).collect();
+        assert!(paths.contains(&"/top"));
+        assert!(paths.contains(&"/api/v2/users"));
+        // Two methods on `/api/v2/users` should produce two rows.
+        assert_eq!(
+            routes
+                .iter()
+                .filter(|r| r.live_path == "/api/v2/users")
+                .count(),
+            2
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn classify_section_buckets_common_prefixes() {
+        assert_eq!(classify_section("/api/v2/users"), "Users & Identity");
+        assert_eq!(
+            classify_section("/api/v2/oauth2-provider/apps"),
+            "OAuth2 Provider",
+        );
+        assert_eq!(
+            classify_section("/api/v2/settings/idpsync/organization"),
+            "Deployment Settings & IDP Sync",
+        );
+        assert_eq!(classify_section("/healthz"), "Root / Health");
+        assert_eq!(classify_section("/scim/v2/Users"), "SCIM");
+    }
+
+    #[test]
+    fn strip_rust_code_noise_blanks_string_contents() {
+        // Braces inside string literals must be erased so brace counters see a
+        // balanced skeleton.
+        let stripped = strip_rust_code_noise(r#"let a = "}{"; let b = 1;"#);
+        let text = String::from_utf8_lossy(&stripped);
+        assert!(
+            !text.contains('}'),
+            "found `}}` in stripped output: {text:?}"
+        );
+        assert!(
+            !text.contains('{'),
+            "found `{{` in stripped output: {text:?}"
+        );
+        assert!(text.contains("let a ="));
+        assert!(text.contains("let b = 1"));
+    }
+
+    #[test]
+    fn strip_rust_code_noise_blanks_block_comment_contents() {
+        let stripped = strip_rust_code_noise("fn a() {/* unbalanced } */}\n");
+        let text = String::from_utf8_lossy(&stripped);
+        // Exactly one `{` and one `}` must remain — the function's own.
+        assert_eq!(text.matches('{').count(), 1);
+        assert_eq!(text.matches('}').count(), 1);
+    }
+
+    #[test]
+    fn strip_rust_code_noise_handles_nested_block_comments() {
+        let stripped = strip_rust_code_noise("fn a() { /* outer /* inner } */ } */ }");
+        let text = String::from_utf8_lossy(&stripped);
+        // The function body should retain a single matched pair of braces.
+        assert_eq!(text.matches('{').count(), 1);
+        assert_eq!(text.matches('}').count(), 1);
+    }
+
+    #[test]
+    fn strip_rust_code_noise_distinguishes_lifetimes_and_chars() {
+        // Lifetimes (`'a`) must not be blanked; char literals (`'}'`) must be.
+        let stripped = strip_rust_code_noise("fn f<'a>() -> &'a str { let c = '}'; \"ok\" }");
+        let text = String::from_utf8_lossy(&stripped);
+        // Lifetimes preserved (apostrophes intact in `'a`).
+        assert!(text.contains("'a"));
+        // The brace-inside-char-literal must be gone.
+        assert_eq!(text.matches('{').count(), 1);
+        assert_eq!(text.matches('}').count(), 1);
+    }
+
+    #[test]
+    fn strip_rust_code_noise_handles_raw_strings() {
+        // `r#"..."#` with an unbalanced `}` inside.
+        let stripped = strip_rust_code_noise(r######"let s = r#"}"#; let x = 1;"######);
+        let text = String::from_utf8_lossy(&stripped);
+        assert!(!text.contains('}'), "unexpected `}}` in {text:?}");
+        assert!(text.contains("let s ="));
+        assert!(text.contains("let x = 1"));
+    }
+
+    #[test]
+    fn extract_build_router_body_tolerates_braces_in_strings() {
+        // A route path containing `{user}` must not confuse the brace-counter.
+        let content = r#"
+            pub fn build_router(state: AppState) -> Router {
+                Router::new()
+                    .route("/users/{user}", get(get_user))
+                    .route("/workspaces/{workspace}/resolve", post(resolve_workspace))
+            }
+            fn trailer() {}
+        "#;
+        let body = extract_build_router_body(content).unwrap_or_default();
+        assert!(!body.is_empty(), "expected non-empty body");
+        assert!(body.contains("Router::new()"));
+        assert!(body.contains(".route(\"/users/{user}\", get(get_user))"));
+        assert!(!body.contains("fn trailer"));
+    }
+
+    #[test]
+    fn extract_fn_body_tolerates_unbalanced_braces_in_strings_and_comments() {
+        let content = r#"fn f() {
+            // } not a real close
+            let s = "{";
+            let t = "}";
+            42
+        }"#;
+        let body = extract_fn_body(content, 0).unwrap_or_default();
+        assert!(!body.is_empty(), "expected non-empty body");
+        // Body should include the full function, not truncate at the comment or strings.
+        assert!(body.contains("let s = \"{\""));
+        assert!(body.contains("let t = \"}\""));
+        assert!(body.contains("42"));
+    }
+
+    #[test]
+    fn extract_method_handlers_requires_word_boundary() {
+        // `forget(x)` must NOT be matched as `get(x)`; similarly `dispatch(y)`
+        // must NOT be matched as `patch(y)`.
+        let handlers = extract_method_handlers("forget(not_a_handler); dispatch(nope);");
+        assert!(handlers.is_empty(), "false positives: {handlers:?}");
     }
 }
