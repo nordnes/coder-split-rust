@@ -371,44 +371,12 @@ struct DepthRoute {
 /// remaining behavioral gap.
 const STUB_PARTIAL_HANDLERS: &[(&str, &str)] = &[
     (
-        "list_api_key_scopes",
-        "Returns the fixed `PUBLIC_API_KEY_SCOPES` list; full scope expansion not modelled yet.",
-    ),
-    (
-        "update_check",
-        "Always reports `current: true`; no remote version probe.",
-    ),
-    (
         "post_template_version_dynamic_parameters_evaluate",
         "Evaluates seeded parameters only; no Terraform module execution.",
     ),
     (
-        "post_workspace_agent_instance_identity_aws",
-        "Parses instance_id from the identity document without AWS certificate verification.",
-    ),
-    (
         "post_workspace_agent_instance_identity_azure",
-        "Extracts VM id from the JWT payload without Microsoft signature verification.",
-    ),
-    (
-        "post_workspace_agent_instance_identity_google",
-        "Extracts instance id from the GCP JWT payload without Google token validation.",
-    ),
-    (
-        "get_workspace_quota_deprecated",
-        "Returns unlimited budget; quota allowance/consumed queries not wired.",
-    ),
-    (
-        "get_workspace_quota",
-        "Returns unlimited budget; quota allowance/consumed queries not wired.",
-    ),
-    (
-        "patch_workspace_sharing_settings",
-        "Validates payload but stores nothing; returns 501 until the store is wired.",
-    ),
-    (
-        "get_replicas",
-        "Returns an empty array; no replica manager service implemented.",
+        "Extracts VM id from the JWT payload; PKCS7 signature verification not yet implemented.",
     ),
 ];
 
@@ -2271,8 +2239,9 @@ mod tests {
 
     #[test]
     fn depth_classifier_flags_known_partial_handler() {
-        let body = "{ Ok(Json(quota).into_response()) }";
-        let (status, notes) = classify_depth("get_workspace_quota", Some(body));
+        let body = "{ Ok(Json(payload).into_response()) }";
+        let (status, notes) =
+            classify_depth("post_workspace_agent_instance_identity_azure", Some(body));
         assert_eq!(status, DepthStatus::StubPartial);
         assert!(notes.is_some());
     }
@@ -2280,7 +2249,8 @@ mod tests {
     #[test]
     fn depth_partial_list_is_stable() {
         // Guard against accidental duplication / ordering regressions.
-        let (status, notes) = classify_depth("get_replicas", None);
+        let (status, notes) =
+            classify_depth("post_template_version_dynamic_parameters_evaluate", None);
         assert_eq!(status, DepthStatus::StubPartial);
         assert!(notes.is_some());
     }
