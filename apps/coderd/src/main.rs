@@ -493,6 +493,12 @@ struct ServerArgs {
     )]
     default_quiet_hours_schedule: String,
 
+    /// Allow users to set their own quiet hours schedule for workspaces to stop in (depending on
+    /// template autostop requirement settings). If false, users can't change their quiet hours
+    /// schedule and the site default is always used.
+    #[arg(long, env = "CODER_ALLOW_CUSTOM_QUIET_HOURS", default_value_t = true)]
+    allow_custom_quiet_hours: bool,
+
     /// Whether workspace renames are allowed.
     #[arg(long, env = "CODER_ALLOW_WORKSPACE_RENAMES", default_value_t = false)]
     allow_workspace_renames: bool,
@@ -1311,6 +1317,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         },
         workspace: WorkspaceConfig {
             default_quiet_hours_schedule: args.default_quiet_hours_schedule,
+            allow_user_custom_quiet_hours: args.allow_custom_quiet_hours,
         },
         worker: WorkerConfig {
             notification_dispatch_interval_secs: args.notification_dispatch_interval_secs,

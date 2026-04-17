@@ -29,7 +29,7 @@ use coder_connectivity::{
 use coder_core::pubsub::PubSub;
 use coder_core::{ApiResponse, AppStore, BuildMetadata, ServerConfig};
 use coder_identity::IdentityService;
-use coder_license::{EntitlementSet, FeatureName};
+use coder_license::EntitlementSet;
 use coder_workspaces::DeploymentStatsService;
 use serde::Deserialize;
 use serde_json::Value;
@@ -40286,6 +40286,244 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let body = response_json(response).await?;
         assert_eq!(body, serde_json::json!([]));
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // Quiet hours entitlement + deployment-gate tests
+    // -----------------------------------------------------------------------
+
+    /// Apply the `AdvancedTemplateScheduling` feature to an `AppState` with
+    /// the desired `entitled`/`enabled` combination. Mirrors Go's
+    /// `autostopRequirementEnabledMW` conditions in
+    /// `coder/enterprise/coderd/users.go`.
+    fn set_advanced_template_scheduling(state: &AppState, entitled: bool, enabled: bool) {
+        let mut ents = coder_license::Entitlements::new_unlicensed();
+        ents.has_license = true;
+        if let Some(f) = ents
+            .features
+            .get_mut(coder_license::FeatureName::AdvancedTemplateScheduling.as_str())
+        {
+            f.entitlement = if entitled {
+                coder_license::Entitlement::Entitled
+            } else {
+                coder_license::Entitlement::NotEntitled
+            };
+            f.enabled = enabled;
+        }
+        state.entitlements.update(ents);
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_get_requires_advanced_template_scheduling_entitlement()
+    -> Result<(), Box<dyn Error>> {
+        // Unlicensed state: AdvancedTemplateScheduling is not entitled.
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/quiet-hours", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some(
+                "Advanced template scheduling (and user quiet hours schedule) is an Enterprise feature. Contact sales!"
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_get_returns_not_enabled_when_entitled_but_disabled()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        set_advanced_template_scheduling(&state, true, false);
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/quiet-hours", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Advanced template scheduling (and user quiet hours schedule) is not enabled.")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_get_returns_default_schedule_when_entitled() -> Result<(), Box<dyn Error>>
+    {
+        let state = test_state(true)?;
+        set_advanced_template_scheduling(&state, true, true);
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/quiet-hours", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("raw_schedule").and_then(Value::as_str),
+            Some("CRON_TZ=UTC 0 0 * * *")
+        );
+        assert_eq!(body.get("user_set").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            body.get("user_can_set").and_then(Value::as_bool),
+            Some(true)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_put_rejects_without_entitlement() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/quiet-hours",
+                &token,
+                &serde_json::json!({ "schedule": "CRON_TZ=UTC 0 3 * * *" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some(
+                "Advanced template scheduling (and user quiet hours schedule) is an Enterprise feature. Contact sales!"
+            )
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_put_updates_schedule_when_entitled() -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        set_advanced_template_scheduling(&state, true, true);
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/quiet-hours",
+                &token,
+                &serde_json::json!({ "schedule": "CRON_TZ=UTC 30 2 * * *" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("raw_schedule").and_then(Value::as_str),
+            Some("CRON_TZ=UTC 30 2 * * *")
+        );
+        assert_eq!(body.get("user_set").and_then(Value::as_bool), Some(true));
+        assert_eq!(
+            body.get("user_can_set").and_then(Value::as_bool),
+            Some(true)
+        );
+        assert_eq!(body.get("time").and_then(Value::as_str), Some("02:30"));
+        assert_eq!(body.get("timezone").and_then(Value::as_str), Some("UTC"));
+
+        // Persisted schedule is returned on subsequent GET.
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/quiet-hours", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("raw_schedule").and_then(Value::as_str),
+            Some("CRON_TZ=UTC 30 2 * * *")
+        );
+        assert_eq!(body.get("user_set").and_then(Value::as_bool), Some(true));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_get_ignores_stored_value_when_user_cannot_set()
+    -> Result<(), Box<dyn Error>> {
+        let (mut state, store) = test_state_with_store(true)?;
+        set_advanced_template_scheduling(&state, true, true);
+        state.config.workspace.allow_user_custom_quiet_hours = false;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        // Seed a persisted per-user schedule directly — it must be ignored
+        // when the deployment forbids custom schedules.
+        let owner_id = store
+            .find_user_by_username("owner")
+            .await?
+            .ok_or("owner missing")?
+            .id;
+        store
+            .upsert_user_config(owner_id, "quiet_hours_schedule", "CRON_TZ=UTC 15 4 * * *")
+            .await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_request(Method::GET, "/api/v2/users/me/quiet-hours", &token)?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("raw_schedule").and_then(Value::as_str),
+            Some("CRON_TZ=UTC 0 0 * * *")
+        );
+        assert_eq!(body.get("user_set").and_then(Value::as_bool), Some(false));
+        assert_eq!(
+            body.get("user_can_set").and_then(Value::as_bool),
+            Some(false)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn quiet_hours_put_rejects_when_user_cannot_set() -> Result<(), Box<dyn Error>> {
+        let mut state = test_state(true)?;
+        set_advanced_template_scheduling(&state, true, true);
+        state.config.workspace.allow_user_custom_quiet_hours = false;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/quiet-hours",
+                &token,
+                &serde_json::json!({ "schedule": "CRON_TZ=UTC 0 3 * * *" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("message").and_then(Value::as_str),
+            Some("Users cannot set custom quiet hours schedule due to deployment configuration.")
+        );
         Ok(())
     }
 }

@@ -606,6 +606,12 @@ impl ServerConfig {
                 description: "Default quiet hours cron schedule for workspaces.",
             },
             ConfigOption {
+                name: "allow-custom-quiet-hours",
+                env: "CODER_ALLOW_CUSTOM_QUIET_HOURS",
+                default: Some("true"),
+                description: "Allow users to set their own quiet hours schedule for workspaces to stop in (depending on template autostop requirement settings). If false, users can't change their quiet hours schedule and the site default is always used.",
+            },
+            ConfigOption {
                 name: "allow-workspace-renames",
                 env: "CODER_ALLOW_WORKSPACE_RENAMES",
                 default: Some("false"),
@@ -1318,12 +1324,19 @@ impl Default for HealthcheckConfig {
 pub struct WorkspaceConfig {
     /// Default quiet hours cron schedule for workspaces.
     pub default_quiet_hours_schedule: String,
+    /// Whether users are allowed to override the site-wide quiet hours
+    /// schedule with a custom per-user schedule. Mirrors Go's
+    /// `UserQuietHoursSchedule.AllowUserCustom` deployment flag
+    /// (`CODER_ALLOW_CUSTOM_QUIET_HOURS`). Defaults to `true`, matching
+    /// `coder/codersdk/deployment.go`.
+    pub allow_user_custom_quiet_hours: bool,
 }
 
 impl Default for WorkspaceConfig {
     fn default() -> Self {
         Self {
             default_quiet_hours_schedule: "CRON_TZ=UTC 0 0 * * *".to_owned(),
+            allow_user_custom_quiet_hours: true,
         }
     }
 }
@@ -1684,6 +1697,7 @@ mod tests {
     fn workspace_config_defaults() {
         let config = WorkspaceConfig::default();
         assert_eq!(config.default_quiet_hours_schedule, "CRON_TZ=UTC 0 0 * * *");
+        assert!(config.allow_user_custom_quiet_hours);
     }
 
     #[test]
