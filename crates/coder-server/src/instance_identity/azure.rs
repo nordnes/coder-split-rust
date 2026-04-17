@@ -1,17 +1,39 @@
-//! Azure VM instance-identity verification.
+//! Azure VM instance-identity verification (JWT scaffold).
 //!
-//! The task brief specifies: "verify the JWT signature against Microsoft's
-//! metadata endpoint / certs list; check `iss`, `aud`, expiry." We therefore
-//! treat the Azure attested-data token as a JWT signed by an RSA key
-//! published at the Microsoft v2.0 discovery endpoint, mirroring how the Rust
-//! stub at `handlers/agents.rs` already decodes the payload.
+//! ⚠️ KNOWN GAP vs Go reference ⚠️
 //!
-//! This deviates from the Go reference in `coder/coderd/azureidentity`, which
-//! parses a PKCS7 envelope; implementing full PKCS7/CMS in Rust is out of
-//! scope for this PR. When a deployment ships genuine Azure JWT-style
-//! instance identity tokens this verifier validates them; older PKCS7
-//! payloads are rejected with `VerificationFailed` instead of being silently
-//! trusted.
+//! Standard Azure IMDS attested-data
+//! (`http://169.254.169.254/metadata/attested/document?api-version=...`)
+//! returns a **base64-encoded PKCS7/CMS envelope**, not a JWT. The Go
+//! reference in `coder/coderd/azureidentity/azureidentity.go` decodes that
+//! PKCS7, walks the cert chain to a bundled set of Microsoft intermediates,
+//! matches the signer cert's `Subject.CommonName` against
+//! `^(.*\.)?metadata\.(azure\.(com|us|cn)|microsoftazure\.de)$`, and reads
+//! `vmId` from the inner JSON content.
+//!
+//! Implementing that full PKCS7 path in Rust is out of scope for this PR.
+//! A tracking issue covers the followup: add `cms` / `x509-cert` /
+//! `cryptographic-message-syntax` and port the Go verification flow.
+//!
+//! What this module DOES do:
+//!   * Validates an RS256 JWT signed by a key published at
+//!     `https://login.microsoftonline.com/common/discovery/v2.0/keys` (the
+//!     Entra ID / Azure AD v2 discovery endpoint). This is the correct path
+//!     for Azure AD-issued tokens (e.g. managed-identity ID tokens), which
+//!     do use JWT with `iss` claims like `https://sts.windows.net/{tid}/`
+//!     or `https://login.microsoftonline.com/{tid}/v2.0`.
+//!   * Validates the `exp` claim strictly (no leeway, and the claim is
+//!     required to be present).
+//!   * Restricts the `iss` claim to a regex covering both Entra ID tenant
+//!     issuers AND the PKCS7 `Subject.CommonName` pattern Go uses, so the
+//!     future PKCS7 implementation can reuse the same allow-list.
+//!
+//! What this module does NOT do:
+//!   * Decode PKCS7. Standard IMDS attested-data blobs are rejected with
+//!     `VerifyError::InvalidRequest("malformed JWT header")` as soon as the
+//!     base64-of-ASN.1 content hits `decode_header`. This is deliberately
+//!     fail-closed — a forged/unvalidated PKCS7 payload cannot sneak
+//!     through masquerading as a valid identity.
 
 use std::sync::{Arc, LazyLock};
 use std::time::{Duration, Instant};
@@ -113,7 +135,14 @@ impl AzureInstanceVerifier {
         validation.validate_nbf = false;
         validation.validate_aud = false;
         validation.leeway = 0;
+        // `jsonwebtoken` only fires `validate_exp` when the claim is present;
+        // `required_spec_claims` controls whether the claim is required to
+        // be present in the first place. After clearing the default set
+        // (which includes `aud` — we don't want to require it) we must put
+        // `exp` back, otherwise a token omitting `exp` would be treated as
+        // non-expiring.
         validation.required_spec_claims.clear();
+        validation.required_spec_claims.insert("exp".to_owned());
 
         let token = decode::<AzureClaims>(jwt, &key, &validation)
             .map_err(|_| VerifyError::VerificationFailed)?;
@@ -179,16 +208,43 @@ impl AzureInstanceVerifier {
     }
 }
 
-/// Regex that matches Microsoft-issued metadata endpoints across public and
-/// sovereign clouds: `metadata.azure.com`, `metadata.azure.us`,
-/// `metadata.azure.cn`, and `metadata.microsoftazure.de`. Mirrors the
-/// `knownAzureRegions` regex in `coder/coderd/azureidentity/azureidentity.go`.
+/// Issuer regex that accepts both the Azure AD / Entra ID tenant issuer
+/// shapes AND the Microsoft metadata / sovereign-cloud hostnames.
 ///
-/// Wrapped in `LazyLock` so the pattern is compiled once at first use. If the
-/// pattern somehow fails to compile (impossible for this literal), we fall
-/// back to `None` and the verifier rejects every issuer — fail-closed.
+/// For an **Entra ID v1 / v2 JWT** the `iss` claim looks like:
+///   * `https://sts.windows.net/{tenantId}/`
+///   * `https://login.microsoftonline.com/{tenantId}/v2.0`
+///   * `https://login.microsoftonline.us/{tenantId}/v2.0` (Gov)
+///   * `https://login.partner.microsoftonline.cn/{tenantId}/v2.0` (China)
+///
+/// For the **PKCS7 path** (Go reference) the allow-list pattern is
+/// `^(.*\.)?metadata\.(azure\.(com|us|cn)|microsoftazure\.de)$`, applied
+/// to the signer cert's `Subject.CommonName` — NOT a JWT `iss` claim.
+/// We keep that pattern here so the future PKCS7 verifier can reuse the
+/// same regex unchanged.
+///
+/// Wrapped in `LazyLock` so the pattern is compiled once at first use. If
+/// compilation fails (impossible for this literal), we fall back to `None`
+/// and the verifier rejects every issuer — fail-closed.
 static DEFAULT_ISSUER_REGEX: LazyLock<Option<Regex>> = LazyLock::new(|| {
-    Regex::new(r"^https?://(.*\.)?metadata\.(azure\.(com|us|cn)|microsoftazure\.de)(/|$)").ok()
+    // Start-anchored only: each alternative specifies its own permitted
+    // tail. The PKCS7 branch historically allowed arbitrary trailing text
+    // after the `/`, so we keep that semantics.
+    Regex::new(concat!(
+        r"^(?:",
+        // Entra ID v1 (`sts.windows.net`).
+        r"https?://sts\.windows\.net/[^/]+/?$",
+        r"|",
+        // Entra ID v2 across public and sovereign clouds.
+        r"https?://login\.microsoftonline\.(?:com|us|de)/[^/]+/v2\.0/?$",
+        r"|",
+        r"https?://login\.partner\.microsoftonline\.cn/[^/]+/v2\.0/?$",
+        r"|",
+        // PKCS7 signer CN pattern, kept for the future PKCS7 path.
+        r"https?://(?:.*\.)?metadata\.(?:azure\.(?:com|us|cn)|microsoftazure\.de)(?:/|$)",
+        r")",
+    ))
+    .ok()
 });
 
 fn default_issuer_regex() -> Option<Regex> {
@@ -290,7 +346,9 @@ mod tests {
     fn azure_claims(vm_id: &str, exp_offset_secs: i64) -> serde_json::Value {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         json!({
-            "iss": "https://metadata.azure.com/",
+            // Use a realistic Entra ID v2 issuer; the PKCS7 CN-style pattern
+            // is also accepted by the regex but doesn't match a real JWT.
+            "iss": "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0",
             "exp": now + exp_offset_secs,
             "iat": now,
             "vmId": vm_id,
@@ -377,13 +435,28 @@ mod tests {
         let (verifier, _handle) = make_verifier(key.jwks_body.clone()).await?;
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let claims = json!({
-            "iss": "https://metadata.azure.com/",
+            "iss": "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0",
             "exp": now + 600,
             "iat": now,
         });
         let token = sign_token(&key, &claims)?;
 
         assert_invalid_request(verifier.verify(&token).await)
+    }
+
+    #[tokio::test]
+    async fn verify_token_without_exp_is_rejected() -> TestResult {
+        // Regression: a JWT that omits `exp` entirely must NOT be treated as
+        // non-expiring. `required_spec_claims` must keep `exp` on the list.
+        let key = build_test_key("kid-noexp")?;
+        let (verifier, _handle) = make_verifier(key.jwks_body.clone()).await?;
+        let claims = json!({
+            "iss": "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0",
+            "vmId": "az-no-exp",
+        });
+        let token = sign_token(&key, &claims)?;
+
+        assert_verify_failed(verifier.verify(&token).await)
     }
 
     #[tokio::test]
@@ -395,14 +468,30 @@ mod tests {
     }
 
     #[test]
-    fn issuer_regex_matches_sovereign_clouds() -> TestResult {
+    fn issuer_regex_matches_entra_and_sovereign_clouds() -> TestResult {
         let re = default_issuer_regex().ok_or("default issuer regex failed to compile")?;
+
+        // Real Entra ID v1 / v2 JWT issuers.
+        assert!(re.is_match("https://sts.windows.net/72f988bf-86f1-41af-91ab-2d7cd011db47/"));
+        assert!(re.is_match(
+            "https://login.microsoftonline.com/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0"
+        ));
+        assert!(re.is_match(
+            "https://login.microsoftonline.us/72f988bf-86f1-41af-91ab-2d7cd011db47/v2.0"
+        ));
+        assert!(re.is_match("https://login.partner.microsoftonline.cn/abc/v2.0"));
+
+        // PKCS7 CN-style patterns (reused here for the future PKCS7 verifier).
         assert!(re.is_match("https://metadata.azure.com/"));
         assert!(re.is_match("https://something.metadata.azure.us/x"));
         assert!(re.is_match("http://metadata.azure.cn"));
         assert!(re.is_match("https://metadata.microsoftazure.de/"));
+
+        // Adversarial / non-Microsoft hosts must be rejected.
         assert!(!re.is_match("https://attacker.example.com/"));
         assert!(!re.is_match("https://metadata.evil.com/"));
+        assert!(!re.is_match("https://login.attacker.com/abc/v2.0"));
+        assert!(!re.is_match("https://sts.windowsnet/abc/"));
         Ok(())
     }
 }

@@ -115,8 +115,20 @@ impl GcpInstanceVerifier {
         validation.validate_exp = true;
         validation.validate_nbf = false;
         validation.leeway = 0;
+        // `jsonwebtoken` only fires `validate_exp` when the claim is present;
+        // `required_spec_claims` controls whether the claim is required to be
+        // present in the first place. After clearing the default set (which
+        // includes `aud` — we don't want to require it) we must put `exp`
+        // back, otherwise a token omitting `exp` would be treated as
+        // non-expiring.
         validation.required_spec_claims.clear();
+        validation.required_spec_claims.insert("exp".to_owned());
         validation.set_issuer(ALLOWED_ISSUERS);
+        // Go's `workspaceresourceauth.go` intentionally passes an empty
+        // audience to `idtoken.Validator.Validate` ("We leave the audience
+        // blank. It's not important we validate who made the token."). We
+        // mirror that here by leaving `validate_aud` off. A configurable
+        // audience is still exposed for operators who want to lock it down.
         if let Some(aud) = &self.audience {
             validation.set_audience(&[aud]);
         } else {
