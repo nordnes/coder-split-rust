@@ -1101,7 +1101,6 @@ async fn run() -> Result<(), MainError> {
         });
     }
 
-
     // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
     //    sends to a remote collector (gRPC), not to the database, so this
