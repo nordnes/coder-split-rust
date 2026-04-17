@@ -9552,7 +9552,12 @@ impl AppStore for PostgresStore {
         #[derive(sqlx::FromRow)]
         struct Row {
             id: Uuid,
-            proxy_id: Uuid,
+            // `replicas.proxy_id` is nullable (primary coderd rows set it to
+            // NULL).  The workspace-proxy upsert path always binds a
+            // non-null value so the RETURNING clause never produces NULL,
+            // but keeping this `Option` avoids sqlx decode panics if a
+            // future schema change ever relaxes that invariant.
+            proxy_id: Option<Uuid>,
             hostname: String,
             relay_address: String,
             region_id: i32,
@@ -9597,7 +9602,11 @@ impl AppStore for PostgresStore {
 
         Ok(ReplicaRow {
             id: row.id,
-            proxy_id: row.proxy_id,
+            proxy_id: row.proxy_id.ok_or_else(|| {
+                StorageError::invalid_data(
+                    "upsert_replica returned a row with NULL proxy_id; expected a workspace-proxy replica",
+                )
+            })?,
             hostname: row.hostname,
             relay_address: row.relay_address,
             region_id: row.region_id,
@@ -9621,7 +9630,11 @@ impl AppStore for PostgresStore {
         #[derive(sqlx::FromRow)]
         struct Row {
             id: Uuid,
-            proxy_id: Uuid,
+            // `proxy_id` is nullable in the schema but the `WHERE proxy_id = $1`
+            // filter excludes NULL rows in Postgres, so this is defensive
+            // against future schema changes rather than something that can
+            // happen today.
+            proxy_id: Option<Uuid>,
             hostname: String,
             relay_address: String,
             region_id: i32,
@@ -9649,24 +9662,29 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| ReplicaRow {
-                id: r.id,
-                proxy_id: r.proxy_id,
-                hostname: r.hostname,
-                relay_address: r.relay_address,
-                region_id: r.region_id,
-                version: r.version,
-                error: r.error,
-                database_latency: r.database_latency,
-                primary_replica: r.primary_replica,
-                started_at: r.started_at,
-                stopped_at: r.stopped_at,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
+        rows.into_iter()
+            .map(|r| {
+                Ok(ReplicaRow {
+                    id: r.id,
+                    proxy_id: r.proxy_id.ok_or_else(|| {
+                        StorageError::invalid_data(
+                            "list_replicas_by_proxy_excluding returned a row with NULL proxy_id; expected a workspace-proxy replica",
+                        )
+                    })?,
+                    hostname: r.hostname,
+                    relay_address: r.relay_address,
+                    region_id: r.region_id,
+                    version: r.version,
+                    error: r.error,
+                    database_latency: r.database_latency,
+                    primary_replica: r.primary_replica,
+                    started_at: r.started_at,
+                    stopped_at: r.stopped_at,
+                    created_at: r.created_at,
+                    updated_at: r.updated_at,
+                })
             })
-            .collect())
+            .collect()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
