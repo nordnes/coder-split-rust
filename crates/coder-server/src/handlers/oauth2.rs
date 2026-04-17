@@ -751,10 +751,7 @@ pub(crate) async fn get_oauth2_authorization_server_metadata(
         authorization_endpoint: format!("{access_url}/oauth2/authorize"),
         token_endpoint: format!("{access_url}/oauth2/tokens"),
         registration_endpoint: format!("{access_url}/oauth2/register"),
-        // NOTE: Token revocation is not yet implemented — the handler returns
-        // an error instead of silently succeeding. We still advertise the
-        // endpoint to match Go's metadata response (which also includes it),
-        // so clients can discover it for future use.
+        // Token revocation endpoint — see `post_oauth2_revoke`.
         revocation_endpoint: format!("{access_url}/oauth2/revoke"),
         response_types_supported: vec!["code".to_owned()],
         grant_types_supported: vec!["authorization_code".to_owned(), "refresh_token".to_owned()],
