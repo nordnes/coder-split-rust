@@ -282,15 +282,18 @@ impl UpdateChecker {
 /// Compares the running version against the latest advertised version and
 /// returns `true` when the runtime is at or ahead of the upstream release.
 ///
-/// Mirrors Go's behavior in `coder/coderd/updatecheck/updatecheck.go`:
-/// the leading `v` prefix is tolerated on both sides and any pre-release
-/// suffix (including but not limited to `-devel+commit`, `-rc.1`,
-/// `-beta.2`) is stripped before parsing. This means an RC build is
-/// treated as current against the matching stable release — same as Go's
-/// `semver.Compare`, which also ignores pre-release tags. If either side
-/// still cannot be parsed as SemVer, the comparison falls back to a
-/// string equality check between the normalized forms so we never wrongly
-/// flag a build as stale.
+/// Mirrors the Go update-check handler in `coder/coderd/updatecheck.go`,
+/// which strips the `-devel+commit` suffix from the running version with
+/// `strings.SplitN(v, "-", 2)[0]` before calling `semver.Compare`. We do
+/// the same in [`normalize_version`] but extend the stripping to all
+/// pre-release tags (`-rc.1`, `-beta.2`, …) so that RC / beta dev builds
+/// are treated as current against the matching stable release. Note that
+/// Go's `golang.org/x/mod/semver.Compare` itself still honours SemVer
+/// pre-release precedence — it is the Coder handler's explicit pre-split
+/// that flattens dev tags, not `semver.Compare`. If either side cannot
+/// be parsed as SemVer after normalization, the comparison falls back to
+/// a string equality check between the normalized forms so we never
+/// wrongly flag a build as stale.
 #[must_use]
 pub fn is_current(running: &str, upstream: &str) -> bool {
     let running_norm = normalize_version(running);
