@@ -1123,7 +1123,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE deleted = false
                AND (
@@ -1157,7 +1158,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE id = $1 AND deleted = false",
         )
@@ -1184,7 +1186,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE LOWER(name) = LOWER($1) AND deleted = false",
         )
@@ -1204,7 +1207,7 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredOrganizationRow>(
             "INSERT INTO organizations (id, name, display_name, description, icon, created_at, updated_at, is_default, deleted)
              VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW(), false, false)
-             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted, workspace_sharing_mode",
         )
         .bind(&input.name)
         .bind(&input.display_name)
@@ -1231,7 +1234,7 @@ impl AppStore for PostgresStore {
             "UPDATE organizations
              SET name = $2, display_name = $3, description = $4, icon = $5, updated_at = NOW()
              WHERE id = $1 AND deleted = false
-             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted, workspace_sharing_mode",
         )
         .bind(input.id)
         .bind(&input.name)
@@ -1260,6 +1263,68 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        let raw = sqlx::query_scalar::<_, String>(
+            "SELECT workspace_sharing_mode
+             FROM organizations
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(organization_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        raw.map(|value| {
+            WorkspaceSharingMode::from_str(&value).map_err(|error| {
+                StorageError::invalid_data(format!("organizations.workspace_sharing_mode: {error}"))
+            })
+        })
+        .transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        // Keep the legacy `workspace_sharing_disabled` boolean in lock-step
+        // with the richer `workspace_sharing_mode` column so old readers
+        // keep working until the boolean is dropped in a follow-up PR.
+        let updated = sqlx::query_scalar::<_, String>(
+            "UPDATE organizations
+             SET workspace_sharing_mode = $2,
+                 workspace_sharing_disabled = $3,
+                 updated_at = NOW()
+             WHERE id = $1 AND deleted = false
+             RETURNING workspace_sharing_mode",
+        )
+        .bind(organization_id)
+        .bind(mode.as_str())
+        .bind(mode.disables_sharing())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+
+        updated
+            .map(|value| {
+                WorkspaceSharingMode::from_str(&value).map_err(|error| {
+                    StorageError::invalid_data(format!(
+                        "organizations.workspace_sharing_mode: {error}"
+                    ))
+                })
+            })
+            .transpose()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -9552,7 +9617,12 @@ impl AppStore for PostgresStore {
         #[derive(sqlx::FromRow)]
         struct Row {
             id: Uuid,
-            proxy_id: Uuid,
+            // `replicas.proxy_id` is nullable (primary coderd rows set it to
+            // NULL).  The workspace-proxy upsert path always binds a
+            // non-null value so the RETURNING clause never produces NULL,
+            // but keeping this `Option` avoids sqlx decode panics if a
+            // future schema change ever relaxes that invariant.
+            proxy_id: Option<Uuid>,
             hostname: String,
             relay_address: String,
             region_id: i32,
@@ -9597,7 +9667,11 @@ impl AppStore for PostgresStore {
 
         Ok(ReplicaRow {
             id: row.id,
-            proxy_id: row.proxy_id,
+            proxy_id: row.proxy_id.ok_or_else(|| {
+                StorageError::invalid_data(
+                    "upsert_replica returned a row with NULL proxy_id; expected a workspace-proxy replica",
+                )
+            })?,
             hostname: row.hostname,
             relay_address: row.relay_address,
             region_id: row.region_id,
@@ -9621,7 +9695,11 @@ impl AppStore for PostgresStore {
         #[derive(sqlx::FromRow)]
         struct Row {
             id: Uuid,
-            proxy_id: Uuid,
+            // `proxy_id` is nullable in the schema but the `WHERE proxy_id = $1`
+            // filter excludes NULL rows in Postgres, so this is defensive
+            // against future schema changes rather than something that can
+            // happen today.
+            proxy_id: Option<Uuid>,
             hostname: String,
             relay_address: String,
             region_id: i32,
@@ -9649,24 +9727,29 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
 
-        Ok(rows
-            .into_iter()
-            .map(|r| ReplicaRow {
-                id: r.id,
-                proxy_id: r.proxy_id,
-                hostname: r.hostname,
-                relay_address: r.relay_address,
-                region_id: r.region_id,
-                version: r.version,
-                error: r.error,
-                database_latency: r.database_latency,
-                primary_replica: r.primary_replica,
-                started_at: r.started_at,
-                stopped_at: r.stopped_at,
-                created_at: r.created_at,
-                updated_at: r.updated_at,
+        rows.into_iter()
+            .map(|r| {
+                Ok(ReplicaRow {
+                    id: r.id,
+                    proxy_id: r.proxy_id.ok_or_else(|| {
+                        StorageError::invalid_data(
+                            "list_replicas_by_proxy_excluding returned a row with NULL proxy_id; expected a workspace-proxy replica",
+                        )
+                    })?,
+                    hostname: r.hostname,
+                    relay_address: r.relay_address,
+                    region_id: r.region_id,
+                    version: r.version,
+                    error: r.error,
+                    database_latency: r.database_latency,
+                    primary_replica: r.primary_replica,
+                    started_at: r.started_at,
+                    stopped_at: r.stopped_at,
+                    created_at: r.created_at,
+                    updated_at: r.updated_at,
+                })
             })
-            .collect())
+            .collect()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -9678,6 +9761,161 @@ impl AppStore for PostgresStore {
             .map_err(storage_error)?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_coderd_replica(
+        &self,
+        input: coder_core::InsertCoderdReplicaInput,
+    ) -> Result<coder_core::CoderdReplicaRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            hostname: String,
+            relay_address: String,
+            region_id: i32,
+            version: String,
+            error: String,
+            database_latency: i32,
+            created_at: OffsetDateTime,
+            started_at: OffsetDateTime,
+            stopped_at: Option<OffsetDateTime>,
+            updated_at: OffsetDateTime,
+        }
+
+        let row = sqlx::query_as::<_, Row>(
+            "INSERT INTO replicas (
+                 id, proxy_id, hostname, relay_address, region_id, version,
+                 error, database_latency, primary_replica, started_at,
+                 stopped_at, created_at, updated_at
+             ) VALUES ($1, NULL, $2, $3, $4, $5, '', $6, TRUE, $7, NULL, $8, $9)
+             RETURNING id, hostname, relay_address, region_id, version,
+                       error, database_latency, created_at, started_at,
+                       stopped_at, updated_at",
+        )
+        .bind(input.id)
+        .bind(&input.hostname)
+        .bind(&input.relay_address)
+        .bind(input.region_id)
+        .bind(&input.version)
+        .bind(input.database_latency)
+        .bind(input.started_at)
+        .bind(input.created_at)
+        .bind(input.updated_at)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(coder_core::CoderdReplicaRow {
+            id: row.id,
+            hostname: row.hostname,
+            relay_address: row.relay_address,
+            region_id: row.region_id,
+            version: row.version,
+            error: row.error,
+            database_latency: row.database_latency,
+            created_at: row.created_at,
+            started_at: row.started_at,
+            stopped_at: row.stopped_at,
+            updated_at: row.updated_at,
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn refresh_coderd_replica(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE replicas SET updated_at = $2
+             WHERE id = $1 AND proxy_id IS NULL AND stopped_at IS NULL",
+        )
+        .bind(id)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_coderd_replica(&self, id: Uuid) -> Result<bool, StorageError> {
+        let result = sqlx::query("DELETE FROM replicas WHERE id = $1 AND proxy_id IS NULL")
+            .bind(id)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_coderd_replicas(
+        &self,
+        updated_after: OffsetDateTime,
+    ) -> Result<Vec<coder_core::CoderdReplicaRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            id: Uuid,
+            hostname: String,
+            relay_address: String,
+            region_id: i32,
+            version: String,
+            error: String,
+            database_latency: i32,
+            created_at: OffsetDateTime,
+            started_at: OffsetDateTime,
+            stopped_at: Option<OffsetDateTime>,
+            updated_at: OffsetDateTime,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT id, hostname, relay_address, region_id, version,
+                    error, database_latency, created_at, started_at,
+                    stopped_at, updated_at
+             FROM replicas
+             WHERE proxy_id IS NULL
+               AND stopped_at IS NULL
+               AND updated_at > $1
+             ORDER BY created_at ASC",
+        )
+        .bind(updated_after)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| coder_core::CoderdReplicaRow {
+                id: r.id,
+                hostname: r.hostname,
+                relay_address: r.relay_address,
+                region_id: r.region_id,
+                version: r.version,
+                error: r.error,
+                database_latency: r.database_latency,
+                created_at: r.created_at,
+                started_at: r.started_at,
+                stopped_at: r.stopped_at,
+                updated_at: r.updated_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn prune_stale_coderd_replicas(
+        &self,
+        older_than: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        let result = sqlx::query("DELETE FROM replicas WHERE proxy_id IS NULL AND updated_at < $1")
+            .bind(older_than)
+            .execute(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        Ok(result.rows_affected())
     }
 
     // ----- Crypto keys -----
@@ -9753,6 +9991,192 @@ impl AppStore for PostgresStore {
             starts_at: result.starts_at,
             deletes_at: result.deletes_at,
         })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_all_crypto_keys(&self) -> Result<Vec<CryptoKeyRow>, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct Row {
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            secret: Vec<u8>,
+            starts_at: OffsetDateTime,
+            deletes_at: Option<OffsetDateTime>,
+        }
+
+        let rows = sqlx::query_as::<_, Row>(
+            "SELECT feature, sequence, secret, starts_at, deletes_at
+             FROM crypto_keys
+             ORDER BY feature ASC, sequence ASC",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|row| CryptoKeyRow {
+                feature: row.feature,
+                sequence: row.sequence,
+                secret: row.secret,
+                starts_at: row.starts_at,
+                deletes_at: row.deletes_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_crypto_key_deletes_at(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+        sequence: i32,
+        deletes_at: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "UPDATE crypto_keys
+             SET deletes_at = $3
+             WHERE feature = $1::crypto_key_feature AND sequence = $2",
+        )
+        .bind(feature)
+        .bind(sequence)
+        .bind(deletes_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_crypto_key(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+        sequence: i32,
+    ) -> Result<bool, StorageError> {
+        // Go's `DeleteCryptoKey` sets `secret = NULL` (soft-delete preserving
+        // the sequence history), but our current schema keeps `secret` as
+        // NOT NULL and has no `secret_key_id` column, so we perform a hard
+        // delete once the key has passed its `deletes_at` horizon. The
+        // observable behaviour — the key is no longer usable — is identical.
+        let result = sqlx::query(
+            "DELETE FROM crypto_keys
+             WHERE feature = $1::crypto_key_feature AND sequence = $2",
+        )
+        .bind(feature)
+        .bind(sequence)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn max_crypto_key_sequence_for_feature(
+        &self,
+        feature: coder_core::enums::CryptoKeyFeature,
+    ) -> Result<i32, StorageError> {
+        let max: Option<i32> = sqlx::query_scalar(
+            "SELECT MAX(sequence) FROM crypto_keys WHERE feature = $1::crypto_key_feature",
+        )
+        .bind(feature)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(max.unwrap_or(0))
+    }
+
+    #[instrument(skip(self, new_row), err(level = tracing::Level::WARN))]
+    async fn rotate_crypto_key_transactional(
+        &self,
+        old_feature: coder_core::enums::CryptoKeyFeature,
+        old_sequence: i32,
+        old_deletes_at: OffsetDateTime,
+        new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError> {
+        #[derive(sqlx::FromRow)]
+        struct StoredRow {
+            feature: coder_core::enums::CryptoKeyFeature,
+            sequence: i32,
+            secret: Vec<u8>,
+            starts_at: OffsetDateTime,
+            deletes_at: Option<OffsetDateTime>,
+        }
+
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        // Stamp `deletes_at` on the old key. If no row matches, the caller
+        // raced against another rotator; roll back and surface an error.
+        let affected = sqlx::query(
+            "UPDATE crypto_keys
+             SET deletes_at = $3
+             WHERE feature = $1::crypto_key_feature AND sequence = $2",
+        )
+        .bind(old_feature)
+        .bind(old_sequence)
+        .bind(old_deletes_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(storage_error)?
+        .rows_affected();
+        if affected == 0 {
+            return Err(StorageError::invalid_data(format!(
+                "crypto key {old_feature:?}#{old_sequence} vanished mid-rotation"
+            )));
+        }
+
+        // Insert the successor. A `(feature, sequence)` primary-key violation
+        // rolls back the UPDATE above, guaranteeing no orphan accumulation.
+        let inserted = sqlx::query_as::<_, StoredRow>(
+            "INSERT INTO crypto_keys (feature, sequence, secret, starts_at, deletes_at)
+             VALUES ($1::crypto_key_feature, $2, $3, $4, $5)
+             RETURNING feature, sequence, secret, starts_at, deletes_at",
+        )
+        .bind(new_row.feature)
+        .bind(new_row.sequence)
+        .bind(&new_row.secret)
+        .bind(new_row.starts_at)
+        .bind(new_row.deletes_at)
+        .fetch_one(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+
+        Ok(CryptoKeyRow {
+            feature: inserted.feature,
+            sequence: inserted.sequence,
+            secret: inserted.secret,
+            starts_at: inserted.starts_at,
+            deletes_at: inserted.deletes_at,
+        })
+    }
+
+    // ----- DERP mesh -----
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError> {
+        let value: Option<String> =
+            sqlx::query_scalar("SELECT value FROM site_configs WHERE key = 'derp_mesh_key'")
+                .fetch_optional(&self.pool)
+                .await
+                .map_err(storage_error)?;
+
+        Ok(value)
+    }
+
+    #[instrument(skip(self, value), err(level = tracing::Level::WARN))]
+    async fn insert_derp_mesh_key(&self, value: &str) -> Result<bool, StorageError> {
+        let result = sqlx::query(
+            "INSERT INTO site_configs (key, value) VALUES ('derp_mesh_key', $1)
+             ON CONFLICT (key) DO NOTHING",
+        )
+        .bind(value)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected() > 0)
     }
 
     // ----- Workspace app stats -----
@@ -9857,5 +10281,68 @@ impl AppStore for PostgresStore {
         // full SQL is wired.
         let _ = filter;
         Ok(Vec::new())
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace quotas (enterprise)
+    //
+    // Ports `GetQuotaAllowanceForUser` / `GetQuotaConsumedForUser` from
+    // `coder/coderd/database/queries/quotas.sql`.  The Go implementation uses
+    // the `group_members_expanded` view which unions `group_members` with
+    // `organization_members` (the implicit "Everyone" group has `id ==
+    // organization_id`).  We inline that union here rather than add a view.
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_quota_allowance_for_user(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(groups.quota_allowance), 0)::BIGINT
+             FROM groups
+             WHERE groups.organization_id = $2
+               AND (
+                   groups.id IN (
+                       SELECT group_id FROM group_members WHERE user_id = $1
+                   )
+                   OR groups.id IN (
+                       SELECT organization_id FROM organization_members WHERE user_id = $1
+                   )
+               )",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_quota_consumed_for_user(
+        &self,
+        owner_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar::<_, i64>(
+            "WITH latest_builds AS (
+                 SELECT DISTINCT ON (wb.workspace_id)
+                        wb.workspace_id,
+                        wb.daily_cost
+                 FROM workspace_builds wb
+                 INNER JOIN workspaces ON wb.workspace_id = workspaces.id
+                 WHERE NOT workspaces.deleted
+                   AND workspaces.owner_id = $1
+                   AND workspaces.organization_id = $2
+                 ORDER BY wb.workspace_id, wb.build_number DESC
+             )
+             SELECT COALESCE(SUM(daily_cost), 0)::BIGINT FROM latest_builds",
+        )
+        .bind(owner_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)
     }
 }

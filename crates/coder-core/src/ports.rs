@@ -41,7 +41,7 @@ use crate::identity::{
     TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
     UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
     UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
-    UserRecord, UserStatus, UserStatusChangeRecord,
+    UserRecord, UserStatus, UserStatusChangeRecord, WorkspaceSharingMode,
 };
 use crate::provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
@@ -904,6 +904,60 @@ pub struct UpsertReplicaInput {
     /// Database latency in microseconds.
     pub database_latency: i32,
     /// When the replica started.
+    pub started_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+}
+
+/// Stored replica record for a main coderd instance (not a workspace proxy).
+///
+/// Mirrors the Go `database.Replica` shape — rows have `proxy_id IS NULL`
+/// and are inserted by the replica manager on startup.  Primary replicas
+/// are surfaced via the enterprise `/replicas` route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoderdReplicaRow {
+    /// Replica identifier.
+    pub id: Uuid,
+    /// OS hostname.
+    pub hostname: String,
+    /// DERP relay address (may be empty for non-HA deployments).
+    pub relay_address: String,
+    /// DERP region identifier.
+    pub region_id: i32,
+    /// Running coder version string.
+    pub version: String,
+    /// Error message (empty when healthy).
+    pub error: String,
+    /// Database latency in microseconds.
+    pub database_latency: i32,
+    /// When the replica was created.
+    pub created_at: OffsetDateTime,
+    /// When the replica was started.
+    pub started_at: OffsetDateTime,
+    /// When the replica was stopped (if applicable).
+    pub stopped_at: Option<OffsetDateTime>,
+    /// Last update time (heartbeat).
+    pub updated_at: OffsetDateTime,
+}
+
+/// Input for inserting a main coderd replica row on startup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertCoderdReplicaInput {
+    /// Replica identifier (generated once per process).
+    pub id: Uuid,
+    /// OS hostname.
+    pub hostname: String,
+    /// DERP relay address (may be empty).
+    pub relay_address: String,
+    /// DERP region identifier.
+    pub region_id: i32,
+    /// Running coder version string.
+    pub version: String,
+    /// Database latency in microseconds at startup.
+    pub database_latency: i32,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Start time.
     pub started_at: OffsetDateTime,
     /// Update time.
     pub updated_at: OffsetDateTime,
@@ -1796,6 +1850,28 @@ pub trait IdentityStore: Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
+
+    /// Reads the workspace sharing mode for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(mode))` parsed from the
+    /// persisted `workspace_sharing_mode` column.
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
+
+    /// Updates the workspace sharing mode for an organization.
+    ///
+    /// Writes `mode` to the `workspace_sharing_mode` column and keeps the
+    /// legacy `workspace_sharing_disabled` boolean in sync. Returns
+    /// `Ok(None)` if the organization does not exist or is soft-deleted;
+    /// otherwise `Ok(Some(mode))` with the newly persisted value.
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
 
     /// Lists members for an organization.
     async fn list_organization_members(
@@ -3043,6 +3119,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
+
+    /// Reads the workspace sharing mode for an organization.
+    ///
+    /// Returns `Ok(None)` if the organization does not exist or is
+    /// soft-deleted. Otherwise returns `Ok(Some(mode))` parsed from the
+    /// persisted `workspace_sharing_mode` column.
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
+
+    /// Updates the workspace sharing mode for an organization.
+    ///
+    /// Writes `mode` to the `workspace_sharing_mode` column and keeps the
+    /// legacy `workspace_sharing_disabled` boolean in sync. Returns
+    /// `Ok(None)` if the organization does not exist or is soft-deleted;
+    /// otherwise `Ok(Some(mode))` with the newly persisted value.
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
 
     /// Lists members for an organization.
     async fn list_organization_members(
@@ -4632,6 +4730,49 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     /// Deletes a replica record by its ID.
     async fn delete_replica(&self, id: Uuid) -> Result<bool, StorageError>;
 
+    /// Inserts a main coderd replica row on server startup.
+    ///
+    /// Ports `InsertReplica` from `coder/coderd/database/queries/replicas.sql`
+    /// (with `proxy_id` left NULL to distinguish coderd replicas from
+    /// workspace-proxy replicas).
+    async fn insert_coderd_replica(
+        &self,
+        input: InsertCoderdReplicaInput,
+    ) -> Result<CoderdReplicaRow, StorageError>;
+
+    /// Refreshes `updated_at` for a main coderd replica heartbeat.
+    ///
+    /// Returns `true` if the row was updated, `false` if it was missing.
+    async fn refresh_coderd_replica(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+
+    /// Deletes a main coderd replica row on graceful shutdown.
+    async fn delete_coderd_replica(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Lists all alive main coderd replicas (proxy_id IS NULL, not stopped,
+    /// and updated after the supplied threshold).
+    ///
+    /// Callers pass `updated_after = now - 3 * update_interval` to implement
+    /// the Go `updateInterval` staleness filter.
+    async fn list_coderd_replicas(
+        &self,
+        updated_after: OffsetDateTime,
+    ) -> Result<Vec<CoderdReplicaRow>, StorageError>;
+
+    /// Prunes coderd replica rows whose `updated_at` is older than the
+    /// supplied threshold.  Mirrors Go `DeleteReplicasUpdatedBefore` but
+    /// scoped to coderd rows (`proxy_id IS NULL`) so workspace-proxy
+    /// replicas are not affected.
+    ///
+    /// Returns the number of rows deleted.
+    async fn prune_stale_coderd_replicas(
+        &self,
+        older_than: OffsetDateTime,
+    ) -> Result<u64, StorageError>;
+
     // ----- Crypto keys -----
 
     /// Lists active crypto keys for a given feature.
@@ -4640,8 +4781,71 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         feature: crate::enums::CryptoKeyFeature,
     ) -> Result<Vec<CryptoKeyRow>, StorageError>;
 
+    /// Lists **all** crypto key rows (active or scheduled for deletion) used by
+    /// the rotation scheduler. Mirrors the Go `GetCryptoKeys` query and
+    /// includes keys whose `starts_at` is in the past but whose `deletes_at`
+    /// may already have elapsed.
+    async fn list_all_crypto_keys(&self) -> Result<Vec<CryptoKeyRow>, StorageError>;
+
     /// Inserts a new crypto key record.
     async fn insert_crypto_key(&self, row: CryptoKeyRow) -> Result<CryptoKeyRow, StorageError>;
+
+    /// Sets the `deletes_at` timestamp on a crypto key (marks it as retired).
+    /// Mirrors the Go `UpdateCryptoKeyDeletesAt` query. Returns `true` if a row
+    /// was affected.
+    async fn update_crypto_key_deletes_at(
+        &self,
+        feature: crate::enums::CryptoKeyFeature,
+        sequence: i32,
+        deletes_at: Option<OffsetDateTime>,
+    ) -> Result<bool, StorageError>;
+
+    /// Deletes (zeroes) a crypto key's secret material once it is past its
+    /// `deletes_at` horizon. Mirrors the Go `DeleteCryptoKey` query which
+    /// `NULL`s out the secret column. Returns `true` if a row was affected.
+    async fn delete_crypto_key(
+        &self,
+        feature: crate::enums::CryptoKeyFeature,
+        sequence: i32,
+    ) -> Result<bool, StorageError>;
+
+    /// Returns the maximum `sequence` across **all** rows for the given feature,
+    /// ignoring `starts_at` / `deletes_at` filters. Used by the rotator to pick
+    /// the next sequence when inserting a successor key whose `starts_at` may
+    /// be in the future (and therefore invisible to `list_crypto_keys_by_feature`).
+    /// Returns `0` if no rows exist for the feature.
+    async fn max_crypto_key_sequence_for_feature(
+        &self,
+        feature: crate::enums::CryptoKeyFeature,
+    ) -> Result<i32, StorageError>;
+
+    /// Atomically retires an old crypto key and inserts its successor in a
+    /// single database transaction. If either step fails, neither persists.
+    /// Mirrors the `UPDATE ... + INSERT ...` pair inside Go's
+    /// `coderd/cryptokeys/rotate.go::rotateKey`, which relies on PostgreSQL's
+    /// implicit per-statement transaction under a surrounding `BEGIN`.
+    ///
+    /// Returns the inserted successor row. On error, the transaction rolls
+    /// back and neither the old key's `deletes_at` nor the new key survive.
+    async fn rotate_crypto_key_transactional(
+        &self,
+        old_feature: crate::enums::CryptoKeyFeature,
+        old_sequence: i32,
+        old_deletes_at: OffsetDateTime,
+        new_row: CryptoKeyRow,
+    ) -> Result<CryptoKeyRow, StorageError>;
+
+    // ----- DERP mesh -----
+
+    /// Reads the deployment's persisted DERP mesh key from `site_configs`.
+    /// Mirrors the Go `GetDERPMeshKey` query. Returns `None` if no mesh key
+    /// has been stored yet.
+    async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError>;
+
+    /// Persists a new DERP mesh key in `site_configs`. Mirrors the Go
+    /// `InsertDERPMeshKey` query. Returns `true` if a new row was inserted,
+    /// `false` if one already existed.
+    async fn insert_derp_mesh_key(&self, value: &str) -> Result<bool, StorageError>;
 
     // ----- Workspace app stats -----
 
@@ -4663,6 +4867,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         filter: crate::api::AIBridgeModelsFilter,
     ) -> Result<Vec<String>, StorageError>;
+
+    /// Returns the total quota allowance for a user in an organization.
+    ///
+    /// Mirrors `GetQuotaAllowanceForUser` in `coder/coderd/database/queries/quotas.sql`.
+    /// Sums `quota_allowance` across all groups the user is a member of in the
+    /// organization (including the implicit "Everyone" group).
+    async fn get_quota_allowance_for_user(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError>;
+
+    /// Returns the total quota consumed for a user in an organization.
+    ///
+    /// Mirrors `GetQuotaConsumedForUser` in `coder/coderd/database/queries/quotas.sql`.
+    /// Sums `daily_cost` across the latest build of each non-deleted workspace
+    /// owned by the user in the organization.
+    async fn get_quota_consumed_for_user(
+        &self,
+        owner_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError>;
 }
 
 /// Stored webpush subscription record.
@@ -5760,6 +5986,21 @@ where
         AppStore::get_organization_resource_counts(self, id).await
     }
 
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        AppStore::get_organization_sharing_settings(self, organization_id).await
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        AppStore::update_organization_sharing_settings(self, organization_id, mode).await
+    }
+
     async fn list_organization_members(
         &self,
         filter: OrganizationMemberListFilter,
@@ -6334,6 +6575,25 @@ where
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError> {
         (**self).get_organization_resource_counts(id).await
+    }
+
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        (**self)
+            .get_organization_sharing_settings(organization_id)
+            .await
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        (**self)
+            .update_organization_sharing_settings(organization_id, mode)
+            .await
     }
 
     async fn list_organization_members(

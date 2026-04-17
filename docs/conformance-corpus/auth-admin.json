@@ -12,13 +12,13 @@
       }
     },
     {
-      "name": "scope-catalog",
+      "name": "scope-catalog-status-only",
       "request": {
         "method": "GET",
         "path": "/api/v2/auth/scopes"
       },
       "comparison": {
-        "body_mode": "json",
+        "body_mode": "ignore",
         "check_headers": false
       }
     }

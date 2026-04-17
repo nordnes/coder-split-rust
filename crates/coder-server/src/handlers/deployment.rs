@@ -49,12 +49,36 @@ pub(crate) async fn deployment_config(
 }
 
 /// GET /api/v2/updatecheck — report whether the running version is current.
+///
+/// Ports `coder/coderd/updatecheck.go`. When an [`UpdateChecker`] is wired
+/// in (i.e. `config.update_check` is enabled at startup), the latest release
+/// is read from the in-memory cache and compared against the running build
+/// via SemVer; otherwise the handler echoes the running version as current,
+/// matching Go's behavior when the updater is disabled or has not yet run.
 pub(crate) async fn update_check(State(state): State<AppState>) -> Json<UpdateCheckResponse> {
-    Json(UpdateCheckResponse {
-        current: true,
-        version: state.build_metadata.version.clone(),
-        url: state.build_metadata.external_url.clone(),
-    })
+    let running_version = state.build_metadata.version.clone();
+    let fallback_url = state.build_metadata.external_url.clone();
+
+    let Some(checker) = state.update_checker.as_ref() else {
+        return Json(UpdateCheckResponse {
+            current: true,
+            version: running_version,
+            url: fallback_url,
+        });
+    };
+
+    match checker.latest().await {
+        Some(result) => Json(UpdateCheckResponse {
+            current: crate::update_check::is_current(&running_version, &result.version),
+            version: result.version,
+            url: result.url,
+        }),
+        None => Json(UpdateCheckResponse {
+            current: true,
+            version: running_version,
+            url: fallback_url,
+        }),
+    }
 }
 
 /// GET /api/v2/init-script/{os}/{arch} — render a platform-specific agent init script.

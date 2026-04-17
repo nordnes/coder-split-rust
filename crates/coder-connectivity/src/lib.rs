@@ -1370,6 +1370,7 @@ mod tests {
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
+            derp_force_websockets: false,
             shutdown_grace_period_secs: 5,
             log_format: coder_core::LogFormat::Pretty,
             logging: coder_core::config::LoggingConfig::default(),
@@ -1391,6 +1392,8 @@ mod tests {
             workspace: coder_core::config::WorkspaceConfig::default(),
             swagger_enabled: true,
             update_check: false,
+            update_check_interval_secs: 24 * 60 * 60,
+            update_check_url: "https://api.github.com/repos/coder/coder/releases/latest".to_owned(),
             ssh_keygen_algorithm: "ed25519".to_owned(),
             cache_dir: String::new(),
             browser_only: false,
@@ -1410,6 +1413,8 @@ mod tests {
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
             worker: coder_core::config::WorkerConfig::default(),
+            verify_instance_identity: false,
+            aws_instance_identity_certs_dir: None,
         }
     }
 

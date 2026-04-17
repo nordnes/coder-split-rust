@@ -1368,7 +1368,11 @@ pub(crate) fn build_workspace_agent_connection_info(
 
     WorkspaceAgentConnectionInfo {
         derp_map: DERPMap { regions },
-        derp_force_websockets: false,
+        // Mirrors the `DeploymentValues.DERP.Config.ForceWebSockets` flag. Both
+        // the workspace-proxy register response and the agent connection-info
+        // endpoint must see the same value so proxy- and direct-connected
+        // clients behave identically.
+        derp_force_websockets: state.config.derp_force_websockets,
         disable_direct_connections: false,
         hostname_suffix: state.config.ssh.hostname_suffix.clone(),
     }
@@ -2258,6 +2262,11 @@ async fn handle_push_logs(
 }
 
 /// POST /api/v2/workspaceagents/aws-instance-identity — AWS instance identity auth.
+///
+/// Ports `handleAuthInstanceID` + `awsInstanceIdentity` in
+/// `coder/coderd/workspaceresourceauth.go`. Verification is delegated to
+/// [`AppState::instance_identity_verifier`]; structural failures return 400
+/// and cryptographic failures return 401 without leaking internals.
 pub(crate) async fn post_workspace_agent_instance_identity_aws(
     State(state): State<AppState>,
     body: Result<Json<AWSInstanceIdentityToken>, JsonRejection>,
@@ -2267,37 +2276,14 @@ pub(crate) async fn post_workspace_agent_instance_identity_aws(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // In the Go implementation, the document is parsed and validated against
-    // AWS certificates to extract the instance ID.  Full cryptographic
-    // verification is not yet implemented; we extract the instance_id from
-    // the identity document JSON directly.
-    let instance_id = match serde_json::from_str::<Value>(&token.document) {
-        Ok(doc) => match doc.get("instanceId").and_then(|v| v.as_str()) {
-            Some(id) => id.to_owned(),
-            None => {
-                return Ok((
-                    StatusCode::BAD_REQUEST,
-                    Json(ApiResponse::error(
-                        "Invalid AWS identity document: missing instanceId.",
-                        "",
-                    )),
-                )
-                    .into_response());
-            }
-        },
-        Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(
-                    "Invalid AWS identity document: malformed JSON.",
-                    "",
-                )),
-            )
-                .into_response());
-        }
-    };
-
-    handle_auth_instance_id(&state, &instance_id).await
+    match state
+        .instance_identity_verifier
+        .verify_aws(&token.document, &token.signature)
+        .await
+    {
+        Ok(verified) => handle_auth_instance_id(&state, &verified.instance_id).await,
+        Err(err) => Ok(instance_identity_error_response(err, "AWS")),
+    }
 }
 
 /// POST /api/v2/workspaceagents/azure-instance-identity — Azure instance identity auth.
@@ -2310,21 +2296,13 @@ pub(crate) async fn post_workspace_agent_instance_identity_azure(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // In the Go implementation, the Azure signature is a PKCS7 JWT that is
-    // validated against Microsoft certificates.  Full cryptographic
-    // verification is not yet implemented; we extract the VM ID from the
-    // JWT payload directly.
-    let instance_id = extract_instance_id_from_jwt(&token.signature);
-    match instance_id {
-        Some(id) => handle_auth_instance_id(&state, &id).await,
-        None => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "Invalid Azure identity: could not extract instance ID from signature.",
-                "",
-            )),
-        )
-            .into_response()),
+    match state
+        .instance_identity_verifier
+        .verify_azure(&token.signature)
+        .await
+    {
+        Ok(verified) => handle_auth_instance_id(&state, &verified.instance_id).await,
+        Err(err) => Ok(instance_identity_error_response(err, "Azure")),
     }
 }
 
@@ -2338,53 +2316,45 @@ pub(crate) async fn post_workspace_agent_instance_identity_google(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // In the Go implementation, the GCP JWT is validated against Google's
-    // token validator and the instance_id is extracted from the claims.
-    // Full cryptographic verification is not yet implemented; we extract
-    // the instance_id from the JWT payload directly.
-    let instance_id = extract_instance_id_from_jwt(&token.json_web_token);
-    match instance_id {
-        Some(id) => handle_auth_instance_id(&state, &id).await,
-        None => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "Invalid GCP identity: could not extract instance ID from token.",
-                "",
-            )),
-        )
-            .into_response()),
+    match state
+        .instance_identity_verifier
+        .verify_gcp(&token.json_web_token)
+        .await
+    {
+        Ok(verified) => handle_auth_instance_id(&state, &verified.instance_id).await,
+        Err(err) => Ok(instance_identity_error_response(err, "Google")),
     }
 }
 
-/// Extracts an instance_id claim from a JWT payload without cryptographic
-/// verification.  Returns `None` when the token structure is invalid or
-/// the claim is missing.
-pub(crate) fn extract_instance_id_from_jwt(jwt: &str) -> Option<String> {
-    // JWTs are header.payload.signature – we need the payload part.
-    let parts: Vec<&str> = jwt.split('.').collect();
-    if parts.len() < 2 {
-        return None;
+/// Map an [`InstanceIdentityVerifier`][iiv] failure into the corresponding
+/// HTTP response. Structural failures map to 400; cryptographic failures
+/// (bad signature, expired token, unknown key) map to 401 with a generic
+/// message so we do not leak which platform check failed.
+///
+/// [iiv]: crate::instance_identity::InstanceIdentityVerifier
+fn instance_identity_error_response(
+    err: crate::instance_identity::VerifyError,
+    provider: &str,
+) -> Response {
+    use crate::instance_identity::VerifyError;
+    match err {
+        VerifyError::InvalidRequest(detail) => (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                &format!("Invalid {provider} instance identity payload."),
+                &detail,
+            )),
+        )
+            .into_response(),
+        VerifyError::VerificationFailed => (
+            StatusCode::UNAUTHORIZED,
+            Json(ApiResponse::error(
+                &format!("{provider} instance identity could not be verified."),
+                "",
+            )),
+        )
+            .into_response(),
     }
-
-    use base64::Engine;
-    let engine = base64::engine::general_purpose::URL_SAFE_NO_PAD;
-    let payload_bytes = engine.decode(parts[1]).ok()?;
-    let payload: Value = serde_json::from_slice(&payload_bytes).ok()?;
-
-    // Azure puts vmId at the top level; GCP nests under google.compute_engine.instance_id.
-    if let Some(vm_id) = payload.get("vmId").and_then(|v| v.as_str()) {
-        return Some(vm_id.to_owned());
-    }
-    if let Some(id) = payload
-        .get("google")
-        .and_then(|g| g.get("compute_engine"))
-        .and_then(|ce| ce.get("instance_id"))
-        .and_then(|v| v.as_str())
-    {
-        return Some(id.to_owned());
-    }
-
-    None
 }
 
 /// Shared handler that takes a cloud-provider instance_id and performs the
@@ -3558,6 +3528,33 @@ mod tests {
 
         let response = oneshot_call(app, req).await?;
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn connection_info_reflects_derp_force_websockets_config() -> TestResult {
+        // Config flag off → agent connection info reports it off.
+        let (state_off, _store_off) = test_state_with_store(true)?;
+        assert!(
+            !state_off.config.derp_force_websockets,
+            "test fixture must default derp_force_websockets to false"
+        );
+        let info_off = build_workspace_agent_connection_info(&state_off);
+        assert!(
+            !info_off.derp_force_websockets,
+            "agent connection info must mirror ServerConfig.derp_force_websockets (off)"
+        );
+
+        // Config flag on → agent connection info reports it on. This is the
+        // regression guard for the old hardcoded `false` that made the agent
+        // endpoint disagree with the workspace-proxy register response.
+        let (mut state_on, _store_on) = test_state_with_store(true)?;
+        state_on.config.derp_force_websockets = true;
+        let info_on = build_workspace_agent_connection_info(&state_on);
+        assert!(
+            info_on.derp_force_websockets,
+            "agent connection info must mirror ServerConfig.derp_force_websockets (on)"
+        );
         Ok(())
     }
 }

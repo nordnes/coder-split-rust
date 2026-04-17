@@ -33,13 +33,21 @@
 mod app;
 pub(crate) mod auth_middleware;
 pub mod connection_guard;
+pub mod crypto_key_rotator;
 mod error;
 mod extractors;
 mod handlers;
 pub(crate) mod helpers;
+pub(crate) mod instance_identity;
 pub mod metrics;
 pub(crate) mod middleware;
 pub mod rate_limit;
+pub mod replica_manager;
+pub mod update_check;
 
 pub use app::{AppState, build_router};
 pub use rate_limit::RateLimitState;
+pub use replica_manager::{
+    AppStoreReplicaAdapter, ReplicaManager, ReplicaManagerOptions, ReplicaManagerStore,
+};
+pub use update_check::{UpdateChecker, UpdateCheckerOptions, UpdateCheckerResult};

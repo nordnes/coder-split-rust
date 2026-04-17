@@ -3,6 +3,7 @@
 use super::templates::resolve_organization;
 use super::*;
 use coder_core::api::WorkspaceQuota;
+use coder_license::FeatureName;
 
 /// GET /api/v2/workspace-quota/{user} — deprecated workspace quota endpoint.
 ///
@@ -56,25 +57,46 @@ pub(crate) async fn get_workspace_quota(
 
 /// Computes workspace quota for a user in an organization.
 ///
-/// If the `FeatureTemplateRBAC` entitlement is not licensed, returns
-/// `budget: -1` (unlimited).  Otherwise queries the store for the
-/// allowance and consumed values.
+/// Ports `coder/enterprise/coderd/workspacequota.go` (`workspaceQuota`):
+///
+/// * If the `TemplateRBAC` entitlement is not enabled, the budget is
+///   reported as `-1` (unlimited).  Credits consumed is still queried so
+///   the UI can display usage even without the feature licensed — this
+///   matches the Go behavior.
+/// * When enabled, the budget is the sum of `quota_allowance` across all
+///   groups the user is a member of in the organization (including the
+///   implicit "Everyone" group), and credits consumed is the sum of
+///   `daily_cost` of the latest build of each non-deleted workspace the
+///   user owns in the organization.
 async fn compute_workspace_quota(
-    _state: &AppState,
-    _user_id: Uuid,
-    _org_id: Uuid,
+    state: &AppState,
+    user_id: Uuid,
+    org_id: Uuid,
 ) -> Result<WorkspaceQuota, AppError> {
-    // TODO: Once EntitlementSet is wired into AppState, check:
-    //   state.entitlements.enabled(FeatureName::TemplateRbac)
-    // If not licensed, return unlimited budget.
-    // If licensed, query:
-    //   get_quota_allowance_for_user(user_id, org_id)
-    //   get_quota_consumed_for_user(user_id, org_id)
-    //
-    // For now, return unlimited since the entitlement service and quota
-    // tables are not yet wired into AppState.
+    let licensed = state.entitlements.enabled(FeatureName::TemplateRbac);
+    let budget: i64 = if licensed {
+        state
+            .store
+            .get_quota_allowance_for_user(user_id, org_id)
+            .await?
+    } else {
+        -1
+    };
+    let consumed: i64 = state
+        .store
+        .get_quota_consumed_for_user(user_id, org_id)
+        .await?;
     Ok(WorkspaceQuota {
-        credits_consumed: 0,
-        budget: -1,
+        credits_consumed: saturating_i64_to_i32(consumed),
+        budget: saturating_i64_to_i32(budget),
     })
+}
+
+/// Saturating conversion from `i64` (SQL `BIGINT`) to `i32` (the JSON
+/// field type on `WorkspaceQuota`).  Matches Go's `int(...)` cast on
+/// 64-bit platforms where the API model is also a plain `int`; clipping
+/// instead of wrapping protects against overflow on 32-bit targets and
+/// keeps the `-1` sentinel intact.
+fn saturating_i64_to_i32(value: i64) -> i32 {
+    value.clamp(i64::from(i32::MIN), i64::from(i32::MAX)) as i32
 }

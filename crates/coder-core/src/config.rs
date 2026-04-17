@@ -46,6 +46,12 @@ pub struct ServerConfig {
     pub external_auth_providers: Vec<ExternalAuthLinkProvider>,
     /// Configured DERP regions used by deployment health probes.
     pub derp_regions: Vec<DerpRegionConfig>,
+    /// Whether DERP connections should be forced over WebSockets instead of
+    /// using the native `Upgrade: derp` path. Mirrors the Go
+    /// `DeploymentValues.DERP.Config.ForceWebSockets` deployment flag and is
+    /// forwarded to workspace proxies via the `/workspaceproxies/me/register`
+    /// response.
+    pub derp_force_websockets: bool,
     /// Grace period for HTTP shutdown.
     pub shutdown_grace_period_secs: u64,
     /// Log format used by the binary.
@@ -90,6 +96,10 @@ pub struct ServerConfig {
     pub swagger_enabled: bool,
     /// Whether to periodically check for Coder updates.
     pub update_check: bool,
+    /// Interval between GitHub release polls, in seconds (default 24h).
+    pub update_check_interval_secs: u64,
+    /// URL used to fetch the latest Coder release from GitHub.
+    pub update_check_url: String,
     /// Algorithm used for SSH key generation (e.g. "ed25519").
     pub ssh_keygen_algorithm: String,
     /// Directory used for caching temporary files.
@@ -126,6 +136,24 @@ pub struct ServerConfig {
     pub scim_api_key: String,
     /// Message displayed to users suggesting they upgrade the CLI.
     pub cli_upgrade_message: String,
+    /// Whether to cryptographically verify cloud-provider instance-identity
+    /// documents submitted to the `/workspaceagents/{aws,azure,google}-instance-identity`
+    /// endpoints. Disabled by default for local development and for the
+    /// existing in-memory test harness, which cannot produce platform-signed
+    /// payloads. Production deployments SHOULD set this to `true`.
+    pub verify_instance_identity: bool,
+    /// Optional directory containing extra AWS EC2 instance-identity
+    /// certificates (PEM-encoded X.509) to load on top of the bundled
+    /// regional trust roots. Only files with a `.pem` or `.crt` extension
+    /// are loaded; invalid files are logged and skipped. Empty / unset
+    /// means "bundled certs only".
+    ///
+    /// This is how operators on partitions not covered by the bundled
+    /// defaults (e.g. `us-iso*`, sovereign clouds, freshly-launched
+    /// regions before we pick up new certs) supply their own trust
+    /// anchors. Maps to `--aws-instance-identity-certs-dir` /
+    /// `CODER_AWS_INSTANCE_IDENTITY_CERTS_DIR`.
+    pub aws_instance_identity_certs_dir: Option<std::path::PathBuf>,
 }
 
 impl ServerConfig {
@@ -166,6 +194,8 @@ impl ServerConfig {
             healthcheck: self.healthcheck.clone(),
             swagger_enabled: self.swagger_enabled,
             update_check: self.update_check,
+            update_check_interval_secs: self.update_check_interval_secs,
+            update_check_url: self.update_check_url.clone(),
             browser_only: self.browser_only,
             disable_password_auth: self.disable_password_auth,
             disable_path_apps: self.disable_path_apps,
@@ -357,6 +387,12 @@ impl ServerConfig {
                 env: "CODER_DERP_REGIONS_JSON",
                 default: Some("[]"),
                 description: "JSON array of DERP region probe metadata used by deployment health checks.",
+            },
+            ConfigOption {
+                name: "derp-force-websockets",
+                env: "CODER_DERP_FORCE_WEBSOCKETS",
+                default: Some("false"),
+                description: "Force all DERP connections to use WebSockets instead of raw UDP/TCP.",
             },
             // -- Server Lifecycle --
             ConfigOption {
@@ -657,6 +693,18 @@ impl ServerConfig {
                 default: Some("false"),
                 description: "Periodically check for new Coder releases.",
             },
+            ConfigOption {
+                name: "update-check-interval-secs",
+                env: "CODER_UPDATE_CHECK_INTERVAL_SECS",
+                default: Some("86400"),
+                description: "Interval in seconds between GitHub release polls for update checks.",
+            },
+            ConfigOption {
+                name: "update-check-url",
+                env: "CODER_UPDATE_CHECK_URL",
+                default: Some("https://api.github.com/repos/coder/coder/releases/latest"),
+                description: "URL used to fetch the latest Coder release.",
+            },
             // -- Miscellaneous --
             ConfigOption {
                 name: "experiments",
@@ -854,6 +902,12 @@ impl ServerConfig {
                 env: "CODER_LIFECYCLE_CHECK_INTERVAL",
                 default: Some("30"),
                 description: "Poll interval in seconds for the lifecycle scheduler (autostart/autostop).",
+            },
+            ConfigOption {
+                name: "replica-update-interval",
+                env: "CODER_REPLICA_UPDATE_INTERVAL",
+                default: Some("15"),
+                description: "Heartbeat interval in seconds for the HA replica manager. Stale rows are pruned at 3× this value.",
             },
         ]
     }
@@ -1287,6 +1341,10 @@ pub struct WorkerConfig {
     pub telemetry_flush_interval_secs: u64,
     /// Poll interval in seconds for the lifecycle scheduler (autostart/autostop).
     pub lifecycle_check_interval_secs: u64,
+    /// Heartbeat interval in seconds for the HA replica manager. The
+    /// `/replicas` handler uses `3 ×` this value as the staleness
+    /// cut-off when filtering rows, matching the manager's prune logic.
+    pub replica_update_interval_secs: u64,
 }
 
 impl Default for WorkerConfig {
@@ -1297,6 +1355,7 @@ impl Default for WorkerConfig {
             dormancy_check_interval_secs: 60,
             telemetry_flush_interval_secs: 1800,
             lifecycle_check_interval_secs: 30,
+            replica_update_interval_secs: 15,
         }
     }
 }
@@ -1342,6 +1401,10 @@ pub struct PublicDeploymentConfig {
     pub swagger_enabled: bool,
     /// Whether update check is enabled.
     pub update_check: bool,
+    /// Interval between update checks, in seconds.
+    pub update_check_interval_secs: u64,
+    /// URL used to fetch the latest Coder release.
+    pub update_check_url: String,
     /// Whether browser-only mode is active.
     pub browser_only: bool,
     /// Whether password auth is disabled.
@@ -1451,6 +1514,7 @@ mod tests {
             },
             external_auth_providers: Vec::new(),
             derp_regions: Vec::new(),
+            derp_force_websockets: false,
             shutdown_grace_period_secs: 10,
             log_format: LogFormat::Pretty,
             logging: LoggingConfig::default(),
@@ -1473,6 +1537,8 @@ mod tests {
             worker: WorkerConfig::default(),
             swagger_enabled: true,
             update_check: false,
+            update_check_interval_secs: 24 * 60 * 60,
+            update_check_url: "https://api.github.com/repos/coder/coder/releases/latest".to_owned(),
             ssh_keygen_algorithm: "ed25519".to_owned(),
             cache_dir: "~/.cache/coder".to_owned(),
             browser_only: false,
@@ -1491,6 +1557,8 @@ mod tests {
             docs_url: "https://coder.com/docs/coder-oss".to_owned(),
             scim_api_key: String::new(),
             cli_upgrade_message: String::new(),
+            verify_instance_identity: false,
+            aws_instance_identity_certs_dir: None,
         }
     }
 
