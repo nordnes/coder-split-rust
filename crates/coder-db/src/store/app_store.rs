@@ -1158,7 +1158,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE id = $1 AND deleted = false",
         )
@@ -1206,7 +1207,7 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredOrganizationRow>(
             "INSERT INTO organizations (id, name, display_name, description, icon, created_at, updated_at, is_default, deleted)
              VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW(), false, false)
-             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted, workspace_sharing_mode",
         )
         .bind(&input.name)
         .bind(&input.display_name)
@@ -1233,7 +1234,7 @@ impl AppStore for PostgresStore {
             "UPDATE organizations
              SET name = $2, display_name = $3, description = $4, icon = $5, updated_at = NOW()
              WHERE id = $1 AND deleted = false
-             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted, workspace_sharing_mode",
         )
         .bind(input.id)
         .bind(&input.name)
