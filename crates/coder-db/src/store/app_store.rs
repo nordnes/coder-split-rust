@@ -1123,7 +1123,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE deleted = false
                AND (
@@ -1157,7 +1158,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE id = $1 AND deleted = false",
         )
@@ -1184,7 +1186,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE LOWER(name) = LOWER($1) AND deleted = false",
         )
@@ -1204,7 +1207,7 @@ impl AppStore for PostgresStore {
         let row = sqlx::query_as::<_, StoredOrganizationRow>(
             "INSERT INTO organizations (id, name, display_name, description, icon, created_at, updated_at, is_default, deleted)
              VALUES (gen_random_uuid(), $1, $2, $3, $4, NOW(), NOW(), false, false)
-             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted, workspace_sharing_mode",
         )
         .bind(&input.name)
         .bind(&input.display_name)
@@ -1231,7 +1234,7 @@ impl AppStore for PostgresStore {
             "UPDATE organizations
              SET name = $2, display_name = $3, description = $4, icon = $5, updated_at = NOW()
              WHERE id = $1 AND deleted = false
-             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted",
+             RETURNING id, name, display_name, description, icon, created_at, updated_at, is_default, deleted, workspace_sharing_mode",
         )
         .bind(input.id)
         .bind(&input.name)
@@ -1260,6 +1263,68 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)?;
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        let raw = sqlx::query_scalar::<_, String>(
+            "SELECT workspace_sharing_mode
+             FROM organizations
+             WHERE id = $1 AND deleted = false",
+        )
+        .bind(organization_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        raw.map(|value| {
+            WorkspaceSharingMode::from_str(&value).map_err(|error| {
+                StorageError::invalid_data(format!("organizations.workspace_sharing_mode: {error}"))
+            })
+        })
+        .transpose()
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_organization_sharing_settings(
+        &self,
+        organization_id: Uuid,
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        let mut tx = self.pool.begin().await.map_err(storage_error)?;
+
+        // Keep the legacy `workspace_sharing_disabled` boolean in lock-step
+        // with the richer `workspace_sharing_mode` column so old readers
+        // keep working until the boolean is dropped in a follow-up PR.
+        let updated = sqlx::query_scalar::<_, String>(
+            "UPDATE organizations
+             SET workspace_sharing_mode = $2,
+                 workspace_sharing_disabled = $3,
+                 updated_at = NOW()
+             WHERE id = $1 AND deleted = false
+             RETURNING workspace_sharing_mode",
+        )
+        .bind(organization_id)
+        .bind(mode.as_str())
+        .bind(mode.disables_sharing())
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(storage_error)?;
+
+        tx.commit().await.map_err(storage_error)?;
+
+        updated
+            .map(|value| {
+                WorkspaceSharingMode::from_str(&value).map_err(|error| {
+                    StorageError::invalid_data(format!(
+                        "organizations.workspace_sharing_mode: {error}"
+                    ))
+                })
+            })
+            .transpose()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -10043,5 +10108,68 @@ impl AppStore for PostgresStore {
         // full SQL is wired.
         let _ = filter;
         Ok(Vec::new())
+    }
+
+    // -----------------------------------------------------------------------
+    // Workspace quotas (enterprise)
+    //
+    // Ports `GetQuotaAllowanceForUser` / `GetQuotaConsumedForUser` from
+    // `coder/coderd/database/queries/quotas.sql`.  The Go implementation uses
+    // the `group_members_expanded` view which unions `group_members` with
+    // `organization_members` (the implicit "Everyone" group has `id ==
+    // organization_id`).  We inline that union here rather than add a view.
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_quota_allowance_for_user(
+        &self,
+        user_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(SUM(groups.quota_allowance), 0)::BIGINT
+             FROM groups
+             WHERE groups.organization_id = $2
+               AND (
+                   groups.id IN (
+                       SELECT group_id FROM group_members WHERE user_id = $1
+                   )
+                   OR groups.id IN (
+                       SELECT organization_id FROM organization_members WHERE user_id = $1
+                   )
+               )",
+        )
+        .bind(user_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_quota_consumed_for_user(
+        &self,
+        owner_id: Uuid,
+        organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        sqlx::query_scalar::<_, i64>(
+            "WITH latest_builds AS (
+                 SELECT DISTINCT ON (wb.workspace_id)
+                        wb.workspace_id,
+                        wb.daily_cost
+                 FROM workspace_builds wb
+                 INNER JOIN workspaces ON wb.workspace_id = workspaces.id
+                 WHERE NOT workspaces.deleted
+                   AND workspaces.owner_id = $1
+                   AND workspaces.organization_id = $2
+                 ORDER BY wb.workspace_id, wb.build_number DESC
+             )
+             SELECT COALESCE(SUM(daily_cost), 0)::BIGINT FROM latest_builds",
+        )
+        .bind(owner_id)
+        .bind(organization_id)
+        .fetch_one(&self.pool)
+        .await
+        .map_err(storage_error)
     }
 }

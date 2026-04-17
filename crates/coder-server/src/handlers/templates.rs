@@ -592,6 +592,10 @@ pub(crate) async fn post_org_template_version(
     } else {
         body.provisioner.clone()
     };
+    // Normalize provisioner tags with scope=organization/user and owner so
+    // daemons can match via `provisioner_tagset_contains` (ports Go's
+    // `provisionersdk.MutateTags`, see coder/provisionersdk/provisionertags.go).
+    let tags = coder_core::mutate_tags(context.user.id, &[&body.tags]);
     let _job = state
         .store
         .create_provisioner_job(CreateProvisionerJobInput {
@@ -606,7 +610,7 @@ pub(crate) async fn post_org_template_version(
             input: serde_json::json!({
                 "template_version_id": version_id.to_string(),
             }),
-            tags: body.tags.clone(),
+            tags,
         })
         .await?;
 
@@ -1211,6 +1215,16 @@ pub(crate) async fn post_template_version_dry_run(
         "user_variable_values": body.user_variable_values,
     });
 
+    // Go copies the previous version's job tags onto the dry-run (see
+    // `coder/coderd/templateversions.go` near "Copy tags from the previous run.").
+    // Fall back to normalized defaults when the prior job tags are unavailable.
+    let prior_tags = state
+        .store
+        .get_provisioner_job_by_id(ver.job_id)
+        .await?
+        .map(|job| coder_core::tags_from_json(&job.tags))
+        .unwrap_or_default();
+    let tags = coder_core::mutate_tags(context.user.id, &[&prior_tags]);
     let job = state
         .store
         .create_provisioner_job(CreateProvisionerJobInput {
@@ -1223,7 +1237,7 @@ pub(crate) async fn post_template_version_dry_run(
             file_id: None,
             job_type: "template_version_dry_run".to_owned(),
             input: input_json,
-            tags: HashMap::new(),
+            tags,
         })
         .await?;
 
