@@ -926,19 +926,22 @@ async fn run() -> Result<(), MainError> {
     // `vals.UpdateCheck` in `coder/cli/server.go`: when disabled we skip
     // both the background poll and the AppState wiring, and the handler
     // falls back to reporting the running version as current.
-    let state = if config.update_check {
-        let checker = Arc::new(coder_server::UpdateChecker::new(
+    let (state, update_check_handle) = if config.update_check {
+        let update_check_cancel = CancellationToken::new();
+        let handle = Arc::new(coder_server::UpdateChecker::with_cancel(
             state.http_client.clone(),
             coder_server::UpdateCheckerOptions {
                 url: config.update_check_url.clone(),
                 interval: Duration::from_secs(config.update_check_interval_secs),
                 timeout: coder_server::update_check::DEFAULT_UPDATE_CHECK_TIMEOUT,
             },
+            update_check_cancel,
         ))
         .spawn();
-        state.with_update_checker(checker)
+        let checker = handle.checker();
+        (state.with_update_checker(checker), Some(handle))
     } else {
-        state
+        (state, None)
     };
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
@@ -1033,6 +1036,17 @@ async fn run() -> Result<(), MainError> {
             warn!(error = %e, "autobuild executor task panicked during shutdown");
         }
     });
+
+    // 5b. Cancel the update checker background poll loop and await the
+    //     task. No DB writes happen in the loop, so ordering relative to
+    //     the database close step below is not load-bearing, but joining
+    //     keeps graceful shutdown deterministic and matches the pattern
+    //     used for the other background workers.
+    if let Some(update_check_handle) = update_check_handle {
+        coordinator.register("update_check", async move {
+            update_check_handle.shutdown().await;
+        });
+    }
 
     // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter

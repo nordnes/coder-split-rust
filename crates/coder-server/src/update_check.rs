@@ -19,6 +19,7 @@ use serde::Deserialize;
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::RwLock;
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, warn};
 
 /// Default URL used to fetch the latest Coder release from GitHub.
@@ -105,36 +106,94 @@ struct GithubRelease {
 /// the background loop with [`UpdateChecker::spawn`]. Tests and other
 /// callers that do not want to poll can call [`UpdateChecker::refresh_now`]
 /// directly or pre-populate the cache with [`UpdateChecker::set_cached`].
+///
+/// The background loop respects a [`CancellationToken`] so graceful
+/// shutdown can stop polling before the tokio runtime is dropped. This
+/// matches the pattern used by the notification dispatcher, autobuild
+/// executor, and the other worker services in `apps/coderd/src/main.rs`.
 pub struct UpdateChecker {
     client: reqwest::Client,
     options: UpdateCheckerOptions,
     cached: RwLock<Option<UpdateCheckerResult>>,
+    cancel: CancellationToken,
+}
+
+/// Handle returned by [`UpdateChecker::spawn`] so the graceful-shutdown
+/// coordinator can cancel the background loop and await its completion.
+pub struct UpdateCheckerHandle {
+    checker: Arc<UpdateChecker>,
+    join: tokio::task::JoinHandle<()>,
+}
+
+impl UpdateCheckerHandle {
+    /// Returns a cloneable handle to the underlying checker for wiring
+    /// into [`AppState`](crate::AppState).
+    #[must_use]
+    pub fn checker(&self) -> Arc<UpdateChecker> {
+        Arc::clone(&self.checker)
+    }
+
+    /// Cancels the background loop and awaits the task.
+    ///
+    /// Idempotent: cancelling an already-cancelled checker is a no-op.
+    pub async fn shutdown(self) {
+        self.checker.cancel.cancel();
+        if let Err(error) = self.join.await {
+            warn!(error = %error, "update check task panicked during shutdown");
+        }
+    }
 }
 
 impl UpdateChecker {
     /// Builds a new checker with the supplied HTTP client and options.
     #[must_use]
     pub fn new(client: reqwest::Client, options: UpdateCheckerOptions) -> Self {
+        Self::with_cancel(client, options, CancellationToken::new())
+    }
+
+    /// Builds a new checker using a caller-provided cancellation token.
+    ///
+    /// Prefer this when the caller already owns a token registered with
+    /// the shutdown coordinator. Calling [`Self::spawn`] on the resulting
+    /// checker will exit the loop as soon as the token is cancelled.
+    #[must_use]
+    pub fn with_cancel(
+        client: reqwest::Client,
+        options: UpdateCheckerOptions,
+        cancel: CancellationToken,
+    ) -> Self {
         Self {
             client,
             options,
             cached: RwLock::new(None),
+            cancel,
         }
     }
 
-    /// Spawns the background refresh loop and returns the shared checker.
+    /// Returns a clone of the cancellation token that stops the background
+    /// loop.
+    #[must_use]
+    pub fn cancellation_token(&self) -> CancellationToken {
+        self.cancel.clone()
+    }
+
+    /// Spawns the background refresh loop and returns a handle that can
+    /// cancel it and await completion.
     ///
     /// The first refresh is triggered immediately so the cache warms up
     /// without waiting a full interval. Subsequent refreshes honour
     /// `options.interval`. Failures keep the last known good value; only
     /// the background task ever mutates the cache.
     #[must_use]
-    pub fn spawn(self: Arc<Self>) -> Arc<Self> {
+    pub fn spawn(self: Arc<Self>) -> UpdateCheckerHandle {
         let checker = Arc::clone(&self);
-        tokio::spawn(async move {
+        let join = tokio::spawn(async move {
             checker.run_loop().await;
         });
-        self
+        UpdateCheckerHandle {
+            checker: self,
+            join,
+        }
     }
 
     /// Returns the last known good release, if any.
@@ -188,16 +247,34 @@ impl UpdateChecker {
     }
 
     async fn run_loop(self: Arc<Self>) {
+        let cancel = self.cancel.clone();
         loop {
-            match self.refresh_now().await {
-                Ok(result) => {
-                    debug!(latest = %result.version, "update check refreshed cache");
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    debug!("update check loop cancelled; exiting");
+                    return;
                 }
-                Err(err) => {
-                    warn!(error = %err, "update check refresh failed; keeping last known good");
+                refresh = self.refresh_now() => {
+                    match refresh {
+                        Ok(result) => {
+                            debug!(latest = %result.version, "update check refreshed cache");
+                        }
+                        Err(err) => {
+                            warn!(error = %err, "update check refresh failed; keeping last known good");
+                        }
+                    }
                 }
             }
-            tokio::time::sleep(self.options.interval).await;
+
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => {
+                    debug!("update check loop cancelled during sleep; exiting");
+                    return;
+                }
+                () = tokio::time::sleep(self.options.interval) => {}
+            }
         }
     }
 }
@@ -205,29 +282,35 @@ impl UpdateChecker {
 /// Compares the running version against the latest advertised version and
 /// returns `true` when the runtime is at or ahead of the upstream release.
 ///
-/// Mirrors the Go behavior: the `-devel+commit` suffix is stripped from the
-/// runtime version (and a leading `v` is tolerated on both sides) before
-/// doing a SemVer compare. If either side cannot be parsed the comparison
-/// falls back to the original string equality check so we never wrongly
+/// Mirrors Go's behavior in `coder/coderd/updatecheck/updatecheck.go`:
+/// the leading `v` prefix is tolerated on both sides and any pre-release
+/// suffix (including but not limited to `-devel+commit`, `-rc.1`,
+/// `-beta.2`) is stripped before parsing. This means an RC build is
+/// treated as current against the matching stable release — same as Go's
+/// `semver.Compare`, which also ignores pre-release tags. If either side
+/// still cannot be parsed as SemVer, the comparison falls back to a
+/// string equality check between the normalized forms so we never wrongly
 /// flag a build as stale.
 #[must_use]
 pub fn is_current(running: &str, upstream: &str) -> bool {
-    let running_semver = normalize_version(running);
-    let upstream_semver = normalize_version(upstream);
+    let running_norm = normalize_version(running);
+    let upstream_norm = normalize_version(upstream);
 
-    match (
-        Version::parse(running_semver),
-        Version::parse(upstream_semver),
-    ) {
+    match (Version::parse(running_norm), Version::parse(upstream_norm)) {
         (Ok(running_v), Ok(upstream_v)) => running_v >= upstream_v,
-        _ => running == upstream,
+        _ => running_norm == upstream_norm,
     }
 }
 
+/// Normalizes a raw version string into a candidate SemVer form.
+///
+/// Strips the leading `v` prefix and drops anything after the first `-`
+/// (all pre-release suffixes — `-devel+commit`, `-rc.1`, `-beta.2`, …).
+/// This mirrors Go's `semver.Compare` which ignores pre-release tags
+/// when comparing, so a dev or RC build of `v2.50.0` is treated as
+/// `2.50.0` for update-check purposes.
 fn normalize_version(raw: &str) -> &str {
-    // Strip Go's `-devel+commit` / build-suffix portion used by dev builds.
     let stripped = raw.split('-').next().unwrap_or(raw);
-    // Tolerate the conventional `v` prefix on both sides.
     stripped.strip_prefix('v').unwrap_or(stripped)
 }
 
@@ -367,5 +450,45 @@ mod tests {
             Err(other) => Err(format!("unexpected error: {other:?}").into()),
             Ok(_) => Err("refresh should have failed on malformed JSON".into()),
         }
+    }
+
+    #[tokio::test]
+    async fn run_loop_exits_on_cancellation() -> Result<(), Box<dyn Error>> {
+        // Use an unreachable URL with a long interval so the task would
+        // otherwise block forever — proving the cancellation token is the
+        // only thing that lets it exit.
+        let cancel = CancellationToken::new();
+        let checker = Arc::new(UpdateChecker::with_cancel(
+            reqwest::Client::new(),
+            UpdateCheckerOptions {
+                url: "http://127.0.0.1:1/unreachable".to_owned(),
+                interval: Duration::from_secs(3600),
+                timeout: Duration::from_millis(50),
+            },
+            cancel.clone(),
+        ));
+        let handle = checker.spawn();
+
+        // Give the loop a moment to enter its first refresh/sleep cycle
+        // before cancelling, so we cover both select! arms.
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        cancel.cancel();
+
+        tokio::time::timeout(Duration::from_secs(5), handle.shutdown())
+            .await
+            .map_err(|_| "update checker shutdown did not complete within 5s")?;
+        Ok(())
+    }
+
+    #[test]
+    fn is_current_fallback_uses_normalized_strings() {
+        // Non-SemVer tags still fall back to string equality, but only
+        // after stripping the leading `v`. `vnightly` and `nightly` now
+        // compare equal because both normalize to `nightly`; previously
+        // the verbatim string compare would have returned `false` here
+        // and wrongly flagged the build as stale.
+        assert!(is_current("vnightly", "nightly"));
+        // The `v` prefix still matters when the remainder differs.
+        assert!(!is_current("vnightly", "stable"));
     }
 }
