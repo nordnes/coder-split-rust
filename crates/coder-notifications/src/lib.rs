@@ -332,7 +332,11 @@ where
             .unwrap_or_default();
 
         if endpoint.is_empty() {
-            return Err(NotificationDispatchError::ConfigMissing(
+            // `targets_json` is captured at enqueue time and never mutated,
+            // so a missing endpoint URL cannot be recovered by retrying.
+            // Matches `coder/coderd/notifications/dispatch/webhook.go` which
+            // treats a nil/empty endpoint as a terminal dispatch failure.
+            return Err(NotificationDispatchError::Permanent(
                 "webhook endpoint URL not found in targets".to_owned(),
             ));
         }
@@ -1973,11 +1977,14 @@ mod tests {
         assert_eq!(updates[0].1, NotificationMessageStatus::PermanentFailure);
     }
 
-    // ── 12. Webhook without endpoint URL records failure ────
+    // ── 12. Webhook without endpoint URL records permanent failure ──
 
     #[tokio::test]
-    async fn dispatch_webhook_without_url_records_temporary_failure() {
-        // targets_json with no "url" field → webhook dispatch fails.
+    async fn dispatch_webhook_without_url_records_permanent_failure() {
+        // targets_json with no "url" field → webhook dispatch is a
+        // permanent failure: `targets_json` is immutable per message, so
+        // retrying cannot recover. The loop should short-circuit to
+        // PermanentFailure without waiting out the attempt budget.
         let msg = make_message(NotificationMethod::Webhook, r#"{"other":"value"}"#);
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
@@ -2004,7 +2011,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].1, NotificationMessageStatus::TemporaryFailure);
+        assert_eq!(updates[0].1, NotificationMessageStatus::PermanentFailure);
     }
 
     // ── 13. Multiple pending messages dispatched in order ────
@@ -2442,6 +2449,26 @@ mod tests {
             }
         });
         format!("http://{addr}/hook")
+    }
+
+    #[tokio::test]
+    async fn dispatch_webhook_missing_url_returns_permanent() {
+        // `targets_json` has no `url` field — config is absent and cannot
+        // be recovered by retrying, so the dispatcher must short-circuit
+        // rather than burn the attempt budget.
+        let msg = make_message(NotificationMethod::Webhook, r#"{"other":"thing"}"#);
+        let store = MockStore::new();
+        let config = NotificationConfig::default();
+        let service = make_service(store, config);
+        let err = match service.dispatch_webhook(&msg).await {
+            Err(e) => e,
+            Ok(()) => panic!("missing URL should fail"),
+        };
+        assert!(
+            err.is_permanent(),
+            "missing URL must surface as permanent: {err}"
+        );
+        assert!(matches!(err, NotificationDispatchError::Permanent(_)));
     }
 
     #[tokio::test]
