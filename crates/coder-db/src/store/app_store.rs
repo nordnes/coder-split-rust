@@ -1123,7 +1123,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE deleted = false
                AND (
@@ -1184,7 +1185,8 @@ impl AppStore for PostgresStore {
                 created_at,
                 updated_at,
                 is_default,
-                deleted
+                deleted,
+                workspace_sharing_mode
              FROM organizations
              WHERE LOWER(name) = LOWER($1) AND deleted = false",
         )
@@ -1266,40 +1268,62 @@ impl AppStore for PostgresStore {
     async fn get_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-    ) -> Result<Option<bool>, StorageError> {
-        sqlx::query_scalar::<_, bool>(
-            "SELECT workspace_sharing_disabled
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        let raw = sqlx::query_scalar::<_, String>(
+            "SELECT workspace_sharing_mode
              FROM organizations
              WHERE id = $1 AND deleted = false",
         )
         .bind(organization_id)
         .fetch_optional(&self.pool)
         .await
-        .map_err(storage_error)
+        .map_err(storage_error)?;
+
+        raw.map(|value| {
+            WorkspaceSharingMode::from_str(&value).map_err(|error| {
+                StorageError::invalid_data(format!("organizations.workspace_sharing_mode: {error}"))
+            })
+        })
+        .transpose()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn update_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-        workspace_sharing_disabled: bool,
-    ) -> Result<Option<bool>, StorageError> {
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
         let mut tx = self.pool.begin().await.map_err(storage_error)?;
 
-        let updated = sqlx::query_scalar::<_, bool>(
+        // Keep the legacy `workspace_sharing_disabled` boolean in lock-step
+        // with the richer `workspace_sharing_mode` column so old readers
+        // keep working until the boolean is dropped in a follow-up PR.
+        let updated = sqlx::query_scalar::<_, String>(
             "UPDATE organizations
-             SET workspace_sharing_disabled = $2, updated_at = NOW()
+             SET workspace_sharing_mode = $2,
+                 workspace_sharing_disabled = $3,
+                 updated_at = NOW()
              WHERE id = $1 AND deleted = false
-             RETURNING workspace_sharing_disabled",
+             RETURNING workspace_sharing_mode",
         )
         .bind(organization_id)
-        .bind(workspace_sharing_disabled)
+        .bind(mode.as_str())
+        .bind(mode.disables_sharing())
         .fetch_optional(&mut *tx)
         .await
         .map_err(storage_error)?;
 
         tx.commit().await.map_err(storage_error)?;
-        Ok(updated)
+
+        updated
+            .map(|value| {
+                WorkspaceSharingMode::from_str(&value).map_err(|error| {
+                    StorageError::invalid_data(format!(
+                        "organizations.workspace_sharing_mode: {error}"
+                    ))
+                })
+            })
+            .transpose()
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]

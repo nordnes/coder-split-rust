@@ -41,7 +41,7 @@ use crate::identity::{
     TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
     UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
     UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
-    UserRecord, UserStatus, UserStatusChangeRecord,
+    UserRecord, UserStatus, UserStatusChangeRecord, WorkspaceSharingMode,
 };
 use crate::provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
@@ -1797,26 +1797,27 @@ pub trait IdentityStore: Send + Sync {
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
 
-    /// Reads the workspace sharing settings for an organization.
+    /// Reads the workspace sharing mode for an organization.
     ///
     /// Returns `Ok(None)` if the organization does not exist or is
-    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` where `disabled`
-    /// is the value of the `workspace_sharing_disabled` column.
+    /// soft-deleted. Otherwise returns `Ok(Some(mode))` parsed from the
+    /// persisted `workspace_sharing_mode` column.
     async fn get_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-    ) -> Result<Option<bool>, StorageError>;
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
 
-    /// Updates the workspace sharing settings for an organization.
+    /// Updates the workspace sharing mode for an organization.
     ///
-    /// Returns `Ok(None)` if the organization does not exist or is
-    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` with the newly
-    /// persisted value.
+    /// Writes `mode` to the `workspace_sharing_mode` column and keeps the
+    /// legacy `workspace_sharing_disabled` boolean in sync. Returns
+    /// `Ok(None)` if the organization does not exist or is soft-deleted;
+    /// otherwise `Ok(Some(mode))` with the newly persisted value.
     async fn update_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-        workspace_sharing_disabled: bool,
-    ) -> Result<Option<bool>, StorageError>;
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
 
     /// Lists members for an organization.
     async fn list_organization_members(
@@ -3065,26 +3066,27 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         id: Uuid,
     ) -> Result<OrgResourceCounts, StorageError>;
 
-    /// Reads the workspace sharing settings for an organization.
+    /// Reads the workspace sharing mode for an organization.
     ///
     /// Returns `Ok(None)` if the organization does not exist or is
-    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` where `disabled`
-    /// is the value of the `workspace_sharing_disabled` column.
+    /// soft-deleted. Otherwise returns `Ok(Some(mode))` parsed from the
+    /// persisted `workspace_sharing_mode` column.
     async fn get_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-    ) -> Result<Option<bool>, StorageError>;
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
 
-    /// Updates the workspace sharing settings for an organization.
+    /// Updates the workspace sharing mode for an organization.
     ///
-    /// Returns `Ok(None)` if the organization does not exist or is
-    /// soft-deleted. Otherwise returns `Ok(Some(disabled))` with the newly
-    /// persisted value.
+    /// Writes `mode` to the `workspace_sharing_mode` column and keeps the
+    /// legacy `workspace_sharing_disabled` boolean in sync. Returns
+    /// `Ok(None)` if the organization does not exist or is soft-deleted;
+    /// otherwise `Ok(Some(mode))` with the newly persisted value.
     async fn update_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-        workspace_sharing_disabled: bool,
-    ) -> Result<Option<bool>, StorageError>;
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError>;
 
     /// Lists members for an organization.
     async fn list_organization_members(
@@ -5805,21 +5807,16 @@ where
     async fn get_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-    ) -> Result<Option<bool>, StorageError> {
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
         AppStore::get_organization_sharing_settings(self, organization_id).await
     }
 
     async fn update_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-        workspace_sharing_disabled: bool,
-    ) -> Result<Option<bool>, StorageError> {
-        AppStore::update_organization_sharing_settings(
-            self,
-            organization_id,
-            workspace_sharing_disabled,
-        )
-        .await
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
+        AppStore::update_organization_sharing_settings(self, organization_id, mode).await
     }
 
     async fn list_organization_members(
@@ -6401,7 +6398,7 @@ where
     async fn get_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-    ) -> Result<Option<bool>, StorageError> {
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
         (**self)
             .get_organization_sharing_settings(organization_id)
             .await
@@ -6410,10 +6407,10 @@ where
     async fn update_organization_sharing_settings(
         &self,
         organization_id: Uuid,
-        workspace_sharing_disabled: bool,
-    ) -> Result<Option<bool>, StorageError> {
+        mode: WorkspaceSharingMode,
+    ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
         (**self)
-            .update_organization_sharing_settings(organization_id, workspace_sharing_disabled)
+            .update_organization_sharing_settings(organization_id, mode)
             .await
     }
 

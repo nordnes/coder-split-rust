@@ -2141,15 +2141,15 @@ impl AppStore for BenchStore {
     async fn get_organization_sharing_settings(
         &self,
         _organization_id: Uuid,
-    ) -> Result<Option<bool>, StorageError> {
+    ) -> Result<Option<coder_core::WorkspaceSharingMode>, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
 
     async fn update_organization_sharing_settings(
         &self,
         _organization_id: Uuid,
-        _workspace_sharing_disabled: bool,
-    ) -> Result<Option<bool>, StorageError> {
+        _mode: coder_core::WorkspaceSharingMode,
+    ) -> Result<Option<coder_core::WorkspaceSharingMode>, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
 

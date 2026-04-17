@@ -1615,7 +1615,8 @@ pub(crate) mod tests {
         WorkspaceBuildRecord, WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs,
         WorkspaceDeploymentStatsResponse, WorkspaceListFilter, WorkspaceProxyHealthInput,
         WorkspaceProxyHealthRecord, WorkspaceProxyRow, WorkspaceRecord,
-        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceStatsWorkspaceInput,
+        WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceSharingMode,
+        WorkspaceStatsWorkspaceInput,
     };
     use serde::Serialize;
     use serde_json::{Value, json};
@@ -1691,7 +1692,7 @@ pub(crate) mod tests {
         health_ok: bool,
         users: Mutex<HashMap<Uuid, UserRecord>>,
         organizations: Mutex<HashMap<Uuid, OrganizationRecord>>,
-        organization_sharing: Mutex<HashMap<Uuid, bool>>,
+        organization_sharing: Mutex<HashMap<Uuid, WorkspaceSharingMode>>,
         organization_members: Mutex<HashMap<(Uuid, Uuid), OrganizationMemberRecord>>,
         sessions: Mutex<HashMap<Vec<u8>, AuthenticatedUser>>,
         api_keys: Mutex<HashMap<String, ApiKeyRecord>>,
@@ -2647,6 +2648,7 @@ pub(crate) mod tests {
                 updated_at: now,
                 is_default: true,
                 deleted: false,
+                workspace_sharing_mode: WorkspaceSharingMode::default(),
             };
             let member = OrganizationMemberRecord {
                 user_id,
@@ -3311,6 +3313,7 @@ pub(crate) mod tests {
                 updated_at: now,
                 is_default: false,
                 deleted: false,
+                workspace_sharing_mode: WorkspaceSharingMode::default(),
             };
             organizations.insert(org.id, org.clone());
 
@@ -3407,32 +3410,36 @@ pub(crate) mod tests {
         async fn get_organization_sharing_settings(
             &self,
             organization_id: Uuid,
-        ) -> Result<Option<bool>, StorageError> {
+        ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
             let organizations = self
                 .organizations
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
-            if !organizations
-                .get(&organization_id)
-                .is_some_and(|org| !org.deleted)
-            {
+            let Some(org) = organizations.get(&organization_id) else {
+                return Ok(None);
+            };
+            if org.deleted {
                 return Ok(None);
             }
+            let default_mode = org.workspace_sharing_mode;
             drop(organizations);
             let sharing = self
                 .organization_sharing
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             Ok(Some(
-                sharing.get(&organization_id).copied().unwrap_or(false),
+                sharing
+                    .get(&organization_id)
+                    .copied()
+                    .unwrap_or(default_mode),
             ))
         }
 
         async fn update_organization_sharing_settings(
             &self,
             organization_id: Uuid,
-            workspace_sharing_disabled: bool,
-        ) -> Result<Option<bool>, StorageError> {
+            mode: WorkspaceSharingMode,
+        ) -> Result<Option<WorkspaceSharingMode>, StorageError> {
             let mut organizations = self
                 .organizations
                 .lock()
@@ -3444,13 +3451,17 @@ pub(crate) mod tests {
                 return Ok(None);
             }
             org.updated_at = OffsetDateTime::now_utc();
+            // Keep the OrganizationRecord in lock-step with the sharing map
+            // so the denormalised record mirrors what the PostgresStore
+            // returns after the same update.
+            org.workspace_sharing_mode = mode;
             drop(organizations);
             let mut sharing = self
                 .organization_sharing
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
-            sharing.insert(organization_id, workspace_sharing_disabled);
-            Ok(Some(workspace_sharing_disabled))
+            sharing.insert(organization_id, mode);
+            Ok(Some(mode))
         }
 
         async fn find_custom_role(
@@ -30672,6 +30683,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: false,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
         let deleted_id = Uuid::from_u128(200);
@@ -30691,6 +30703,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: true,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
 
@@ -30725,6 +30738,7 @@ pub(crate) mod tests {
                     updated_at: now,
                     is_default: false,
                     deleted: true,
+                    workspace_sharing_mode: WorkspaceSharingMode::default(),
                 },
             );
         let result = store.find_organization_by_id(org_id).await?;
@@ -36615,21 +36629,84 @@ pub(crate) mod tests {
     }
 
     #[tokio::test]
-    async fn workspace_sharing_patch_rejects_service_accounts() -> Result<(), Box<dyn Error>> {
+    async fn workspace_sharing_patch_round_trips_all_modes() -> Result<(), Box<dyn Error>> {
+        // Round-trip each of the three `shareable_workspace_owners` enum
+        // values through the PATCH → GET path, asserting the new
+        // `workspace_sharing_mode` column preserves the exact value and
+        // keeps the legacy `sharing_disabled` boolean in sync (only `none`
+        // disables sharing).
         let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
         let org_id = first_organization_id(&app, &session_token).await?;
 
-        // Go upstream only stores a boolean, so `service_accounts` is rejected
-        // at the API boundary with 400 rather than silently coerced to
-        // `everyone` (which would swallow the caller's intent).
+        for (mode, expected_disabled) in [
+            ("service_accounts", false),
+            ("none", true),
+            ("everyone", false),
+        ] {
+            let patch = call(
+                app.clone(),
+                authenticated_json_request(
+                    Method::PATCH,
+                    &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                    &session_token,
+                    &serde_json::json!({ "shareable_workspace_owners": mode }),
+                )?,
+            )
+            .await?;
+            assert_eq!(patch.status(), StatusCode::OK, "PATCH {mode} should be OK");
+            let body = response_json(patch).await?;
+            assert_eq!(
+                body.get("shareable_workspace_owners")
+                    .and_then(Value::as_str),
+                Some(mode),
+                "PATCH response should echo {mode}",
+            );
+            assert_eq!(
+                body.get("sharing_disabled").and_then(Value::as_bool),
+                Some(expected_disabled),
+                "sharing_disabled should be {expected_disabled} for {mode}",
+            );
+
+            let get = call(
+                app.clone(),
+                authenticated_request(
+                    Method::GET,
+                    &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
+                    &session_token,
+                )?,
+            )
+            .await?;
+            assert_eq!(get.status(), StatusCode::OK);
+            let body = response_json(get).await?;
+            assert_eq!(
+                body.get("shareable_workspace_owners")
+                    .and_then(Value::as_str),
+                Some(mode),
+                "GET should return persisted {mode}",
+            );
+            assert_eq!(
+                body.get("sharing_disabled").and_then(Value::as_bool),
+                Some(expected_disabled),
+                "GET sharing_disabled should stay in sync with {mode}",
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_sharing_patch_rejects_unknown_mode() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+
         let patch = call(
-            app.clone(),
+            app,
             authenticated_json_request(
                 Method::PATCH,
                 &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
                 &session_token,
-                &serde_json::json!({ "shareable_workspace_owners": "service_accounts" }),
+                &serde_json::json!({ "shareable_workspace_owners": "not_a_mode" }),
             )?,
         )
         .await?;
@@ -36638,28 +36715,6 @@ pub(crate) mod tests {
         assert_eq!(
             body.get("message").and_then(Value::as_str),
             Some("unsupported shareable_workspace_owners value"),
-        );
-
-        // The rejected PATCH must not persist any change.
-        let get = call(
-            app,
-            authenticated_request(
-                Method::GET,
-                &format!("/api/v2/organizations/{org_id}/settings/workspace-sharing"),
-                &session_token,
-            )?,
-        )
-        .await?;
-        assert_eq!(get.status(), StatusCode::OK);
-        let body = response_json(get).await?;
-        assert_eq!(
-            body.get("sharing_disabled").and_then(Value::as_bool),
-            Some(false),
-        );
-        assert_eq!(
-            body.get("shareable_workspace_owners")
-                .and_then(Value::as_str),
-            Some("everyone"),
         );
         Ok(())
     }

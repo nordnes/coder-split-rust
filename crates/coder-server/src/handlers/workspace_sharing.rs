@@ -1,49 +1,40 @@
 //! Workspace sharing settings handlers.
 //!
 //! Ported from `coder/enterprise/coderd/workspacesharing.go`.
+//!
+//! Storage note: the Rust layer intentionally deviates from Go's current
+//! schema here. Go upstream persists only a boolean `workspace_sharing_disabled`
+//! on the organization row, which cannot round-trip the full
+//! `shareable_workspace_owners` enum (`none` / `everyone` / `service_accounts`).
+//! We added a dedicated `workspace_sharing_mode TEXT` column so
+//! `"service_accounts"` is preserved end-to-end. The legacy boolean column is
+//! kept in lock-step for backward compatibility with any reader still bound to
+//! it; it will be dropped in a follow-up migration once every reader consumes
+//! the new column.
 
 use super::templates::resolve_organization;
 use super::*;
+use coder_core::WorkspaceSharingMode;
 use coder_core::api::{UpdateWorkspaceSharingSettingsRequest, WorkspaceSharingSettings};
 
-/// Accepted values for the Rust-layer `shareable_workspace_owners` enum.
+/// Renders the settings response for the given organization-level mode.
 ///
-/// The Go upstream (`coder/enterprise/coderd/workspacesharing.go`) persists
-/// only a boolean `workspace_sharing_disabled`; it has no notion of this
-/// enum. We therefore accept `"none"` ↔ `disabled=true` and `"everyone"` ↔
-/// `disabled=false`, and reject `"service_accounts"` at the API boundary
-/// until upstream grows storage for the full enum. Silently coercing
-/// `"service_accounts"` to `"everyone"` would swallow the caller's intent,
-/// so it is safer to 400.
-const SUPPORTED_SHAREABLE_WORKSPACE_OWNERS: &[&str] = &["none", "everyone"];
-
-/// Translates an accepted `shareable_workspace_owners` string into the
-/// persisted `workspace_sharing_disabled` boolean.
-///
-/// Callers must validate the input against `SUPPORTED_SHAREABLE_WORKSPACE_OWNERS`
-/// first; unknown values fall through to `false` here.
-fn owners_to_disabled(owners: &str) -> bool {
-    owners == "none"
-}
-
-/// Renders the settings response for the given organization-level value.
-///
-/// Globally disabled sharing is OR-ed with the per-org flag so clients see the
-/// effective state.
+/// Globally disabled sharing is OR-ed with the per-org mode so clients see the
+/// effective state: when deployment-wide sharing is off we always advertise
+/// `"none"` regardless of the persisted mode.
 fn render_settings(
     globally_disabled: bool,
-    organization_disabled: bool,
+    organization_mode: WorkspaceSharingMode,
 ) -> WorkspaceSharingSettings {
-    let effective_disabled = globally_disabled || organization_disabled;
-    let shareable_workspace_owners = if effective_disabled {
-        "none".to_owned()
+    let effective_mode = if globally_disabled {
+        WorkspaceSharingMode::None
     } else {
-        "everyone".to_owned()
+        organization_mode
     };
     WorkspaceSharingSettings {
         sharing_globally_disabled: globally_disabled,
-        sharing_disabled: effective_disabled,
-        shareable_workspace_owners,
+        sharing_disabled: effective_mode.disables_sharing(),
+        shareable_workspace_owners: effective_mode.as_str().to_owned(),
     }
 }
 
@@ -77,15 +68,15 @@ pub(crate) async fn get_workspace_sharing_settings(
     }
 
     let globally_disabled = state.config.disable_workspace_sharing;
-    let organization_disabled = state
+    let organization_mode = state
         .store
         .get_organization_sharing_settings(org.id)
         .await?
-        .unwrap_or(false);
+        .unwrap_or_default();
 
     Ok((
         StatusCode::OK,
-        Json(render_settings(globally_disabled, organization_disabled)),
+        Json(render_settings(globally_disabled, organization_mode)),
     )
         .into_response())
 }
@@ -125,56 +116,55 @@ pub(crate) async fn patch_workspace_sharing_settings(
         Err(error) => return Ok(invalid_json_response(error)),
     };
 
-    // Validate shareable_workspace_owners if provided. Go upstream only stores
-    // a boolean, so we only accept the two values that map cleanly onto it.
-    // `service_accounts` and any other enum values are rejected with 400 until
-    // the storage column grows support for them.
-    if let Some(ref owners) = request.shareable_workspace_owners
-        && !SUPPORTED_SHAREABLE_WORKSPACE_OWNERS.contains(&owners.as_str())
-    {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "unsupported shareable_workspace_owners value",
-                format!(
-                    "Must be one of: {}",
-                    SUPPORTED_SHAREABLE_WORKSPACE_OWNERS.join(", ")
-                ),
-            )),
-        )
-            .into_response());
-    }
-
     let globally_disabled = state.config.disable_workspace_sharing;
 
-    // Determine the new value. `shareable_workspace_owners` takes precedence
-    // over the deprecated `sharing_disabled` boolean. When neither is present
-    // we simply return the current settings without any write.
-    let new_disabled: Option<bool> = if let Some(owners) = request.shareable_workspace_owners {
-        Some(owners_to_disabled(&owners))
-    } else {
-        request.sharing_disabled
+    // Determine the new mode. `shareable_workspace_owners` takes precedence
+    // over the deprecated `sharing_disabled` boolean; the boolean is accepted
+    // for backward compatibility and maps `true → None`, `false → Everyone`
+    // (it has no way to express `service_accounts`). When neither is present
+    // we return the current settings unchanged.
+    let new_mode: Option<WorkspaceSharingMode> = match request.shareable_workspace_owners {
+        Some(owners) => match owners.parse::<WorkspaceSharingMode>() {
+            Ok(mode) => Some(mode),
+            Err(_) => {
+                return Ok((
+                    StatusCode::BAD_REQUEST,
+                    Json(ApiResponse::error(
+                        "unsupported shareable_workspace_owners value",
+                        "Must be one of: none, everyone, service_accounts",
+                    )),
+                )
+                    .into_response());
+            }
+        },
+        None => request.sharing_disabled.map(|disabled| {
+            if disabled {
+                WorkspaceSharingMode::None
+            } else {
+                WorkspaceSharingMode::Everyone
+            }
+        }),
     };
 
-    let Some(new_disabled) = new_disabled else {
-        let organization_disabled = state
+    let Some(new_mode) = new_mode else {
+        let organization_mode = state
             .store
             .get_organization_sharing_settings(org.id)
             .await?
-            .unwrap_or(false);
+            .unwrap_or_default();
         return Ok((
             StatusCode::OK,
-            Json(render_settings(globally_disabled, organization_disabled)),
+            Json(render_settings(globally_disabled, organization_mode)),
         )
             .into_response());
     };
 
     let persisted = state
         .store
-        .update_organization_sharing_settings(org.id, new_disabled)
+        .update_organization_sharing_settings(org.id, new_mode)
         .await?;
 
-    let Some(organization_disabled) = persisted else {
+    let Some(organization_mode) = persisted else {
         return Ok(not_found_response("Organization not found."));
     };
 
@@ -184,17 +174,21 @@ pub(crate) async fn patch_workspace_sharing_settings(
         ResourceKind::Organization,
         Some(&context.user),
         Some(org.id.to_string()),
-        if organization_disabled {
-            "disabled workspace sharing for organization"
-        } else {
-            "enabled workspace sharing for organization"
+        match organization_mode {
+            WorkspaceSharingMode::None => "disabled workspace sharing for organization",
+            WorkspaceSharingMode::Everyone => {
+                "enabled workspace sharing for organization (everyone)"
+            }
+            WorkspaceSharingMode::ServiceAccounts => {
+                "enabled workspace sharing for organization (service accounts)"
+            }
         },
     )
     .await;
 
     Ok((
         StatusCode::OK,
-        Json(render_settings(globally_disabled, organization_disabled)),
+        Json(render_settings(globally_disabled, organization_mode)),
     )
         .into_response())
 }
