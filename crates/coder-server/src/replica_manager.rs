@@ -46,7 +46,10 @@ const MIN_UPDATE_INTERVAL: Duration = Duration::from_millis(10);
 /// Factor applied to the update interval to determine when rows are
 /// considered stale.  Mirrors the Go `updateInterval` helper which uses
 /// `now - 3 * updateInterval` as the liveness threshold.
-const STALE_MULTIPLIER: u32 = 3;
+///
+/// Shared with the `/replicas` handler so the manager's prune policy
+/// and the handler's staleness filter cannot drift out of sync.
+pub(crate) const STALE_MULTIPLIER: u32 = 3;
 
 /// Narrow storage trait the manager depends on.  Separating this from the
 /// full `AppStore` keeps unit tests cheap: tests only need to implement

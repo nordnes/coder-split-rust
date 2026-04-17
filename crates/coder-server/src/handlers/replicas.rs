@@ -1,14 +1,10 @@
 //! Replica listing handler.
 
 use super::*;
-use crate::replica_manager::replica_from_row;
+use crate::replica_manager::{STALE_MULTIPLIER, replica_from_row};
 use coder_core::api::ReplicaResponse;
 use std::time::Duration;
 use time::OffsetDateTime;
-
-/// Staleness-cutoff multiplier.  Matches the `3 × UpdateInterval`
-/// pruning policy in `coder/enterprise/replicasync/replicasync.go`.
-const STALE_MULTIPLIER: u32 = 3;
 
 /// GET /api/v2/replicas — list active Coder replicas.
 ///
