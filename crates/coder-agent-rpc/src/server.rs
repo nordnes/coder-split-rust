@@ -29,24 +29,48 @@ const DRPC_ERR_INVALID_ARGUMENT: u64 = 3;
 /// Generic internal-server-error DRPC code.
 const DRPC_ERR_INTERNAL: u64 = 13;
 
+/// Maximum number of `InvokeMetadata` packets we will accept before the
+/// `Invoke`. This is a defensive cap against a peer spamming metadata frames.
+const MAX_INVOKE_METADATA_PACKETS: usize = 16;
+
 /// Drives a single DRPC stream to completion against `handler`.
 ///
-/// Reads the required `Invoke` + `Message` packets, dispatches, and writes
-/// the response followed by a `Close`. Control packets like `CloseSend` and
-/// `Cancel` are tolerated; unknown packet kinds trigger a protocol error.
+/// Reads any leading `InvokeMetadata` packets (per the DRPC spec these may
+/// precede an `Invoke` to carry context about the upcoming call; Phase 1
+/// does not consume metadata, but we must tolerate it for forward
+/// compatibility with Go clients), then the required `Invoke` + `Message`
+/// packets, dispatches, and writes the response followed by a `Close`.
+/// Control packets like `CloseSend` and `Cancel` are tolerated; unknown
+/// packet kinds trigger a protocol error.
 pub async fn serve_drpc_stream<S, H>(mut stream: S, handler: Arc<H>) -> DrpcResult<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
     H: AgentRpcHandler + ?Sized,
 {
     // -- 1. Invoke --------------------------------------------------------
-    let invoke = wire::read_packet(&mut stream).await?;
-    if invoke.kind != Kind::Invoke {
-        return Err(DrpcError::Protocol(format!(
-            "expected Invoke, got {:?}",
-            invoke.kind
-        )));
-    }
+    // Skip any leading `InvokeMetadata` packets; they carry context the
+    // Phase-1 handlers do not consume, but Go clients may still emit them.
+    let mut metadata_seen = 0usize;
+    let invoke = loop {
+        let p = wire::read_packet(&mut stream).await?;
+        match p.kind {
+            Kind::InvokeMetadata => {
+                metadata_seen += 1;
+                if metadata_seen > MAX_INVOKE_METADATA_PACKETS {
+                    return Err(DrpcError::Protocol(format!(
+                        "too many InvokeMetadata packets (>{MAX_INVOKE_METADATA_PACKETS}) before Invoke"
+                    )));
+                }
+                continue;
+            }
+            Kind::Invoke => break p,
+            other => {
+                return Err(DrpcError::Protocol(format!(
+                    "expected Invoke, got {other:?}"
+                )));
+            }
+        }
+    };
     let method = std::str::from_utf8(&invoke.data)
         .map_err(|e| DrpcError::Protocol(format!("invalid method utf-8: {e}")))?
         .to_owned();
@@ -261,6 +285,64 @@ mod tests {
         )
         .await?;
         let _ = agent::BatchUpdateAppHealthResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn leading_invoke_metadata_is_tolerated() -> DrpcResult<()> {
+        // Go clients may send one or more `InvokeMetadata` packets before the
+        // `Invoke` packet. The server must skip them and still complete the
+        // RPC successfully.
+        let (mut client, server) = duplex(64 * 1024);
+        let server_task =
+            tokio::spawn(async move { serve_drpc_stream(server, Arc::new(StubHandler)).await });
+
+        // Two leading metadata packets on the same stream id.
+        for i in 1..=2u64 {
+            wire::write_packet(
+                &mut client,
+                &Packet {
+                    kind: Kind::InvokeMetadata,
+                    id: PacketId {
+                        stream: 1,
+                        message: i,
+                    },
+                    data: b"ignored-metadata".to_vec(),
+                },
+            )
+            .await?;
+        }
+        wire::write_packet(
+            &mut client,
+            &Packet {
+                kind: Kind::Invoke,
+                id: PacketId {
+                    stream: 1,
+                    message: 3,
+                },
+                data: b"/coder.agent.v2.Agent/GetManifest".to_vec(),
+            },
+        )
+        .await?;
+        wire::write_packet(
+            &mut client,
+            &Packet {
+                kind: Kind::Message,
+                id: PacketId {
+                    stream: 1,
+                    message: 4,
+                },
+                data: agent::GetManifestRequest {}.encode_to_vec(),
+            },
+        )
+        .await?;
+
+        let resp = wire::read_packet(&mut client).await?;
+        assert_eq!(resp.kind, Kind::Message);
+        let close = wire::read_packet(&mut client).await?;
+        assert_eq!(close.kind, Kind::Close);
+        drop(client);
+        let _ = server_task.await;
         Ok(())
     }
 
