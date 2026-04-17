@@ -6582,6 +6582,41 @@ pub(crate) mod tests {
             Ok(Some(record))
         }
 
+        async fn list_provisioner_jobs_by_organization(
+            &self,
+            organization_id: Uuid,
+        ) -> Result<Vec<TemplateProvisionerJobRecord>, StorageError> {
+            let jobs = self
+                .provisioner_jobs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut filtered: Vec<TemplateProvisionerJobRecord> = jobs
+                .values()
+                .filter(|j| j.organization_id == organization_id)
+                .cloned()
+                .collect();
+            drop(jobs);
+
+            // Mirror the PostgresStore derivation from daemon-side prov_jobs
+            // so live status/worker/completion data is reflected.
+            if let Ok(prov_jobs) = self.prov_jobs.lock() {
+                for record in &mut filtered {
+                    if let Some(pj) = prov_jobs.get(&record.id) {
+                        record.started_at = pj.started_at;
+                        record.canceled_at = pj.canceled_at;
+                        record.completed_at = pj.completed_at;
+                        record.error = pj.error.clone();
+                        record.worker_id = pj.worker_id;
+                        record.updated_at = pj.updated_at;
+                        record.job_status = pj.job_status.as_str().to_owned();
+                    }
+                }
+            }
+
+            filtered.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            Ok(filtered)
+        }
+
         async fn cancel_template_provisioner_job(
             &self,
             job_id: Uuid,
@@ -21064,6 +21099,237 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::PRECONDITION_FAILED);
+        Ok(())
+    }
+
+    // -- list_provisioner_daemons tests --
+
+    #[tokio::test]
+    async fn list_provisioner_daemons_empty() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerdaemons"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert!(body.as_array().ok_or("expected array")?.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_provisioner_daemons_returns_seeded() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        // Seed via the store's upsert method.
+        let now = OffsetDateTime::now_utc();
+        store
+            .upsert_provisioner_daemon(UpsertProvisionerDaemonInput {
+                name: "daemon-1".to_owned(),
+                organization_id: org_id,
+                last_seen_at: now,
+                version: "v1.0.0".to_owned(),
+                api_version: "1.2".to_owned(),
+                provisioners: vec!["echo".to_owned()],
+                tags: HashMap::new(),
+                key_id: None,
+            })
+            .await?;
+        // Seed one in a different org to ensure filtering works.
+        store
+            .upsert_provisioner_daemon(UpsertProvisionerDaemonInput {
+                name: "other-org-daemon".to_owned(),
+                organization_id: Uuid::from_u128(0x1111_1111),
+                last_seen_at: now,
+                version: "v1.0.0".to_owned(),
+                api_version: "1.2".to_owned(),
+                provisioners: vec!["terraform".to_owned()],
+                tags: HashMap::new(),
+                key_id: None,
+            })
+            .await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerdaemons"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let daemons = body.as_array().ok_or("expected array")?;
+        assert_eq!(daemons.len(), 1);
+        assert_eq!(
+            daemons[0].get("name").and_then(Value::as_str),
+            Some("daemon-1")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn list_provisioner_daemons_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let org_id = Uuid::nil();
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerdaemons"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    // -- list_provisioner_jobs tests --
+
+    #[tokio::test]
+    async fn list_provisioner_jobs_returns_seeded() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(0x7001);
+        seed_provisioner_job(&store, job_id, org_id);
+        // Seed one in a different org to ensure filtering works.
+        seed_provisioner_job(&store, Uuid::from_u128(0x7002), Uuid::from_u128(0xAAAA));
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let jobs = body.as_array().ok_or("expected array")?;
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            jobs[0].get("id").and_then(Value::as_str),
+            Some(job_id.to_string().as_str())
+        );
+        Ok(())
+    }
+
+    // -- get_provisioner_job tests --
+
+    #[tokio::test]
+    async fn get_provisioner_job_happy_path() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(0x8001);
+        seed_provisioner_job(&store, job_id, org_id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("id").and_then(Value::as_str),
+            Some(job_id.to_string().as_str())
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_not_found() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(0x8999);
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_cross_org() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let job_id = Uuid::from_u128(0x8002);
+        // Seed job with a different org id.
+        seed_provisioner_job(&store, job_id, Uuid::from_u128(0xBEEF));
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_invalid_uuid() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/not-a-uuid"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_provisioner_job_requires_auth() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let job_id = Uuid::from_u128(0x8003);
+        let org_id = Uuid::nil();
+        let response = call(
+            app,
+            request(
+                Method::GET,
+                &format!("/api/v2/organizations/{org_id}/provisionerjobs/{job_id}"),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
         Ok(())
     }
 

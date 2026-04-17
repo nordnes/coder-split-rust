@@ -2819,6 +2819,15 @@ pub trait TemplateStore: Send + Sync {
         job_id: Uuid,
     ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError>;
 
+    /// Lists provisioner jobs for an organization, ordered by creation time
+    /// (descending). Mirrors Go's
+    /// `GetProvisionerJobsByOrganizationAndStatusWithQueuePositionAndProvisioner`
+    /// without the optional status/tags filters.
+    async fn list_provisioner_jobs_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<TemplateProvisionerJobRecord>, StorageError>;
+
     /// Cancels a provisioner job (template workflow).
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
 
@@ -4308,6 +4317,15 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         job_id: Uuid,
     ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError>;
+
+    /// Lists provisioner jobs for an organization, ordered by creation time
+    /// (descending). Mirrors Go's
+    /// `GetProvisionerJobsByOrganizationAndStatusWithQueuePositionAndProvisioner`
+    /// without the optional status/tags filters.
+    async fn list_provisioner_jobs_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<TemplateProvisionerJobRecord>, StorageError>;
 
     /// Cancels a provisioner job (template workflow).
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError>;
@@ -8876,6 +8894,13 @@ where
         job_id: Uuid,
     ) -> Result<Option<TemplateProvisionerJobRecord>, StorageError> {
         AppStore::find_provisioner_job(self, job_id).await
+    }
+
+    async fn list_provisioner_jobs_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<TemplateProvisionerJobRecord>, StorageError> {
+        AppStore::list_provisioner_jobs_by_organization(self, organization_id).await
     }
 
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {

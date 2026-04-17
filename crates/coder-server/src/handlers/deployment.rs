@@ -197,8 +197,30 @@ pub(crate) async fn list_provisioner_daemons(
         ));
     }
 
-    let empty: Vec<coder_core::ProvisionerDaemonResponse> = Vec::new();
-    Ok((StatusCode::OK, Json(empty)).into_response())
+    let daemons = state
+        .store
+        .get_provisioner_daemons_by_organization(org.id)
+        .await?;
+    let responses: Vec<coder_core::ProvisionerDaemonResponse> =
+        daemons.iter().map(daemon_record_to_response).collect();
+    Ok((StatusCode::OK, Json(responses)).into_response())
+}
+
+/// Converts a [`coder_core::provisioner::ProvisionerDaemonRecord`] to API response.
+fn daemon_record_to_response(
+    d: &coder_core::provisioner::ProvisionerDaemonRecord,
+) -> coder_core::ProvisionerDaemonResponse {
+    coder_core::ProvisionerDaemonResponse {
+        id: d.id,
+        organization_id: d.organization_id,
+        created_at: d.created_at,
+        last_seen_at: d.last_seen_at,
+        name: d.name.clone(),
+        version: d.version.clone(),
+        api_version: d.api_version.clone(),
+        provisioners: d.provisioners.clone(),
+        tags: d.tags.clone(),
+    }
 }
 
 pub(crate) async fn list_provisioner_jobs(
@@ -234,13 +256,20 @@ pub(crate) async fn list_provisioner_jobs(
         ));
     }
 
-    let empty: Vec<ProvisionerJobResponse> = Vec::new();
-    Ok((StatusCode::OK, Json(empty)).into_response())
+    let jobs = state
+        .store
+        .list_provisioner_jobs_by_organization(org.id)
+        .await?;
+    let responses: Vec<ProvisionerJobResponse> = jobs
+        .iter()
+        .map(super::templates::provisioner_job_response)
+        .collect();
+    Ok((StatusCode::OK, Json(responses)).into_response())
 }
 
 pub(crate) async fn get_provisioner_job(
     State(state): State<AppState>,
-    Path((organization, _job)): Path<(String, String)>,
+    Path((organization, job)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Result<Response, AppError> {
     let Some(context) = authenticate_request(&state, &headers).await? else {
@@ -270,10 +299,39 @@ pub(crate) async fn get_provisioner_job(
             "You are not authorized to view provisioner jobs.",
         ));
     }
-    Ok(not_found_detail_response(
-        "Resource not found or you do not have access to this resource",
-        "The provisioner domain is not yet implemented in this backend slice.",
-    ))
+
+    // Parse job UUID.
+    let job_id = match Uuid::from_str(&job) {
+        Ok(id) => id,
+        Err(_) => {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Invalid provisioner job ID",
+                    "The job path parameter must be a valid UUID.",
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    // Look up the provisioner job.
+    let Some(pj) = state.store.find_provisioner_job(job_id).await? else {
+        return Ok(resource_not_found_response());
+    };
+
+    // Verify the job belongs to the requested organization. Mirror Go's
+    // behavior of returning 404 rather than 403 for cross-org access to
+    // avoid leaking existence information.
+    if pj.organization_id != org.id {
+        return Ok(resource_not_found_response());
+    }
+
+    Ok((
+        StatusCode::OK,
+        Json(super::templates::provisioner_job_response(&pj)),
+    )
+        .into_response())
 }
 
 pub(crate) async fn cancel_provisioner_job(

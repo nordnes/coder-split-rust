@@ -8861,6 +8861,39 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_provisioner_jobs_by_organization(
+        &self,
+        organization_id: Uuid,
+    ) -> Result<Vec<TemplateProvisionerJobRecord>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredTemplateProvisionerJobRow>(
+            r#"
+            SELECT id, created_at, updated_at, started_at, canceled_at, completed_at,
+                   error, organization_id, initiator_id, provisioner::text AS provisioner,
+                   CASE
+                       WHEN completed_at IS NOT NULL AND canceled_at IS NOT NULL THEN 'canceled'
+                       WHEN completed_at IS NOT NULL AND error != '' THEN 'failed'
+                       WHEN completed_at IS NOT NULL THEN 'succeeded'
+                       WHEN canceled_at IS NOT NULL THEN 'canceling'
+                       WHEN started_at IS NOT NULL THEN 'running'
+                       ELSE 'pending'
+                   END AS job_status,
+                   file_id, type, input, worker_id, tags
+            FROM provisioner_jobs
+            WHERE organization_id = $1
+            ORDER BY created_at DESC
+            "#,
+        )
+        .bind(organization_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(template_provisioner_job_record_from_row)
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn cancel_template_provisioner_job(&self, job_id: Uuid) -> Result<bool, StorageError> {
         let result = sqlx::query(
             "UPDATE provisioner_jobs SET canceled_at = NOW(), completed_at = CASE WHEN worker_id IS NULL THEN NOW() ELSE completed_at END, updated_at = NOW() WHERE id = $1 AND canceled_at IS NULL AND completed_at IS NULL",
