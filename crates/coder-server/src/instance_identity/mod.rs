@@ -23,6 +23,7 @@ use async_trait::async_trait;
 
 pub(crate) mod aws;
 pub(crate) mod azure;
+pub(crate) mod azure_certs;
 pub(crate) mod gcp;
 
 pub(crate) use aws::AwsInstanceVerifier;
@@ -66,7 +67,8 @@ pub(crate) trait InstanceIdentityVerifier: Send + Sync {
         signature_b64: &str,
     ) -> Result<VerifiedInstance, VerifyError>;
 
-    /// Verifies an Azure attested-data JWT, returning the Azure `vmId`.
+    /// Verifies an Azure attested-data document (PKCS7/CMS envelope),
+    /// returning the Azure `vmId`.
     async fn verify_azure(&self, signature: &str) -> Result<VerifiedInstance, VerifyError>;
 
     /// Verifies a GCP instance-identity JWT, returning the GCE

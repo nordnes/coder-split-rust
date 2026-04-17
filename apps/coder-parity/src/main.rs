@@ -369,16 +369,10 @@ struct DepthRoute {
 /// `docs/remaining-behavioral-gaps.md` and kept in-sync with that document.
 /// Each entry maps a handler function name to a short note describing the
 /// remaining behavioral gap.
-const STUB_PARTIAL_HANDLERS: &[(&str, &str)] = &[
-    (
-        "post_template_version_dynamic_parameters_evaluate",
-        "Evaluates seeded parameters only; no Terraform module execution.",
-    ),
-    (
-        "post_workspace_agent_instance_identity_azure",
-        "PKCS7/Microsoft CA verification not yet implemented: the crypto verifier hard-fails every request, while the permissive path extracts `vmId` from the JWT payload without validating the signature.",
-    ),
-];
+const STUB_PARTIAL_HANDLERS: &[(&str, &str)] = &[(
+    "post_template_version_dynamic_parameters_evaluate",
+    "Evaluates seeded parameters only; no Terraform module execution.",
+)];
 
 fn run_depth(args: DepthArgs) -> Result<(), ParityError> {
     let (routes, summary) = build_depth_matrix(&args.rust_root)?;
@@ -2240,8 +2234,10 @@ mod tests {
     #[test]
     fn depth_classifier_flags_known_partial_handler() {
         let body = "{ Ok(Json(payload).into_response()) }";
-        let (status, notes) =
-            classify_depth("post_workspace_agent_instance_identity_azure", Some(body));
+        let (status, notes) = classify_depth(
+            "post_template_version_dynamic_parameters_evaluate",
+            Some(body),
+        );
         assert_eq!(status, DepthStatus::StubPartial);
         assert!(notes.is_some());
     }
