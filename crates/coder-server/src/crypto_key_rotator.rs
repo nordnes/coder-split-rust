@@ -46,8 +46,14 @@ fn token_duration(feature: CryptoKeyFeature) -> Duration {
 }
 
 /// Returns the number of secret bytes used for a newly-minted key. Mirrors
-/// the pre-hex byte counts Go uses in `generateNewSecret`.
-fn secret_byte_length(feature: CryptoKeyFeature) -> usize {
+/// the pre-hex byte counts Go uses in `generateNewSecret` (see
+/// `coder/coderd/cryptokeys/rotate.go` and `.../keys.go`).
+///
+/// Exposed so the lazy-creation path in the `/crypto-keys` handler can match
+/// the rotator's output exactly when it has to mint a key before the
+/// background rotator's initial sweep lands.
+#[must_use]
+pub fn secret_byte_length(feature: CryptoKeyFeature) -> usize {
     match feature {
         CryptoKeyFeature::WorkspaceAppsApiKey => 32,
         CryptoKeyFeature::WorkspaceAppsToken
@@ -624,6 +630,46 @@ mod tests {
         assert!(
             after_cleanup.iter().any(|k| k.sequence >= 2),
             "a replacement key must still exist"
+        );
+    }
+
+    #[tokio::test]
+    async fn insert_new_key_accounts_for_future_dated_rows() {
+        // Regression: `insert_new_key` once computed `max_sequence` from
+        // `list_by_feature`, whose production SQL filters out rows with
+        // `starts_at > NOW()`. A future-dated successor (the normal output
+        // of `rotate_key`) would therefore be invisible and the next insert
+        // would collide on the `(feature, sequence)` PRIMARY KEY. Using
+        // `list_all()` + a client-side filter avoids that.
+        let now = OffsetDateTime::now_utc();
+        let future = CryptoKeyRow {
+            feature: CryptoKeyFeature::WorkspaceAppsApiKey,
+            sequence: 42,
+            secret: vec![0xCC; 32],
+            // starts_at in the future → production `list_by_feature` excludes it.
+            starts_at: now + time::Duration::hours(1),
+            deletes_at: None,
+        };
+        let store = RotatorStore::new(vec![future]);
+
+        insert_new_key(store.as_ref(), CryptoKeyFeature::WorkspaceAppsApiKey, now)
+            .await
+            .expect("insert_new_key should succeed");
+
+        let snapshot = store.snapshot();
+        let sequences: Vec<i32> = snapshot
+            .iter()
+            .filter(|k| k.feature == CryptoKeyFeature::WorkspaceAppsApiKey)
+            .map(|k| k.sequence)
+            .collect();
+        assert_eq!(
+            sequences.len(),
+            2,
+            "future-dated predecessor must be preserved alongside the new key"
+        );
+        assert!(
+            sequences.contains(&43),
+            "new key must increment past the future-dated sequence (42 → 43); got {sequences:?}"
         );
     }
 }

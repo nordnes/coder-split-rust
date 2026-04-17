@@ -807,8 +807,13 @@ pub(crate) async fn workspace_proxy_crypto_keys(
     let mut keys = state.store.list_crypto_keys_by_feature(feature).await?;
 
     // If no keys exist, auto-generate one (lazy creation, matches Go behavior).
+    // Use the rotator's per-feature secret length so the lazy and the
+    // background-rotated paths produce identically-sized keys — otherwise a
+    // deployment that hits `/crypto-keys` before the rotator's initial sweep
+    // lands would serve a 32-byte `WorkspaceAppsToken` / `OidcConvert` /
+    // `TailnetResume` secret where Go's `generateNewSecret` emits 64 bytes.
     if keys.is_empty() {
-        let mut secret = vec![0u8; 32];
+        let mut secret = vec![0u8; crate::crypto_key_rotator::secret_byte_length(feature)];
         rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut secret);
         let new_key = coder_core::CryptoKeyRow {
             feature,
