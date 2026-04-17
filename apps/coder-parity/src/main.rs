@@ -1,7 +1,14 @@
 //! Route parity comparison tool between the Go and Rust Coder backends.
 //!
-//! Provides `inventory` and `compare` subcommands for tracking and validating
-//! API route porting progress.
+//! Provides three subcommands:
+//!
+//! * `inventory` — scan the Go and Rust trees and emit a route parity matrix
+//!   (route existence: `ported` vs `missing`).
+//! * `compare` — drive a black-box HTTP comparison between a live Go coderd and
+//!   a live Rust coderd using a shared request corpus.
+//! * `depth` — scan the Rust tree and emit a per-route implementation-depth
+//!   matrix (`complete` / `stub-partial` / `stub-501`), used to maintain
+//!   `crates/coder-server/PARITY_MATRIX.md`.
 
 #![forbid(unsafe_code)]
 
@@ -438,11 +445,15 @@ fn build_depth_matrix(rust_root: &Path) -> Result<(Vec<DepthRoute>, DepthSummary
 
     let handler_bodies = collect_handler_bodies(rust_root)?;
 
+    let mut missing_bodies: BTreeSet<String> = BTreeSet::new();
     let mut rows = Vec::with_capacity(handler_routes.len());
     for entry in &handler_routes {
         let body = handler_bodies
             .get(entry.handler.as_str())
             .map(String::as_str);
+        if body.is_none() {
+            missing_bodies.insert(entry.handler.clone());
+        }
         let (status, notes) = classify_depth(&entry.handler, body);
         rows.push(DepthRoute {
             live_path: entry.live_path.clone(),
@@ -452,6 +463,20 @@ fn build_depth_matrix(rust_root: &Path) -> Result<(Vec<DepthRoute>, DepthSummary
             notes,
             section: classify_section(&entry.live_path),
         });
+    }
+
+    // Surface a loud warning on stderr when any handler body couldn't be
+    // located under `crates/coder-server/src/{app.rs, handlers/**}`.  Missing
+    // bodies default to `complete` (see `classify_depth`), so they otherwise
+    // disappear silently and can mask regressions.
+    if !missing_bodies.is_empty() {
+        eprintln!(
+            "warning: {} handler body(ies) could not be located and were classified as complete by default:",
+            missing_bodies.len()
+        );
+        for name in &missing_bodies {
+            eprintln!("  - {name}");
+        }
     }
 
     rows.sort_by(|left, right| {
@@ -503,13 +528,15 @@ struct HandlerRoute {
 fn extract_build_router_body(content: &str) -> Option<String> {
     let start = content.find("pub fn build_router(")?;
     let rest = &content[start..];
-    // Find the opening `{` of the function body.
-    let open = rest.find('{')?;
-    let bytes = rest.as_bytes();
+    // Strip strings, char literals, and comments so braces inside them don't
+    // throw off the brace-depth counter.  Offsets are preserved so slices of
+    // the *original* content are returned.
+    let stripped = strip_rust_code_noise(rest);
+    let open = stripped.iter().position(|b| *b == b'{')?;
     let mut depth: i32 = 0;
     let mut index = open;
-    while index < bytes.len() {
-        match bytes[index] {
+    while index < stripped.len() {
+        match stripped[index] {
             b'{' => depth += 1,
             b'}' => {
                 depth -= 1;
@@ -586,9 +613,12 @@ fn collect_rust_handler_routes_from_content(
 fn extract_method_handlers(block: &str) -> Vec<(String, String)> {
     // Matches `get(fn_name)`, `post(fn_name)`, ... where `fn_name` is a bare
     // identifier.  Inline closures or trailing punctuation (e.g.
-    // `get(|| async { ... })`) are skipped.
+    // `get(|| async { ... })`) are skipped.  The leading `\b` ensures we don't
+    // match longer identifiers that merely end in a method keyword (e.g.
+    // `forget(x)` must not be read as `get(x)`; `dispatch(y)` must not be
+    // read as `patch(y)`).
     let Ok(regex) = compile_regex(
-        r"(?P<method>get|post|put|patch|delete|any)\(\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)\s*\)",
+        r"\b(?P<method>get|post|put|patch|delete|any)\(\s*(?P<handler>[A-Za-z_][A-Za-z0-9_]*)\s*\)",
     ) else {
         return Vec::new();
     };
@@ -652,9 +682,13 @@ fn collect_handler_bodies(rust_root: &Path) -> Result<BTreeMap<String, String>, 
 }
 
 fn extract_fn_body(content: &str, match_start: usize) -> Option<String> {
-    // Advance from match_start to the first `{` at brace-depth 0 (ignoring
+    // Advance from match_start to the first `{` at paren-depth 0 (ignoring
     // generic / parameter parens) — i.e. the start of the function body.
-    let bytes = content.as_bytes();
+    // Braces / parens / semicolons that live inside strings, char literals, or
+    // comments must be ignored, so we walk over a noise-stripped copy of the
+    // byte buffer.  Offsets are preserved so slices of `content` are correct.
+    let stripped = strip_rust_code_noise(content);
+    let bytes = &stripped;
     let mut index = match_start;
     let mut paren: i32 = 0;
     while index < bytes.len() {
@@ -686,6 +720,227 @@ fn extract_fn_body(content: &str, match_start: usize) -> Option<String> {
         index += 1;
     }
     None
+}
+
+/// Build a byte buffer of the same length as `content` where every byte that
+/// lives inside a string literal, char literal, `//` line comment, or
+/// `/* ... */` block comment (including nested block comments, per Rust's
+/// grammar) has been replaced with a space.  Newlines are preserved.  Byte
+/// offsets in the returned buffer are identical to those in `content`, so
+/// callers can use it for brace / paren / semicolon scanning and then index
+/// back into the original content.
+fn strip_rust_code_noise(content: &str) -> Vec<u8> {
+    let bytes = content.as_bytes();
+    let mut out = bytes.to_vec();
+    let mut index = 0usize;
+    while index < bytes.len() {
+        let b = bytes[index];
+
+        // Line comment: `//` to end of line.
+        if b == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'/' {
+            while index < bytes.len() && bytes[index] != b'\n' {
+                out[index] = b' ';
+                index += 1;
+            }
+            continue;
+        }
+
+        // Block comment (Rust supports nesting).
+        if b == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
+            out[index] = b' ';
+            out[index + 1] = b' ';
+            index += 2;
+            let mut depth: i32 = 1;
+            while index < bytes.len() && depth > 0 {
+                if bytes[index] == b'/' && index + 1 < bytes.len() && bytes[index + 1] == b'*' {
+                    depth += 1;
+                    out[index] = b' ';
+                    out[index + 1] = b' ';
+                    index += 2;
+                } else if bytes[index] == b'*'
+                    && index + 1 < bytes.len()
+                    && bytes[index + 1] == b'/'
+                {
+                    depth -= 1;
+                    out[index] = b' ';
+                    out[index + 1] = b' ';
+                    index += 2;
+                } else {
+                    if bytes[index] != b'\n' {
+                        out[index] = b' ';
+                    }
+                    index += 1;
+                }
+            }
+            continue;
+        }
+
+        // Raw string: `r"..."`, `r#"..."#`, `r##"..."##`, optionally prefixed
+        // with `b`.  Raw strings don't honor `\` escapes, so we only need to
+        // match the matching number of `#`s when looking for the close.
+        if let Some(prefix_len) = raw_string_prefix_len(bytes, index) {
+            let hashes = prefix_len
+                - 1
+                - usize::from(bytes[index] == b'b')
+                - usize::from(bytes[index] == b'r');
+            // Blank the opening delimiter.
+            for offset in 0..prefix_len {
+                if bytes[index + offset] != b'\n' {
+                    out[index + offset] = b' ';
+                }
+            }
+            index += prefix_len;
+            while index < bytes.len() {
+                if bytes[index] == b'"' {
+                    let mut ok = true;
+                    for k in 0..hashes {
+                        if index + 1 + k >= bytes.len() || bytes[index + 1 + k] != b'#' {
+                            ok = false;
+                            break;
+                        }
+                    }
+                    if ok {
+                        out[index] = b' ';
+                        for k in 0..hashes {
+                            out[index + 1 + k] = b' ';
+                        }
+                        index += 1 + hashes;
+                        break;
+                    }
+                }
+                if bytes[index] != b'\n' {
+                    out[index] = b' ';
+                }
+                index += 1;
+            }
+            continue;
+        }
+
+        // Plain string literal: `"..."`, optionally prefixed with `b`.
+        if b == b'"' || (b == b'b' && index + 1 < bytes.len() && bytes[index + 1] == b'"') {
+            let open_len = if b == b'b' { 2 } else { 1 };
+            for offset in 0..open_len {
+                out[index + offset] = b' ';
+            }
+            index += open_len;
+            while index < bytes.len() && bytes[index] != b'"' {
+                if bytes[index] == b'\\' && index + 1 < bytes.len() {
+                    out[index] = b' ';
+                    if bytes[index + 1] != b'\n' {
+                        out[index + 1] = b' ';
+                    }
+                    index += 2;
+                    continue;
+                }
+                if bytes[index] != b'\n' {
+                    out[index] = b' ';
+                }
+                index += 1;
+            }
+            if index < bytes.len() {
+                out[index] = b' ';
+                index += 1;
+            }
+            continue;
+        }
+
+        // Char literal vs lifetime.  A lifetime is `'` followed by an
+        // identifier char and NOT a closing `'` shortly after.  A char literal
+        // is `'x'`, `'\x'`, `'\xHH'`, `'\u{...}'`, etc.
+        if b == b'\'' {
+            if let Some(close) = char_literal_close(bytes, index) {
+                for offset in index..=close {
+                    if bytes[offset] != b'\n' {
+                        out[offset] = b' ';
+                    }
+                }
+                index = close + 1;
+                continue;
+            }
+            // Otherwise treat as a lifetime — leave bytes alone and continue.
+        }
+
+        index += 1;
+    }
+    out
+}
+
+/// If `bytes[index..]` is the opening delimiter of a Rust raw string literal
+/// (optionally prefixed with `b`), return the length of that opener.
+/// Otherwise return `None`.
+fn raw_string_prefix_len(bytes: &[u8], index: usize) -> Option<usize> {
+    let mut cursor = index;
+    if cursor < bytes.len() && bytes[cursor] == b'b' {
+        cursor += 1;
+    }
+    if cursor >= bytes.len() || bytes[cursor] != b'r' {
+        return None;
+    }
+    cursor += 1;
+    while cursor < bytes.len() && bytes[cursor] == b'#' {
+        cursor += 1;
+    }
+    if cursor < bytes.len() && bytes[cursor] == b'"' {
+        Some(cursor + 1 - index)
+    } else {
+        None
+    }
+}
+
+/// If `bytes[index]` begins a char literal, return the index of the closing
+/// `'`.  Returns `None` for lifetimes or for malformed input.
+fn char_literal_close(bytes: &[u8], index: usize) -> Option<usize> {
+    // `'` must be followed by at least one byte.
+    let next = index + 1;
+    if next >= bytes.len() {
+        return None;
+    }
+    // If the next byte is `\`, this is an escape sequence.  Scan forward to
+    // the matching `'` with a reasonable bound (Rust's longest escape is
+    // `\u{10FFFF}` — 10 bytes after the opening quote).
+    if bytes[next] == b'\\' {
+        let mut cursor = next + 1;
+        let limit = (index + 12).min(bytes.len());
+        while cursor < limit {
+            if bytes[cursor] == b'\'' {
+                return Some(cursor);
+            }
+            cursor += 1;
+        }
+        return None;
+    }
+    // Otherwise, a char literal is exactly one character followed by `'`.
+    // (UTF-8 multi-byte characters are allowed.)  Skip to the end of the
+    // current UTF-8 scalar, then check for the closing quote.
+    let scalar_end = utf8_scalar_end(bytes, next);
+    if scalar_end < bytes.len() && bytes[scalar_end] == b'\'' {
+        return Some(scalar_end);
+    }
+    // Lifetime (e.g. `'a`, `'static`) — no closing quote.
+    None
+}
+
+/// Given `bytes[index]` is the first byte of a UTF-8 scalar, return the
+/// index immediately after that scalar.
+fn utf8_scalar_end(bytes: &[u8], index: usize) -> usize {
+    if index >= bytes.len() {
+        return index;
+    }
+    let first = bytes[index];
+    let len = if first < 0x80 {
+        1
+    } else if first < 0xC0 {
+        // Continuation byte — treat as length 1 to avoid infinite loops on
+        // malformed input.
+        1
+    } else if first < 0xE0 {
+        2
+    } else if first < 0xF0 {
+        3
+    } else {
+        4
+    };
+    index + len
 }
 
 fn classify_depth(handler_name: &str, body: Option<&str>) -> (DepthStatus, Option<String>) {
@@ -1652,7 +1907,7 @@ mod tests {
         classify_depth, classify_section, collect_rust_handler_routes_from_content,
         collect_rust_routes_from_content, extract_build_router_body, extract_fn_body,
         extract_method_handlers, extract_rust_methods, go_live_path, join_path, matches_scope,
-        normalize_path, parse_go_routes,
+        normalize_path, parse_go_routes, strip_rust_code_noise,
     };
 
     #[test]
@@ -2107,5 +2362,105 @@ mod tests {
         );
         assert_eq!(classify_section("/healthz"), "Root / Health");
         assert_eq!(classify_section("/scim/v2/Users"), "SCIM");
+    }
+
+    #[test]
+    fn strip_rust_code_noise_blanks_string_contents() {
+        // Braces inside string literals must be erased so brace counters see a
+        // balanced skeleton.
+        let stripped = strip_rust_code_noise(r#"let a = "}{"; let b = 1;"#);
+        let text = String::from_utf8_lossy(&stripped);
+        assert!(
+            !text.contains('}'),
+            "found `}}` in stripped output: {text:?}"
+        );
+        assert!(
+            !text.contains('{'),
+            "found `{{` in stripped output: {text:?}"
+        );
+        assert!(text.contains("let a ="));
+        assert!(text.contains("let b = 1"));
+    }
+
+    #[test]
+    fn strip_rust_code_noise_blanks_block_comment_contents() {
+        let stripped = strip_rust_code_noise("fn a() {/* unbalanced } */}\n");
+        let text = String::from_utf8_lossy(&stripped);
+        // Exactly one `{` and one `}` must remain — the function's own.
+        assert_eq!(text.matches('{').count(), 1);
+        assert_eq!(text.matches('}').count(), 1);
+    }
+
+    #[test]
+    fn strip_rust_code_noise_handles_nested_block_comments() {
+        let stripped = strip_rust_code_noise("fn a() { /* outer /* inner } */ } */ }");
+        let text = String::from_utf8_lossy(&stripped);
+        // The function body should retain a single matched pair of braces.
+        assert_eq!(text.matches('{').count(), 1);
+        assert_eq!(text.matches('}').count(), 1);
+    }
+
+    #[test]
+    fn strip_rust_code_noise_distinguishes_lifetimes_and_chars() {
+        // Lifetimes (`'a`) must not be blanked; char literals (`'}'`) must be.
+        let stripped = strip_rust_code_noise("fn f<'a>() -> &'a str { let c = '}'; \"ok\" }");
+        let text = String::from_utf8_lossy(&stripped);
+        // Lifetimes preserved (apostrophes intact in `'a`).
+        assert!(text.contains("'a"));
+        // The brace-inside-char-literal must be gone.
+        assert_eq!(text.matches('{').count(), 1);
+        assert_eq!(text.matches('}').count(), 1);
+    }
+
+    #[test]
+    fn strip_rust_code_noise_handles_raw_strings() {
+        // `r#"..."#` with an unbalanced `}` inside.
+        let stripped = strip_rust_code_noise(r######"let s = r#"}"#; let x = 1;"######);
+        let text = String::from_utf8_lossy(&stripped);
+        assert!(!text.contains('}'), "unexpected `}}` in {text:?}");
+        assert!(text.contains("let s ="));
+        assert!(text.contains("let x = 1"));
+    }
+
+    #[test]
+    fn extract_build_router_body_tolerates_braces_in_strings() {
+        // A route path containing `{user}` must not confuse the brace-counter.
+        let content = r#"
+            pub fn build_router(state: AppState) -> Router {
+                Router::new()
+                    .route("/users/{user}", get(get_user))
+                    .route("/workspaces/{workspace}/resolve", post(resolve_workspace))
+            }
+            fn trailer() {}
+        "#;
+        let body = extract_build_router_body(content).unwrap_or_default();
+        assert!(!body.is_empty(), "expected non-empty body");
+        assert!(body.contains("Router::new()"));
+        assert!(body.contains(".route(\"/users/{user}\", get(get_user))"));
+        assert!(!body.contains("fn trailer"));
+    }
+
+    #[test]
+    fn extract_fn_body_tolerates_unbalanced_braces_in_strings_and_comments() {
+        let content = r#"fn f() {
+            // } not a real close
+            let s = "{";
+            let t = "}";
+            42
+        }"#;
+        let body = extract_fn_body(content, 0).unwrap_or_default();
+        assert!(!body.is_empty(), "expected non-empty body");
+        // Body should include the full function, not truncate at the comment or strings.
+        assert!(body.contains("let s = \"{\""));
+        assert!(body.contains("let t = \"}\""));
+        assert!(body.contains("42"));
+    }
+
+    #[test]
+    fn extract_method_handlers_requires_word_boundary() {
+        // `forget(x)` must NOT be matched as `get(x)`; similarly `dispatch(y)`
+        // must NOT be matched as `patch(y)`.
+        let handlers = extract_method_handlers("forget(not_a_handler); dispatch(nope);");
+        assert!(handlers.is_empty(), "false positives: {handlers:?}");
     }
 }
