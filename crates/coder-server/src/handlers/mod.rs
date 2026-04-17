@@ -331,6 +331,7 @@ fn strip_paired_delimiter(input: &str, delim: &str) -> String {
     s
 }
 
+pub(crate) mod agent_rpc_live;
 pub(crate) mod agents;
 pub(crate) mod aibridge;
 pub(crate) mod appearance;

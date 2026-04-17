@@ -1482,6 +1482,25 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn update_workspace_agent_startup(
+        &self,
+        _agent_id: Uuid,
+        _version: &str,
+        _expanded_directory: &str,
+        _subsystems: &[&str],
+        _api_version: &str,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_workspace_app_health(
+        &self,
+        _app_id: Uuid,
+        _health: &str,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn upsert_workspace_agent_metadata(
         &self,
         _agent_id: Uuid,
