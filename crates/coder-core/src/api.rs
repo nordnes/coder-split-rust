@@ -130,11 +130,22 @@ pub struct ConfigOption {
     pub description: &'static str,
 }
 
+/// Metadata describing a single requestable API key scope.
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+pub struct ApiKeyScopeMetadata {
+    /// Scope identifier (e.g. `workspace:read`, `coder:all`).
+    pub name: String,
+    /// Human-readable description of what the scope grants.
+    pub description: String,
+    /// Resource names unlocked by this scope (e.g. `workspace`, `template`).
+    pub resources: Vec<String>,
+}
+
 /// Available low-level API key scopes.
 #[derive(Clone, Debug, Default, Serialize, PartialEq, Eq)]
 pub struct ExternalApiKeyScopes {
-    /// Requestable external scopes.
-    pub external: Vec<String>,
+    /// Requestable external scopes, each with its descriptive metadata.
+    pub external: Vec<ApiKeyScopeMetadata>,
 }
 
 /// Safe experiments exposed by the deployment.
@@ -2196,30 +2207,6 @@ pub struct UserQuietHoursScheduleResponse {
 pub struct UpdateUserQuietHoursScheduleRequest {
     /// Cron schedule string with timezone, e.g. `CRON_TZ=America/Chicago 0 0 * * *`.
     pub schedule: String,
-}
-
-// ---------------------------------------------------------------------------
-// Replicas
-// ---------------------------------------------------------------------------
-
-/// A running Coder replica instance.
-#[derive(Clone, Debug, Serialize)]
-pub struct Replica {
-    /// Unique identifier of this replica.
-    pub id: Uuid,
-    /// Hostname of the replica.
-    pub hostname: String,
-    /// When the replica was registered.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    /// Relay address used for DERP traffic.
-    pub relay_address: String,
-    /// DERP region identifier for this replica.
-    pub region_id: i32,
-    /// Error message if the replica is unhealthy (empty string if healthy).
-    pub error: String,
-    /// Database latency in nanoseconds.
-    pub database_latency: i64,
 }
 
 // ---------------------------------------------------------------------------

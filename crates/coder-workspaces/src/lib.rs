@@ -1438,6 +1438,20 @@ pub trait LifecycleStore: Send + Sync + 'static {
         &self,
         input: coder_core::ports::CreateWorkspaceBuildInput,
     ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError>;
+
+    /// Looks up a template version by identifier, used to obtain the
+    /// provisioner job whose tags seed lifecycle builds.
+    async fn find_template_version_by_id(
+        &self,
+        version_id: uuid::Uuid,
+    ) -> Result<Option<coder_core::TemplateVersionRecord>, StorageError>;
+
+    /// Looks up a provisioner job by identifier, used to copy prior tags
+    /// onto a lifecycle build.
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<coder_core::template::ProvisionerJobRecord>, StorageError>;
 }
 
 #[async_trait]
@@ -1476,6 +1490,20 @@ impl LifecycleStore for dyn AppStore {
     ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
         AppStore::insert_workspace_build(self, input).await
     }
+
+    async fn find_template_version_by_id(
+        &self,
+        version_id: uuid::Uuid,
+    ) -> Result<Option<coder_core::TemplateVersionRecord>, StorageError> {
+        AppStore::find_template_version_by_id(self, version_id).await
+    }
+
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<coder_core::template::ProvisionerJobRecord>, StorageError> {
+        AppStore::find_provisioner_job(self, id).await
+    }
 }
 
 #[async_trait]
@@ -1513,6 +1541,20 @@ impl<T: LifecycleStore + ?Sized> LifecycleStore for Arc<T> {
         input: coder_core::ports::CreateWorkspaceBuildInput,
     ) -> Result<coder_core::ports::WorkspaceBuildRecord, StorageError> {
         (**self).insert_workspace_build(input).await
+    }
+
+    async fn find_template_version_by_id(
+        &self,
+        version_id: uuid::Uuid,
+    ) -> Result<Option<coder_core::TemplateVersionRecord>, StorageError> {
+        (**self).find_template_version_by_id(version_id).await
+    }
+
+    async fn get_provisioner_job_by_id(
+        &self,
+        id: uuid::Uuid,
+    ) -> Result<Option<coder_core::template::ProvisionerJobRecord>, StorageError> {
+        (**self).get_provisioner_job_by_id(id).await
     }
 }
 
@@ -1701,6 +1743,30 @@ pub async fn lifecycle_tick_once<S: LifecycleStore>(
     Ok(stats)
 }
 
+/// Copy the template version's provisioner-job tags, then normalize via
+/// [`coder_core::mutate_tags`] so lifecycle builds (autostart/autostop) can
+/// still be acquired by tagged daemons.
+///
+/// Ports the Go `wsbuilder.getClassicProvisionerTags` helper (see
+/// `coder/coderd/wsbuilder/wsbuilder.go`). Falls back to an empty base set
+/// when the template version or its provisioner job is missing, matching
+/// Go's graceful fallback.
+async fn lifecycle_provisioner_tags<S: LifecycleStore>(
+    store: &S,
+    owner_id: uuid::Uuid,
+    template_version_id: uuid::Uuid,
+) -> Result<std::collections::HashMap<String, String>, StorageError> {
+    let mut prior: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    if let Some(version) = store
+        .find_template_version_by_id(template_version_id)
+        .await?
+        && let Some(job) = store.get_provisioner_job_by_id(version.job_id).await?
+    {
+        prior = job.tags;
+    }
+    Ok(coder_core::mutate_tags(owner_id, &[&prior]))
+}
+
 /// Creates a workspace build to start a workspace.
 async fn trigger_workspace_start<S: LifecycleStore>(
     store: &S,
@@ -1718,6 +1784,11 @@ async fn trigger_workspace_start<S: LifecycleStore>(
         .ok_or_else(|| StorageError::not_found("workspace not found"))?;
 
     let job_id = uuid::Uuid::new_v4();
+    // Copy prior template-version job tags so tagged daemons can acquire
+    // lifecycle builds, then normalize via `mutate_tags`. Mirrors Go's
+    // `wsbuilder.getClassicProvisionerTags`.
+    let tags =
+        lifecycle_provisioner_tags(store, ws.owner_id, latest_build.template_version_id).await?;
     let _job = store
         .create_provisioner_job(coder_core::CreateProvisionerJobInput {
             id: job_id,
@@ -1729,7 +1800,7 @@ async fn trigger_workspace_start<S: LifecycleStore>(
             file_id: None,
             job_type: "workspace_build".to_owned(),
             input: serde_json::json!({}),
-            tags: std::collections::HashMap::new(),
+            tags,
         })
         .await?;
 
@@ -1774,6 +1845,11 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
         .ok_or_else(|| StorageError::not_found("workspace not found"))?;
 
     let job_id = uuid::Uuid::new_v4();
+    // Copy prior template-version job tags so tagged daemons can acquire
+    // lifecycle builds, then normalize via `mutate_tags`. Mirrors Go's
+    // `wsbuilder.getClassicProvisionerTags`.
+    let tags =
+        lifecycle_provisioner_tags(store, ws.owner_id, latest_build.template_version_id).await?;
     let _job = store
         .create_provisioner_job(coder_core::CreateProvisionerJobInput {
             id: job_id,
@@ -1785,7 +1861,7 @@ async fn trigger_workspace_stop<S: LifecycleStore>(
             file_id: None,
             job_type: "workspace_build".to_owned(),
             input: serde_json::json!({}),
-            tags: std::collections::HashMap::new(),
+            tags,
         })
         .await?;
 
@@ -3732,6 +3808,10 @@ mod tests {
         workspaces: Vec<WorkspaceTransitionRow>,
         latest_build: Option<coder_core::ports::WorkspaceBuildRecord>,
         inserted_builds: std::sync::Mutex<Vec<coder_core::ports::CreateWorkspaceBuildInput>>,
+        inserted_jobs: std::sync::Mutex<Vec<coder_core::CreateProvisionerJobInput>>,
+        template_versions: std::collections::HashMap<uuid::Uuid, coder_core::TemplateVersionRecord>,
+        provisioner_jobs:
+            std::collections::HashMap<uuid::Uuid, coder_core::template::ProvisionerJobRecord>,
         fail_transition: AtomicBool,
         fail_insert: AtomicBool,
     }
@@ -3742,6 +3822,9 @@ mod tests {
                 workspaces,
                 latest_build: Some(make_build_record()),
                 inserted_builds: std::sync::Mutex::new(Vec::new()),
+                inserted_jobs: std::sync::Mutex::new(Vec::new()),
+                template_versions: std::collections::HashMap::new(),
+                provisioner_jobs: std::collections::HashMap::new(),
                 fail_transition: AtomicBool::new(false),
                 fail_insert: AtomicBool::new(false),
             }
@@ -3762,6 +3845,68 @@ mod tests {
                 .lock()
                 .unwrap_or_else(|p| p.into_inner())
                 .clone()
+        }
+
+        fn inserted_jobs(&self) -> Vec<coder_core::CreateProvisionerJobInput> {
+            self.inserted_jobs
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clone()
+        }
+
+        /// Seed a template version whose `job_id` points at `prior_tags` so
+        /// lifecycle builds copy those tags before normalization.
+        fn with_prior_job_tags(
+            mut self,
+            template_version_id: uuid::Uuid,
+            prior_tags: std::collections::HashMap<String, String>,
+        ) -> Self {
+            let job_id = uuid::Uuid::new_v4();
+            self.template_versions.insert(
+                template_version_id,
+                coder_core::TemplateVersionRecord {
+                    id: template_version_id,
+                    template_id: None,
+                    organization_id: uuid::Uuid::new_v4(),
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    name: "v1".to_owned(),
+                    readme: String::new(),
+                    job_id,
+                    created_by: uuid::Uuid::new_v4(),
+                    external_auth_providers: serde_json::json!([]),
+                    message: String::new(),
+                    archived: false,
+                    source_example_id: None,
+                    has_ai_task: None,
+                    has_external_agent: None,
+                    created_by_avatar_url: String::new(),
+                    created_by_username: String::new(),
+                    created_by_name: String::new(),
+                },
+            );
+            self.provisioner_jobs.insert(
+                job_id,
+                coder_core::template::ProvisionerJobRecord {
+                    id: job_id,
+                    created_at: OffsetDateTime::now_utc(),
+                    updated_at: OffsetDateTime::now_utc(),
+                    started_at: None,
+                    canceled_at: None,
+                    completed_at: None,
+                    error: String::new(),
+                    organization_id: uuid::Uuid::new_v4(),
+                    initiator_id: uuid::Uuid::new_v4(),
+                    provisioner: "echo".to_owned(),
+                    job_status: "succeeded".to_owned(),
+                    file_id: None,
+                    tags: prior_tags,
+                    worker_id: None,
+                    input: serde_json::json!({}),
+                    job_type: "template_version_import".to_owned(),
+                },
+            );
+            self
         }
     }
 
@@ -3832,6 +3977,9 @@ mod tests {
             &self,
             input: coder_core::CreateProvisionerJobInput,
         ) -> Result<coder_core::template::ProvisionerJobRecord, StorageError> {
+            if let Ok(mut jobs) = self.inserted_jobs.lock() {
+                jobs.push(input.clone());
+            }
             Ok(coder_core::template::ProvisionerJobRecord {
                 id: input.id,
                 created_at: input.created_at,
@@ -3845,11 +3993,25 @@ mod tests {
                 provisioner: input.provisioner,
                 job_status: "pending".to_owned(),
                 file_id: input.file_id,
-                tags: std::collections::HashMap::new(),
+                tags: input.tags,
                 worker_id: None,
                 input: input.input,
                 job_type: input.job_type,
             })
+        }
+
+        async fn find_template_version_by_id(
+            &self,
+            version_id: uuid::Uuid,
+        ) -> Result<Option<coder_core::TemplateVersionRecord>, StorageError> {
+            Ok(self.template_versions.get(&version_id).cloned())
+        }
+
+        async fn get_provisioner_job_by_id(
+            &self,
+            id: uuid::Uuid,
+        ) -> Result<Option<coder_core::template::ProvisionerJobRecord>, StorageError> {
+            Ok(self.provisioner_jobs.get(&id).cloned())
         }
 
         async fn insert_workspace_build(
@@ -4135,5 +4297,97 @@ mod tests {
         let w = window.unwrap_or_else(|| unreachable!());
         // Unrecognised timezone falls back to treating the hour as UTC.
         assert_eq!(w.start_hour, 7);
+    }
+
+    /// Lifecycle autostart/autostop must copy the template version's prior
+    /// provisioner-job tags before calling `mutate_tags` so tagged daemons
+    /// can still acquire lifecycle builds. Regression test for the bug where
+    /// lifecycle builds were tagged as untagged-org-scope and therefore only
+    /// acquirable by the bare untagged daemon.
+    #[tokio::test]
+    async fn lifecycle_autostop_copies_template_version_job_tags() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "start".to_owned();
+        ws.build_deadline = Some(now - time::Duration::minutes(5));
+        ws.job_status = "succeeded".to_owned();
+
+        let template_version_id = make_build_record().template_version_id;
+        let mut latest_build = make_build_record();
+        latest_build.template_version_id = template_version_id;
+
+        let prior_tags = std::collections::HashMap::from([
+            ("env".to_owned(), "prod".to_owned()),
+            ("region".to_owned(), "us-east".to_owned()),
+        ]);
+
+        let mut store = MockLifecycleStore::new(vec![ws.clone()])
+            .with_prior_job_tags(template_version_id, prior_tags.clone());
+        store.latest_build = Some(latest_build);
+
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+
+        let jobs = store.inserted_jobs();
+        assert_eq!(jobs.len(), 1, "one provisioner job should be created");
+        let tags = &jobs[0].tags;
+        assert_eq!(tags.get("env"), Some(&"prod".to_owned()));
+        assert_eq!(tags.get("region"), Some(&"us-east".to_owned()));
+        assert_eq!(
+            tags.get(coder_core::TAG_SCOPE),
+            Some(&coder_core::SCOPE_ORGANIZATION.to_owned())
+        );
+        assert_eq!(tags.get(coder_core::TAG_OWNER), Some(&String::new()));
+
+        // A tagged daemon advertising the prior tags (plus the normalized
+        // scope/owner) must be allowed to acquire the resulting job.
+        let mut daemon_tags = prior_tags.clone();
+        daemon_tags.insert(
+            coder_core::TAG_SCOPE.to_owned(),
+            coder_core::SCOPE_ORGANIZATION.to_owned(),
+        );
+        daemon_tags.insert(coder_core::TAG_OWNER.to_owned(), String::new());
+        assert!(coder_core::provisioner_tagset_matches(&daemon_tags, tags));
+
+        // A bare untagged daemon (only scope/owner) must NOT match a tagged
+        // job — it is missing env/region.
+        let bare_daemon = std::collections::HashMap::from([
+            (
+                coder_core::TAG_SCOPE.to_owned(),
+                coder_core::SCOPE_ORGANIZATION.to_owned(),
+            ),
+            (coder_core::TAG_OWNER.to_owned(), String::new()),
+        ]);
+        assert!(!coder_core::provisioner_tagset_matches(&bare_daemon, tags));
+    }
+
+    /// When the template version or its prior job is missing (e.g., pruned),
+    /// lifecycle builds fall back to the bare untagged set — matching Go's
+    /// `wsbuilder.getClassicProvisionerTags` graceful fallback.
+    #[tokio::test]
+    async fn lifecycle_autostart_falls_back_to_untagged_when_prior_job_missing() {
+        let now = OffsetDateTime::now_utc();
+        let mut ws = make_transition_row();
+        ws.build_transition = "stop".to_owned();
+        ws.owner_status = "active".to_owned();
+        ws.template_allow_user_autostart = true;
+        ws.autostart_schedule = Some("* * * * *".to_owned());
+        ws.job_status = "succeeded".to_owned();
+        ws.job_completed_at = Some(now - time::Duration::hours(1));
+
+        // Default MockLifecycleStore has no template versions / jobs seeded.
+        let store = MockLifecycleStore::new(vec![ws]);
+        let result = lifecycle_tick_once(&store, now, None).await;
+        assert!(result.is_ok());
+
+        let jobs = store.inserted_jobs();
+        assert_eq!(jobs.len(), 1);
+        let tags = &jobs[0].tags;
+        assert_eq!(tags.len(), 2, "only scope + owner should be set");
+        assert_eq!(
+            tags.get(coder_core::TAG_SCOPE),
+            Some(&coder_core::SCOPE_ORGANIZATION.to_owned())
+        );
+        assert_eq!(tags.get(coder_core::TAG_OWNER), Some(&String::new()));
     }
 }

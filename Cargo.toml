@@ -52,6 +52,7 @@ prost-types = "0.14"
 protoc-bin-vendored = "3.1"
 rand = "0.8"
 regex = "1.11"
+semver = "1.0"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rsa = { version = "0.9", default-features = false, features = ["sha2"] }
 x509-parser = { version = "0.16", default-features = false }
@@ -79,6 +80,7 @@ url = { version = "2.5", features = ["serde"] }
 uuid = { version = "1.8", features = ["serde", "v4"] }
 p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"] }
 web-push = "0.11"
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "builder", "pool", "hostname"] }
 yamux = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
 

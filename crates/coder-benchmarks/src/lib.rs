@@ -2138,6 +2138,21 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn get_organization_sharing_settings(
+        &self,
+        _organization_id: Uuid,
+    ) -> Result<Option<coder_core::WorkspaceSharingMode>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn update_organization_sharing_settings(
+        &self,
+        _organization_id: Uuid,
+        _mode: coder_core::WorkspaceSharingMode,
+    ) -> Result<Option<coder_core::WorkspaceSharingMode>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn batch_insert_workspace_build_parameters(
         &self,
         _params: Vec<WorkspaceBuildParameterRecord>,
@@ -2337,6 +2352,39 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn insert_coderd_replica(
+        &self,
+        _input: coder_core::InsertCoderdReplicaInput,
+    ) -> Result<coder_core::CoderdReplicaRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn refresh_coderd_replica(
+        &self,
+        _id: Uuid,
+        _updated_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn delete_coderd_replica(&self, _id: Uuid) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn list_coderd_replicas(
+        &self,
+        _updated_after: OffsetDateTime,
+    ) -> Result<Vec<coder_core::CoderdReplicaRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn prune_stale_coderd_replicas(
+        &self,
+        _older_than: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn list_crypto_keys_by_feature(
         &self,
         _feature: coder_core::enums::CryptoKeyFeature,
@@ -2363,6 +2411,22 @@ impl AppStore for BenchStore {
         &self,
         _filter: coder_core::api::AIBridgeModelsFilter,
     ) -> Result<Vec<String>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn get_quota_allowance_for_user(
+        &self,
+        _user_id: Uuid,
+        _organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn get_quota_consumed_for_user(
+        &self,
+        _owner_id: Uuid,
+        _organization_id: Uuid,
+    ) -> Result<i64, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
 }

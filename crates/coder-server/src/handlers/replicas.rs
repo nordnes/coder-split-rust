@@ -1,13 +1,24 @@
 //! Replica listing handler.
 
 use super::*;
-use coder_core::api::Replica;
+use crate::replica_manager::{replica_from_row, stale_cutoff};
+use coder_core::api::ReplicaResponse;
+use std::time::Duration;
+use time::OffsetDateTime;
 
 /// GET /api/v2/replicas — list active Coder replicas.
 ///
-/// In a high-availability deployment this would return all primary replicas
-/// from the replica manager.  Since the replica manager service is not yet
-/// implemented, we return an empty array.
+/// Ports `coder/enterprise/coderd/replicas.go:22`
+/// (`(*API).replicas`).  In the Go code the set of replicas is provided
+/// by the in-memory `replicasync.Manager`; here we query the database
+/// view that the manager populates, which is equivalent for `AllPrimary`.
+///
+/// The staleness cut-off is derived from
+/// `ServerConfig::worker.replica_update_interval_secs` so this handler
+/// and the replica manager stay in sync: the manager refreshes every
+/// `replica_update_interval_secs` and prunes rows older than
+/// `3 × replica_update_interval_secs`; the handler applies the same
+/// cut-off when filtering query results.
 pub(crate) async fn get_replicas(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -30,10 +41,12 @@ pub(crate) async fn get_replicas(
         return Ok(resource_not_found_response());
     }
 
-    // TODO: Once a replicaManager service exists, query it for all primary
-    // replicas and convert them to `Replica` responses.  For now, return an
-    // empty array matching the Go single-replica / no-HA behaviour.
-    let replicas: Vec<Replica> = Vec::new();
+    let update_interval = Duration::from_secs(state.config.worker.replica_update_interval_secs);
+    // Share the same staleness formula as the replica manager so the
+    // handler's filter and the manager's prune policy cannot drift.
+    let threshold = OffsetDateTime::now_utc() - stale_cutoff(update_interval);
+    let rows = state.store.list_coderd_replicas(threshold).await?;
+    let replicas: Vec<ReplicaResponse> = rows.iter().map(replica_from_row).collect();
 
     Ok((StatusCode::OK, Json(replicas)).into_response())
 }

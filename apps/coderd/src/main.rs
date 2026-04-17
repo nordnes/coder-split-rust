@@ -538,6 +538,22 @@ struct ServerArgs {
     #[arg(long, env = "CODER_UPDATE_CHECK", default_value_t = false)]
     update_check: bool,
 
+    /// Interval in seconds between GitHub release polls for update checks.
+    #[arg(
+        long,
+        env = "CODER_UPDATE_CHECK_INTERVAL_SECS",
+        default_value_t = 24 * 60 * 60
+    )]
+    update_check_interval_secs: u64,
+
+    /// URL used to fetch the latest Coder release.
+    #[arg(
+        long,
+        env = "CODER_UPDATE_CHECK_URL",
+        default_value = "https://api.github.com/repos/coder/coder/releases/latest"
+    )]
+    update_check_url: String,
+
     /// Algorithm used for SSH key generation.
     #[arg(long, env = "CODER_SSH_KEYGEN_ALGORITHM", default_value = "ed25519")]
     ssh_keygen_algorithm: String,
@@ -644,6 +660,16 @@ struct ServerArgs {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     lifecycle_check_interval_secs: u64,
+
+    /// Heartbeat interval in seconds for the HA replica manager. The
+    /// `/replicas` handler uses `3 ×` this value as the staleness cut-off.
+    #[arg(
+        long,
+        env = "CODER_REPLICA_UPDATE_INTERVAL",
+        default_value_t = 15,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    replica_update_interval_secs: u64,
 
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
@@ -902,6 +928,26 @@ async fn run() -> Result<(), MainError> {
         CancellationToken::new(),
     );
 
+    // Start the replica manager: registers this coderd instance in the
+    // `replicas` table on startup, refreshes the row every
+    // `replica_update_interval_secs`, and unregisters it on graceful
+    // shutdown.  This powers the `/api/v2/replicas` HA view.  The
+    // `/replicas` handler derives its staleness cut-off from the same
+    // config field so the two can't drift out of sync.
+    let replica_store: Arc<dyn coder_server::ReplicaManagerStore> =
+        Arc::new(coder_server::AppStoreReplicaAdapter::new(store.clone()));
+    let replica_manager = coder_server::ReplicaManager::start(
+        replica_store,
+        coder_server::ReplicaManagerOptions {
+            region_id: 0,
+            version: BuildMetadata::default().version.clone(),
+            update_interval: Duration::from_secs(config.worker.replica_update_interval_secs),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| MainError::Config(format!("start replica manager: {error}")))?;
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -920,6 +966,28 @@ async fn run() -> Result<(), MainError> {
         std::sync::Arc::new(coder_license::EntitlementSet::new()),
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
+
+    // Optionally spin up the GitHub release update checker. Matches
+    // `vals.UpdateCheck` in `coder/cli/server.go`: when disabled we skip
+    // both the background poll and the AppState wiring, and the handler
+    // falls back to reporting the running version as current.
+    let (state, update_check_handle) = if config.update_check {
+        let update_check_cancel = CancellationToken::new();
+        let handle = Arc::new(coder_server::UpdateChecker::with_cancel(
+            state.http_client.clone(),
+            coder_server::UpdateCheckerOptions {
+                url: config.update_check_url.clone(),
+                interval: Duration::from_secs(config.update_check_interval_secs),
+                timeout: coder_server::update_check::DEFAULT_UPDATE_CHECK_TIMEOUT,
+            },
+            update_check_cancel,
+        ))
+        .spawn();
+        let checker = handle.checker();
+        (state.with_update_checker(checker), Some(handle))
+    } else {
+        (state, None)
+    };
 
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
@@ -1013,6 +1081,26 @@ async fn run() -> Result<(), MainError> {
             warn!(error = %e, "autobuild executor task panicked during shutdown");
         }
     });
+
+    // 5b. Stop the replica manager: cancel the heartbeat loop and delete
+    //     this instance's row from the `replicas` table before the pool is
+    //     closed, so other replicas see us disappear promptly.
+    coordinator.register("replica_manager", async move {
+        let mut replica_manager = replica_manager;
+        replica_manager.shutdown().await;
+    });
+
+    // 5c. Cancel the update checker background poll loop and await the
+    //     task. No DB writes happen in the loop, so ordering relative to
+    //     the database close step below is not load-bearing, but joining
+    //     keeps graceful shutdown deterministic and matches the pattern
+    //     used for the other background workers.
+    if let Some(update_check_handle) = update_check_handle {
+        coordinator.register("update_check", async move {
+            update_check_handle.shutdown().await;
+        });
+    }
+
 
     // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
@@ -1208,9 +1296,12 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             dormancy_check_interval_secs: args.dormancy_check_interval_secs,
             telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
             lifecycle_check_interval_secs: args.lifecycle_check_interval_secs,
+            replica_update_interval_secs: args.replica_update_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,
+        update_check_interval_secs: args.update_check_interval_secs,
+        update_check_url: args.update_check_url,
         ssh_keygen_algorithm: args.ssh_keygen_algorithm,
         cache_dir: args.cache_dir,
         browser_only: args.browser_only,
@@ -1402,6 +1493,7 @@ fn resource_kind_name(resource: coder_rbac::ResourceKind) -> &'static str {
         coder_rbac::ResourceKind::HealthSettings => "health_settings",
         coder_rbac::ResourceKind::Oauth2ProviderApp => "oauth2_provider_app",
         coder_rbac::ResourceKind::Oauth2ProviderAppSecret => "oauth2_provider_app_secret",
+        coder_rbac::ResourceKind::Oauth2ProviderAppToken => "oauth2_provider_app_token",
         coder_rbac::ResourceKind::CustomRole => "custom_role",
         coder_rbac::ResourceKind::OrganizationMember => "organization_member",
         coder_rbac::ResourceKind::NotificationsSettings => "notifications_settings",

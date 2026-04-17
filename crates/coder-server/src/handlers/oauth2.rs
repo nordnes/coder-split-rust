@@ -1200,6 +1200,13 @@ pub(crate) async fn post_oauth2_revoke(
     // Try to revoke the token. We attempt both access-token and
     // refresh-token lookups since the two formats are not easily
     // distinguishable in the Rust backend (both are opaque base64).
+    //
+    // `revoked` carries the (token_record, hint) pair for the token that
+    // was actually deleted — used to emit exactly one audit event below.
+    let mut revoked: Option<(
+        coder_core::identity::OAuth2ProviderAppTokenRecord,
+        &'static str,
+    )> = None;
 
     // --- Access token path ---
     // The hash_prefix stored in the token record is the first 8 bytes
@@ -1210,6 +1217,7 @@ pub(crate) async fn post_oauth2_revoke(
         req.token.as_bytes()
     };
 
+    let mut access_path_verified = false;
     if let Ok(Some(token_record)) = state
         .store
         .find_oauth2_provider_app_token_by_prefix(access_prefix)
@@ -1238,25 +1246,25 @@ pub(crate) async fn post_oauth2_revoke(
         }
 
         if verified {
+            access_path_verified = true;
             // Verify ownership: the token's app must match the requesting client.
             if let Ok(Some(secret)) = state
                 .store
                 .find_oauth2_provider_app_secret_by_id(token_record.app_secret_id)
                 .await
+                && secret.app_id == client_id
             {
-                if secret.app_id == client_id {
-                    // Delete the API key first (cascades in Go; explicit here).
-                    let _ = state.store.delete_api_key(&token_record.api_key_id).await;
-                    let _ = state
-                        .store
-                        .delete_oauth2_provider_app_token(token_record.id)
-                        .await;
-                }
+                // Cascade: deleting the API key cascades to the
+                // oauth2_provider_app_tokens row via FK in PostgreSQL; the
+                // explicit token delete keeps the FakeStore in sync and
+                // guards against any stale rows.
+                let _ = state.store.delete_api_key(&token_record.api_key_id).await;
+                let _ = state
+                    .store
+                    .delete_oauth2_provider_app_token(token_record.id)
+                    .await;
+                revoked = Some((token_record, "access_token"));
             }
-
-            // Token was verified (even if ownership didn't match) — no need
-            // to try the refresh-token path.  RFC 7009: always return 200 OK.
-            return Ok(StatusCode::OK.into_response());
         }
         // If verification failed (prefix collision), fall through to the
         // refresh-token path below.
@@ -1264,7 +1272,9 @@ pub(crate) async fn post_oauth2_revoke(
 
     // --- Refresh token path ---
     // The refresh_hash stored in the token record is SHA-256(refresh_token).
-    {
+    // Skip the refresh lookup when the access-token path already verified
+    // this token; the two formats must not both match a single token value.
+    if !access_path_verified {
         use sha2::Digest;
 
         let refresh_hash = sha2::Sha256::digest(req.token.as_bytes()).to_vec();
@@ -1272,27 +1282,57 @@ pub(crate) async fn post_oauth2_revoke(
             .store
             .find_oauth2_provider_app_token_by_refresh_hash(&refresh_hash)
             .await
-        {
-            // Verify ownership.
-            if let Ok(Some(secret)) = state
+            && let Ok(Some(secret)) = state
                 .store
                 .find_oauth2_provider_app_secret_by_id(token_record.app_secret_id)
                 .await
-            {
-                if secret.app_id == client_id {
-                    let _ = state.store.delete_api_key(&token_record.api_key_id).await;
-                    let _ = state
-                        .store
-                        .delete_oauth2_provider_app_token(token_record.id)
-                        .await;
-                }
-            }
+            && secret.app_id == client_id
+        {
+            let _ = state.store.delete_api_key(&token_record.api_key_id).await;
+            let _ = state
+                .store
+                .delete_oauth2_provider_app_token(token_record.id)
+                .await;
+            revoked = Some((token_record, "refresh_token"));
         }
+    }
+
+    // Emit audit event only on successful revocation — unknown tokens,
+    // prefix collisions, and wrong-owner attempts are silent per RFC 7009
+    // to avoid leaking token existence.
+    if let Some((token, hint)) = revoked {
+        let prefix_hex = encode_token_prefix_hex(&token.hash_prefix);
+        state
+            .audit
+            .record(AuditEvent {
+                action: AuditAction::Delete,
+                resource: ResourceKind::Oauth2ProviderAppToken,
+                actor_user_id: Some(token.user_id),
+                target_id: Some(token.id.to_string()),
+                summary: format!(
+                    "revoked oauth2 provider app token ({hint}, prefix={prefix_hex}, client_id={client_id})"
+                ),
+            })
+            .await;
     }
 
     // RFC 7009: always return 200 OK regardless of whether the token
     // was found, invalid, or belonged to another client.
     Ok(StatusCode::OK.into_response())
+}
+
+/// Returns a lowercase hex-encoded representation of the token's stored
+/// `hash_prefix` — safe to include in audit summaries because the prefix
+/// is not the secret (the verified secret is the API-key hashed_secret or
+/// the `refresh_hash`).
+fn encode_token_prefix_hex(prefix: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut s = String::with_capacity(prefix.len() * 2);
+    for byte in prefix {
+        // Writing to a `String` via `fmt::Write` is infallible.
+        let _ = write!(&mut s, "{byte:02x}");
+    }
+    s
 }
 
 // ---------------------------------------------------------------------------

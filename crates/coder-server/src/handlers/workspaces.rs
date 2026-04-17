@@ -4,6 +4,29 @@ use super::templates::resolve_organization;
 use super::users::clamp_pagination_limit;
 use super::*;
 
+/// Compute provisioner tags for a workspace build by copying the template
+/// version's prior job tags and then normalizing via
+/// [`coder_core::mutate_tags`]. Ports the Go `wsbuilder.getClassicProvisionerTags`
+/// helper (see `coder/coderd/wsbuilder/wsbuilder.go`). Falls back to an empty
+/// base set when the template version or its job is not found so daemon
+/// matching still works against scope/owner defaults.
+async fn build_provisioner_tags(
+    state: &AppState,
+    owner_id: Uuid,
+    template_version_id: Uuid,
+) -> Result<HashMap<String, String>, AppError> {
+    let mut prior_tags: HashMap<String, String> = HashMap::new();
+    if let Some(ver) = state
+        .store
+        .find_template_version_by_id(template_version_id)
+        .await?
+        && let Some(job) = state.store.get_provisioner_job_by_id(ver.job_id).await?
+    {
+        prior_tags = coder_core::tags_from_json(&job.tags);
+    }
+    Ok(coder_core::mutate_tags(owner_id, &[&prior_tags]))
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct WorkspacesQuery {
     owner: Option<String>,
@@ -278,6 +301,7 @@ pub(crate) async fn post_workspace_build(
     let job_id = Uuid::new_v4();
     let build_id = Uuid::new_v4();
 
+    let tags = build_provisioner_tags(&state, workspace.owner_id, tv_id).await?;
     let _job = state
         .store
         .create_provisioner_job(CreateProvisionerJobInput {
@@ -290,7 +314,7 @@ pub(crate) async fn post_workspace_build(
             file_id: None,
             job_type: "workspace_build".to_owned(),
             input: json!({}),
-            tags: HashMap::new(),
+            tags,
         })
         .await?;
 
@@ -1875,6 +1899,7 @@ pub(crate) async fn post_user_workspace(
         .and_then(|s| Uuid::parse_str(s).ok())
         .unwrap_or(template.active_version_id);
 
+    let tags = build_provisioner_tags(&state, workspace.owner_id, template_version_id).await?;
     let _job = state
         .store
         .create_provisioner_job(CreateProvisionerJobInput {
@@ -1887,7 +1912,7 @@ pub(crate) async fn post_user_workspace(
             file_id: None,
             job_type: "workspace_build".to_owned(),
             input: json!({}),
-            tags: HashMap::new(),
+            tags,
         })
         .await?;
 
@@ -2054,6 +2079,7 @@ pub(crate) async fn post_org_member_workspace(
         .and_then(|s| Uuid::parse_str(s).ok())
         .unwrap_or(template.active_version_id);
 
+    let tags = build_provisioner_tags(&state, workspace.owner_id, template_version_id).await?;
     let _job = state
         .store
         .create_provisioner_job(CreateProvisionerJobInput {
@@ -2066,7 +2092,7 @@ pub(crate) async fn post_org_member_workspace(
             file_id: None,
             job_type: "workspace_build".to_owned(),
             input: json!({}),
-            tags: HashMap::new(),
+            tags,
         })
         .await?;
 
