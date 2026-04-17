@@ -1884,6 +1884,7 @@ pub(crate) mod tests {
         workspace_proxies: Mutex<HashMap<Uuid, WorkspaceProxyHealthRecord>>,
         workspace_proxy_rows: Mutex<HashMap<Uuid, WorkspaceProxyRow>>,
         replicas: Mutex<HashMap<Uuid, coder_core::ReplicaRow>>,
+        coderd_replicas: Mutex<HashMap<Uuid, coder_core::CoderdReplicaRow>>,
         crypto_keys: Mutex<Vec<coder_core::CryptoKeyRow>>,
         derp_mesh_key: Mutex<Option<String>>,
         provisioner_daemons: Mutex<HashMap<Uuid, ProvisionerDaemonHealthRecord>>,
@@ -2001,6 +2002,7 @@ pub(crate) mod tests {
                 workspace_proxies: Mutex::new(HashMap::new()),
                 workspace_proxy_rows: Mutex::new(HashMap::new()),
                 replicas: Mutex::new(HashMap::new()),
+                coderd_replicas: Mutex::new(HashMap::new()),
                 crypto_keys: Mutex::new(Vec::new()),
                 derp_mesh_key: Mutex::new(None),
                 provisioner_daemons: Mutex::new(HashMap::new()),
@@ -9586,6 +9588,88 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|error| StorageError::unavailable(error.to_string()))?;
             Ok(map.remove(&id).is_some())
+        }
+
+        async fn insert_coderd_replica(
+            &self,
+            input: coder_core::InsertCoderdReplicaInput,
+        ) -> Result<coder_core::CoderdReplicaRow, StorageError> {
+            let mut map = self
+                .coderd_replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let row = coder_core::CoderdReplicaRow {
+                id: input.id,
+                hostname: input.hostname,
+                relay_address: input.relay_address,
+                region_id: input.region_id,
+                version: input.version,
+                error: String::new(),
+                database_latency: input.database_latency,
+                created_at: input.created_at,
+                started_at: input.started_at,
+                stopped_at: None,
+                updated_at: input.updated_at,
+            };
+            map.insert(row.id, row.clone());
+            Ok(row)
+        }
+
+        async fn refresh_coderd_replica(
+            &self,
+            id: Uuid,
+            updated_at: OffsetDateTime,
+        ) -> Result<bool, StorageError> {
+            let mut map = self
+                .coderd_replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            if let Some(row) = map.get_mut(&id) {
+                if row.stopped_at.is_some() {
+                    return Ok(false);
+                }
+                row.updated_at = updated_at;
+                return Ok(true);
+            }
+            Ok(false)
+        }
+
+        async fn delete_coderd_replica(&self, id: Uuid) -> Result<bool, StorageError> {
+            let mut map = self
+                .coderd_replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            Ok(map.remove(&id).is_some())
+        }
+
+        async fn list_coderd_replicas(
+            &self,
+            updated_after: OffsetDateTime,
+        ) -> Result<Vec<coder_core::CoderdReplicaRow>, StorageError> {
+            let map = self
+                .coderd_replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let mut rows: Vec<_> = map
+                .values()
+                .filter(|r| r.stopped_at.is_none() && r.updated_at > updated_after)
+                .cloned()
+                .collect();
+            rows.sort_by_key(|r| r.created_at);
+            Ok(rows)
+        }
+
+        async fn prune_stale_coderd_replicas(
+            &self,
+            older_than: OffsetDateTime,
+        ) -> Result<u64, StorageError> {
+            let mut map = self
+                .coderd_replicas
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            let before = map.len() as u64;
+            map.retain(|_, r| r.updated_at >= older_than);
+            Ok(before - map.len() as u64)
         }
 
         async fn list_crypto_keys_by_feature(
@@ -40083,6 +40167,109 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_replicas_returns_empty_array_when_none_registered() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/replicas", &session_token)?,
+        )
+        .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body, serde_json::json!([]));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_replicas_returns_registered_replica() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let now = OffsetDateTime::now_utc();
+        let replica_id = Uuid::new_v4();
+        store
+            .insert_coderd_replica(coder_core::InsertCoderdReplicaInput {
+                id: replica_id,
+                created_at: now,
+                started_at: now,
+                updated_at: now,
+                hostname: "replica-host".to_owned(),
+                region_id: 42,
+                relay_address: "http://replica.example:3000".to_owned(),
+                version: "v0.0.0-test".to_owned(),
+                database_latency: 123,
+            })
+            .await?;
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/replicas", &session_token)?,
+        )
+        .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let array = body.as_array().ok_or("expected JSON array")?;
+        assert_eq!(array.len(), 1);
+        let entry = &array[0];
+        assert_eq!(
+            entry.get("id").and_then(Value::as_str),
+            Some(replica_id.to_string().as_str())
+        );
+        assert_eq!(
+            entry.get("hostname").and_then(Value::as_str),
+            Some("replica-host")
+        );
+        assert_eq!(
+            entry.get("relay_address").and_then(Value::as_str),
+            Some("http://replica.example:3000")
+        );
+        assert_eq!(entry.get("region_id").and_then(Value::as_i64), Some(42));
+        assert_eq!(
+            entry.get("database_latency").and_then(Value::as_i64),
+            Some(123)
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_replicas_excludes_stale_rows() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let stale_time = OffsetDateTime::now_utc() - time::Duration::seconds(120);
+        store
+            .insert_coderd_replica(coder_core::InsertCoderdReplicaInput {
+                id: Uuid::new_v4(),
+                created_at: stale_time,
+                started_at: stale_time,
+                updated_at: stale_time,
+                hostname: "stale-host".to_owned(),
+                region_id: 1,
+                relay_address: "http://stale.example:3000".to_owned(),
+                version: "v0.0.0-test".to_owned(),
+                database_latency: 5,
+            })
+            .await?;
+
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/replicas", &session_token)?,
+        )
+        .await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        assert_eq!(body, serde_json::json!([]));
         Ok(())
     }
 }

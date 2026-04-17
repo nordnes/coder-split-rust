@@ -2210,30 +2210,6 @@ pub struct UpdateUserQuietHoursScheduleRequest {
 }
 
 // ---------------------------------------------------------------------------
-// Replicas
-// ---------------------------------------------------------------------------
-
-/// A running Coder replica instance.
-#[derive(Clone, Debug, Serialize)]
-pub struct Replica {
-    /// Unique identifier of this replica.
-    pub id: Uuid,
-    /// Hostname of the replica.
-    pub hostname: String,
-    /// When the replica was registered.
-    #[serde(with = "time::serde::rfc3339")]
-    pub created_at: OffsetDateTime,
-    /// Relay address used for DERP traffic.
-    pub relay_address: String,
-    /// DERP region identifier for this replica.
-    pub region_id: i32,
-    /// Error message if the replica is unhealthy (empty string if healthy).
-    pub error: String,
-    /// Database latency in nanoseconds.
-    pub database_latency: i64,
-}
-
-// ---------------------------------------------------------------------------
 // Workspace Quota
 // ---------------------------------------------------------------------------
 

@@ -2352,6 +2352,39 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn insert_coderd_replica(
+        &self,
+        _input: coder_core::InsertCoderdReplicaInput,
+    ) -> Result<coder_core::CoderdReplicaRow, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn refresh_coderd_replica(
+        &self,
+        _id: Uuid,
+        _updated_at: OffsetDateTime,
+    ) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn delete_coderd_replica(&self, _id: Uuid) -> Result<bool, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn list_coderd_replicas(
+        &self,
+        _updated_after: OffsetDateTime,
+    ) -> Result<Vec<coder_core::CoderdReplicaRow>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn prune_stale_coderd_replicas(
+        &self,
+        _older_than: OffsetDateTime,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn list_crypto_keys_by_feature(
         &self,
         _feature: coder_core::enums::CryptoKeyFeature,

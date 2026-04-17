@@ -885,6 +885,12 @@ impl ServerConfig {
                 default: Some("30"),
                 description: "Poll interval in seconds for the lifecycle scheduler (autostart/autostop).",
             },
+            ConfigOption {
+                name: "replica-update-interval",
+                env: "CODER_REPLICA_UPDATE_INTERVAL",
+                default: Some("15"),
+                description: "Heartbeat interval in seconds for the HA replica manager. Stale rows are pruned at 3× this value.",
+            },
         ]
     }
 }
@@ -1317,6 +1323,10 @@ pub struct WorkerConfig {
     pub telemetry_flush_interval_secs: u64,
     /// Poll interval in seconds for the lifecycle scheduler (autostart/autostop).
     pub lifecycle_check_interval_secs: u64,
+    /// Heartbeat interval in seconds for the HA replica manager. The
+    /// `/replicas` handler uses `3 ×` this value as the staleness
+    /// cut-off when filtering rows, matching the manager's prune logic.
+    pub replica_update_interval_secs: u64,
 }
 
 impl Default for WorkerConfig {
@@ -1327,6 +1337,7 @@ impl Default for WorkerConfig {
             dormancy_check_interval_secs: 60,
             telemetry_flush_interval_secs: 1800,
             lifecycle_check_interval_secs: 30,
+            replica_update_interval_secs: 15,
         }
     }
 }

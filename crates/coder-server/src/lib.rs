@@ -41,8 +41,12 @@ pub(crate) mod helpers;
 pub mod metrics;
 pub(crate) mod middleware;
 pub mod rate_limit;
+pub mod replica_manager;
 pub mod update_check;
 
 pub use app::{AppState, build_router};
 pub use rate_limit::RateLimitState;
+pub use replica_manager::{
+    AppStoreReplicaAdapter, ReplicaManager, ReplicaManagerOptions, ReplicaManagerStore,
+};
 pub use update_check::{UpdateChecker, UpdateCheckerOptions, UpdateCheckerResult};

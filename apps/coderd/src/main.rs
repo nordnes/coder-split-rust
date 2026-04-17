@@ -651,6 +651,16 @@ struct ServerArgs {
     )]
     lifecycle_check_interval_secs: u64,
 
+    /// Heartbeat interval in seconds for the HA replica manager. The
+    /// `/replicas` handler uses `3 ×` this value as the staleness cut-off.
+    #[arg(
+        long,
+        env = "CODER_REPLICA_UPDATE_INTERVAL",
+        default_value_t = 15,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    replica_update_interval_secs: u64,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -916,6 +926,26 @@ async fn run() -> Result<(), MainError> {
         CancellationToken::new(),
     );
 
+    // Start the replica manager: registers this coderd instance in the
+    // `replicas` table on startup, refreshes the row every
+    // `replica_update_interval_secs`, and unregisters it on graceful
+    // shutdown.  This powers the `/api/v2/replicas` HA view.  The
+    // `/replicas` handler derives its staleness cut-off from the same
+    // config field so the two can't drift out of sync.
+    let replica_store: Arc<dyn coder_server::ReplicaManagerStore> =
+        Arc::new(coder_server::AppStoreReplicaAdapter::new(store.clone()));
+    let replica_manager = coder_server::ReplicaManager::start(
+        replica_store,
+        coder_server::ReplicaManagerOptions {
+            region_id: 0,
+            version: BuildMetadata::default().version.clone(),
+            update_interval: Duration::from_secs(config.worker.replica_update_interval_secs),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|error| MainError::Config(format!("start replica manager: {error}")))?;
+
     let state = AppState::new(
         config.clone(),
         BuildMetadata::default(),
@@ -1050,7 +1080,15 @@ async fn run() -> Result<(), MainError> {
         }
     });
 
-    // 5b. Cancel the crypto-key rotator and await completion so any in-flight
+    // 5b. Stop the replica manager: cancel the heartbeat loop and delete
+    //     this instance's row from the `replicas` table before the pool is
+    //     closed, so other replicas see us disappear promptly.
+    coordinator.register("replica_manager", async move {
+        let mut replica_manager = replica_manager;
+        replica_manager.shutdown().await;
+    });
+
+    // 5c. Cancel the crypto-key rotator and await completion so any in-flight
     //     sweep finishes before the DB pool is closed.
     coordinator.register("crypto_key_rotator", async move {
         crypto_key_rotator_cancel.cancel();
@@ -1059,7 +1097,7 @@ async fn run() -> Result<(), MainError> {
         }
     });
 
-    // 5c. Cancel the update checker background poll loop and await the
+    // 5d. Cancel the update checker background poll loop and await the
     //     task. No DB writes happen in the loop, so ordering relative to
     //     the database close step below is not load-bearing, but joining
     //     keeps graceful shutdown deterministic and matches the pattern
@@ -1069,6 +1107,7 @@ async fn run() -> Result<(), MainError> {
             update_check_handle.shutdown().await;
         });
     }
+
 
     // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
@@ -1265,6 +1304,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             dormancy_check_interval_secs: args.dormancy_check_interval_secs,
             telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
             lifecycle_check_interval_secs: args.lifecycle_check_interval_secs,
+            replica_update_interval_secs: args.replica_update_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,

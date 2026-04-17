@@ -909,6 +909,60 @@ pub struct UpsertReplicaInput {
     pub updated_at: OffsetDateTime,
 }
 
+/// Stored replica record for a main coderd instance (not a workspace proxy).
+///
+/// Mirrors the Go `database.Replica` shape — rows have `proxy_id IS NULL`
+/// and are inserted by the replica manager on startup.  Primary replicas
+/// are surfaced via the enterprise `/replicas` route.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CoderdReplicaRow {
+    /// Replica identifier.
+    pub id: Uuid,
+    /// OS hostname.
+    pub hostname: String,
+    /// DERP relay address (may be empty for non-HA deployments).
+    pub relay_address: String,
+    /// DERP region identifier.
+    pub region_id: i32,
+    /// Running coder version string.
+    pub version: String,
+    /// Error message (empty when healthy).
+    pub error: String,
+    /// Database latency in microseconds.
+    pub database_latency: i32,
+    /// When the replica was created.
+    pub created_at: OffsetDateTime,
+    /// When the replica was started.
+    pub started_at: OffsetDateTime,
+    /// When the replica was stopped (if applicable).
+    pub stopped_at: Option<OffsetDateTime>,
+    /// Last update time (heartbeat).
+    pub updated_at: OffsetDateTime,
+}
+
+/// Input for inserting a main coderd replica row on startup.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertCoderdReplicaInput {
+    /// Replica identifier (generated once per process).
+    pub id: Uuid,
+    /// OS hostname.
+    pub hostname: String,
+    /// DERP relay address (may be empty).
+    pub relay_address: String,
+    /// DERP region identifier.
+    pub region_id: i32,
+    /// Running coder version string.
+    pub version: String,
+    /// Database latency in microseconds at startup.
+    pub database_latency: i32,
+    /// Creation time.
+    pub created_at: OffsetDateTime,
+    /// Start time.
+    pub started_at: OffsetDateTime,
+    /// Update time.
+    pub updated_at: OffsetDateTime,
+}
+
 /// Stored crypto key record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CryptoKeyRow {
@@ -4675,6 +4729,49 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
 
     /// Deletes a replica record by its ID.
     async fn delete_replica(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Inserts a main coderd replica row on server startup.
+    ///
+    /// Ports `InsertReplica` from `coder/coderd/database/queries/replicas.sql`
+    /// (with `proxy_id` left NULL to distinguish coderd replicas from
+    /// workspace-proxy replicas).
+    async fn insert_coderd_replica(
+        &self,
+        input: InsertCoderdReplicaInput,
+    ) -> Result<CoderdReplicaRow, StorageError>;
+
+    /// Refreshes `updated_at` for a main coderd replica heartbeat.
+    ///
+    /// Returns `true` if the row was updated, `false` if it was missing.
+    async fn refresh_coderd_replica(
+        &self,
+        id: Uuid,
+        updated_at: OffsetDateTime,
+    ) -> Result<bool, StorageError>;
+
+    /// Deletes a main coderd replica row on graceful shutdown.
+    async fn delete_coderd_replica(&self, id: Uuid) -> Result<bool, StorageError>;
+
+    /// Lists all alive main coderd replicas (proxy_id IS NULL, not stopped,
+    /// and updated after the supplied threshold).
+    ///
+    /// Callers pass `updated_after = now - 3 * update_interval` to implement
+    /// the Go `updateInterval` staleness filter.
+    async fn list_coderd_replicas(
+        &self,
+        updated_after: OffsetDateTime,
+    ) -> Result<Vec<CoderdReplicaRow>, StorageError>;
+
+    /// Prunes coderd replica rows whose `updated_at` is older than the
+    /// supplied threshold.  Mirrors Go `DeleteReplicasUpdatedBefore` but
+    /// scoped to coderd rows (`proxy_id IS NULL`) so workspace-proxy
+    /// replicas are not affected.
+    ///
+    /// Returns the number of rows deleted.
+    async fn prune_stale_coderd_replicas(
+        &self,
+        older_than: OffsetDateTime,
+    ) -> Result<u64, StorageError>;
 
     // ----- Crypto keys -----
 
