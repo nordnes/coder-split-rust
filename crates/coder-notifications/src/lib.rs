@@ -15,12 +15,17 @@
 //! * [`NotificationDispatchError`] — transport-level delivery failures
 //! * [`Webpusher`] — Web Push dispatcher with VAPID key management
 //!
-//! Email dispatch is currently stubbed (requires `lettre` wiring); webhook
-//! and inbox delivery are fully implemented.
+//! Email dispatch uses `lettre` over STARTTLS / implicit TLS, with auth-failure
+//! classification so permanent failures short-circuit the retry loop. Webhook
+//! delivery classifies HTTP status codes (2xx success, 4xx permanent except
+//! 408/429, 5xx/408/429/timeout retryable) and applies exponential backoff
+//! with jitter between retries.
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::{Arc, Weak};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, Weak};
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
@@ -28,6 +33,11 @@ use coder_core::AppStore;
 use coder_core::IdentityStore;
 use coder_core::api::{WebpushMessage, WebpushSubscription};
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
+use lettre::transport::smtp::authentication::{Credentials, Mechanism};
+use lettre::transport::smtp::client::{Tls, TlsParameters};
+use lettre::transport::smtp::extension::ClientId;
+use lettre::{AsyncSmtpTransport, AsyncTransport, Message, Tokio1Executor, message::MultiPart};
+use rand::Rng;
 use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -43,6 +53,9 @@ const DISPATCH_BATCH_SIZE: u32 = 50;
 const MAX_DISPATCH_ATTEMPTS: u32 = 3;
 
 /// Configuration for the notification dispatch pipeline.
+///
+/// Mirrors the `NotificationsEmailConfig` / `NotificationsWebhookConfig`
+/// fields in the Go reference (`codersdk/deployment.go`).
 #[derive(Clone, Debug)]
 pub struct NotificationConfig {
     /// SMTP relay host for email dispatch (empty = disabled).
@@ -51,8 +64,24 @@ pub struct NotificationConfig {
     pub smtp_port: u16,
     /// Sender email address for outgoing notifications.
     pub smtp_from: String,
+    /// Hostname identifying us to the SMTP server in EHLO/HELO.
+    pub smtp_hello: String,
+    /// SASL username for PLAIN / LOGIN authentication (empty = no auth).
+    pub smtp_username: String,
+    /// SASL password for PLAIN / LOGIN authentication.
+    pub smtp_password: String,
+    /// If true, attempt an implicit-TLS (SMTPS) connection (e.g. port 465).
+    pub smtp_force_tls: bool,
+    /// If true, upgrade the plain connection to TLS via STARTTLS (e.g. port 587).
+    pub smtp_start_tls: bool,
+    /// If true, skip TLS certificate verification (testing only).
+    pub smtp_tls_skip_verify: bool,
     /// Webhook timeout in seconds.
     pub webhook_timeout_secs: u64,
+    /// Base interval (seconds) between retries of a retryable failure.
+    pub base_retry_interval_secs: u64,
+    /// Cap (seconds) on the exponential backoff window.
+    pub max_retry_interval_secs: u64,
 }
 
 impl Default for NotificationConfig {
@@ -61,7 +90,15 @@ impl Default for NotificationConfig {
             smtp_host: String::new(),
             smtp_port: 587,
             smtp_from: String::new(),
+            smtp_hello: String::new(),
+            smtp_username: String::new(),
+            smtp_password: String::new(),
+            smtp_force_tls: false,
+            smtp_start_tls: true,
+            smtp_tls_skip_verify: false,
             webhook_timeout_secs: 30,
+            base_retry_interval_secs: 5,
+            max_retry_interval_secs: 300,
         }
     }
 }
@@ -75,6 +112,9 @@ pub struct NotificationDispatchService<S> {
     config: NotificationConfig,
     http_client: reqwest::Client,
     poll_interval_secs: u64,
+    /// Per-message retry-after deadlines used for exponential backoff.
+    /// Gates the dispatch-loop hook in [`dispatch_once`].
+    retry_after: Mutex<HashMap<Uuid, Instant>>,
 }
 
 impl<S> NotificationDispatchService<S>
@@ -97,7 +137,7 @@ where
         cancel: CancellationToken,
     ) -> Result<(Arc<Self>, tokio::task::JoinHandle<()>), reqwest::Error> {
         let http_client = reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(config.webhook_timeout_secs))
+            .timeout(Duration::from_secs(config.webhook_timeout_secs))
             .build()?;
 
         let service = Arc::new(Self {
@@ -105,6 +145,7 @@ where
             config,
             http_client,
             poll_interval_secs,
+            retry_after: Mutex::new(HashMap::new()),
         });
         let handle = Self::spawn_dispatch_loop(&service, cancel);
         Ok((service, handle))
@@ -127,35 +168,59 @@ where
         let count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
 
         for message in messages {
+            // Dispatch-loop hook: gate retryable messages behind exponential
+            // backoff. When we skip, we release the lease back to the pending
+            // pool so the next acquire cycle can pick it up once the backoff
+            // window elapses.
+            if self.is_in_backoff(&message.id) {
+                let _ = self
+                    .store
+                    .update_notification_message_status(
+                        message.id,
+                        NotificationMessageStatus::TemporaryFailure,
+                    )
+                    .await;
+                continue;
+            }
+
             let result = match message.method {
                 NotificationMethod::Email => self.dispatch_email(&message).await,
                 NotificationMethod::Webhook => self.dispatch_webhook(&message).await,
                 NotificationMethod::Inbox => self.dispatch_inbox(&message).await,
             };
 
-            let new_status = if result.is_ok() {
-                NotificationMessageStatus::Sent
-            } else {
-                if let Err(ref err) = result {
+            let new_status = match &result {
+                Ok(()) => {
+                    self.clear_backoff(&message.id);
+                    NotificationMessageStatus::Sent
+                }
+                Err(err) => {
                     warn!(
                         message_id = %message.id,
                         method = ?message.method,
                         error = %err,
+                        permanent = err.is_permanent(),
                         "notification dispatch failed"
                     );
-                }
-                // Increment the attempt count so exhausted messages can be
-                // identified and marked as permanently failed below.
-                let _ = self
-                    .store
-                    .increment_notification_message_attempt_count(message.id)
-                    .await;
-                // If this was the last allowed attempt, mark as permanent
-                // failure so the message is no longer eligible for retry.
-                if message.attempt_count + 1 >= MAX_DISPATCH_ATTEMPTS as i32 {
-                    NotificationMessageStatus::PermanentFailure
-                } else {
-                    NotificationMessageStatus::TemporaryFailure
+                    let _ = self
+                        .store
+                        .increment_notification_message_attempt_count(message.id)
+                        .await;
+                    // Permanent errors skip retry entirely. Retryable errors
+                    // fall back to TemporaryFailure until the attempt budget
+                    // is exhausted.
+                    let attempts_exhausted =
+                        message.attempt_count + 1 >= MAX_DISPATCH_ATTEMPTS as i32;
+                    if err.is_permanent() || attempts_exhausted {
+                        self.clear_backoff(&message.id);
+                        NotificationMessageStatus::PermanentFailure
+                    } else {
+                        // Schedule the next retry via exponential backoff.
+                        let next_attempt =
+                            u32::try_from(message.attempt_count + 1).unwrap_or(u32::MAX);
+                        self.schedule_backoff(message.id, next_attempt);
+                        NotificationMessageStatus::TemporaryFailure
+                    }
                 }
             };
 
@@ -168,6 +233,50 @@ where
         Ok(count)
     }
 
+    /// Returns true if the message is still within its exponential backoff
+    /// window and should not be dispatched in this cycle.
+    fn is_in_backoff(&self, message_id: &Uuid) -> bool {
+        match self.retry_after.lock() {
+            Ok(guard) => guard
+                .get(message_id)
+                .is_some_and(|deadline| *deadline > Instant::now()),
+            Err(poisoned) => poisoned
+                .into_inner()
+                .get(message_id)
+                .is_some_and(|deadline| *deadline > Instant::now()),
+        }
+    }
+
+    /// Schedules the next retry deadline for a message after a retryable
+    /// failure, using exponential backoff with jitter bounded by config.
+    fn schedule_backoff(&self, message_id: Uuid, attempt: u32) {
+        let delay = backoff_duration(
+            attempt,
+            self.config.base_retry_interval_secs,
+            self.config.max_retry_interval_secs,
+        );
+        let deadline = Instant::now() + delay;
+        match self.retry_after.lock() {
+            Ok(mut guard) => {
+                guard.insert(message_id, deadline);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().insert(message_id, deadline);
+            }
+        }
+    }
+
+    fn clear_backoff(&self, message_id: &Uuid) {
+        match self.retry_after.lock() {
+            Ok(mut guard) => {
+                guard.remove(message_id);
+            }
+            Err(poisoned) => {
+                poisoned.into_inner().remove(message_id);
+            }
+        }
+    }
+
     async fn dispatch_email(
         &self,
         message: &coder_core::identity::NotificationMessageRecord,
@@ -177,19 +286,37 @@ where
                 "SMTP host is not configured".to_owned(),
             ));
         }
+        if self.config.smtp_from.is_empty() {
+            return Err(NotificationDispatchError::ConfigMissing(
+                "SMTP from address is not configured".to_owned(),
+            ));
+        }
 
-        // A full SMTP implementation using `lettre` will be wired in when
-        // SMTP credentials are provisioned. Until then, return an error so the
-        // message is not incorrectly marked as Sent.
-        warn!(
-            message_id = %message.id,
-            user_id = %message.user_id,
-            smtp_host = %self.config.smtp_host,
-            "email dispatch not yet implemented"
-        );
-        Err(NotificationDispatchError::Transport(
-            "SMTP email dispatch is not yet implemented".to_owned(),
-        ))
+        let email = build_email(message, &self.config.smtp_from, &self.config.smtp_hello)?;
+        let transport = build_smtp_transport(&self.config)?;
+
+        match transport.send(email).await {
+            Ok(response) => {
+                info!(
+                    message_id = %message.id,
+                    user_id = %message.user_id,
+                    smtp_host = %self.config.smtp_host,
+                    smtp_code = ?response.code(),
+                    "email notification dispatched"
+                );
+                Ok(())
+            }
+            Err(err) => {
+                // lettre's Error exposes `is_permanent()` for 5xx SMTP replies
+                // (auth failures, rejected recipients, malformed messages).
+                // `is_transient()` maps to 4xx temporary failures.
+                if err.is_permanent() {
+                    Err(NotificationDispatchError::Permanent(err.to_string()))
+                } else {
+                    Err(NotificationDispatchError::Transport(err.to_string()))
+                }
+            }
+        }
     }
 
     async fn dispatch_webhook(
@@ -205,33 +332,56 @@ where
             .unwrap_or_default();
 
         if endpoint.is_empty() {
-            return Err(NotificationDispatchError::ConfigMissing(
+            // `targets_json` is captured at enqueue time and never mutated,
+            // so a missing endpoint URL cannot be recovered by retrying.
+            // Matches `coder/coderd/notifications/dispatch/webhook.go` which
+            // treats a nil/empty endpoint as a terminal dispatch failure.
+            return Err(NotificationDispatchError::Permanent(
                 "webhook endpoint URL not found in targets".to_owned(),
             ));
         }
 
-        let response = self
+        let send_result = self
             .http_client
             .post(&endpoint)
             .header("Content-Type", "application/json")
             .body(message.input_json.clone())
             .send()
-            .await
-            .map_err(|e| NotificationDispatchError::Transport(e.to_string()))?;
+            .await;
 
-        if !response.status().is_success() {
-            return Err(NotificationDispatchError::Transport(format!(
-                "webhook returned HTTP {}",
-                response.status().as_u16()
-            )));
+        let response = match send_result {
+            Ok(resp) => resp,
+            Err(err) => {
+                // Transport-level failures (DNS, connect, TLS handshake,
+                // request timeout) are retryable. Go's `webhook.go` treats
+                // these the same — see `retryable = true` in `Dispatcher()`.
+                if err.is_timeout() || err.is_connect() || err.is_request() {
+                    return Err(NotificationDispatchError::Transport(err.to_string()));
+                }
+                return Err(NotificationDispatchError::Transport(err.to_string()));
+            }
+        };
+
+        let status = response.status();
+        match classify_webhook_status(status.as_u16()) {
+            WebhookOutcome::Success => {
+                info!(
+                    message_id = %message.id,
+                    endpoint = %endpoint,
+                    status = status.as_u16(),
+                    "webhook notification dispatched"
+                );
+                Ok(())
+            }
+            WebhookOutcome::Retryable => Err(NotificationDispatchError::Transport(format!(
+                "webhook returned retryable HTTP {}",
+                status.as_u16()
+            ))),
+            WebhookOutcome::Permanent => Err(NotificationDispatchError::Permanent(format!(
+                "webhook returned permanent HTTP {}",
+                status.as_u16()
+            ))),
         }
-
-        info!(
-            message_id = %message.id,
-            endpoint = %endpoint,
-            "webhook notification dispatched"
-        );
-        Ok(())
     }
 
     async fn dispatch_inbox(
@@ -261,14 +411,194 @@ where
 }
 
 /// Errors from the notification dispatch pipeline.
+///
+/// Errors are classified so the dispatch loop can short-circuit retries for
+/// permanent failures (auth rejections, 4xx webhook responses) rather than
+/// burning the attempt budget.
 #[derive(Debug, thiserror::Error)]
 pub enum NotificationDispatchError {
-    /// Required configuration is missing.
+    /// Required configuration is missing. Treated as retryable: admins may
+    /// provision the missing config between poll cycles.
     #[error("config missing: {0}")]
     ConfigMissing(String),
-    /// Transport-level delivery failure.
+    /// Transport-level delivery failure that may succeed on retry
+    /// (5xx / 408 / 429 / timeout / connection failures).
     #[error("transport error: {0}")]
     Transport(String),
+    /// Permanent delivery failure. The loop marks the message
+    /// [`NotificationMessageStatus::PermanentFailure`] without retrying.
+    #[error("permanent failure: {0}")]
+    Permanent(String),
+}
+
+impl NotificationDispatchError {
+    /// Returns `true` if the error indicates no retry should be attempted.
+    #[must_use]
+    pub fn is_permanent(&self) -> bool {
+        matches!(self, Self::Permanent(_))
+    }
+}
+
+/// Classification of a webhook HTTP response used by [`dispatch_webhook`].
+///
+/// Mirrors Go's `notifications/dispatch/webhook.go`:
+/// - 2xx → success.
+/// - 408 (timeout), 429 (rate limit) and 5xx → retryable.
+/// - All other 4xx → permanent (caller is rejecting the payload).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WebhookOutcome {
+    Success,
+    Retryable,
+    Permanent,
+}
+
+fn classify_webhook_status(status: u16) -> WebhookOutcome {
+    if (200..300).contains(&status) {
+        return WebhookOutcome::Success;
+    }
+    if status == 408 || status == 429 || (500..600).contains(&status) {
+        return WebhookOutcome::Retryable;
+    }
+    if (400..500).contains(&status) {
+        return WebhookOutcome::Permanent;
+    }
+    // 1xx / 3xx / unknown codes — treat as retryable to be safe.
+    WebhookOutcome::Retryable
+}
+
+/// Computes the backoff interval for a retryable failure using
+/// `base * 2^(attempt-1)` capped at `max`, plus up to 1s of jitter.
+///
+/// `attempt` is 1-based (first retry = 1). Matches the shape of Go's
+/// `backoff.ExponentialBackOff` used in the notification retry loop.
+fn backoff_duration(attempt: u32, base_secs: u64, max_secs: u64) -> Duration {
+    let base_ms = base_secs.saturating_mul(1000).max(1);
+    let cap_ms = max_secs.saturating_mul(1000).max(base_ms);
+    let shift = attempt.saturating_sub(1).min(20);
+    let backoff_ms = base_ms.saturating_mul(1u64 << shift).min(cap_ms);
+    let jitter_ms = rand::thread_rng().gen_range(0..1000);
+    Duration::from_millis(backoff_ms.saturating_add(jitter_ms))
+}
+
+/// Builds a lettre [`Message`] from a notification record.
+///
+/// The message's `input_json` payload is expected to contain `user_email`,
+/// `subject`, `plain_body`, and `html_body` fields. Missing fields surface as
+/// [`NotificationDispatchError::ConfigMissing`] so the message stays
+/// retryable (the enqueuer can be re-run).
+fn build_email(
+    message: &coder_core::identity::NotificationMessageRecord,
+    from_address: &str,
+    hello: &str,
+) -> Result<Message, NotificationDispatchError> {
+    let payload: serde_json::Value = serde_json::from_str(&message.input_json).map_err(|e| {
+        NotificationDispatchError::ConfigMissing(format!("invalid email payload JSON: {e}"))
+    })?;
+
+    let to_address = payload
+        .get("user_email")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .trim();
+    if to_address.is_empty() {
+        return Err(NotificationDispatchError::ConfigMissing(
+            "payload.user_email is empty".to_owned(),
+        ));
+    }
+
+    let subject = payload
+        .get("subject")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let plain_body = payload
+        .get("plain_body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+    let html_body = payload
+        .get("html_body")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_owned();
+
+    let hostname = if hello.is_empty() { "localhost" } else { hello };
+    let from_parsed = from_address
+        .parse::<lettre::message::Mailbox>()
+        .map_err(|e| {
+            NotificationDispatchError::ConfigMissing(format!(
+                "invalid SMTP from address '{from_address}': {e}"
+            ))
+        })?;
+    let to_parsed = to_address
+        .parse::<lettre::message::Mailbox>()
+        .map_err(|e| {
+            NotificationDispatchError::Permanent(format!(
+                "invalid recipient address '{to_address}': {e}"
+            ))
+        })?;
+
+    let message_id = format!("<{}@{}>", message.id, hostname);
+
+    Message::builder()
+        .from(from_parsed)
+        .to(to_parsed)
+        .subject(subject)
+        .message_id(Some(message_id))
+        .date_now()
+        .multipart(MultiPart::alternative_plain_html(plain_body, html_body))
+        .map_err(|e| NotificationDispatchError::Permanent(format!("build email: {e}")))
+}
+
+/// Constructs the async SMTP transport based on the runtime config.
+///
+/// Port/TLS selection follows Go's `smtp.Dispatcher`:
+/// - `force_tls=true` → implicit TLS (`relay`), typical on port 465.
+/// - `start_tls=true` → plain connect then STARTTLS upgrade, typical on 587.
+/// - Otherwise → unencrypted connection (plain port 25 or local relay).
+fn build_smtp_transport(
+    config: &NotificationConfig,
+) -> Result<AsyncSmtpTransport<Tokio1Executor>, NotificationDispatchError> {
+    let host = config.smtp_host.as_str();
+
+    let mut builder = if config.smtp_force_tls {
+        AsyncSmtpTransport::<Tokio1Executor>::relay(host)
+            .map_err(|e| NotificationDispatchError::Transport(format!("smtp relay: {e}")))?
+    } else if config.smtp_start_tls {
+        AsyncSmtpTransport::<Tokio1Executor>::starttls_relay(host)
+            .map_err(|e| NotificationDispatchError::Transport(format!("smtp starttls: {e}")))?
+    } else {
+        AsyncSmtpTransport::<Tokio1Executor>::builder_dangerous(host)
+    };
+
+    builder = builder.port(config.smtp_port);
+
+    if !config.smtp_hello.is_empty() {
+        builder = builder.hello_name(ClientId::Domain(config.smtp_hello.clone()));
+    }
+
+    if config.smtp_tls_skip_verify && (config.smtp_force_tls || config.smtp_start_tls) {
+        let tls_params = TlsParameters::builder(host.to_owned())
+            .dangerous_accept_invalid_certs(true)
+            .dangerous_accept_invalid_hostnames(true)
+            .build()
+            .map_err(|e| NotificationDispatchError::Transport(format!("tls params: {e}")))?;
+        builder = if config.smtp_force_tls {
+            builder.tls(Tls::Wrapper(tls_params))
+        } else {
+            builder.tls(Tls::Required(tls_params))
+        };
+    }
+
+    if !config.smtp_username.is_empty() {
+        let credentials =
+            Credentials::new(config.smtp_username.clone(), config.smtp_password.clone());
+        builder = builder
+            .credentials(credentials)
+            .authentication(vec![Mechanism::Plain, Mechanism::Login]);
+    }
+
+    Ok(builder.build())
 }
 
 async fn run_dispatch_loop<S>(
@@ -278,7 +608,7 @@ async fn run_dispatch_loop<S>(
 ) where
     S: IdentityStore + Clone + Send + Sync + 'static,
 {
-    let mut interval = tokio::time::interval(tokio::time::Duration::from_secs(poll_secs));
+    let mut interval = tokio::time::interval(Duration::from_secs(poll_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
 
     loop {
@@ -446,7 +776,7 @@ where
             body: "This is a test Web Push notification".to_owned(),
             tag: String::new(),
             actions: Vec::new(),
-            data: std::collections::HashMap::new(),
+            data: HashMap::new(),
         };
 
         let msg_json = serde_json::to_vec(&test_msg)
@@ -1519,6 +1849,7 @@ mod tests {
             smtp_port: 465,
             smtp_from: "noreply@example.com".to_owned(),
             webhook_timeout_secs: 15,
+            ..NotificationConfig::default()
         };
         let service = make_service(store, config.clone());
         assert_eq!(service.config().smtp_host, "mail.example.com");
@@ -1646,11 +1977,14 @@ mod tests {
         assert_eq!(updates[0].1, NotificationMessageStatus::PermanentFailure);
     }
 
-    // ── 12. Webhook without endpoint URL records failure ────
+    // ── 12. Webhook without endpoint URL records permanent failure ──
 
     #[tokio::test]
-    async fn dispatch_webhook_without_url_records_temporary_failure() {
-        // targets_json with no "url" field → webhook dispatch fails.
+    async fn dispatch_webhook_without_url_records_permanent_failure() {
+        // targets_json with no "url" field → webhook dispatch is a
+        // permanent failure: `targets_json` is immutable per message, so
+        // retrying cannot recover. The loop should short-circuit to
+        // PermanentFailure without waiting out the attempt budget.
         let msg = make_message(NotificationMethod::Webhook, r#"{"other":"value"}"#);
         let msg_id = msg.id;
         let store = MockStore::new().with_pending(vec![msg]);
@@ -1677,7 +2011,7 @@ mod tests {
             .unwrap_or_else(|e| e.into_inner())
             .clone();
         assert_eq!(updates.len(), 1);
-        assert_eq!(updates[0].1, NotificationMessageStatus::TemporaryFailure);
+        assert_eq!(updates[0].1, NotificationMessageStatus::PermanentFailure);
     }
 
     // ── 13. Multiple pending messages dispatched in order ────
@@ -1726,6 +2060,7 @@ mod tests {
             smtp_port: 2525,
             smtp_from: "sender@custom.com".to_owned(),
             webhook_timeout_secs: 5,
+            ..NotificationConfig::default()
         };
         let service = make_service(store, config);
         assert_eq!(service.config().smtp_host, "custom.smtp.example.com");
@@ -1933,7 +2268,7 @@ mod tests {
             body: "Test Body".to_owned(),
             tag: "test-tag".to_owned(),
             actions: Vec::new(),
-            data: std::collections::HashMap::new(),
+            data: HashMap::new(),
         };
         let json = serde_json::to_string(&msg);
         assert!(json.is_ok(), "WebpushMessage should serialize");
@@ -1951,7 +2286,7 @@ mod tests {
             body: "World".to_owned(),
             tag: String::new(),
             actions: Vec::new(),
-            data: std::collections::HashMap::new(),
+            data: HashMap::new(),
         };
         let json = serde_json::to_vec(&msg).unwrap_or_else(|e| panic!("serialize: {e}"));
         let decoded: WebpushMessage =
@@ -1996,5 +2331,521 @@ mod tests {
         assert!(!encoded.contains('+'), "should use URL-safe encoding");
         assert!(!encoded.contains('/'), "should use URL-safe encoding");
         assert!(!encoded.contains('='), "should have no padding");
+    }
+
+    // ── 26. Webhook status classification ─────────────────────
+
+    #[test]
+    fn classify_webhook_status_success_permanent_retryable() {
+        assert_eq!(classify_webhook_status(200), WebhookOutcome::Success);
+        assert_eq!(classify_webhook_status(201), WebhookOutcome::Success);
+        assert_eq!(classify_webhook_status(299), WebhookOutcome::Success);
+        // 4xx is permanent...
+        assert_eq!(classify_webhook_status(400), WebhookOutcome::Permanent);
+        assert_eq!(classify_webhook_status(401), WebhookOutcome::Permanent);
+        assert_eq!(classify_webhook_status(403), WebhookOutcome::Permanent);
+        assert_eq!(classify_webhook_status(404), WebhookOutcome::Permanent);
+        // ...except 408 and 429.
+        assert_eq!(classify_webhook_status(408), WebhookOutcome::Retryable);
+        assert_eq!(classify_webhook_status(429), WebhookOutcome::Retryable);
+        // 5xx retryable.
+        assert_eq!(classify_webhook_status(500), WebhookOutcome::Retryable);
+        assert_eq!(classify_webhook_status(502), WebhookOutcome::Retryable);
+        assert_eq!(classify_webhook_status(599), WebhookOutcome::Retryable);
+        // Redirects etc. are treated as retryable.
+        assert_eq!(classify_webhook_status(301), WebhookOutcome::Retryable);
+    }
+
+    // ── 27. Backoff duration grows exponentially and caps ─────
+
+    #[test]
+    fn backoff_duration_respects_base_cap_and_jitter() {
+        // attempt=1 → ~base, +0-1s jitter.
+        let d1 = backoff_duration(1, 5, 300);
+        assert!(d1 >= Duration::from_secs(5));
+        assert!(d1 < Duration::from_secs(7));
+
+        // attempt=2 → ~2*base.
+        let d2 = backoff_duration(2, 5, 300);
+        assert!(d2 >= Duration::from_secs(10));
+        assert!(d2 < Duration::from_secs(12));
+
+        // attempt=20 → capped at max.
+        let d_cap = backoff_duration(20, 5, 300);
+        assert!(d_cap >= Duration::from_secs(300));
+        assert!(d_cap < Duration::from_secs(302));
+
+        // attempt=0 is treated as 1 (no underflow).
+        let d0 = backoff_duration(0, 1, 60);
+        assert!(d0 >= Duration::from_secs(1));
+        assert!(d0 < Duration::from_secs(3));
+    }
+
+    // ── 28. Error helper: is_permanent ────────────────────────
+
+    #[test]
+    fn notification_dispatch_error_is_permanent() {
+        assert!(NotificationDispatchError::Permanent("x".into()).is_permanent());
+        assert!(!NotificationDispatchError::Transport("x".into()).is_permanent());
+        assert!(!NotificationDispatchError::ConfigMissing("x".into()).is_permanent());
+    }
+
+    // ── 29. Webhook dispatch: 403 → permanent failure ─────────
+
+    /// Spawns a one-shot HTTP responder that reads one request and replies
+    /// with the provided status line, then closes. Returns the bound URL.
+    async fn spawn_one_shot_http(status_line: &'static str) -> String {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("bind: {e}"));
+        let addr = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("local_addr: {e}"));
+        tokio::spawn(async move {
+            if let Ok((mut sock, _)) = listener.accept().await {
+                use tokio::io::{AsyncReadExt, AsyncWriteExt};
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = "ok";
+                let resp = format!(
+                    "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}/hook")
+    }
+
+    /// Spawns a sequenced HTTP responder that answers each incoming request
+    /// with the next status line from `statuses` and closes. Returns the URL.
+    fn spawn_sequenced_http(statuses: Vec<&'static str>) -> String {
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").unwrap_or_else(|e| panic!("bind: {e}"));
+        let addr = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("local_addr: {e}"));
+        listener
+            .set_nonblocking(true)
+            .unwrap_or_else(|e| panic!("nonblocking: {e}"));
+        let listener =
+            tokio::net::TcpListener::from_std(listener).unwrap_or_else(|e| panic!("from_std: {e}"));
+        tokio::spawn(async move {
+            use tokio::io::{AsyncReadExt, AsyncWriteExt};
+            for status_line in statuses {
+                let Ok((mut sock, _)) = listener.accept().await else {
+                    return;
+                };
+                let mut buf = [0u8; 4096];
+                let _ = sock.read(&mut buf).await;
+                let body = "ok";
+                let resp = format!(
+                    "{status_line}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                let _ = sock.write_all(resp.as_bytes()).await;
+                let _ = sock.shutdown().await;
+            }
+        });
+        format!("http://{addr}/hook")
+    }
+
+    #[tokio::test]
+    async fn dispatch_webhook_missing_url_returns_permanent() {
+        // `targets_json` has no `url` field — config is absent and cannot
+        // be recovered by retrying, so the dispatcher must short-circuit
+        // rather than burn the attempt budget.
+        let msg = make_message(NotificationMethod::Webhook, r#"{"other":"thing"}"#);
+        let store = MockStore::new();
+        let config = NotificationConfig::default();
+        let service = make_service(store, config);
+        let err = match service.dispatch_webhook(&msg).await {
+            Err(e) => e,
+            Ok(()) => panic!("missing URL should fail"),
+        };
+        assert!(
+            err.is_permanent(),
+            "missing URL must surface as permanent: {err}"
+        );
+        assert!(matches!(err, NotificationDispatchError::Permanent(_)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_webhook_403_returns_permanent() {
+        let url = spawn_one_shot_http("HTTP/1.1 403 Forbidden").await;
+        let msg = make_message(
+            NotificationMethod::Webhook,
+            &format!(r#"{{"url":"{url}"}}"#),
+        );
+        let store = MockStore::new();
+        let config = NotificationConfig::default();
+        let service = make_service(store, config);
+        let err = match service.dispatch_webhook(&msg).await {
+            Err(e) => e,
+            Ok(()) => panic!("403 should fail"),
+        };
+        assert!(err.is_permanent(), "403 must surface as permanent: {err}");
+    }
+
+    #[tokio::test]
+    async fn dispatch_webhook_500_returns_retryable_transport() {
+        let url = spawn_one_shot_http("HTTP/1.1 500 Internal Server Error").await;
+        let msg = make_message(
+            NotificationMethod::Webhook,
+            &format!(r#"{{"url":"{url}"}}"#),
+        );
+        let store = MockStore::new();
+        let config = NotificationConfig::default();
+        let service = make_service(store, config);
+        let err = match service.dispatch_webhook(&msg).await {
+            Err(e) => e,
+            Ok(()) => panic!("500 should fail"),
+        };
+        assert!(
+            !err.is_permanent(),
+            "5xx must surface as retryable transport error: {err}"
+        );
+        assert!(matches!(err, NotificationDispatchError::Transport(_)));
+    }
+
+    #[tokio::test]
+    async fn dispatch_webhook_200_succeeds() {
+        let url = spawn_one_shot_http("HTTP/1.1 200 OK").await;
+        let msg = make_message(
+            NotificationMethod::Webhook,
+            &format!(r#"{{"url":"{url}"}}"#),
+        );
+        let store = MockStore::new();
+        let config = NotificationConfig::default();
+        let service = make_service(store, config);
+        service
+            .dispatch_webhook(&msg)
+            .await
+            .unwrap_or_else(|e| panic!("200 should succeed: {e}"));
+    }
+
+    #[tokio::test]
+    async fn dispatch_webhook_500_then_200_eventually_succeeds() {
+        // First call hits 500 (retryable), second call hits 200 (success).
+        let url = spawn_sequenced_http(vec![
+            "HTTP/1.1 500 Internal Server Error",
+            "HTTP/1.1 200 OK",
+        ]);
+        let msg = make_message(
+            NotificationMethod::Webhook,
+            &format!(r#"{{"url":"{url}"}}"#),
+        );
+        let store = MockStore::new();
+        let config = NotificationConfig::default();
+        let service = make_service(store, config);
+
+        // First attempt: 500 → Retryable transport error.
+        let first = service.dispatch_webhook(&msg).await;
+        assert!(
+            matches!(first, Err(NotificationDispatchError::Transport(_))),
+            "expected retryable transport error, got {first:?}"
+        );
+
+        // Retry: hits 200.
+        service
+            .dispatch_webhook(&msg)
+            .await
+            .unwrap_or_else(|e| panic!("retry should succeed: {e}"));
+    }
+
+    // ── 30. Dispatch loop: permanent error short-circuits retry ──
+
+    #[tokio::test]
+    async fn dispatch_once_permanent_error_marks_permanent_failure_immediately() {
+        let url = spawn_one_shot_http("HTTP/1.1 403 Forbidden").await;
+        let msg = make_message(
+            NotificationMethod::Webhook,
+            &format!(r#"{{"url":"{url}"}}"#),
+        );
+        let msg_id = msg.id;
+        // attempt_count=0, so normally we'd go to TemporaryFailure; with
+        // a permanent error we expect PermanentFailure immediately.
+        let store = MockStore::new().with_pending(vec![msg]);
+        let config = NotificationConfig::default();
+        let service = make_service(store.clone(), config);
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 1);
+
+        let updates = store
+            .status_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(updates.len(), 1);
+        assert_eq!(updates[0].0, msg_id);
+        assert_eq!(updates[0].1, NotificationMessageStatus::PermanentFailure);
+    }
+
+    // ── 31. Exponential backoff gate: second attempt skipped ──
+
+    #[tokio::test]
+    async fn dispatch_once_retryable_schedules_backoff_and_gates_next_cycle() {
+        // Use a config with a long base interval so we can observe the gate.
+        let url = spawn_sequenced_http(vec![
+            "HTTP/1.1 500 Internal Server Error",
+            // Second request would succeed, but backoff should gate it.
+            "HTTP/1.1 200 OK",
+        ]);
+        let msg = make_message(
+            NotificationMethod::Webhook,
+            &format!(r#"{{"url":"{url}"}}"#),
+        );
+        let msg_id = msg.id;
+        let store = MockStore::new().with_pending(vec![msg.clone()]);
+        let config = NotificationConfig {
+            base_retry_interval_secs: 60,
+            max_retry_interval_secs: 300,
+            ..NotificationConfig::default()
+        };
+        let service = make_service(store.clone(), config);
+
+        // Cycle 1: hits 500, retryable, schedules backoff.
+        service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("cycle 1: {e}"));
+
+        // Cycle 2: backoff still active → should not call HTTP at all and
+        // should only record a TemporaryFailure status update. The MockStore
+        // replays the same pending list each cycle, so no re-seed is needed.
+        let _ = &msg; // silence unused warning for Clone'd payload.
+        service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("cycle 2: {e}"));
+
+        let updates = store
+            .status_updates
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert!(
+            updates.len() >= 2,
+            "expected at least 2 status updates, got {updates:?}"
+        );
+        // Both updates should be TemporaryFailure (first from 500, second from backoff gate).
+        for (id, status) in &updates {
+            assert_eq!(*id, msg_id);
+            assert_eq!(*status, NotificationMessageStatus::TemporaryFailure);
+        }
+    }
+
+    // ── 32. SMTP dispatch: real SMTP conversation delivers message ──
+
+    /// Minimal in-process SMTP responder that accepts one session without
+    /// authentication and captures the raw DATA payload. It speaks enough of
+    /// the protocol (`EHLO → MAIL FROM → RCPT TO → DATA → QUIT`) for lettre
+    /// to consider the send successful.
+    async fn spawn_smtp_capture() -> (u16, Arc<Mutex<Vec<String>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("bind: {e}"));
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("local_addr: {e}"))
+            .port();
+        let capture: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let cap = Arc::clone(&capture);
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let (read, mut write) = sock.into_split();
+            let mut reader = BufReader::new(read);
+            let _ = write.write_all(b"220 test.local ESMTP ready\r\n").await;
+            let mut in_data = false;
+            let mut body = String::new();
+            loop {
+                let mut line = String::new();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                if in_data {
+                    if line == ".\r\n" || line == ".\n" {
+                        in_data = false;
+                        cap.lock()
+                            .unwrap_or_else(|e| e.into_inner())
+                            .push(std::mem::take(&mut body));
+                        let _ = write.write_all(b"250 OK: queued\r\n").await;
+                        continue;
+                    }
+                    body.push_str(&line);
+                    continue;
+                }
+                let upper = line.trim_end().to_ascii_uppercase();
+                if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                    let _ = write
+                        .write_all(b"250-test.local\r\n250 SIZE 10485760\r\n")
+                        .await;
+                } else if upper.starts_with("MAIL FROM") || upper.starts_with("RCPT TO") {
+                    let _ = write.write_all(b"250 OK\r\n").await;
+                } else if upper.starts_with("DATA") {
+                    let _ = write
+                        .write_all(b"354 End data with <CR><LF>.<CR><LF>\r\n")
+                        .await;
+                    in_data = true;
+                } else if upper.starts_with("QUIT") {
+                    let _ = write.write_all(b"221 Bye\r\n").await;
+                    break;
+                } else if upper.starts_with("RSET") || upper.starts_with("NOOP") {
+                    let _ = write.write_all(b"250 OK\r\n").await;
+                } else {
+                    let _ = write.write_all(b"502 command not implemented\r\n").await;
+                }
+            }
+        });
+        (port, capture)
+    }
+
+    /// Minimal SMTP responder that rejects MAIL FROM with a permanent (5xx)
+    /// error. Used to exercise the permanent-failure code path.
+    async fn spawn_smtp_reject_permanent() -> u16 {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("bind: {e}"));
+        let port = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("local_addr: {e}"))
+            .port();
+        tokio::spawn(async move {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let Ok((sock, _)) = listener.accept().await else {
+                return;
+            };
+            let (read, mut write) = sock.into_split();
+            let mut reader = BufReader::new(read);
+            let _ = write.write_all(b"220 test.local ESMTP ready\r\n").await;
+            loop {
+                let mut line = String::new();
+                let Ok(n) = reader.read_line(&mut line).await else {
+                    break;
+                };
+                if n == 0 {
+                    break;
+                }
+                let upper = line.trim_end().to_ascii_uppercase();
+                if upper.starts_with("EHLO") || upper.starts_with("HELO") {
+                    let _ = write.write_all(b"250 test.local\r\n").await;
+                } else if upper.starts_with("MAIL FROM") {
+                    let _ = write.write_all(b"550 5.7.1 Sender not allowed\r\n").await;
+                } else if upper.starts_with("QUIT") {
+                    let _ = write.write_all(b"221 Bye\r\n").await;
+                    break;
+                } else {
+                    let _ = write.write_all(b"250 OK\r\n").await;
+                }
+            }
+        });
+        port
+    }
+
+    #[tokio::test]
+    async fn dispatch_email_delivers_message_with_expected_headers() {
+        let (port, capture) = spawn_smtp_capture().await;
+        let payload = serde_json::json!({
+            "user_email": "alice@example.com",
+            "subject": "Hello",
+            "plain_body": "Plain text body",
+            "html_body": "<p>HTML body</p>",
+        })
+        .to_string();
+        let mut msg = make_message(NotificationMethod::Email, "{}");
+        msg.input_json = payload;
+        let store = MockStore::new();
+        let config = NotificationConfig {
+            smtp_host: "127.0.0.1".to_owned(),
+            smtp_port: port,
+            smtp_from: "noreply@example.com".to_owned(),
+            smtp_hello: "test.local".to_owned(),
+            smtp_force_tls: false,
+            smtp_start_tls: false,
+            ..NotificationConfig::default()
+        };
+        let service = make_service(store, config);
+        service
+            .dispatch_email(&msg)
+            .await
+            .unwrap_or_else(|e| panic!("SMTP dispatch should succeed: {e}"));
+
+        let bodies = capture.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        assert_eq!(bodies.len(), 1, "expected exactly one delivered message");
+        let body = &bodies[0];
+        assert!(body.contains("From:"), "missing From header: {body}");
+        assert!(body.contains("To:"), "missing To header: {body}");
+        assert!(body.contains("Subject: Hello"), "missing Subject: {body}");
+        assert!(body.contains("Date:"), "missing Date header: {body}");
+        assert!(body.contains("Message-ID"), "missing Message-ID: {body}");
+        assert!(
+            body.contains("multipart/alternative"),
+            "missing multipart/alternative: {body}"
+        );
+        assert!(body.contains("Plain text body"), "missing plain part");
+        assert!(body.contains("HTML body"), "missing html part");
+    }
+
+    #[tokio::test]
+    async fn dispatch_email_permanent_rejection_surfaces_as_permanent() {
+        let port = spawn_smtp_reject_permanent().await;
+        let payload = serde_json::json!({
+            "user_email": "alice@example.com",
+            "subject": "Hello",
+            "plain_body": "Body",
+            "html_body": "<p>Body</p>",
+        })
+        .to_string();
+        let mut msg = make_message(NotificationMethod::Email, "{}");
+        msg.input_json = payload;
+        let store = MockStore::new();
+        let config = NotificationConfig {
+            smtp_host: "127.0.0.1".to_owned(),
+            smtp_port: port,
+            smtp_from: "noreply@example.com".to_owned(),
+            smtp_hello: "test.local".to_owned(),
+            smtp_force_tls: false,
+            smtp_start_tls: false,
+            ..NotificationConfig::default()
+        };
+        let service = make_service(store, config);
+        let err = match service.dispatch_email(&msg).await {
+            Err(e) => e,
+            Ok(()) => panic!("permanent 5xx should fail"),
+        };
+        assert!(
+            err.is_permanent(),
+            "5xx SMTP reply must be permanent: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn dispatch_email_missing_recipient_is_config_missing() {
+        // SMTP host is set but payload lacks user_email.
+        let mut msg = make_message(NotificationMethod::Email, "{}");
+        msg.input_json = r#"{"subject":"x"}"#.to_owned();
+        let store = MockStore::new();
+        let config = NotificationConfig {
+            smtp_host: "127.0.0.1".to_owned(),
+            smtp_from: "noreply@example.com".to_owned(),
+            ..NotificationConfig::default()
+        };
+        let service = make_service(store, config);
+        let err = match service.dispatch_email(&msg).await {
+            Err(e) => e,
+            Ok(()) => panic!("missing recipient should fail"),
+        };
+        assert!(matches!(err, NotificationDispatchError::ConfigMissing(_)));
     }
 }
