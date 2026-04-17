@@ -657,6 +657,12 @@ fn collect_handler_bodies(rust_root: &Path) -> Result<BTreeMap<String, String>, 
 
     for path in rust_files {
         let content = read_to_string(&path)?;
+        // Strip strings / chars / comments once per file so each call to
+        // `extract_fn_body_with_stripped` below reuses the same buffer instead
+        // of re-walking the entire file.  `strip_rust_code_noise` is O(n), so
+        // doing it once collapses the overall cost from O(n*m) to O(n + m)
+        // where m is the number of function matches per file.
+        let stripped = strip_rust_code_noise(&content);
         let matches: Vec<(usize, String)> = fn_re
             .captures_iter(&content)
             .filter_map(|captures| {
@@ -672,7 +678,7 @@ fn collect_handler_bodies(rust_root: &Path) -> Result<BTreeMap<String, String>, 
             if bodies.contains_key(name) {
                 continue;
             }
-            if let Some(body) = extract_fn_body(&content, *match_start) {
+            if let Some(body) = extract_fn_body_with_stripped(&content, &stripped, *match_start) {
                 bodies.insert(name.clone(), body);
             }
         }
@@ -681,14 +687,27 @@ fn collect_handler_bodies(rust_root: &Path) -> Result<BTreeMap<String, String>, 
     Ok(bodies)
 }
 
+#[cfg(test)]
 fn extract_fn_body(content: &str, match_start: usize) -> Option<String> {
+    // Convenience wrapper for tests that don't already have a stripped buffer
+    // on hand.  Production hot paths — namely `collect_handler_bodies` — strip
+    // once per file and call `extract_fn_body_with_stripped` directly to avoid
+    // O(n*m) re-stripping.
+    let stripped = strip_rust_code_noise(content);
+    extract_fn_body_with_stripped(content, &stripped, match_start)
+}
+
+fn extract_fn_body_with_stripped(
+    content: &str,
+    stripped: &[u8],
+    match_start: usize,
+) -> Option<String> {
     // Advance from match_start to the first `{` at paren-depth 0 (ignoring
     // generic / parameter parens) — i.e. the start of the function body.
     // Braces / parens / semicolons that live inside strings, char literals, or
     // comments must be ignored, so we walk over a noise-stripped copy of the
     // byte buffer.  Offsets are preserved so slices of `content` are correct.
-    let stripped = strip_rust_code_noise(content);
-    let bytes = &stripped;
+    let bytes = stripped;
     let mut index = match_start;
     let mut paren: i32 = 0;
     while index < bytes.len() {
@@ -960,20 +979,17 @@ fn classify_depth(handler_name: &str, body: Option<&str>) -> (DepthStatus, Optio
 
 fn body_returns_not_implemented(body: &str) -> bool {
     // Heuristic: consider any function that constructs a `StatusCode::NOT_IMPLEMENTED`
-    // response as a 501 stub.  Line-comments containing the literal are stripped
-    // before the search so that comment-only mentions do not produce false
-    // positives.  This does not understand `/* ... */` block comments, but
-    // none of the handlers in this codebase use them around status literals.
-    for line in body.lines() {
-        let code = match line.find("//") {
-            Some(index) => &line[..index],
-            None => line,
-        };
-        if code.contains("StatusCode::NOT_IMPLEMENTED") {
-            return true;
-        }
-    }
-    false
+    // response as a 501 stub.  String literals, char literals, line comments, and
+    // (nested) block comments are blanked before the search via
+    // `strip_rust_code_noise` so that a stray token inside a `"..."` or a `/* ... */`
+    // comment cannot false-positive.
+    let stripped = strip_rust_code_noise(body);
+    // Safety: `strip_rust_code_noise` only replaces bytes with ASCII spaces, so the
+    // resulting buffer stays valid UTF-8 and `from_utf8` succeeds.
+    let Ok(stripped_str) = std::str::from_utf8(&stripped) else {
+        return body.contains("StatusCode::NOT_IMPLEMENTED");
+    };
+    stripped_str.contains("StatusCode::NOT_IMPLEMENTED")
 }
 
 fn classify_section(live_path: &str) -> &'static str {
@@ -2279,6 +2295,18 @@ mod tests {
     #[test]
     fn body_returns_not_implemented_skips_comment_only_occurrence() {
         let body = "// could eventually return StatusCode::NOT_IMPLEMENTED\nreturn something;";
+        assert!(!body_returns_not_implemented(body));
+    }
+
+    #[test]
+    fn body_returns_not_implemented_skips_string_literal_occurrence() {
+        let body = r#"let msg = "StatusCode::NOT_IMPLEMENTED"; return Ok(());"#;
+        assert!(!body_returns_not_implemented(body));
+    }
+
+    #[test]
+    fn body_returns_not_implemented_skips_block_comment_occurrence() {
+        let body = "/* TODO: return StatusCode::NOT_IMPLEMENTED once wired */ return Ok(());";
         assert!(!body_returns_not_implemented(body));
     }
 
