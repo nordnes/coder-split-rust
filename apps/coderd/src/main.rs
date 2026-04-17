@@ -523,6 +523,22 @@ struct ServerArgs {
     #[arg(long, env = "CODER_UPDATE_CHECK", default_value_t = false)]
     update_check: bool,
 
+    /// Interval in seconds between GitHub release polls for update checks.
+    #[arg(
+        long,
+        env = "CODER_UPDATE_CHECK_INTERVAL_SECS",
+        default_value_t = 24 * 60 * 60
+    )]
+    update_check_interval_secs: u64,
+
+    /// URL used to fetch the latest Coder release.
+    #[arg(
+        long,
+        env = "CODER_UPDATE_CHECK_URL",
+        default_value = "https://api.github.com/repos/coder/coder/releases/latest"
+    )]
+    update_check_url: String,
+
     /// Algorithm used for SSH key generation.
     #[arg(long, env = "CODER_SSH_KEYGEN_ALGORITHM", default_value = "ed25519")]
     ssh_keygen_algorithm: String,
@@ -906,6 +922,28 @@ async fn run() -> Result<(), MainError> {
     )
     .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
 
+    // Optionally spin up the GitHub release update checker. Matches
+    // `vals.UpdateCheck` in `coder/cli/server.go`: when disabled we skip
+    // both the background poll and the AppState wiring, and the handler
+    // falls back to reporting the running version as current.
+    let (state, update_check_handle) = if config.update_check {
+        let update_check_cancel = CancellationToken::new();
+        let handle = Arc::new(coder_server::UpdateChecker::with_cancel(
+            state.http_client.clone(),
+            coder_server::UpdateCheckerOptions {
+                url: config.update_check_url.clone(),
+                interval: Duration::from_secs(config.update_check_interval_secs),
+                timeout: coder_server::update_check::DEFAULT_UPDATE_CHECK_TIMEOUT,
+            },
+            update_check_cancel,
+        ))
+        .spawn();
+        let checker = handle.checker();
+        (state.with_update_checker(checker), Some(handle))
+    } else {
+        (state, None)
+    };
+
     let listener = tokio::net::TcpListener::bind(config.listen_addr)
         .await
         .map_err(|source| MainError::Listen {
@@ -998,6 +1036,17 @@ async fn run() -> Result<(), MainError> {
             warn!(error = %e, "autobuild executor task panicked during shutdown");
         }
     });
+
+    // 5b. Cancel the update checker background poll loop and await the
+    //     task. No DB writes happen in the loop, so ordering relative to
+    //     the database close step below is not load-bearing, but joining
+    //     keeps graceful shutdown deterministic and matches the pattern
+    //     used for the other background workers.
+    if let Some(update_check_handle) = update_check_handle {
+        coordinator.register("update_check", async move {
+            update_check_handle.shutdown().await;
+        });
+    }
 
     // 6. Flush and shut down the OpenTelemetry tracer provider so buffered
     //    spans are exported before the process exits.  The OTLP exporter
@@ -1196,6 +1245,8 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,
+        update_check_interval_secs: args.update_check_interval_secs,
+        update_check_url: args.update_check_url,
         ssh_keygen_algorithm: args.ssh_keygen_algorithm,
         cache_dir: args.cache_dir,
         browser_only: args.browser_only,

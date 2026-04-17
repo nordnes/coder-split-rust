@@ -90,6 +90,10 @@ pub struct ServerConfig {
     pub swagger_enabled: bool,
     /// Whether to periodically check for Coder updates.
     pub update_check: bool,
+    /// Interval between GitHub release polls, in seconds (default 24h).
+    pub update_check_interval_secs: u64,
+    /// URL used to fetch the latest Coder release from GitHub.
+    pub update_check_url: String,
     /// Algorithm used for SSH key generation (e.g. "ed25519").
     pub ssh_keygen_algorithm: String,
     /// Directory used for caching temporary files.
@@ -166,6 +170,8 @@ impl ServerConfig {
             healthcheck: self.healthcheck.clone(),
             swagger_enabled: self.swagger_enabled,
             update_check: self.update_check,
+            update_check_interval_secs: self.update_check_interval_secs,
+            update_check_url: self.update_check_url.clone(),
             browser_only: self.browser_only,
             disable_password_auth: self.disable_password_auth,
             disable_path_apps: self.disable_path_apps,
@@ -656,6 +662,18 @@ impl ServerConfig {
                 env: "CODER_UPDATE_CHECK",
                 default: Some("false"),
                 description: "Periodically check for new Coder releases.",
+            },
+            ConfigOption {
+                name: "update-check-interval-secs",
+                env: "CODER_UPDATE_CHECK_INTERVAL_SECS",
+                default: Some("86400"),
+                description: "Interval in seconds between GitHub release polls for update checks.",
+            },
+            ConfigOption {
+                name: "update-check-url",
+                env: "CODER_UPDATE_CHECK_URL",
+                default: Some("https://api.github.com/repos/coder/coder/releases/latest"),
+                description: "URL used to fetch the latest Coder release.",
             },
             // -- Miscellaneous --
             ConfigOption {
@@ -1342,6 +1360,10 @@ pub struct PublicDeploymentConfig {
     pub swagger_enabled: bool,
     /// Whether update check is enabled.
     pub update_check: bool,
+    /// Interval between update checks, in seconds.
+    pub update_check_interval_secs: u64,
+    /// URL used to fetch the latest Coder release.
+    pub update_check_url: String,
     /// Whether browser-only mode is active.
     pub browser_only: bool,
     /// Whether password auth is disabled.
@@ -1473,6 +1495,8 @@ mod tests {
             worker: WorkerConfig::default(),
             swagger_enabled: true,
             update_check: false,
+            update_check_interval_secs: 24 * 60 * 60,
+            update_check_url: "https://api.github.com/repos/coder/coder/releases/latest".to_owned(),
             ssh_keygen_algorithm: "ed25519".to_owned(),
             cache_dir: "~/.cache/coder".to_owned(),
             browser_only: false,

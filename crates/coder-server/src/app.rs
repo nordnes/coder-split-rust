@@ -335,6 +335,12 @@ pub struct AppState {
     /// Will be replaced by the CryptoKeys DB-backed system when workspace-proxy
     /// infrastructure is fully ported.
     pub(crate) app_signing_key: [u8; 32],
+    /// Optional background-refreshed cache of the latest Coder release.
+    ///
+    /// `None` when `config.update_check` is disabled or the server is
+    /// running in test mode. The `/updatecheck` handler falls back to the
+    /// currently running version in that case, matching Go's behavior.
+    pub update_checker: Option<Arc<crate::update_check::UpdateChecker>>,
 }
 
 impl AppState {
@@ -396,7 +402,18 @@ impl AppState {
             http_client,
             entitlements,
             app_signing_key,
+            update_checker: None,
         })
+    }
+
+    /// Attaches an [`UpdateChecker`] to this state. The background poll loop
+    /// is expected to already be running (via
+    /// [`crate::update_check::UpdateChecker::spawn`]). Returns the mutated
+    /// state so call sites can use builder-style chaining at startup.
+    #[must_use]
+    pub fn with_update_checker(mut self, checker: Arc<crate::update_check::UpdateChecker>) -> Self {
+        self.update_checker = Some(checker);
+        self
     }
 
     /// Cancels the background deployment-stats refresh loop.
@@ -9598,6 +9615,8 @@ pub(crate) mod tests {
             worker: coder_core::config::WorkerConfig::default(),
             swagger_enabled: true,
             update_check: false,
+            update_check_interval_secs: 24 * 60 * 60,
+            update_check_url: "https://api.github.com/repos/coder/coder/releases/latest".to_owned(),
             ssh_keygen_algorithm: "ed25519".to_owned(),
             cache_dir: String::new(),
             browser_only: false,
