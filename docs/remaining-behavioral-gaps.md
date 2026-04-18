@@ -78,7 +78,6 @@ to `complete` in the next regeneration.
 | Route | Method | Current behavior | Real gap |
 |-------|--------|------------------|----------|
 | `/templateversions/{ver}/dynamic-parameters/evaluate` | POST | Returns the stored parameter definitions (`crates/coder-server/src/handlers/templates.rs:1568`). | Go runs the provisioner's `Plan` in preview mode with the user-supplied values to produce *evaluated* options. Rust returns the raw definitions because the provisioner runtime is not wired in. |
-| `/workspaceagents/azure-instance-identity` | POST | Permissive path extracts `vmId` from the JWT payload without validating the signature (`crates/coder-server/src/instance_identity/mod.rs:109`). The `CryptoVerifier` path always returns `VerifyError::VerificationFailed` (`crates/coder-server/src/instance_identity/azure.rs:64`). | No PKCS7/Microsoft CA verification. Deployments running with `verify_instance_identity = true` cannot bootstrap Azure agents at all; deployments in permissive mode accept forged tokens. See Appendix A.1. |
 
 ---
 
@@ -235,13 +234,12 @@ complete.
 | 1 | Port agent DRPC protocol (messages 1–4 + yamux + DRPC framing) | §6 | **L** (2–3 weeks) | Proto schema, yamux crate, tailnet DRPC types |
 | 2 | Wire provisioner tag matching to job creation sites | §7.1 | **M** (3–5 days) | Go `ProvisionerTagSet` semantics |
 | 3 | Dynamic-parameter evaluation via provisioner Plan | §3 / §7.2 | **M** (1 week) | Provisioner runtime in Rust |
-| 4 | Azure instance-identity PKCS7/CA verification | §3 / Appendix A.1 | **M** (1 week) | Microsoft CA bundle, PKCS7 verifier |
-| 5 | SMTP email dispatch (`lettre`) | §9.1 | **S** (1 day) | SMTP credentials in config (already present) |
-| 6 | Workspace-proxy coordinate multi-agent tailnet bridge | §4 | **M** (1 week) | Agent DRPC (§6) first |
-| 7 | Workspace-proxy signed app token: full `WorkspaceAppsProvider` chain | §4 | **M** (1 week) | Workspace-apps port from Go |
-| 8 | Token-revocation cascade + audit entry | §5.1 | **XS** (hours) | Existing audit sink |
-| 9 | Proxy crypto-keys rotation scheduler | §4 | **S** (1–2 days) | Background task runner |
-| 10 | Regenerate `crates/coder-server/PARITY_MATRIX.md` | §1, §2, §4 | **XS** (hours) | `apps/coder-parity` |
+| 4 | SMTP email dispatch (`lettre`) | §9.1 | **S** (1 day) | SMTP credentials in config (already present) |
+| 5 | Workspace-proxy coordinate multi-agent tailnet bridge | §4 | **M** (1 week) | Agent DRPC (§6) first |
+| 6 | Workspace-proxy signed app token: full `WorkspaceAppsProvider` chain | §4 | **M** (1 week) | Workspace-apps port from Go |
+| 7 | Token-revocation cascade + audit entry | §5.1 | **XS** (hours) | Existing audit sink |
+| 8 | Proxy crypto-keys rotation scheduler | §4 | **S** (1–2 days) | Background task runner |
+| 9 | Regenerate `crates/coder-server/PARITY_MATRIX.md` | §1, §2, §4 | **XS** (hours) | `apps/coder-parity` |
 
 *Earlier revisions of this matrix listed additional items that have
 since landed and are therefore no longer tracked here:*
@@ -249,7 +247,7 @@ since landed and are therefore no longer tracked here:*
   `/auth/scopes` — closed by PRs #199, #200, #203, #205.*
 - *Quota enforcement (§8) — closed by PR #202.*
 - *AWS/GCP instance-identity cryptographic verification — closed by PR
-  #206. Only Azure remains (item #4 above).*
+  #206. Azure PKCS7/CA verification — closed by PR #211.*
 
 Effort key: XS < 1 day · S = 1–3 days · M = ~1 week · L = ~3 weeks.
 
@@ -266,7 +264,7 @@ parallel.
 |---|---:|---|
 | §1 Stale documentation | 3 files | README/AGENTS already correct; PARITY_MATRIX needs regen |
 | §2 `stub-501` classification drift | 5 routes | All five handlers are actually complete |
-| §3 Genuine `stub-partial` routes | 2 routes | Dynamic-parameters evaluation and Azure instance identity. The other 8 entries were closed by PRs #199–#206. |
+| §3 Genuine `stub-partial` routes | 1 route | Dynamic-parameters evaluation only. The other 9 entries were closed by PRs #199–#206 and #211. |
 | §4 Workspace-proxy internal stubs | 6 routes | Now implemented; remaining gaps are narrow (DERP mesh key, rotation, coordinate bridge) |
 | §5 OAuth2 behavioral gaps | 2 items | Revocation cascade + RFC 7592 replay protection |
 | §6 Agent RPC protocol | ≥4 message types + DRPC/yamux framing | Largest single gap |

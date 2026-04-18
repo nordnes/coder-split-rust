@@ -41,7 +41,10 @@ semver.workspace = true
 serde.workspace = true
 rand.workspace = true
 sha2.workspace = true
-x509-parser.workspace = true
+x509-parser = { workspace = true, features = ["verify"] }
+cms.workspace = true
+const-oid.workspace = true
+der.workspace = true
 subtle.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
