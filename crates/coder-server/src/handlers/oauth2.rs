@@ -684,6 +684,7 @@ pub(crate) async fn post_oauth2_token(
                     client_id,
                     &request.client_secret,
                     &request.code_verifier,
+                    &request.resource,
                 )
                 .await
             {
@@ -714,7 +715,12 @@ pub(crate) async fn post_oauth2_token(
             };
             let result = match state
                 .oauth2_provider
-                .refresh_token(&request.refresh_token, client_id, &request.client_secret)
+                .refresh_token(
+                    &request.refresh_token,
+                    client_id,
+                    &request.client_secret,
+                    &request.resource,
+                )
                 .await
             {
                 Ok(result) => result,
