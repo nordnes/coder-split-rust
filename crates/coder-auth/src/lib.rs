@@ -2147,6 +2147,31 @@ impl OAuth2ProviderError {
     }
 }
 
+/// Rejects any `code_challenge_method` that is not `"S256"` when PKCE is
+/// in use. RFC 7636 defines both `S256` and `plain`, but Coder only
+/// advertises `S256` in its OAuth2 metadata
+/// (`code_challenge_methods_supported`). Accepting `plain` would leak the
+/// verifier on the wire and contradict that advertisement, so this helper
+/// is used by [`OAuth2ProviderService::create_authorization_code`] to fail
+/// fast at code-minting time.
+///
+/// An empty `code_challenge` means the client is not using PKCE — the
+/// method is ignored and the call is permitted.
+fn validate_pkce_method(
+    code_challenge: &str,
+    code_challenge_method: &str,
+) -> Result<(), OAuth2ProviderError> {
+    if code_challenge.is_empty() {
+        return Ok(());
+    }
+    if code_challenge_method == "S256" {
+        return Ok(());
+    }
+    Err(OAuth2ProviderError::bad_request(
+        "Unsupported code_challenge_method: only S256 is accepted.",
+    ))
+}
+
 /// Enforces RFC 8707 §2.1 (authorization-code exchange) resource-indicator
 /// consistency between the authorization step and the token step:
 ///
@@ -2404,6 +2429,8 @@ where
         use sha2::Digest;
 
         let _app = self.get_app(app_id).await?;
+
+        validate_pkce_method(code_challenge, code_challenge_method)?;
 
         // Generate a 32-byte random code and encode as URL-safe base64.
         let mut raw_bytes = [0u8; 32];
@@ -3837,5 +3864,61 @@ mod tests {
             msg.contains("does not match") && msg.contains("refresh"),
             "error message must identify the refresh-grant branch: {msg}"
         );
+    }
+
+    // ── PKCE method validation (Wave 3 #22) ─────────────────
+
+    #[test]
+    fn pkce_method_no_challenge_always_ok() {
+        // Non-PKCE flows are permitted: if the client did not supply a
+        // `code_challenge` we don't care what method string (if any) was
+        // passed along — it's unused.
+        assert!(super::validate_pkce_method("", "S256").is_ok());
+        assert!(super::validate_pkce_method("", "").is_ok());
+        assert!(super::validate_pkce_method("", "plain").is_ok());
+        assert!(super::validate_pkce_method("", "something-weird").is_ok());
+    }
+
+    #[test]
+    fn pkce_method_s256_is_accepted() {
+        assert!(super::validate_pkce_method("some-challenge", "S256").is_ok());
+    }
+
+    #[test]
+    fn pkce_method_plain_is_rejected() {
+        // RFC 7636 allows `plain`, but Coder advertises S256-only.
+        // Accepting `plain` would leak the verifier on the wire.
+        let result = super::validate_pkce_method("some-challenge", "plain");
+        assert!(result.is_err());
+        let msg = result
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "<no error>".to_owned());
+        assert!(
+            msg.contains("S256"),
+            "error must explicitly name the accepted method: {msg}"
+        );
+    }
+
+    #[test]
+    fn pkce_method_empty_is_rejected_when_challenge_set() {
+        // RFC 7636 says unspecified method defaults to `plain`. We refuse
+        // to accept the default — clients must state S256 explicitly.
+        assert!(super::validate_pkce_method("some-challenge", "").is_err());
+    }
+
+    #[test]
+    fn pkce_method_unknown_is_rejected() {
+        assert!(super::validate_pkce_method("some-challenge", "S384").is_err());
+        assert!(super::validate_pkce_method("some-challenge", "S512").is_err());
+        assert!(super::validate_pkce_method("some-challenge", "weird").is_err());
+    }
+
+    #[test]
+    fn pkce_method_case_sensitive_s256() {
+        // RFC 7636 §4.3 is case-sensitive on the method name: "S256", not
+        // "s256". Accept only the exact casing.
+        assert!(super::validate_pkce_method("c", "s256").is_err());
+        assert!(super::validate_pkce_method("c", "S256").is_ok());
     }
 }
