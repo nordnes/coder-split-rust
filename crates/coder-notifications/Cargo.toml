@@ -16,6 +16,7 @@ base64.workspace = true
 coder-core = { path = "../coder-core" }
 lettre.workspace = true
 futures-util = { workspace = true, features = ["alloc"] }
+metrics.workspace = true
 p256.workspace = true
 rand.workspace = true
 reqwest.workspace = true

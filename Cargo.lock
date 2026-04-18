@@ -825,6 +825,7 @@ dependencies = [
  "coder-core",
  "futures-util",
  "lettre",
+ "metrics",
  "p256",
  "rand 0.8.5",
  "reqwest",
