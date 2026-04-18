@@ -658,7 +658,7 @@ pub(crate) async fn watch_chats(
         };
         match serde_json::to_string(&ping) {
             Ok(json) => {
-                yield Ok::<_, Infallible>(Event::default().data(json));
+                yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_DURATION));
             }
             Err(e) => {
                 tracing::debug!(error = %e, "failed to serialize watch_chats ping event");
@@ -693,7 +693,11 @@ pub(crate) async fn watch_chats(
     };
 
     Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(SSE_KEEPALIVE_INTERVAL)
+                .text("ping"),
+        )
         .into_response())
 }
 
@@ -814,6 +818,11 @@ pub(crate) async fn stream_chat(
         // Send snapshot in batches (up to 256 events per SSE message).
         // The batch size of 256 matches the Go reference `chatStreamBatchSize`.
         const BATCH_SIZE: usize = 256;
+        // Track whether the `retry:` hint has been sent.  We attach it to
+        // the first successfully-serialized event, whether that comes from
+        // the snapshot batch loop or (in the unlikely fallback) the pub/sub
+        // loop.  This is more robust than scoping the flag to a single loop.
+        let mut retry_sent = false;
         for chunk in snapshot.chunks(BATCH_SIZE) {
             let sse = coder_core::api::ServerSentEvent {
                 event_type: coder_core::api::ServerSentEventType::Data,
@@ -821,7 +830,13 @@ pub(crate) async fn stream_chat(
             };
             match serde_json::to_string(&sse) {
                 Ok(json) => {
-                    yield Ok::<_, Infallible>(Event::default().data(json));
+                    let event = Event::default().data(json);
+                    if !retry_sent {
+                        retry_sent = true;
+                        yield Ok::<_, Infallible>(event.retry(SSE_RETRY_DURATION));
+                    } else {
+                        yield Ok::<_, Infallible>(event);
+                    }
                 }
                 Err(e) => {
                     tracing::debug!(error = %e, "failed to serialize stream_chat snapshot batch");
@@ -840,7 +855,13 @@ pub(crate) async fn stream_chat(
                     };
                     match serde_json::to_string(&sse) {
                         Ok(json) => {
-                            yield Ok::<_, Infallible>(Event::default().data(json));
+                            let event = Event::default().data(json);
+                            if !retry_sent {
+                                retry_sent = true;
+                                yield Ok::<_, Infallible>(event.retry(SSE_RETRY_DURATION));
+                            } else {
+                                yield Ok::<_, Infallible>(event);
+                            }
                         }
                         Err(e) => {
                             tracing::debug!(error = %e, "failed to serialize stream_chat SSE event");
@@ -856,7 +877,11 @@ pub(crate) async fn stream_chat(
     };
 
     Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(SSE_KEEPALIVE_INTERVAL)
+                .text("ping"),
+        )
         .into_response())
 }
 

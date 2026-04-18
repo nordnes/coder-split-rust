@@ -538,7 +538,9 @@ pub(crate) async fn watch_inbox_notifications(
                 };
                 match serde_json::to_string(&sse) {
                     Ok(json) => {
-                        yield Ok::<_, Infallible>(Event::default().data(json));
+                        // Include `retry:` hint in the first event so clients
+                        // know how long to wait before reconnecting.
+                        yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_DURATION));
                     }
                     Err(e) => {
                         tracing::debug!(error = %e, "failed to serialize initial inbox SSE event");
@@ -552,7 +554,7 @@ pub(crate) async fn watch_inbox_notifications(
                     data: None,
                 };
                 if let Ok(json) = serde_json::to_string(&err_sse) {
-                    yield Ok::<_, Infallible>(Event::default().data(json));
+                    yield Ok::<_, Infallible>(Event::default().data(json).retry(SSE_RETRY_DURATION));
                 }
             }
         }
@@ -585,7 +587,11 @@ pub(crate) async fn watch_inbox_notifications(
     };
 
     Ok(Sse::new(stream)
-        .keep_alive(KeepAlive::default())
+        .keep_alive(
+            KeepAlive::new()
+                .interval(SSE_KEEPALIVE_INTERVAL)
+                .text("ping"),
+        )
         .into_response())
 }
 
@@ -1090,6 +1096,153 @@ mod tests {
             .send()
             .await?;
         assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_initial_event_contains_retry() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!("{base_url}api/v2/notifications/inbox/watch");
+        let client = reqwest::Client::new();
+        let mut resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        let text = read_sse_frame(&mut resp, 2).await?;
+        assert!(
+            text.contains("retry:"),
+            "expected retry: field in initial SSE event, got: {text}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_mark_all_read_triggers_update() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!("{base_url}api/v2/notifications/inbox/watch");
+        let client = reqwest::Client::new();
+        let mut resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        // Consume the initial snapshot event.
+        let _ = read_sse_frame(&mut resp, 2).await?;
+
+        // Call mark-all-read, which should publish to the inbox channel.
+        let mark_resp = client
+            .put(format!(
+                "{base_url}api/v2/notifications/inbox/mark-all-as-read"
+            ))
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+        assert_eq!(mark_resp.status(), StatusCode::NO_CONTENT);
+
+        // The SSE stream should receive an update triggered by the write path.
+        let text = read_sse_frame(&mut resp, 2).await?;
+        assert!(
+            text.contains("\"type\":\"data\""),
+            "expected SSE data event after mark-all-read, got: {text}"
+        );
+        assert!(
+            text.contains("\"notifications\""),
+            "expected notifications in SSE update after mark-all-read, got: {text}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_stream_terminates_on_pubsub_close() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let pubsub = state.pubsub.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!("{base_url}api/v2/notifications/inbox/watch");
+        let client = reqwest::Client::new();
+        let mut resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        // Consume the initial snapshot event.
+        let _ = read_sse_frame(&mut resp, 2).await?;
+
+        // Close the pubsub system — this simulates server shutdown.
+        pubsub.close().await?;
+
+        // The stream should terminate: reading should return empty/no more data.
+        let text = read_sse_frame(&mut resp, 2).await?;
+        // After pubsub closes the stream loop exits and the SSE response ends.
+        // We might get empty data or a partial keepalive; the key assertion is
+        // that we don't hang — the read_sse_frame call returns within the timeout.
+        // The stream should NOT produce another data event.
+        let has_data_event =
+            text.contains("\"type\":\"data\"") && text.contains("\"notifications\"");
+        assert!(
+            !has_data_event,
+            "stream should not produce data events after pubsub close, got: {text}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn watch_inbox_notifications_sends_keepalive() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let url = format!("{base_url}api/v2/notifications/inbox/watch");
+        let client = reqwest::Client::new();
+        let mut resp = client
+            .get(&url)
+            .header("Coder-Session-Token", &session_token)
+            .send()
+            .await?;
+
+        // Consume the initial snapshot event.
+        let _ = read_sse_frame(&mut resp, 2).await?;
+
+        // Wait long enough for the keepalive interval (15s) to fire, plus margin.
+        // Read raw bytes from the response to detect the `: ping` keepalive comment.
+        let mut buffer: Vec<u8> = Vec::new();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match tokio::time::timeout(remaining, resp.chunk()).await {
+                Ok(Ok(Some(bytes))) => {
+                    buffer.extend_from_slice(&bytes);
+                    let text = String::from_utf8_lossy(&buffer);
+                    if text.contains(": ping") {
+                        break;
+                    }
+                }
+                _ => break,
+            }
+        }
+        let text = String::from_utf8_lossy(&buffer).into_owned();
+        assert!(
+            text.contains(": ping"),
+            "expected keepalive `: ping` comment within 20s, got: {text}"
+        );
         Ok(())
     }
 }

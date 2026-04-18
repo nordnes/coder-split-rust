@@ -106,9 +106,22 @@ use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::Sha256;
+use std::time::Duration;
 use time::OffsetDateTime;
 use tracing::debug;
 use uuid::Uuid;
+
+/// SSE keepalive interval for watch streams.
+///
+/// Proxies and load balancers often drop idle connections after 30-60 seconds.
+/// A 15-second interval keeps the connection alive through most intermediaries.
+pub(crate) const SSE_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
+
+/// SSE retry hint sent to clients in the initial event.
+///
+/// Tells conformant EventSource clients to wait 3 seconds before reconnecting
+/// after an unexpected disconnect.
+pub(crate) const SSE_RETRY_DURATION: Duration = Duration::from_millis(3000);
 
 /// Strips Markdown formatting from a string, returning plain text.
 ///
