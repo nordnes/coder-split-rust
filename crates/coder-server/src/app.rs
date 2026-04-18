@@ -7289,6 +7289,16 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        async fn list_workspace_apps_with_healthchecks(
+            &self,
+        ) -> Result<Vec<coder_core::WorkspaceAppHealthcheckTarget>, StorageError> {
+            // The in-memory stub does not model the workspace → build →
+            // resource → agent → app chain, so it cannot answer this
+            // query. Returning an empty list is safe: the server-side
+            // prober simply has nothing to probe.
+            Ok(Vec::new())
+        }
+
         async fn upsert_workspace_agent_metadata(
             &self,
             agent_id: Uuid,
@@ -25082,6 +25092,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
         Ok((state, store, audit_sink))
     }
@@ -38448,6 +38459,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
         let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;

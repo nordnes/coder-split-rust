@@ -1041,6 +1041,21 @@ async fn run() -> Result<(), MainError> {
     // `vals.UpdateCheck` in `coder/cli/server.go`: when disabled we skip
     // both the background poll and the AppState wiring, and the handler
     // falls back to reporting the running version as current.
+    // Start the server-side workspace-app healthcheck prober: periodically
+    // GETs each workspace_app's `healthcheck_url` and updates
+    // `workspace_apps.health` on transition. Mirrors Go's
+    // `coderd/workspaceapps/` prober. Coexists with the agent-reported
+    // path (DRPC `BatchUpdateAppHealths`); last-writer-wins on the DB
+    // column.
+    let app_healthcheck_handle =
+        Arc::new(coder_server::app_healthcheck::AppHealthcheckProber::new(
+            store.clone(),
+            state.http_client.clone(),
+            coder_server::app_healthcheck::AppHealthcheckProberOptions::default(),
+            CancellationToken::new(),
+        ))
+        .spawn();
+
     let (state, update_check_handle) = if config.update_check {
         let update_check_cancel = CancellationToken::new();
         let handle = Arc::new(coder_server::UpdateChecker::with_cancel(
@@ -1148,6 +1163,13 @@ async fn run() -> Result<(), MainError> {
     coordinator.register("stale_job_reaper", async move {
         stale_job_reaper_cancel.cancel();
         stale_job_reaper.join().await;
+    });
+
+    // 4f. Cancel the app healthcheck prober and await completion so any
+    //     in-flight `update_workspace_app_health` write lands before the
+    //     pool is closed.
+    coordinator.register("app_healthcheck_prober", async move {
+        app_healthcheck_handle.shutdown().await;
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight

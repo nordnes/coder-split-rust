@@ -604,6 +604,30 @@ struct StoredWorkspaceAppRow {
 }
 
 #[derive(Debug, FromRow)]
+struct StoredWorkspaceAppHealthcheckTargetRow {
+    workspace_id: Uuid,
+    id: Uuid,
+    created_at: OffsetDateTime,
+    agent_id: Uuid,
+    display_name: String,
+    icon: String,
+    command: Option<String>,
+    url: Option<String>,
+    healthcheck_url: String,
+    healthcheck_interval: i32,
+    healthcheck_threshold: i32,
+    health: String,
+    subdomain: bool,
+    sharing_level: String,
+    slug: String,
+    external: bool,
+    display_order: i32,
+    hidden: bool,
+    open_in: String,
+    display_group: Option<String>,
+}
+
+#[derive(Debug, FromRow)]
 struct StoredWorkspaceAgentScriptRow {
     id: Uuid,
     workspace_agent_id: Uuid,
@@ -2301,6 +2325,35 @@ fn workspace_app_row_from_stored(row: StoredWorkspaceAppRow) -> WorkspaceAppRow 
         hidden: row.hidden,
         open_in: row.open_in,
         display_group: row.display_group,
+    }
+}
+
+fn workspace_app_healthcheck_target_from_stored(
+    row: StoredWorkspaceAppHealthcheckTargetRow,
+) -> coder_core::WorkspaceAppHealthcheckTarget {
+    coder_core::WorkspaceAppHealthcheckTarget {
+        workspace_id: row.workspace_id,
+        app: WorkspaceAppRow {
+            id: row.id,
+            created_at: row.created_at,
+            agent_id: row.agent_id,
+            display_name: row.display_name,
+            icon: row.icon,
+            command: row.command,
+            url: row.url,
+            healthcheck_url: row.healthcheck_url,
+            healthcheck_interval: row.healthcheck_interval,
+            healthcheck_threshold: row.healthcheck_threshold,
+            health: row.health,
+            subdomain: row.subdomain,
+            sharing_level: row.sharing_level,
+            slug: row.slug,
+            external: row.external,
+            display_order: row.display_order,
+            hidden: row.hidden,
+            open_in: row.open_in,
+            display_group: row.display_group,
+        },
     }
 }
 
