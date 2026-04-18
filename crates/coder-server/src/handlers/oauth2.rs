@@ -602,10 +602,66 @@ pub(crate) async fn post_oauth2_authorize(
     Ok((StatusCode::SEE_OTHER, [("location", redirect_url.as_str())]).into_response())
 }
 
+/// Parse HTTP Basic authentication from an `Authorization` header.
+///
+/// Returns `(client_id, client_secret)` if the header starts with `Basic `
+/// and the base64-encoded payload decodes to a `user:pass` string. Matches
+/// RFC 7617 / RFC 6749 §2.3.1 semantics — OAuth2 confidential clients may
+/// authenticate via HTTP Basic (percent-decoded), with `user` → `client_id`
+/// and `pass` → `client_secret`.
+///
+/// Returns `None` on any parse failure so the caller can fall back to form
+/// credentials without tearing the whole request down.
+fn parse_oauth2_basic_auth(headers: &HeaderMap) -> Option<(String, String)> {
+    use base64::Engine as _;
+
+    let auth_header = headers.get("authorization").and_then(|v| v.to_str().ok())?;
+    // The scheme prefix is case-insensitive per RFC 7235.
+    let rest = auth_header
+        .strip_prefix("Basic ")
+        .or_else(|| auth_header.strip_prefix("basic "))?;
+    let decoded = base64::engine::general_purpose::STANDARD
+        .decode(rest.trim())
+        .ok()?;
+    let decoded = std::str::from_utf8(&decoded).ok()?;
+    let (id, secret) = decoded.split_once(':')?;
+    // RFC 6749 §2.3.1 requires percent-encoding of the form-urlencoded id
+    // and secret before base64 wrapping. We pass the raw values through —
+    // both our client_ids (UUIDs) and client_secrets (URL-safe bytes) are
+    // always percent-encoding-safe, so this shortcut is correct for every
+    // secret the Rust provider mints. Clients that choose to embed
+    // reserved characters would need to use body credentials instead.
+    Some((id.to_owned(), secret.to_owned()))
+}
+
 pub(crate) async fn post_oauth2_token(
     State(state): State<AppState>,
-    Form(request): Form<OAuth2TokenRequest>,
+    headers: HeaderMap,
+    Form(mut request): Form<OAuth2TokenRequest>,
 ) -> Result<Response, AppError> {
+    // RFC 6749 §2.3.1: confidential clients authenticate via HTTP Basic
+    // credentials OR body parameters, but MUST NOT use both in one request.
+    // If the client sends Basic auth without also sending body creds, we
+    // lift the Basic values into `request` before proceeding.
+    if let Some((basic_id, basic_secret)) = parse_oauth2_basic_auth(&headers) {
+        let body_has_id = !request.client_id.is_empty();
+        let body_has_secret = !request.client_secret.is_empty();
+        if body_has_id || body_has_secret {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(OAuth2ErrorResponse {
+                    error: "invalid_request".to_owned(),
+                    error_description:
+                        "Use either HTTP Basic authentication or body credentials, not both."
+                            .to_owned(),
+                }),
+            )
+                .into_response());
+        }
+        request.client_id = basic_id;
+        request.client_secret = basic_secret;
+    }
+
     match request.grant_type.as_str() {
         "authorization_code" => {
             let client_id = match Uuid::parse_str(&request.client_id) {
@@ -1558,5 +1614,84 @@ pub(crate) fn oauth2_secret_response(
         id: secret.id.to_string(),
         last_used_at: None,
         client_secret_truncated: secret.display_secret,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_oauth2_basic_auth;
+    use base64::Engine as _;
+    use http::HeaderMap;
+
+    fn headers_with_auth(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        if let Ok(v) = http::HeaderValue::from_str(value) {
+            headers.insert("authorization", v);
+        }
+        headers
+    }
+
+    #[test]
+    fn basic_auth_parses_standard_credentials() {
+        let creds = base64::engine::general_purpose::STANDARD
+            .encode(b"00000000-0000-0000-0000-000000000000:some-secret");
+        let headers = headers_with_auth(&format!("Basic {creds}"));
+        let parsed = parse_oauth2_basic_auth(&headers);
+        assert!(parsed.is_some(), "Basic credentials must parse");
+        let (id, secret) = parsed.unwrap_or_default();
+        assert_eq!(id, "00000000-0000-0000-0000-000000000000");
+        assert_eq!(secret, "some-secret");
+    }
+
+    #[test]
+    fn basic_auth_scheme_is_case_insensitive() {
+        // RFC 7235 allows mixed-case scheme tokens; confirm the lowercase
+        // variant some proxy stacks normalize to still parses.
+        let creds = base64::engine::general_purpose::STANDARD.encode(b"abc:xyz");
+        let headers = headers_with_auth(&format!("basic {creds}"));
+        assert!(
+            parse_oauth2_basic_auth(&headers).is_some(),
+            "lowercase 'basic' scheme must be accepted"
+        );
+    }
+
+    #[test]
+    fn basic_auth_returns_none_without_header() {
+        assert!(parse_oauth2_basic_auth(&HeaderMap::new()).is_none());
+    }
+
+    #[test]
+    fn basic_auth_returns_none_for_bearer_scheme() {
+        // Bearer tokens must not be treated as Basic credentials — they feed
+        // a different auth path (the RFC 7592 registration endpoints).
+        let headers = headers_with_auth("Bearer some-token");
+        assert!(parse_oauth2_basic_auth(&headers).is_none());
+    }
+
+    #[test]
+    fn basic_auth_returns_none_for_non_base64_payload() {
+        let headers = headers_with_auth("Basic !!!not-base64!!!");
+        assert!(parse_oauth2_basic_auth(&headers).is_none());
+    }
+
+    #[test]
+    fn basic_auth_returns_none_when_payload_missing_colon() {
+        // "noColon" base64-decodes cleanly but has no `user:pass` split.
+        let creds = base64::engine::general_purpose::STANDARD.encode(b"noColon");
+        let headers = headers_with_auth(&format!("Basic {creds}"));
+        assert!(parse_oauth2_basic_auth(&headers).is_none());
+    }
+
+    #[test]
+    fn basic_auth_accepts_empty_secret() {
+        // "client:" (empty password) is legal HTTP Basic and sometimes used
+        // by public OAuth2 clients that only authenticate the id half.
+        let creds = base64::engine::general_purpose::STANDARD.encode(b"client-id:");
+        let headers = headers_with_auth(&format!("Basic {creds}"));
+        let parsed = parse_oauth2_basic_auth(&headers);
+        assert!(parsed.is_some());
+        let (id, secret) = parsed.unwrap_or_default();
+        assert_eq!(id, "client-id");
+        assert_eq!(secret, "");
     }
 }

@@ -1502,6 +1502,9 @@ mod tests {
         let worker = super::StaleJobReaperWorker::start(store, 3600, cancel.clone());
         cancel.cancel();
         let result = tokio::time::timeout(std::time::Duration::from_secs(2), worker.join()).await;
-        assert!(result.is_ok(), "worker must shut down promptly after cancel");
+        assert!(
+            result.is_ok(),
+            "worker must shut down promptly after cancel"
+        );
     }
 }
