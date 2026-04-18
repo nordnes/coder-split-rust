@@ -47,6 +47,40 @@ use web_push::{
     VapidSignatureBuilder, WebPushClient, WebPushMessageBuilder,
 };
 
+/// Narrow capability the dispatch loop needs beyond [`IdentityStore`] —
+/// reading the deployment-wide `notifier_paused` switch.
+///
+/// Defined as its own trait (rather than widening the service bound to
+/// [`AppStore`]) so `MockStore`s in test suites can keep implementing
+/// `IdentityStore` without taking on the full 200-method `AppStore`
+/// surface. A blanket impl forwards to `AppStore::get_notifications_settings`
+/// so production callers pass an `Arc<dyn AppStore>` unchanged.
+///
+/// Mirrors Go's `notifications.Manager.ensureRunning` check against
+/// `GetNotificationsSettings().NotifierPaused` in
+/// `coder/coderd/notifications/manager.go`.
+#[async_trait::async_trait]
+pub trait NotifierPausedReader: Send + Sync {
+    /// Returns whether deployment-wide notification dispatch is paused.
+    async fn notifier_paused(&self) -> Result<bool, coder_core::StorageError>;
+}
+
+// Concrete impl for the single production shape `apps/coderd/src/main.rs`
+// actually passes (`Arc<dyn AppStore>`). Avoiding a blanket `impl<T: AppStore>`
+// sidesteps orphan-rule conflicts between coder-notifications (defining this
+// trait) and coder-core (owning `AppStore`) — Rust can't prove that a
+// downstream crate won't add `impl AppStore for Arc<Something>`, which
+// would then overlap with any `Arc<T>` forwarding impl. Tests that use a
+// non-`AppStore` mock add their own `impl NotifierPausedReader` directly.
+#[async_trait::async_trait]
+impl NotifierPausedReader for Arc<dyn AppStore> {
+    async fn notifier_paused(&self) -> Result<bool, coder_core::StorageError> {
+        Ok(AppStore::get_notifications_settings(self.as_ref())
+            .await?
+            .notifier_paused)
+    }
+}
+
 /// Current milestone for the notifications crate.
 pub const STATUS: &str = "active";
 
@@ -127,7 +161,7 @@ pub struct NotificationDispatchService<S> {
 
 impl<S> NotificationDispatchService<S>
 where
-    S: IdentityStore + Clone + Send + Sync + 'static,
+    S: IdentityStore + NotifierPausedReader + Clone + Send + Sync + 'static,
 {
     /// Creates the dispatch service and starts the background poll loop.
     ///
@@ -166,6 +200,20 @@ where
     }
 
     async fn dispatch_once(&self) -> Result<u32, coder_core::StorageError> {
+        // Honor the deployment-wide pause switch before acquiring any work.
+        // Mirrors Go's `notifications.Manager.ensureRunning` which checks
+        // `GetNotificationsSettings().NotifierPaused` on every tick. If the
+        // settings read itself fails we fall through and keep trying —
+        // a single DB blip shouldn't permanently silence the dispatcher.
+        match self.store.notifier_paused().await {
+            Ok(true) => return Ok(0),
+            Ok(false) => {}
+            Err(err) => warn!(
+                error = %err,
+                "failed to read notifier_paused setting; continuing dispatch"
+            ),
+        }
+
         // Messages that have already reached MAX_DISPATCH_ATTEMPTS are
         // excluded by the query itself via the max_attempt_count parameter.
         let messages = self
@@ -614,7 +662,7 @@ async fn run_dispatch_loop<S>(
     poll_secs: u64,
     cancel: CancellationToken,
 ) where
-    S: IdentityStore + Clone + Send + Sync + 'static,
+    S: IdentityStore + NotifierPausedReader + Clone + Send + Sync + 'static,
 {
     let mut interval = tokio::time::interval(Duration::from_secs(poll_secs));
     interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
@@ -1272,6 +1320,7 @@ mod tests {
         status_updates: Arc<Mutex<Vec<(Uuid, NotificationMessageStatus)>>>,
         attempt_increments: Arc<Mutex<Vec<Uuid>>>,
         force_error: Option<String>,
+        notifier_paused: bool,
     }
 
     impl MockStore {
@@ -1281,6 +1330,7 @@ mod tests {
                 status_updates: Arc::new(Mutex::new(Vec::new())),
                 attempt_increments: Arc::new(Mutex::new(Vec::new())),
                 force_error: None,
+                notifier_paused: false,
             }
         }
 
@@ -1291,6 +1341,11 @@ mod tests {
 
         fn with_error(mut self, msg: &str) -> Self {
             self.force_error = Some(msg.to_owned());
+            self
+        }
+
+        fn with_notifier_paused(mut self, paused: bool) -> Self {
+            self.notifier_paused = paused;
             self
         }
 
@@ -1973,6 +2028,18 @@ mod tests {
         }
     }
 
+    // `MockStore` does not implement `AppStore` (that trait is enormous), so
+    // the blanket impl of `NotifierPausedReader` for `T: AppStore` does not
+    // cover it. Provide a direct impl that drives off the test-configured
+    // field.
+    #[async_trait]
+    impl NotifierPausedReader for MockStore {
+        async fn notifier_paused(&self) -> Result<bool, StorageError> {
+            self.maybe_err()?;
+            Ok(self.notifier_paused)
+        }
+    }
+
     // ── Helpers ──────────────────────────────────────────────
 
     /// Test helper: creates a `NotificationDispatchService` with an immediately-
@@ -2127,6 +2194,44 @@ mod tests {
             .await
             .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
         assert_eq!(count, 0);
+    }
+
+    // ── 7b. Dispatch skips work entirely when notifier is paused ────
+    //
+    // Regression test: a message is pending in the store *and* the store
+    // is configured to respond to `notifier_paused` with `true`. The
+    // dispatch loop must return early without touching the queue — no
+    // status updates, no attempt increments.
+    #[tokio::test]
+    async fn dispatch_once_skips_when_notifier_paused() {
+        let msg = make_message(NotificationMethod::Inbox, "{}");
+        let store = MockStore::new()
+            .with_pending(vec![msg])
+            .with_notifier_paused(true);
+        let status_updates = store.status_updates.clone();
+        let attempt_increments = store.attempt_increments.clone();
+
+        let service = make_service(store, NotificationConfig::default());
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+
+        assert_eq!(count, 0, "paused dispatcher must report zero dispatched");
+        assert!(
+            status_updates
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "paused dispatcher must not mark any message sent/failed"
+        );
+        assert!(
+            attempt_increments
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "paused dispatcher must not consume retry attempts"
+        );
     }
 
     // ── 8. Dispatch propagates storage error ────────────────
