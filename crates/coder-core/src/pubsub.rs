@@ -244,6 +244,28 @@ pub fn inbox_notification_channel(user_id: Uuid) -> String {
     format!("inbox_notification:owner:{user_id}")
 }
 
+/// Kind discriminator for inbox notification pub/sub events.
+///
+/// Mirrors Go `pubsub.InboxNotificationEventKind`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InboxNotificationEventKind {
+    /// A new inbox notification has been inserted for the target user.
+    #[serde(rename = "new")]
+    New,
+}
+
+/// Payload published on [`inbox_notification_channel`] whenever a new inbox
+/// notification is inserted.
+///
+/// Mirrors Go `pubsub.InboxNotificationEvent`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct InboxNotificationEvent {
+    /// The kind of inbox notification event.
+    pub kind: InboxNotificationEventKind,
+    /// The inbox notification payload.
+    pub inbox_notification: crate::InboxNotification,
+}
+
 /// Name of the pub/sub channel carrying replica-sync events. Mirrors Go's
 /// `replicasync.PubsubEvent` constant. Publishing any value (typically a
 /// replica UUID or `Uuid::nil()` for a broadcast refresh) asks every replica

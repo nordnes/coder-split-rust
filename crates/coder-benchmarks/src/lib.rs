@@ -1016,6 +1016,13 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn insert_inbox_notification(
+        &self,
+        _notification: &coder_core::InboxNotification,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn get_filtered_inbox_notifications(
         &self,
         _user_id: Uuid,

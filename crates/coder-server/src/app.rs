@@ -2090,6 +2090,23 @@ pub(crate) mod tests {
             }
         }
 
+        /// Marks the user with the given id as a system user, for testing
+        /// the system-user guard on endpoints that forbid bot/system actors.
+        pub(crate) fn set_user_is_system(
+            &self,
+            user_id: Uuid,
+            is_system: bool,
+        ) -> Result<(), StorageError> {
+            let mut users = self
+                .users
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(user) = users.get_mut(&user_id) {
+                user.is_system = is_system;
+            }
+            Ok(())
+        }
+
         /// Inserts a workspace agent into the fake store for testing.
         pub(crate) fn insert_agent(&self, agent: WorkspaceAgentRow) -> Result<(), StorageError> {
             self.workspace_agents
@@ -5777,6 +5794,18 @@ pub(crate) mod tests {
                     },
                 );
             }
+            Ok(())
+        }
+
+        async fn insert_inbox_notification(
+            &self,
+            notification: &coder_core::InboxNotification,
+        ) -> Result<(), StorageError> {
+            let mut notifs = self
+                .inbox_notifications
+                .lock()
+                .map_err(|error| StorageError::unavailable(error.to_string()))?;
+            notifs.insert(notification.id, notification.clone());
             Ok(())
         }
 
@@ -10068,7 +10097,7 @@ pub(crate) mod tests {
         Ok(request)
     }
 
-    fn authenticated_request(
+    pub(crate) fn authenticated_request(
         method: Method,
         uri: &str,
         session_token: &str,
