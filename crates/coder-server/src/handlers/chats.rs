@@ -3,6 +3,10 @@
 use super::*;
 
 /// GET /api/v2/chats — list chats owned by the authenticated user.
+///
+/// When no `archived` query parameter is provided, defaults to returning only
+/// non-archived chats (`archived=false`), matching the Go Coder implementation's
+/// behavior. Pass `archived=true` to list archived chats only.
 pub(crate) async fn list_chats(
     State(state): State<AppState>,
     Query(query): Query<ChatsQuery>,
@@ -12,8 +16,9 @@ pub(crate) async fn list_chats(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Default to non-archived chats when no filter is specified,
-    // matching the Go implementation behavior.
+    // Default to non-archived chats when no archived filter is specified,
+    // matching Go's behavior. Store layer treats None as "return all" — the
+    // handler enforces the user-facing default.
     let archived_filter = query.archived.or(Some(false));
     let chats = state
         .store

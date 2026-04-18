@@ -36591,6 +36591,246 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    // -----------------------------------------------------------------
+    // list_chats archived-filter tests
+    // -----------------------------------------------------------------
+
+    /// Helper: create a chat via the API and return its ID.
+    async fn create_chat_helper(
+        app: &Router,
+        token: &str,
+        text: &str,
+    ) -> Result<String, Box<dyn Error>> {
+        let resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/chats",
+                token,
+                &CreateChatRequest {
+                    content: vec![ChatInputPart {
+                        part_type: ChatInputPartType::Text,
+                        text: text.into(),
+                        file_id: None,
+                        file_name: String::new(),
+                        start_line: None,
+                        end_line: None,
+                        content: String::new(),
+                    }],
+                    workspace_id: None,
+                    model_config_id: None,
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::CREATED);
+        let body = response_json(resp).await?;
+        let chat_id = body
+            .get("chat")
+            .and_then(|c| c.get("id"))
+            .and_then(Value::as_str)
+            .ok_or("missing chat id")?
+            .to_owned();
+        Ok(chat_id)
+    }
+
+    #[tokio::test]
+    async fn test_list_chats_no_archived_param() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        // Create two chats: one stays active, one gets archived.
+        let active_id = create_chat_helper(&app, &token, "active chat").await?;
+        let archived_id = create_chat_helper(&app, &token, "archived chat").await?;
+
+        // Archive the second chat directly in FakeStore.
+        {
+            let parsed = Uuid::parse_str(&archived_id)?;
+            let mut chats = store
+                .chats
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            let chat = chats
+                .get_mut(&parsed)
+                .ok_or("chat not found in FakeStore")?;
+            chat.archived = true;
+        }
+
+        // GET /api/v2/chats with no query param → should return only
+        // non-archived chats (verifies the Some(false) default).
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats", &token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        let chats = body.as_array().ok_or("expected array")?;
+        assert_eq!(chats.len(), 1, "only non-archived chat should be returned");
+        assert_eq!(
+            chats[0].get("id").and_then(Value::as_str),
+            Some(active_id.as_str()),
+        );
+        assert_eq!(
+            chats[0].get("archived").and_then(Value::as_bool),
+            Some(false),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_list_chats_archived_false() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let active_id = create_chat_helper(&app, &token, "active chat").await?;
+        let archived_id = create_chat_helper(&app, &token, "archived chat").await?;
+
+        // Archive the second chat.
+        {
+            let parsed = Uuid::parse_str(&archived_id)?;
+            let mut chats = store
+                .chats
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            let chat = chats
+                .get_mut(&parsed)
+                .ok_or("chat not found in FakeStore")?;
+            chat.archived = true;
+        }
+
+        // GET /api/v2/chats?archived=false → only non-archived chats.
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats?archived=false", &token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        let chats = body.as_array().ok_or("expected array")?;
+        assert_eq!(chats.len(), 1, "only non-archived chat should be returned");
+        assert_eq!(
+            chats[0].get("id").and_then(Value::as_str),
+            Some(active_id.as_str()),
+        );
+        assert_eq!(
+            chats[0].get("archived").and_then(Value::as_bool),
+            Some(false),
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn test_list_chats_archived_true() -> Result<(), Box<dyn Error>> {
+        let (state, store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let token = create_and_login(&app).await?;
+
+        let _active_id = create_chat_helper(&app, &token, "active chat").await?;
+        let archived_id = create_chat_helper(&app, &token, "archived chat").await?;
+
+        // Archive the second chat.
+        {
+            let parsed = Uuid::parse_str(&archived_id)?;
+            let mut chats = store
+                .chats
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            let chat = chats
+                .get_mut(&parsed)
+                .ok_or("chat not found in FakeStore")?;
+            chat.archived = true;
+        }
+
+        // GET /api/v2/chats?archived=true → only archived chats.
+        let resp = call(
+            app,
+            authenticated_request(Method::GET, "/api/v2/chats?archived=true", &token)?,
+        )
+        .await?;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let body = response_json(resp).await?;
+        let chats = body.as_array().ok_or("expected array")?;
+        assert_eq!(chats.len(), 1, "only archived chat should be returned");
+        assert_eq!(
+            chats[0].get("id").and_then(Value::as_str),
+            Some(archived_id.as_str()),
+        );
+        assert_eq!(
+            chats[0].get("archived").and_then(Value::as_bool),
+            Some(true),
+        );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------
+    // FakeStore parity verification — list_chats_by_owner archived filter
+    // -----------------------------------------------------------------
+
+    #[tokio::test]
+    async fn test_fake_store_list_chats_archived_parity() -> Result<(), Box<dyn Error>> {
+        let store = Arc::new(FakeStore::new(true));
+
+        let owner_id = Uuid::new_v4();
+
+        // Insert two chats: one active, one archived.
+        let active_chat = store
+            .insert_chat(InsertChatInput {
+                owner_id,
+                workspace_id: None,
+                parent_chat_id: None,
+                root_chat_id: None,
+                last_model_config_id: Uuid::nil(),
+                title: "Active".to_string(),
+            })
+            .await?;
+        let archived_chat = store
+            .insert_chat(InsertChatInput {
+                owner_id,
+                workspace_id: None,
+                parent_chat_id: None,
+                root_chat_id: None,
+                last_model_config_id: Uuid::nil(),
+                title: "Archived".to_string(),
+            })
+            .await?;
+
+        // Manually archive one chat.
+        {
+            let mut chats = store
+                .chats
+                .lock()
+                .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+            let chat = chats.get_mut(&archived_chat.id).ok_or("chat not found")?;
+            chat.archived = true;
+        }
+
+        // archived = None → returns ALL chats (both archived and non-archived),
+        // matching PostgresStore SQL: `$2::boolean IS NULL OR archived = $2`.
+        let all = store.list_chats_by_owner(owner_id, None).await?;
+        assert_eq!(all.len(), 2, "None should return all chats");
+
+        // archived = Some(false) → returns only non-archived chats.
+        let non_archived = store.list_chats_by_owner(owner_id, Some(false)).await?;
+        assert_eq!(
+            non_archived.len(),
+            1,
+            "Some(false) should return only non-archived"
+        );
+        assert_eq!(non_archived[0].id, active_chat.id);
+        assert!(!non_archived[0].archived);
+
+        // archived = Some(true) → returns only archived chats.
+        let archived = store.list_chats_by_owner(owner_id, Some(true)).await?;
+        assert_eq!(archived.len(), 1, "Some(true) should return only archived");
+        assert_eq!(archived[0].id, archived_chat.id);
+        assert!(archived[0].archived);
+
+        Ok(())
+    }
+
     #[tokio::test]
     async fn post_chat_message_to_existing_chat() -> Result<(), Box<dyn Error>> {
         let app = build_router(test_state(true)?, None);
