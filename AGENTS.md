@@ -68,14 +68,20 @@ Some workspace proxy internal routes remain at stub depth (accept requests but r
 | `coderd/userauth.go`, sessions, API keys, OIDC, OAuth2 | `crates/coder-auth` | Active — password auth, sessions, external auth, OAuth2/OIDC callbacks |
 | `coderd/users.go`, organizations, RBAC | `crates/coder-identity` | Active — full user CRUD, org membership, roles |
 | `coderd/rbac/*` | `crates/coder-rbac` | Active — actor checks, role assignment, custom roles |
-| `coderd/audit/*` | `crates/coder-audit` | Active — structured audit sink with full event coverage |
-| Templates, workspaces, builds, presets | `crates/coder-workspaces` | Active — full template/workspace CRUD, builds, presets, scheduling |
-| Provisioner APIs and background jobs | `crates/coder-provisioner` | Active — provisioner daemon serve, jobs, keys, init scripts |
-| Notifications, inbox, webpush | `crates/coder-notifications` | Active — webhook + inbox dispatch, webpush, settings |
-| DERP, tailnet, agent RPC, workspace apps | `crates/coder-connectivity` | Active — health checks, SSH keys, agent endpoints, workspace apps |
-| Shared SQL repositories and migrations | `crates/coder-db` | Active — full query coverage across all domains |
-| HTTP composition and cross-cutting middleware | `crates/coder-server` | Active — 400+ route handlers covering all 326 Go routes |
-| Shared types: config, identity, API models, passwords | `crates/coder-core` | Active — foundational types |
+| `coderd/audit/*` | `crates/coder-audit` | Active — audit sink + batched background flusher |
+| Templates, workspaces, builds, presets, autobuild, dormancy, activity bump | `crates/coder-workspaces` | Active — full template/workspace CRUD, builds, presets, scheduling, lifecycle workers |
+| Provisioner APIs and background jobs | `crates/coder-provisioner` | Active — provisioner daemon serve (custom JSON wire; DRPC port pending), jobs, keys, init scripts |
+| Notifications, inbox, webpush, SMTP, webhook | `crates/coder-notifications` | Active — SMTP (`lettre`), webhook with retry+backoff, VAPID webpush, inbox dispatch |
+| DERP relay, tailnet coordinator, workspace apps proxy | `crates/coder-connectivity` | Active — embedded DERP server, in-memory tailnet coordinator (JSON wire; DRPC port pending) |
+| Agent DRPC wire (protobuf + yamux) | `crates/coder-agent-rpc` | Active — Phase 2: DRPC framing + yamux + 4 live RPCs (`GetManifest`, `GetAnnouncementBanners`, `UpdateStartup`, `BatchUpdateAppHealths`); 14 more pending |
+| `coderd/telemetry/` | `crates/coder-telemetry` | Active — periodic telemetry worker + reporter |
+| `coderd/apidoc/*`, licenses/entitlements | `crates/coder-license` | Active — license verify, feature resolution, entitlement set |
+| MCP server (JSON-RPC over HTTP) | `crates/coder-mcp` | Active — protocol + tools surface for AI agents |
+| Perf harness | `crates/coder-benchmarks` | Active — benchmark scaffolding |
+| End-to-end integration tests | `crates/coder-integration-tests` | Active — Postgres-backed integration harness |
+| Shared SQL repositories and migrations | `crates/coder-db` | Active — full query coverage across all domains; Postgres `LISTEN/NOTIFY` pubsub |
+| HTTP composition and cross-cutting middleware | `crates/coder-server` | Active — 400+ route handlers covering all 326 Go routes; replica manager, crypto-key rotator, update checker |
+| Shared types: config, identity, API models, passwords, ports | `crates/coder-core` | Active — foundational types |
 
 # Technology
 
@@ -92,36 +98,44 @@ Some workspace proxy internal routes remain at stub depth (accept requests but r
 # Project Structure
 
 ```
-Cargo.toml              # Workspace root — all deps centralized here
-rust-toolchain.toml     # Pinned toolchain + components
+Cargo.toml                 # Workspace root — all deps centralized here
+rust-toolchain.toml        # Pinned toolchain + components
 apps/
-  coderd/               # Main Axum HTTP server binary
-  coder-parity/         # Black-box Go↔Rust route comparison tool
+  coderd/                  # Main Axum HTTP server binary
+  coder-parity/            # Black-box Go↔Rust route comparison tool
 crates/
-  coder-core/           # Shared types: config, identity, API models, ports, passwords
-  coder-server/         # Axum app wiring, route handlers, error types
-  coder-db/             # sqlx store (Postgres queries, migrations)
-  coder-auth/           # Auth middleware and session logic
-  coder-identity/       # Identity/user management
-  coder-rbac/           # Role-based access control
-  coder-audit/          # Audit log
-  coder-workspaces/     # Workspace management (stub)
-  coder-provisioner/    # Provisioner integration (stub, has bootstrap scripts)
-  coder-connectivity/   # Connectivity checks (stub)
-  coder-notifications/  # Notification system (stub)
-docs/                   # Design docs, parity matrix, conformance harness
-coder/                  # ⛔ Original Go monorepo — READ-ONLY REFERENCE
+  coder-core/              # Shared types: config, identity, API models, ports, passwords
+  coder-server/            # Axum app wiring, route handlers, replica manager, crypto-key rotator
+  coder-db/                # sqlx store (Postgres queries, migrations, LISTEN/NOTIFY pubsub)
+  coder-auth/              # Auth middleware, session cache, OAuth login
+  coder-identity/          # Identity/user management
+  coder-rbac/              # Role-based access control
+  coder-audit/             # Audit log + batched background sink
+  coder-workspaces/        # Workspace CRUD, autobuild, activity-bump, dormancy, lifecycle scheduler
+  coder-provisioner/       # Provisioner daemon serve (JSON wire), jobs, keys, init scripts
+  coder-connectivity/      # Embedded DERP relay + in-memory tailnet coordinator
+  coder-agent-rpc/         # Agent DRPC wire (prost + yamux) and live handler
+  coder-notifications/     # SMTP (lettre), webhook w/ retry, VAPID webpush, inbox
+  coder-telemetry/         # Telemetry worker + reporter
+  coder-license/           # License verify, entitlements, features
+  coder-mcp/               # MCP server (JSON-RPC over HTTP)
+  coder-benchmarks/        # Perf benchmark scaffolding
+  coder-integration-tests/ # Postgres-backed end-to-end test harness
+docs/                      # Design docs, parity matrices, conformance harness
+coder/                     # ⛔ Original Go monorepo — READ-ONLY REFERENCE
 ```
 
 # Key Files
 
-- `crates/coder-server/src/app.rs` — All route definitions and handlers (6,566 lines)
+- `crates/coder-server/src/app.rs` — Route wiring and shared `AppState` (~42k lines)
+- `crates/coder-server/src/handlers/` — Route handlers split by subsystem (~30k lines across ~35 files)
 - `crates/coder-server/src/error.rs` — Error types
-- `crates/coder-db/src/store.rs` — Database store implementation (2,893 lines)
-- `crates/coder-core/src/ports.rs` — Port/trait definitions (2,081 lines)
-- `crates/coder-core/src/api.rs` — API request/response models (1,528 lines)
+- `crates/coder-db/src/store/app_store.rs` — Main `AppStore` impl (~10k lines)
+- `crates/coder-db/src/store/mod.rs` — Store module + query coverage (~8.5k lines)
+- `crates/coder-core/src/ports.rs` — Port/trait definitions (~9k lines)
+- `crates/coder-core/src/api.rs` — API request/response models (~7k lines)
 - `crates/coder-core/src/config.rs` — Configuration types
-- `apps/coderd/src/main.rs` — Server entry point
+- `apps/coderd/src/main.rs` — Server entry point, worker bootstrap, graceful shutdown
 - `docs/parity-matrix.md` — Generated OSS route parity status
 - `docs/parity-matrix-enterprise.md` — Generated Enterprise route parity status
 - `docs/parity-matrix-all.md` — Generated combined route parity status
