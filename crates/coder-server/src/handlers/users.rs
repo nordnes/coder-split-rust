@@ -3,6 +3,31 @@
 use super::*;
 use chrono_tz::Tz;
 use coder_core::api::{UpdateUserQuietHoursScheduleRequest, UserQuietHoursScheduleResponse};
+use coder_license::FeatureName;
+
+/// Returns a 403 response when `AdvancedTemplateScheduling` is not entitled
+/// or not enabled, matching Go's `autostopRequirementEnabledMW` in
+/// `coder/enterprise/coderd/users.go`. Returns `None` when the gate is
+/// satisfied.
+fn advanced_template_scheduling_gate(state: &AppState) -> Option<Response> {
+    if !state
+        .entitlements
+        .is_entitled(FeatureName::AdvancedTemplateScheduling)
+    {
+        return Some(forbidden_response(
+            "Advanced template scheduling (and user quiet hours schedule) is an Enterprise feature. Contact sales!",
+        ));
+    }
+    if !state
+        .entitlements
+        .enabled(FeatureName::AdvancedTemplateScheduling)
+    {
+        return Some(forbidden_response(
+            "Advanced template scheduling (and user quiet hours schedule) is not enabled.",
+        ));
+    }
+    None
+}
 
 /// Maximum number of rows a single paginated request may return.
 ///
@@ -952,11 +977,11 @@ pub(crate) async fn get_user_quiet_hours(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // Feature gate: AdvancedTemplateScheduling must be entitled.
-    // Since no persistent EntitlementSet is wired into AppState yet, we check
-    // the feature gate via the license helpers. For now, we allow access (the
-    // entitlement check will be enforced once the license service is integrated).
-    // TODO: enforce FeatureName::AdvancedTemplateScheduling entitlement check.
+    // Enterprise feature gate — ported from
+    // `coder/enterprise/coderd/users.go` (`autostopRequirementEnabledMW`).
+    if let Some(response) = advanced_template_scheduling_gate(&state) {
+        return Ok(response);
+    }
 
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
@@ -967,25 +992,27 @@ pub(crate) async fn get_user_quiet_hours(
         return Ok(resource_not_found_response());
     }
 
-    // Read the user's quiet hours schedule from user_configs.
-    let config_record = state
-        .store
-        .get_user_config(target_user.id, QUIET_HOURS_SCHEDULE_KEY)
-        .await?;
-
     let default_schedule = &state.config.workspace.default_quiet_hours_schedule;
-    let (raw_schedule, user_set) = match config_record {
-        Some(ref record) if !record.value.is_empty() => (record.value.clone(), true),
-        _ => (default_schedule.clone(), false),
+    let user_can_set = state.config.workspace.allow_user_custom_quiet_hours;
+
+    // Mirror the enterprise Go store in `coder/enterprise/coderd/schedule/user.go`:
+    // when the deployment forbids custom schedules, ignore any persisted
+    // per-user value and always report the site default with `user_set=false`.
+    let (raw_schedule, user_set) = if user_can_set {
+        let config_record = state
+            .store
+            .get_user_config(target_user.id, QUIET_HOURS_SCHEDULE_KEY)
+            .await?;
+        match config_record {
+            Some(ref record) if !record.value.is_empty() => (record.value.clone(), true),
+            _ => (default_schedule.clone(), false),
+        }
+    } else {
+        (default_schedule.clone(), false)
     };
 
     let (timezone, time_str) = parse_quiet_hours_cron(&raw_schedule);
     let next = next_quiet_hours(&raw_schedule);
-
-    // user_can_set: deployment allows users to set their own schedule.
-    // For now, we default to true. This should be read from deployment config
-    // once the allow_custom_quiet_hours flag is implemented.
-    let user_can_set = true;
 
     Ok((
         StatusCode::OK,
@@ -1012,7 +1039,11 @@ pub(crate) async fn put_user_quiet_hours(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
 
-    // TODO: enforce FeatureName::AdvancedTemplateScheduling entitlement check.
+    // Enterprise feature gate — ported from
+    // `coder/enterprise/coderd/users.go` (`autostopRequirementEnabledMW`).
+    if let Some(response) = advanced_template_scheduling_gate(&state) {
+        return Ok(response);
+    }
 
     let Some(target_user) = resolve_user(&state, &user, &context.user).await? else {
         return Ok(resource_not_found_response());
@@ -1032,6 +1063,15 @@ pub(crate) async fn put_user_quiet_hours(
     {
         return Ok(forbidden_response(
             "You are not authorized to update this user's quiet hours schedule.",
+        ));
+    }
+
+    // Deployment gate — mirror `schedule.ErrUserCannotSetQuietHoursSchedule`
+    // from `coder/enterprise/coderd/schedule/user.go`.
+    let user_can_set = state.config.workspace.allow_user_custom_quiet_hours;
+    if !user_can_set {
+        return Ok(forbidden_response(
+            "Users cannot set custom quiet hours schedule due to deployment configuration.",
         ));
     }
 
@@ -1075,7 +1115,7 @@ pub(crate) async fn put_user_quiet_hours(
         Json(UserQuietHoursScheduleResponse {
             raw_schedule: request.schedule,
             user_set: true,
-            user_can_set: true,
+            user_can_set,
             time: time_str,
             timezone,
             next,
