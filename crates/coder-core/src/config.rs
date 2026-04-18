@@ -154,6 +154,12 @@ pub struct ServerConfig {
     /// anchors. Maps to `--aws-instance-identity-certs-dir` /
     /// `CODER_AWS_INSTANCE_IDENTITY_CERTS_DIR`.
     pub aws_instance_identity_certs_dir: Option<std::path::PathBuf>,
+    /// VAPID subscriber contact for web push notifications.
+    ///
+    /// Should be a `mailto:` URI per RFC 8292 best practice (e.g.
+    /// `mailto:admin@example.com`). Used as the `sub` claim in VAPID
+    /// signatures sent to push services.
+    pub vapid_sub: String,
 }
 
 impl ServerConfig {
@@ -1572,6 +1578,7 @@ mod tests {
             cli_upgrade_message: String::new(),
             verify_instance_identity: false,
             aws_instance_identity_certs_dir: None,
+            vapid_sub: String::new(),
         }
     }
 

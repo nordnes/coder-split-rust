@@ -147,6 +147,7 @@ mod tests {
             cli_upgrade_message: String::new(),
             verify_instance_identity: false,
             aws_instance_identity_certs_dir: None,
+            vapid_sub: String::new(),
         })
     }
 
@@ -269,6 +270,7 @@ mod tests {
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
                 std::sync::Arc::new(coder_license::EntitlementSet::new()),
+                None,
             )?;
 
             let router = build_router(state, None);
@@ -2050,6 +2052,7 @@ mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
 
         let router = build_router(state, None);

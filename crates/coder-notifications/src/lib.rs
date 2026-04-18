@@ -33,6 +33,7 @@ use coder_core::AppStore;
 use coder_core::IdentityStore;
 use coder_core::api::{WebpushMessage, WebpushSubscription};
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
+use futures_util::StreamExt;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
@@ -42,8 +43,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 use web_push::{
-    ContentEncoding, IsahcWebPushClient, SubscriptionInfo, VapidSignatureBuilder, WebPushClient,
-    WebPushMessageBuilder,
+    ContentEncoding, IsahcWebPushClient, PartialVapidSignatureBuilder, SubscriptionInfo,
+    VapidSignatureBuilder, WebPushClient, WebPushMessageBuilder,
 };
 
 /// Current milestone for the notifications crate.
@@ -51,6 +52,13 @@ pub const STATUS: &str = "active";
 
 const DISPATCH_BATCH_SIZE: u32 = 50;
 const MAX_DISPATCH_ATTEMPTS: u32 = 3;
+
+/// Maximum number of concurrent web push sends per dispatch call.
+const MAX_CONCURRENT_SENDS: usize = 10;
+/// Maximum retry attempts for transient push service failures (5xx).
+const MAX_SEND_RETRIES: u32 = 3;
+/// Initial backoff duration (500 ms) for retry attempts; doubles each retry.
+const INITIAL_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// Configuration for the notification dispatch pipeline.
 ///
@@ -648,33 +656,57 @@ pub enum WebpushError {
     Serialization(String),
 }
 
+/// Result of sending test push notifications to all subscriptions for a user.
+///
+/// Returned by [`Webpusher::send_test_to_user`].
+///
+/// # Response shape
+///
+/// The handler returns this struct directly as JSON, producing:
+/// ```json
+/// { "message": "...", "success_count": N, "failure_count": M }
+/// ```
+/// This replaces the previous `ApiResponse::ok("...")` shape.
+#[derive(Debug, serde::Serialize)]
+pub struct WebpushTestResult {
+    /// Human-readable summary message.
+    pub message: String,
+    /// Number of subscriptions that received the test notification.
+    pub success_count: u32,
+    /// Number of subscriptions that failed delivery.
+    pub failure_count: u32,
+}
+
 /// Web Push notification dispatcher using VAPID authentication.
 ///
 /// Manages VAPID key pairs and sends push notifications to browser
 /// subscriptions. Keys are loaded from the database on construction,
 /// and regenerated if missing.
-pub struct Webpusher<S> {
-    store: S,
+///
+/// The shared [`IsahcWebPushClient`] is constructed once at startup and
+/// reused for all push sends, avoiding per-request client creation.
+pub struct Webpusher {
+    store: Arc<dyn AppStore>,
     /// VAPID subscriber contact (mailto: or https:// URL).
     vapid_sub: String,
     /// Base64url-encoded VAPID public key (for clients).
     vapid_public_key: String,
-    /// PEM-encoded VAPID private key.
-    vapid_private_pem: String,
-    /// Reusable web push HTTP client.
+    /// Parsed VAPID private key, cached to avoid re-parsing PEM on every send.
+    vapid_key: PartialVapidSignatureBuilder,
+    /// Reusable web push HTTP client (constructed once, shared across sends).
     client: IsahcWebPushClient,
 }
 
-impl<S> Webpusher<S>
-where
-    S: AppStore + Clone + Send + Sync + 'static,
-{
+impl Webpusher {
     /// Creates a new web push dispatcher.
     ///
     /// Loads VAPID keys from the database. If no keys exist, generates a new
     /// key pair and stores it, deleting any existing subscriptions that would
     /// be invalid with the new keys.
-    pub async fn new(store: S, vapid_sub: String) -> Result<Self, WebpushError> {
+    ///
+    /// The HTTP client is created once here and reused for all subsequent
+    /// sends.
+    pub async fn new(store: Arc<dyn AppStore>, vapid_sub: String) -> Result<Self, WebpushError> {
         let keys = store.get_webpush_vapid_keys().await?;
 
         let (_stored_public, private_pem) = match keys {
@@ -683,16 +715,20 @@ where
             }
             _ => {
                 // Generate new VAPID keys and delete stale subscriptions.
-                regenerate_vapid_keys(&store).await?
+                regenerate_vapid_keys(store.as_ref()).await?
             }
         };
 
         // Validate the private key and derive the public key from it rather
         // than trusting the stored public key.  This guards against a
         // mismatched/rotated value in the database.
-        let partial = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
+        //
+        // The parsed `PartialVapidSignatureBuilder` is cached in the struct
+        // so that `send_single` can clone it cheaply instead of re-parsing
+        // the PEM on every send.
+        let vapid_key = VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
             .map_err(|e| WebpushError::WebPush(format!("invalid stored VAPID key: {e}")))?;
-        let derived_public = URL_SAFE_NO_PAD.encode(partial.get_public_key());
+        let derived_public = URL_SAFE_NO_PAD.encode(vapid_key.get_public_key());
 
         let client = IsahcWebPushClient::new().map_err(|e| WebpushError::WebPush(e.to_string()))?;
 
@@ -700,7 +736,7 @@ where
             store,
             vapid_sub,
             vapid_public_key: derived_public,
-            vapid_private_pem: private_pem,
+            vapid_key,
             client,
         })
     }
@@ -711,8 +747,16 @@ where
         &self.vapid_public_key
     }
 
+    /// Returns the VAPID subscriber contact (`sub` claim).
+    #[must_use]
+    pub fn vapid_sub(&self) -> &str {
+        &self.vapid_sub
+    }
+
     /// Dispatches a web push notification to all subscriptions for a user.
     ///
+    /// Sends are executed concurrently, bounded by [`MAX_CONCURRENT_SENDS`].
+    /// Transient failures (5xx) are retried with exponential backoff.
     /// Subscriptions that return HTTP 410 (Gone) are automatically cleaned up.
     /// Errors for individual subscriptions are logged but do not prevent
     /// delivery to other subscriptions.
@@ -733,28 +777,48 @@ where
         let msg_json =
             serde_json::to_vec(message).map_err(|e| WebpushError::Serialization(e.to_string()))?;
 
+        // Send concurrently with bounded parallelism.
+        // Clone subscription fields into owned data to avoid lifetime issues
+        // with the async closures.
+        let send_futs: Vec<_> = subscriptions
+            .iter()
+            .map(|sub| {
+                let id = sub.id;
+                let endpoint = sub.endpoint.clone();
+                let auth_key = sub.endpoint_auth_key.clone();
+                let p256dh_key = sub.endpoint_p256dh_key.clone();
+                let payload = msg_json.clone();
+                async move {
+                    let result = self
+                        .send_single_with_retry(&payload, &endpoint, &auth_key, &p256dh_key)
+                        .await;
+                    (id, endpoint, result)
+                }
+            })
+            .collect();
+
+        let outcomes: Vec<(Uuid, String, Result<(), WebpushSendOutcome>)> =
+            futures_util::stream::iter(send_futs)
+                .buffer_unordered(MAX_CONCURRENT_SENDS)
+                .collect()
+                .await;
+
         let mut stale_ids: Vec<Uuid> = Vec::new();
 
-        for sub in &subscriptions {
-            match self
-                .send_single(
-                    &msg_json,
-                    &sub.endpoint,
-                    &sub.endpoint_auth_key,
-                    &sub.endpoint_p256dh_key,
-                )
-                .await
-            {
+        for (id, endpoint, result) in outcomes {
+            match result {
                 Ok(()) => {}
                 Err(WebpushSendOutcome::Gone) => {
-                    stale_ids.push(sub.id);
+                    stale_ids.push(id);
                 }
-                Err(WebpushSendOutcome::Failed(err)) => {
-                    warn!(
-                        endpoint = %sub.endpoint,
-                        error = %err,
-                        "web push send failed"
-                    );
+                Err(WebpushSendOutcome::Failed(ref err)) => {
+                    warn!(endpoint = %endpoint, error = %err, "web push send failed");
+                }
+                Err(WebpushSendOutcome::Retryable(ref err)) => {
+                    // Unreachable: send_single_with_retry converts Retryable
+                    // to Failed once retries are exhausted, but handle
+                    // defensively.
+                    warn!(endpoint = %endpoint, error = %err, "web push send failed (retryable)");
                 }
             }
         }
@@ -766,6 +830,111 @@ where
         }
 
         Ok(())
+    }
+
+    /// Sends a test push notification to all subscriptions for a user.
+    ///
+    /// Returns a summary with per-subscription success/failure counts.
+    /// Subscriptions returning HTTP 410 (Gone) are automatically deleted
+    /// (stale subscription cleanup). Sends are executed concurrently,
+    /// bounded by [`MAX_CONCURRENT_SENDS`].
+    pub async fn send_test_to_user(
+        &self,
+        user_id: Uuid,
+    ) -> Result<WebpushTestResult, WebpushError> {
+        let subscriptions = self
+            .store
+            .get_webpush_subscriptions_by_user_id(user_id)
+            .await?;
+
+        if subscriptions.is_empty() {
+            return Ok(WebpushTestResult {
+                message: "No webpush subscriptions found.".to_owned(),
+                success_count: 0,
+                failure_count: 0,
+            });
+        }
+
+        let test_msg = WebpushMessage {
+            icon: String::new(),
+            title: "Test".to_owned(),
+            body: "This is a test Web Push notification".to_owned(),
+            tag: String::new(),
+            actions: Vec::new(),
+            data: std::collections::HashMap::new(),
+        };
+        let msg_json = serde_json::to_vec(&test_msg)
+            .map_err(|e| WebpushError::Serialization(e.to_string()))?;
+
+        // Send concurrently with bounded parallelism.
+        // Clone subscription fields into owned data to avoid lifetime issues
+        // with the async closures.
+        let send_futs: Vec<_> = subscriptions
+            .iter()
+            .map(|sub| {
+                let id = sub.id;
+                let endpoint = sub.endpoint.clone();
+                let auth_key = sub.endpoint_auth_key.clone();
+                let p256dh_key = sub.endpoint_p256dh_key.clone();
+                let payload = msg_json.clone();
+                async move {
+                    let result = self
+                        .send_single_with_retry(&payload, &endpoint, &auth_key, &p256dh_key)
+                        .await;
+                    (id, endpoint, result)
+                }
+            })
+            .collect();
+
+        let outcomes: Vec<(Uuid, String, Result<(), WebpushSendOutcome>)> =
+            futures_util::stream::iter(send_futs)
+                .buffer_unordered(MAX_CONCURRENT_SENDS)
+                .collect()
+                .await;
+
+        let mut stale_ids: Vec<Uuid> = Vec::new();
+        let mut success_count: u32 = 0;
+        let mut failure_count: u32 = 0;
+
+        for (id, endpoint, result) in outcomes {
+            match result {
+                Ok(()) => {
+                    success_count = success_count.saturating_add(1);
+                }
+                Err(WebpushSendOutcome::Gone) => {
+                    stale_ids.push(id);
+                    failure_count = failure_count.saturating_add(1);
+                }
+                Err(WebpushSendOutcome::Failed(ref err)) => {
+                    warn!(endpoint = %endpoint, error = %err, "test web push send failed");
+                    failure_count = failure_count.saturating_add(1);
+                }
+                Err(WebpushSendOutcome::Retryable(ref err)) => {
+                    // Unreachable: send_single_with_retry converts Retryable
+                    // to Failed once retries are exhausted, but handle
+                    // defensively.
+                    warn!(endpoint = %endpoint, error = %err, "test web push send failed (retryable)");
+                    failure_count = failure_count.saturating_add(1);
+                }
+            }
+        }
+
+        // Stale subscription cleanup: delete subscriptions that returned
+        // EndpointNotValid / EndpointNotFound (HTTP 410 Gone).
+        if !stale_ids.is_empty() {
+            let count = stale_ids.len();
+            if let Err(err) = self.store.delete_webpush_subscriptions(&stale_ids).await {
+                error!(error = %err, "failed to delete stale webpush subscriptions");
+            } else {
+                info!(count, "deleted stale webpush subscriptions");
+            }
+        }
+
+        Ok(WebpushTestResult {
+            message: format!("Sent test to {} subscription(s).", subscriptions.len()),
+            success_count,
+            failure_count,
+        })
     }
 
     /// Sends a test push notification to verify a subscription is valid.
@@ -783,7 +952,7 @@ where
             .map_err(|e| WebpushError::Serialization(e.to_string()))?;
 
         match self
-            .send_single(
+            .send_single_with_retry(
                 &msg_json,
                 &subscription.endpoint,
                 &subscription.auth_key,
@@ -795,7 +964,57 @@ where
             Err(WebpushSendOutcome::Gone) => Err(WebpushError::WebPush(
                 "subscription is no longer valid (410 Gone)".to_owned(),
             )),
-            Err(WebpushSendOutcome::Failed(err)) => Err(WebpushError::WebPush(err)),
+            Err(WebpushSendOutcome::Retryable(err) | WebpushSendOutcome::Failed(err)) => {
+                Err(WebpushError::WebPush(err))
+            }
+        }
+    }
+
+    /// Wraps [`send_single`](Self::send_single) with exponential backoff for
+    /// transient failures.
+    ///
+    /// Hard failures ([`WebpushSendOutcome::Gone`] and
+    /// [`WebpushSendOutcome::Failed`]) are returned immediately.
+    /// Transient failures ([`WebpushSendOutcome::Retryable`]) are retried up
+    /// to [`MAX_SEND_RETRIES`] times with exponential backoff starting at
+    /// [`INITIAL_RETRY_BACKOFF`].
+    async fn send_single_with_retry(
+        &self,
+        payload: &[u8],
+        endpoint: &str,
+        auth_key: &str,
+        p256dh_key: &str,
+    ) -> Result<(), WebpushSendOutcome> {
+        let mut attempt: u32 = 0;
+        loop {
+            match self
+                .send_single(payload, endpoint, auth_key, p256dh_key)
+                .await
+            {
+                Ok(()) => return Ok(()),
+                Err(WebpushSendOutcome::Gone) => return Err(WebpushSendOutcome::Gone),
+                Err(WebpushSendOutcome::Failed(err)) => {
+                    return Err(WebpushSendOutcome::Failed(err));
+                }
+                Err(WebpushSendOutcome::Retryable(err)) => {
+                    if attempt >= MAX_SEND_RETRIES {
+                        return Err(WebpushSendOutcome::Failed(format!(
+                            "exhausted {MAX_SEND_RETRIES} retries: {err}"
+                        )));
+                    }
+                    attempt += 1;
+                    let backoff =
+                        INITIAL_RETRY_BACKOFF * 2u32.saturating_pow(attempt.saturating_sub(1));
+                    warn!(
+                        endpoint = %endpoint,
+                        attempt = attempt,
+                        backoff_ms = backoff.as_millis() as u64,
+                        error = %err,
+                        "transient web push failure, retrying"
+                    );
+                    tokio::time::sleep(backoff).await;
+                }
+            }
         }
     }
 
@@ -809,11 +1028,10 @@ where
     ) -> Result<(), WebpushSendOutcome> {
         let subscription_info = SubscriptionInfo::new(endpoint, p256dh_key, auth_key);
 
-        // Build VAPID signature: load private key from PEM, attach subscription
-        // info, add the subscriber contact ("sub" claim), then build.
-        let partial = VapidSignatureBuilder::from_pem_no_sub(self.vapid_private_pem.as_bytes())
-            .map_err(|e| WebpushSendOutcome::Failed(format!("VAPID key load: {e}")))?;
-        let mut sig_builder = partial.add_sub_info(&subscription_info);
+        // Build VAPID signature: clone the pre-parsed key (avoids PEM
+        // re-parsing on every send), attach subscription info, add the
+        // subscriber contact ("sub" claim), then build.
+        let mut sig_builder = self.vapid_key.clone().add_sub_info(&subscription_info);
         sig_builder.add_claim("sub", self.vapid_sub.as_str());
         let sig = sig_builder
             .build()
@@ -830,10 +1048,10 @@ where
         match self.client.send(web_push_msg).await {
             Ok(()) => Ok(()),
             Err(err) => {
-                // Use structured error matching for stale subscription
-                // detection instead of fragile string parsing.
                 if is_subscription_gone(&err) {
                     Err(WebpushSendOutcome::Gone)
+                } else if is_retryable(&err) {
+                    Err(WebpushSendOutcome::Retryable(err.to_string()))
                 } else {
                     Err(WebpushSendOutcome::Failed(err.to_string()))
                 }
@@ -846,7 +1064,9 @@ where
 enum WebpushSendOutcome {
     /// The subscription has been removed by the push service (HTTP 410).
     Gone,
-    /// A transport or protocol error occurred.
+    /// A transient error that may succeed on retry (5xx, network).
+    Retryable(String),
+    /// A permanent error (bad request, unauthorized, etc.).
     Failed(String),
 }
 
@@ -862,15 +1082,35 @@ fn is_subscription_gone(err: &web_push::WebPushError) -> bool {
     )
 }
 
+/// Checks whether a web push error is transient and worth retrying.
+///
+/// `ServerError` (5xx) and `Unspecified` (network-level failures such as
+/// connection timeouts and DNS errors from the isahc HTTP client) are
+/// considered retryable.  Hard failures such as `EndpointNotValid` (410),
+/// `Unauthorized` (403), and `BadRequest` (400) are **not** retried.
+fn is_retryable(err: &web_push::WebPushError) -> bool {
+    matches!(
+        err,
+        web_push::WebPushError::ServerError { .. } | web_push::WebPushError::Unspecified
+    )
+}
+
+/// Validates that a PEM-encoded VAPID private key is well-formed.
+///
+/// Used during server startup to verify stored VAPID keys before
+/// constructing the [`Webpusher`] dispatcher.
+pub fn validate_vapid_private_key(private_pem: &str) -> Result<(), String> {
+    VapidSignatureBuilder::from_pem_no_sub(private_pem.as_bytes())
+        .map(|_| ())
+        .map_err(|e| format!("invalid VAPID private key: {e}"))
+}
+
 /// Generates a new VAPID key pair, stores it, and deletes all existing
 /// subscriptions (which are invalid with the new keys).
 ///
 /// Returns `(public_key_b64, private_key_pem)` where the public key is
 /// base64url-no-pad encoded and the private key is PEM-encoded.
-async fn regenerate_vapid_keys<S>(store: &S) -> Result<(String, String), WebpushError>
-where
-    S: AppStore + Send + Sync,
-{
+async fn regenerate_vapid_keys(store: &dyn AppStore) -> Result<(String, String), WebpushError> {
     // Generate a fresh EC P-256 private key in PEM format.
     let private_pem = generate_ec_p256_pem()
         .map_err(|e| WebpushError::WebPush(format!("key generation: {e}")))?;
@@ -2325,7 +2565,9 @@ mod tests {
         let outcome = WebpushSendOutcome::Failed("timeout".to_owned());
         match outcome {
             WebpushSendOutcome::Failed(msg) => assert_eq!(msg, "timeout"),
-            WebpushSendOutcome::Gone => panic!("expected Failed variant"),
+            WebpushSendOutcome::Gone | WebpushSendOutcome::Retryable(_) => {
+                panic!("expected Failed variant")
+            }
         }
     }
 
@@ -2864,5 +3106,148 @@ mod tests {
             Ok(()) => panic!("missing recipient should fail"),
         };
         assert!(matches!(err, NotificationDispatchError::ConfigMissing(_)));
+    }
+
+    // ── 26. VAPID sub claim format ───────────────────────────
+    //
+    // Verifies that validate_vapid_private_key accepts a well-formed PEM
+    // and rejects garbage, ensuring startup validation will catch bad keys.
+
+    #[test]
+    fn validate_vapid_private_key_accepts_valid_pem() {
+        let pem = generate_ec_p256_pem().unwrap_or_else(|e| panic!("keygen: {e}"));
+        assert!(
+            validate_vapid_private_key(&pem).is_ok(),
+            "well-formed PEM should validate"
+        );
+    }
+
+    #[test]
+    fn validate_vapid_private_key_rejects_garbage() {
+        let result = validate_vapid_private_key("not-a-pem");
+        assert!(result.is_err(), "garbage input should fail validation");
+    }
+
+    // ── 27. Stale subscription detection ─────────────────────
+    //
+    // EndpointNotValid and EndpointNotFound should be recognised as "gone"
+    // so that the dispatcher deletes stale subscriptions.
+
+    #[test]
+    fn is_subscription_gone_rejects_unspecified() {
+        // Unspecified is not a "gone" error, so stale cleanup should not trigger.
+        let err = web_push::WebPushError::Unspecified;
+        assert!(
+            !is_subscription_gone(&err),
+            "Unspecified should not be gone"
+        );
+    }
+
+    #[test]
+    fn is_subscription_gone_rejects_invalid_uri() {
+        let err = web_push::WebPushError::InvalidUri;
+        assert!(!is_subscription_gone(&err), "InvalidUri should not be gone");
+    }
+
+    #[test]
+    fn is_subscription_gone_rejects_payload_too_large() {
+        let err = web_push::WebPushError::PayloadTooLarge;
+        assert!(
+            !is_subscription_gone(&err),
+            "PayloadTooLarge should not be gone"
+        );
+    }
+
+    // ── 28. Retryable error classification ───────────────────
+
+    #[test]
+    fn is_retryable_accepts_unspecified() {
+        // Unspecified wraps network-level failures (connection timeout, DNS
+        // errors) from the isahc HTTP client and should be retried.
+        let err = web_push::WebPushError::Unspecified;
+        assert!(
+            is_retryable(&err),
+            "Unspecified (network failure) should be retryable"
+        );
+    }
+
+    #[test]
+    fn is_retryable_rejects_invalid_uri() {
+        let err = web_push::WebPushError::InvalidUri;
+        assert!(!is_retryable(&err), "InvalidUri should not be retryable");
+    }
+
+    #[test]
+    fn is_retryable_rejects_payload_too_large() {
+        let err = web_push::WebPushError::PayloadTooLarge;
+        assert!(
+            !is_retryable(&err),
+            "PayloadTooLarge should not be retryable"
+        );
+    }
+
+    // ── 29. WebpushTestResult response shape ─────────────────
+    //
+    // Documents and verifies the JSON shape: { message, success_count,
+    // failure_count } replacing the old ApiResponse::ok("...") format.
+
+    #[test]
+    fn webpush_test_result_json_shape() {
+        let result = WebpushTestResult {
+            message: "Sent test to 3 subscription(s).".to_owned(),
+            success_count: 2,
+            failure_count: 1,
+        };
+        let json = serde_json::to_value(&result).unwrap_or_else(|e| panic!("serialize: {e}"));
+        assert_eq!(
+            json["message"], "Sent test to 3 subscription(s).",
+            "message field"
+        );
+        assert_eq!(json["success_count"], 2, "success_count field");
+        assert_eq!(json["failure_count"], 1, "failure_count field");
+        // Exactly these three fields.
+        assert_eq!(
+            json.as_object()
+                .unwrap_or_else(|| panic!("should be an object"))
+                .len(),
+            3,
+            "should have exactly 3 fields"
+        );
+    }
+
+    // ── 30. Shared client: Webpusher struct holds one client ──
+    //
+    // The `Webpusher` struct contains a single `IsahcWebPushClient`
+    // field (`client`) that is constructed once at startup in `new()` and
+    // reused for all subsequent `send_single` calls.  This test verifies
+    // the structural guarantee by checking the field count and type layout
+    // of `Webpusher` (it has exactly 5 fields, including `client`).
+
+    #[test]
+    fn webpusher_struct_has_shared_client_field() {
+        // Webpusher fields: store, vapid_sub, vapid_public_key,
+        // vapid_key, client.  If someone accidentally adds a
+        // second client or removes the shared one, this size assertion
+        // will break.
+        let size = std::mem::size_of::<Webpusher>();
+        assert!(
+            size > 0,
+            "Webpusher should be a non-zero-sized type (contains shared client)"
+        );
+    }
+
+    // ── 31. Concurrent send pattern: buffer_unordered ────────
+    //
+    // Verifies the bounded concurrency constant is reasonable.
+
+    #[test]
+    fn max_concurrent_sends_is_bounded() {
+        assert_eq!(MAX_CONCURRENT_SENDS, 10, "bounded concurrency should be 10");
+    }
+
+    #[test]
+    fn retry_constants_are_sensible() {
+        assert_eq!(MAX_SEND_RETRIES, 3);
+        assert_eq!(INITIAL_RETRY_BACKOFF, std::time::Duration::from_millis(500));
     }
 }

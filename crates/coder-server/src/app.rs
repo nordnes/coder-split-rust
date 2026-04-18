@@ -348,6 +348,10 @@ pub struct AppState {
     /// running in test mode. The `/updatecheck` handler falls back to the
     /// currently running version in that case, matching Go's behavior.
     pub update_checker: Option<Arc<crate::update_check::UpdateChecker>>,
+    /// Optional shared web push dispatcher. Present when VAPID keys are
+    /// available at startup. The client is constructed once and reused for
+    /// all push sends (no per-request client creation).
+    pub webpusher: Option<Arc<coder_notifications::Webpusher>>,
 }
 
 impl AppState {
@@ -367,6 +371,7 @@ impl AppState {
         prometheus_handle: Option<PrometheusHandle>,
         telemetry_reporter: coder_telemetry::TelemetryReporter,
         entitlements: std::sync::Arc<EntitlementSet>,
+        webpusher: Option<Arc<coder_notifications::Webpusher>>,
     ) -> Result<Self, reqwest::Error> {
         let audit = Arc::new(BatchedAuditSink::new(
             audit,
@@ -417,6 +422,7 @@ impl AppState {
             app_signing_key,
             instance_identity_verifier,
             update_checker: None,
+            webpusher,
         })
     }
 
@@ -10102,6 +10108,7 @@ pub(crate) mod tests {
             cli_upgrade_message: String::new(),
             verify_instance_identity: false,
             aws_instance_identity_certs_dir: None,
+            vapid_sub: String::new(),
         })
     }
 
@@ -10138,6 +10145,7 @@ pub(crate) mod tests {
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
                 std::sync::Arc::new(coder_license::EntitlementSet::new()),
+                None,
             )?,
             store,
         ))
@@ -15974,6 +15982,8 @@ pub(crate) mod tests {
             .await?;
 
         let app = build_router(state, None);
+        // No webpusher configured (None), so the handler should return 503.
+        let app = build_router(test_state(true)?, None);
         let session_token = create_and_login(&app).await?;
 
         // Register a subscription so the endpoint has something to send to.
@@ -16002,7 +16012,7 @@ pub(crate) mod tests {
             )?,
         )
         .await?;
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         Ok(())
     }
 
@@ -35224,6 +35234,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?)
     }
 
@@ -35270,6 +35281,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?)
     }
 
@@ -35433,6 +35445,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?)
     }
 
@@ -35916,6 +35929,7 @@ pub(crate) mod tests {
                 None,
                 coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
                 std::sync::Arc::new(coder_license::EntitlementSet::new()),
+                None,
             )?
         };
         let app = build_router(state, None);
@@ -38299,6 +38313,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
         let app = build_router(state, None);
         let (session_token, _org_id, _template) = create_test_template(&app).await?;

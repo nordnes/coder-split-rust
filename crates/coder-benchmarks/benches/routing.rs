@@ -105,6 +105,7 @@ fn bench_app_state() -> AppState {
         cli_upgrade_message: String::new(),
         verify_instance_identity: false,
         aws_instance_identity_certs_dir: None,
+        vapid_sub: String::new(),
     };
 
     AppState::new(
@@ -121,6 +122,7 @@ fn bench_app_state() -> AppState {
         None,
         coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
         std::sync::Arc::new(coder_license::EntitlementSet::new()),
+        None,
     )
     .unwrap_or_else(|_| std::process::abort())
 }

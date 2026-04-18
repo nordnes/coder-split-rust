@@ -25,6 +25,7 @@ coder-audit = { path = "../coder-audit" }
 coder-auth = { path = "../coder-auth" }
 coder-connectivity = { path = "../coder-connectivity" }
 coder-core = { path = "../coder-core" }
+coder-notifications = { path = "../coder-notifications" }
 coder-license = { path = "../coder-license" }
 coder-identity = { path = "../coder-identity" }
 coder-mcp = { path = "../coder-mcp" }
