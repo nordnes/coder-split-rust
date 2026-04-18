@@ -1,6 +1,16 @@
-# Remaining Behavioral Gaps
+# Remaining Behavioral Gaps — *superseded 2026-04-18*
 
-> **Scope:** Now that every Go route has a Rust counterpart (326/326, 100%),
+> **⚠️ Superseded.** The authoritative, current inventory is
+> [`docs/backend-gap-analysis-2026-04.md`](backend-gap-analysis-2026-04.md).
+> This document was written before the agent DRPC work (PR #215), the
+> `coder-telemetry` / `coder-license` / `coder-agent-rpc` crates, the
+> `lettre`-based SMTP dispatcher, and the batched audit sink landed, and it
+> is therefore stale in several places. It is retained for historical
+> context; do not plan work from it.
+>
+> ---
+>
+> **Original scope:** Now that every Go route has a Rust counterpart (326/326, 100%),
 > this document enumerates the remaining *behavioral* gaps — places where the
 > Rust handler is reachable and returns a sane shape, but the underlying
 > semantics still differ from the Go reference in `coder/`. It is the
