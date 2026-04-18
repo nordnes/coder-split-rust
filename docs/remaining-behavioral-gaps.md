@@ -64,28 +64,21 @@ routes; no handler code changes.
 
 ---
 
-## 3. `stub-partial` Routes (10) — Actual Remaining Partials
+## 3. `stub-partial` Routes (2) — Actual Remaining Partials
 
-After the Wave 4B/4C work moved the workspace-proxy internal routes and
-`/oauth2/revoke` to real implementations, these ten remain as
-genuinely-partial handlers. Several items the old matrix lists as
-`stub-partial` (`/buildinfo`, `/deployment/config`, `/deployment/ssh`,
-GitHub/OIDC callbacks, agent external-auth) are not actually hardcoded —
-they read from real config/store — and should move to `complete` in the
-next regeneration.
+PRs #199–#206 closed eight of the original ten `stub-partial` handlers
+(scope enrichment, update-check probe, AWS/GCP instance identity,
+workspace quota x2, workspace-sharing persistence, replicas listing).
+Two genuinely-partial handlers remain; the rest of the old matrix's
+`stub-partial` entries (`/buildinfo`, `/deployment/config`,
+`/deployment/ssh`, GitHub/OIDC callbacks, agent external-auth) are not
+actually hardcoded — they read from real config/store — and should move
+to `complete` in the next regeneration.
 
 | Route | Method | Current behavior | Real gap |
 |-------|--------|------------------|----------|
-| `/auth/scopes` | GET | Returns `PUBLIC_API_KEY_SCOPES` verbatim (`crates/coder-server/src/handlers/auth.rs:14`). | Go enriches the response with per-scope metadata (description, resources). Rust returns only the name list. |
-| `/updatecheck` | GET | Returns `current: true` unconditionally (`crates/coder-server/src/handlers/deployment.rs:52`). | Go queries GitHub releases and compares versions. Rust never reports an available update. |
 | `/templateversions/{ver}/dynamic-parameters/evaluate` | POST | Returns the stored parameter definitions (`crates/coder-server/src/handlers/templates.rs:1568`). | Go runs the provisioner's `Plan` in preview mode with the user-supplied values to produce *evaluated* options. Rust returns the raw definitions because the provisioner runtime is not wired in. |
-| `/workspaceagents/aws-instance-identity` | POST | Parses the document JSON and trusts `instanceId` (`crates/coder-server/src/handlers/agents.rs:2261`). | No AWS certificate verification. Anyone who can reach the endpoint with a well-formed JSON can claim an instance ID. |
-| `/workspaceagents/azure-instance-identity` | POST | Decodes the JWT body without validating the signature (`crates/coder-server/src/handlers/agents.rs:2304`). | No PKCS7/Microsoft CA verification. |
-| `/workspaceagents/google-instance-identity` | POST | Decodes the JWT body without validating the signature (`crates/coder-server/src/handlers/agents.rs:2332`). | No Google token-validator call. |
-| `/workspace-quota/{user}` | GET | Returns `{credits_consumed: 0, budget: -1}` (`crates/coder-server/src/handlers/quotas.rs:11`). | See §8. |
-| `/organizations/{organization}/members/{user}/workspace-quota` | GET | Same stub as above (`crates/coder-server/src/handlers/quotas.rs:36`). | See §8. |
-| `/organizations/{organization}/settings/workspace-sharing` | PATCH | Validates input, but the transactional write path ends in `"Not implemented."` (`crates/coder-server/src/handlers/workspace_sharing.rs:141`). | The organization record has no `shareable_workspace_owners` column yet; the handler reads a constant and refuses to persist updates. |
-| `/replicas` | GET | Returns `[]` after auth+RBAC (`crates/coder-server/src/handlers/replicas.rs:11`). | No replica manager service exists, so HA deployments never see sibling replicas. |
+| `/workspaceagents/azure-instance-identity` | POST | Permissive path extracts `vmId` from the JWT payload without validating the signature (`crates/coder-server/src/instance_identity/mod.rs:109`). The `CryptoVerifier` path always returns `VerifyError::VerificationFailed` (`crates/coder-server/src/instance_identity/azure.rs:64`). | No PKCS7/Microsoft CA verification. Deployments running with `verify_instance_identity = true` cannot bootstrap Azure agents at all; deployments in permissive mode accept forged tokens. See Appendix A.1. |
 
 ---
 
@@ -195,21 +188,18 @@ is the blocker for running real provisioned workspaces end-to-end.
 
 ---
 
-## 8. Workspace Quota Stub (1)
+## 8. Workspace Quota Stub (1) — RESOLVED
 
-`compute_workspace_quota` in `crates/coder-server/src/handlers/quotas.rs:62`
-always returns `{credits_consumed: 0, budget: -1}` (unlimited). The TODO
-comment correctly identifies the missing pieces:
+Closed by **PR #202**. `compute_workspace_quota` now consults
+`state.entitlements` for `FeatureName::TemplateRbac` and calls the
+`get_quota_allowance_for_user` / `get_quota_consumed_for_user` queries
+in `coder-db`. Both the deprecated `/workspace-quota/{user}` and the
+organization-scoped
+`/organizations/{organization}/members/{user}/workspace-quota` routes
+report real allowance/consumed values.
 
-- `state.entitlements` is not yet checked for `FeatureName::TemplateRbac`
-- the real queries (`get_quota_allowance_for_user`,
-  `get_quota_consumed_for_user`) exist in `coder-db` but are not called.
-
-Net effect: enterprise deployments that license `template_rbac` cannot
-enforce quotas via the Rust backend; both the deprecated
-`/workspace-quota/{user}` and the organization-scoped
-`/organizations/{organization}/members/{user}/workspace-quota` are
-affected.
+Retained here for historical context so reviewers can trace the
+resolution; no further work required.
 
 ---
 
@@ -245,18 +235,21 @@ complete.
 | 1 | Port agent DRPC protocol (messages 1–4 + yamux + DRPC framing) | §6 | **L** (2–3 weeks) | Proto schema, yamux crate, tailnet DRPC types |
 | 2 | Wire provisioner tag matching to job creation sites | §7.1 | **M** (3–5 days) | Go `ProvisionerTagSet` semantics |
 | 3 | Dynamic-parameter evaluation via provisioner Plan | §3 / §7.2 | **M** (1 week) | Provisioner runtime in Rust |
-| 4 | Quota enforcement: entitlement check + allowance/consumed queries | §8 | **S** (1–2 days) | `state.entitlements` already wired |
-| 5 | Instance-identity cryptographic verification (AWS/Azure/GCP) | §3 | **M** (1 week) | Platform CA bundles, JWT verifier |
-| 6 | SMTP email dispatch (`lettre`) | §9.1 | **S** (1 day) | SMTP credentials in config (already present) |
-| 7 | Workspace-proxy coordinate multi-agent tailnet bridge | §4 | **M** (1 week) | Agent DRPC (§6) first |
-| 8 | Workspace-proxy signed app token: full `WorkspaceAppsProvider` chain | §4 | **M** (1 week) | Workspace-apps port from Go |
-| 9 | `/replicas` list via replica manager | §3 | **S** (2–3 days) | Replica manager crate (doesn't exist) |
-| 10 | Workspace-sharing PATCH persistence | §3 | **S** (1 day) | Add `shareable_workspace_owners` column + migration |
-| 11 | `/updatecheck` against GitHub releases | §3 | **XS** (hours) | HTTP client; cache policy decision |
-| 12 | `/auth/scopes` response enrichment with descriptions | §3 | **XS** (hours) | None |
-| 13 | Token-revocation cascade + audit entry | §5.1 | **XS** (hours) | Existing audit sink |
-| 14 | Proxy crypto-keys rotation scheduler | §4 | **S** (1–2 days) | Background task runner |
-| 15 | Regenerate `crates/coder-server/PARITY_MATRIX.md` | §1, §2, §4 | **XS** (hours) | `apps/coder-parity` |
+| 4 | Azure instance-identity PKCS7/CA verification | §3 / Appendix A.1 | **M** (1 week) | Microsoft CA bundle, PKCS7 verifier |
+| 5 | SMTP email dispatch (`lettre`) | §9.1 | **S** (1 day) | SMTP credentials in config (already present) |
+| 6 | Workspace-proxy coordinate multi-agent tailnet bridge | §4 | **M** (1 week) | Agent DRPC (§6) first |
+| 7 | Workspace-proxy signed app token: full `WorkspaceAppsProvider` chain | §4 | **M** (1 week) | Workspace-apps port from Go |
+| 8 | Token-revocation cascade + audit entry | §5.1 | **XS** (hours) | Existing audit sink |
+| 9 | Proxy crypto-keys rotation scheduler | §4 | **S** (1–2 days) | Background task runner |
+| 10 | Regenerate `crates/coder-server/PARITY_MATRIX.md` | §1, §2, §4 | **XS** (hours) | `apps/coder-parity` |
+
+*Earlier revisions of this matrix listed additional items that have
+since landed and are therefore no longer tracked here:*
+- *`/replicas`, workspace-sharing PATCH persistence, `/updatecheck` and
+  `/auth/scopes` — closed by PRs #199, #200, #203, #205.*
+- *Quota enforcement (§8) — closed by PR #202.*
+- *AWS/GCP instance-identity cryptographic verification — closed by PR
+  #206. Only Azure remains (item #4 above).*
 
 Effort key: XS < 1 day · S = 1–3 days · M = ~1 week · L = ~3 weeks.
 
@@ -273,14 +266,14 @@ parallel.
 |---|---:|---|
 | §1 Stale documentation | 3 files | README/AGENTS already correct; PARITY_MATRIX needs regen |
 | §2 `stub-501` classification drift | 5 routes | All five handlers are actually complete |
-| §3 Genuine `stub-partial` routes | 10 routes | Includes instance-identity, quota, replicas, updatecheck, dynamic-params, etc. |
+| §3 Genuine `stub-partial` routes | 2 routes | Dynamic-parameters evaluation and Azure instance identity. The other 8 entries were closed by PRs #199–#206. |
 | §4 Workspace-proxy internal stubs | 6 routes | Now implemented; remaining gaps are narrow (DERP mesh key, rotation, coordinate bridge) |
 | §5 OAuth2 behavioral gaps | 2 items | Revocation cascade + RFC 7592 replay protection |
 | §6 Agent RPC protocol | ≥4 message types + DRPC/yamux framing | Largest single gap |
 | §7 Provisioner / template | 2 items | Tag matching, dynamic-parameter evaluation |
-| §8 Workspace quota | 1 item | Two routes affected |
+| ~~§8 Workspace quota~~ | — | **RESOLVED** (PR #202) |
 | §9 Notification dispatch | 2 items | SMTP not implemented, webhook retry policy |
-| **Total** | **~35 discrete work items** across ~24 routes and 3 subsystems |
+| **Total** | **~26 discrete work items** across ~16 routes and 3 subsystems |
 
 Most items are small (XS/S). The long pole is the agent DRPC port (§6).
 
