@@ -1049,7 +1049,7 @@ async fn run() -> Result<(), MainError> {
     // column.
     let app_healthcheck_handle =
         Arc::new(coder_server::app_healthcheck::AppHealthcheckProber::new(
-            store.clone(),
+            state.store.clone(),
             state.http_client.clone(),
             coder_server::app_healthcheck::AppHealthcheckProberOptions::default(),
             CancellationToken::new(),

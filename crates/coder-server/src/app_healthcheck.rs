@@ -66,8 +66,8 @@ struct AppState {
 
 /// Background worker that probes workspace-app health URLs and updates
 /// `workspace_apps.health` on transition.
-pub struct AppHealthcheckProber<S: AppStore + 'static> {
-    store: Arc<S>,
+pub struct AppHealthcheckProber {
+    store: Arc<dyn AppStore>,
     client: reqwest::Client,
     options: AppHealthcheckProberOptions,
     cancel: CancellationToken,
@@ -91,11 +91,11 @@ impl AppHealthcheckProberHandle {
     }
 }
 
-impl<S: AppStore + 'static> AppHealthcheckProber<S> {
+impl AppHealthcheckProber {
     /// Builds a new prober. Use [`Self::spawn`] to start the loop.
     #[must_use]
     pub fn new(
-        store: Arc<S>,
+        store: Arc<dyn AppStore>,
         client: reqwest::Client,
         options: AppHealthcheckProberOptions,
         cancel: CancellationToken,
