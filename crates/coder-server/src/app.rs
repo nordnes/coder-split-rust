@@ -7247,6 +7247,42 @@ pub(crate) mod tests {
             Ok(())
         }
 
+        async fn update_workspace_agent_startup(
+            &self,
+            agent_id: Uuid,
+            version: &str,
+            expanded_directory: &str,
+            subsystems: &[&str],
+            api_version: &str,
+        ) -> Result<(), StorageError> {
+            let mut agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(agent) = agents.get_mut(&agent_id) {
+                agent.version = version.to_owned();
+                agent.expanded_directory = expanded_directory.to_owned();
+                agent.subsystems = subsystems.iter().map(|s| (*s).to_owned()).collect();
+                agent.api_version = api_version.to_owned();
+            }
+            Ok(())
+        }
+
+        async fn update_workspace_app_health(
+            &self,
+            app_id: Uuid,
+            health: &str,
+        ) -> Result<(), StorageError> {
+            let mut apps = self
+                .workspace_apps
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            if let Some(app) = apps.get_mut(&app_id) {
+                app.health = health.to_owned();
+            }
+            Ok(())
+        }
+
         async fn upsert_workspace_agent_metadata(
             &self,
             agent_id: Uuid,
@@ -18279,6 +18315,248 @@ pub(crate) mod tests {
         let response = call(app, req).await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // LiveAgentHandler unit tests — the DRPC handler implementation used by
+    // the yamux path of /api/v2/workspaceagents/me/rpc.
+    // -----------------------------------------------------------------------
+
+    /// Helper: resolve the agent_id seeded by `setup_agent_test_state`.
+    fn agent_id_from_store(store: &FakeStore) -> Result<Uuid, Box<dyn Error>> {
+        let guard = store
+            .workspace_agents
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        let id = guard.values().next().map(|a| a.id).ok_or("no agent")?;
+        Ok(id)
+    }
+
+    fn live_handler_for_store(
+        store: Arc<FakeStore>,
+        agent_id: Uuid,
+    ) -> crate::handlers::agent_rpc_live::LiveAgentHandler {
+        let store_dyn: Arc<dyn AppStore> = store;
+        crate::handlers::agent_rpc_live::LiveAgentHandler::new(
+            agent_id,
+            store_dyn,
+            "2.0".to_owned(),
+        )
+    }
+
+    #[tokio::test]
+    async fn live_handler_get_manifest_returns_agent_and_workspace_ids()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let manifest = handler
+            .get_manifest(agent::GetManifestRequest {})
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        assert_eq!(manifest.agent_id, agent_id.as_bytes().to_vec());
+        assert_eq!(manifest.agent_name, "test-agent");
+        assert_eq!(manifest.workspace_name, "test-workspace");
+        assert!(manifest.apps.is_empty());
+        assert!(manifest.scripts.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_handler_get_announcement_banners_returns_empty_by_default()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let resp = handler
+            .get_announcement_banners(agent::GetAnnouncementBannersRequest {})
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(resp.announcement_banners.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_handler_update_startup_persists_version_and_subsystems()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let startup = agent::Startup {
+            version: "v2.5.0".to_owned(),
+            expanded_directory: "/home/coder/work".to_owned(),
+            subsystems: vec![
+                agent::startup::Subsystem::Envbox as i32,
+                agent::startup::Subsystem::Envbuilder as i32,
+            ],
+        };
+        handler
+            .update_startup(agent::UpdateStartupRequest {
+                startup: Some(startup),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let agents = store
+            .workspace_agents
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        let agent = agents.get(&agent_id).ok_or("agent gone")?;
+        assert_eq!(agent.version, "v2.5.0");
+        assert_eq!(agent.expanded_directory, "/home/coder/work");
+        assert_eq!(agent.api_version, "2.0");
+        let mut subs = agent.subsystems.clone();
+        subs.sort();
+        assert_eq!(subs, vec!["envbox".to_owned(), "envbuilder".to_owned()]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_handler_update_startup_rejects_invalid_subsystem() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let startup = agent::Startup {
+            version: "v1".to_owned(),
+            expanded_directory: "/".to_owned(),
+            // 9999 is not a valid Subsystem enum value.
+            subsystems: vec![9999],
+        };
+        let result = handler
+            .update_startup(agent::UpdateStartupRequest {
+                startup: Some(startup),
+            })
+            .await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => return Err("expected InvalidArgument, got Ok".into()),
+        };
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_handler_batch_update_app_health_updates_changed_apps()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+
+        let now = OffsetDateTime::now_utc();
+        let app_id = Uuid::new_v4();
+        let app_row = WorkspaceAppRow {
+            id: app_id,
+            created_at: now,
+            agent_id,
+            display_name: "My App".to_owned(),
+            icon: String::new(),
+            command: None,
+            url: None,
+            healthcheck_url: "http://localhost/healthz".to_owned(),
+            healthcheck_interval: 30,
+            healthcheck_threshold: 3,
+            health: "initializing".to_owned(),
+            subdomain: false,
+            sharing_level: "owner".to_owned(),
+            slug: "my-app".to_owned(),
+            external: false,
+            display_order: 0,
+            hidden: false,
+            open_in: "slim-window".to_owned(),
+            display_group: None,
+        };
+        store.insert_app(app_row)?;
+
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        handler
+            .batch_update_app_health(agent::BatchUpdateAppHealthRequest {
+                updates: vec![agent::batch_update_app_health_request::HealthUpdate {
+                    id: app_id.as_bytes().to_vec(),
+                    health: agent::AppHealth::Healthy as i32,
+                }],
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let apps = store
+            .workspace_apps
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert_eq!(apps.get(&app_id).ok_or("gone")?.health, "healthy");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn live_handler_batch_update_app_health_rejects_without_healthcheck()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+
+        let now = OffsetDateTime::now_utc();
+        let app_id = Uuid::new_v4();
+        let app_row = WorkspaceAppRow {
+            id: app_id,
+            created_at: now,
+            agent_id,
+            display_name: "My App".to_owned(),
+            icon: String::new(),
+            command: None,
+            url: None,
+            healthcheck_url: String::new(),
+            healthcheck_interval: 0,
+            healthcheck_threshold: 0,
+            health: "disabled".to_owned(),
+            subdomain: false,
+            sharing_level: "owner".to_owned(),
+            slug: "my-app".to_owned(),
+            external: false,
+            display_order: 0,
+            hidden: false,
+            open_in: "slim-window".to_owned(),
+            display_group: None,
+        };
+        store.insert_app(app_row)?;
+
+        let handler = live_handler_for_store(store, agent_id);
+        let result = handler
+            .batch_update_app_health(agent::BatchUpdateAppHealthRequest {
+                updates: vec![agent::batch_update_app_health_request::HealthUpdate {
+                    id: app_id.as_bytes().to_vec(),
+                    health: agent::AppHealth::Healthy as i32,
+                }],
+            })
+            .await;
+        let err = match result {
+            Err(e) => e,
+            Ok(_) => return Err("expected InvalidArgument, got Ok".into()),
+        };
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
         Ok(())
     }
 

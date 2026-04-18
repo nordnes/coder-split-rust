@@ -1780,18 +1780,25 @@ pub(crate) async fn get_workspace_agent_reinit(
         .into_response())
 }
 
-/// GET /api/v2/workspaceagents/me/rpc — dRPC over WebSocket.
+/// GET /api/v2/workspaceagents/me/rpc — DRPC over WebSocket.
 ///
-/// In Go this upgrades to a WebSocket, wraps it with yamux, then serves dRPC
-/// methods for the agent API (manifest, stats, lifecycle, etc.).
+/// Ports `coder/coderd/workspaceagentsrpc.go::workspaceAgentRPC`: the Go
+/// server upgrades to a WebSocket, wraps the frame stream with yamux, then
+/// serves DRPC methods for the agent API (manifest, stats, lifecycle, …).
 ///
-/// This implementation upgrades to WebSocket and registers the agent connection
-/// in the [`AgentProvider`] so that devcontainer commands can be delivered.
-/// Full dRPC/yamux message handling is not yet ported; the connection is held
-/// open and cleaned up when the agent disconnects.
+/// We select between two paths via the `?version=` query parameter (mirroring
+/// the Go server's version negotiation):
+///
+/// * When `version` is present and of the form `2.x` we bridge the WebSocket
+///   into an [`AsyncRead`]/[`AsyncWrite`] pair and run
+///   [`coder_agent_rpc::serve_yamux`] against a live [`LiveAgentHandler`].
+/// * Otherwise we keep the legacy JSON-over-WebSocket shim so existing
+///   internal callers (e.g. the devcontainer dispatch path wired through
+///   [`AgentProvider`]) keep working unchanged.
 pub(crate) async fn get_workspace_agent_rpc(
     State(state): State<AppState>,
     headers: HeaderMap,
+    Query(params): Query<std::collections::HashMap<String, String>>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(agent) = authenticate_agent_request(&state, &headers).await? else {
@@ -1803,9 +1810,127 @@ pub(crate) async fn get_workspace_agent_rpc(
     let store = state.store.clone();
     let pubsub = state.pubsub.clone();
 
+    // Go defaults the version to "2.0" when unspecified, but its entire
+    // agent fleet always speaks DRPC/yamux over that endpoint. Our Rust
+    // server still supports the JSON shim for internal devcontainer
+    // plumbing, so we only switch to yamux when the client explicitly
+    // advertises an API version (which real agents always do).
+    //
+    // When a version *is* advertised, mirror Go's `apiversion.Validate`
+    // strictness: require a strict `major.minor` form with `major == 2`.
+    // Anything else (a bare "2", "23.0", "2abc", "3.0", etc.) is an
+    // unsupported protocol revision and gets HTTP 400 — we must not route
+    // it to the DRPC pump, because we would then speak DRPC to a client
+    // that thinks it is on a different wire protocol.
+    if let Some(ver) = params.get("version").cloned() {
+        if !is_supported_agent_api_version(&ver) {
+            return Ok((
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    format!("Unknown or unsupported API version: {ver}"),
+                    "",
+                )),
+            )
+                .into_response());
+        }
+        let store_for_drpc = store.clone();
+        return Ok(ws.on_upgrade(move |socket| async move {
+            handle_agent_drpc_socket(socket, agent_id, store_for_drpc, ver).await;
+        }));
+    }
+
     Ok(ws.on_upgrade(move |socket| {
         handle_agent_rpc_socket(socket, agent_id, provider, store, pubsub)
     }))
+}
+
+/// Returns `true` if `version` is a strict `major.minor` string with
+/// `major == 2`. Mirrors Go's `coder/apiversion/apiversion.go::Validate`
+/// for the currently-supported `2.x` family.
+fn is_supported_agent_api_version(version: &str) -> bool {
+    let Some((major, minor)) = version.split_once('.') else {
+        return false;
+    };
+    let major_ok = major.parse::<u32>().is_ok_and(|m| m == 2);
+    let minor_ok = minor.parse::<u32>().is_ok();
+    major_ok && minor_ok
+}
+
+/// Bridges the WebSocket into a yamux-carried DRPC session backed by
+/// [`crate::handlers::agent_rpc_live::LiveAgentHandler`]. One half of a
+/// [`tokio::io::duplex`] pair is handed to yamux; the other half is pumped
+/// to/from the WebSocket as opaque binary frames.
+async fn handle_agent_drpc_socket(
+    socket: WebSocket,
+    agent_id: Uuid,
+    store: Arc<dyn AppStore>,
+    api_version: String,
+) {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let handler = Arc::new(crate::handlers::agent_rpc_live::LiveAgentHandler::new(
+        agent_id,
+        store,
+        api_version,
+    ));
+
+    // Ample buffer: DRPC payloads are small (<64 KiB) but we want to
+    // avoid blocking the WebSocket pump on slow yamux consumers.
+    let (yamux_io, bridge_io) = tokio::io::duplex(256 * 1024);
+    let (mut bridge_reader, mut bridge_writer) = tokio::io::split(bridge_io);
+
+    let (mut ws_sink, mut ws_source) = socket.split();
+
+    // WS → bridge_writer: inbound binary frames become yamux input bytes.
+    let ws_to_bridge = tokio::spawn(async move {
+        while let Some(msg) = ws_source.next().await {
+            match msg {
+                Ok(Message::Binary(bytes)) => {
+                    if bridge_writer.write_all(&bytes).await.is_err() {
+                        break;
+                    }
+                }
+                Ok(Message::Close(_)) | Err(_) => break,
+                // Ignore text/ping/pong — DRPC agents never send them on this path.
+                Ok(_) => {}
+            }
+        }
+        let _ = bridge_writer.shutdown().await;
+    });
+
+    // bridge_reader → WS: yamux output bytes become outbound binary frames.
+    let bridge_to_ws = tokio::spawn(async move {
+        let mut buf = vec![0u8; 32 * 1024];
+        loop {
+            let n = match bridge_reader.read(&mut buf).await {
+                Ok(0) | Err(_) => break,
+                Ok(n) => n,
+            };
+            if ws_sink
+                .send(Message::Binary(buf[..n].to_vec().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+        let _ = ws_sink.close().await;
+    });
+
+    // Serve DRPC over yamux on the owner side of the duplex.
+    if let Err(err) = coder_agent_rpc::serve_yamux(yamux_io, handler).await {
+        tracing::debug!("agent drpc: yamux session ended for {agent_id}: {err}");
+    }
+
+    // Best-effort wind-down of the pumps.
+    ws_to_bridge.abort();
+    bridge_to_ws.abort();
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(100), async {
+        let _ = ws_to_bridge.await;
+        let _ = bridge_to_ws.await;
+    })
+    .await;
 }
 
 /// Runs the WebSocket message loop for one connected agent.

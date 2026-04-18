@@ -15,9 +15,12 @@ async-stream.workspace = true
 async-trait.workspace = true
 axum.workspace = true
 base64.workspace = true
+prost.workspace = true
+prost-types.workspace = true
 chrono = { workspace = true, features = ["clock", "std"] }
 chrono-tz.workspace = true
 governor.workspace = true
+coder-agent-rpc = { path = "../coder-agent-rpc" }
 coder-audit = { path = "../coder-audit" }
 coder-auth = { path = "../coder-auth" }
 coder-connectivity = { path = "../coder-connectivity" }

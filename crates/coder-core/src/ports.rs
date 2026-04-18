@@ -3841,6 +3841,27 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         ready_at: Option<OffsetDateTime>,
     ) -> Result<(), StorageError>;
 
+    /// Records the agent's startup info (version, expanded directory, subsystems,
+    /// API version). Mirrors the Go `UpdateWorkspaceAgentStartupByID` query in
+    /// `coder/coderd/database/queries/workspaceagents.sql`.
+    async fn update_workspace_agent_startup(
+        &self,
+        agent_id: Uuid,
+        version: &str,
+        expanded_directory: &str,
+        subsystems: &[&str],
+        api_version: &str,
+    ) -> Result<(), StorageError>;
+
+    /// Updates a workspace app's health status. Mirrors Go's
+    /// `UpdateWorkspaceAppHealthByID` in
+    /// `coder/coderd/database/queries/workspaceapps.sql`.
+    async fn update_workspace_app_health(
+        &self,
+        app_id: Uuid,
+        health: &str,
+    ) -> Result<(), StorageError>;
+
     /// Upserts workspace agent metadata entries.
     async fn upsert_workspace_agent_metadata(
         &self,

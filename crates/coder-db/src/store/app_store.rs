@@ -6102,6 +6102,54 @@ impl AppStore for PostgresStore {
         Ok(())
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_agent_startup(
+        &self,
+        agent_id: Uuid,
+        version: &str,
+        expanded_directory: &str,
+        subsystems: &[&str],
+        api_version: &str,
+    ) -> Result<(), StorageError> {
+        let subsystems_vec: Vec<String> = subsystems.iter().map(|s| (*s).to_owned()).collect();
+        sqlx::query(
+            "UPDATE workspace_agents
+             SET version = $2,
+                 expanded_directory = $3,
+                 subsystems = $4::workspace_agent_subsystem[],
+                 api_version = $5
+             WHERE id = $1",
+        )
+        .bind(agent_id)
+        .bind(version)
+        .bind(expanded_directory)
+        .bind(&subsystems_vec)
+        .bind(api_version)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn update_workspace_app_health(
+        &self,
+        app_id: Uuid,
+        health: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE workspace_apps
+             SET health = $2::workspace_app_health
+             WHERE id = $1",
+        )
+        .bind(app_id)
+        .bind(health)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     #[instrument(skip(self, entries), err(level = tracing::Level::WARN))]
     async fn upsert_workspace_agent_metadata(
         &self,
