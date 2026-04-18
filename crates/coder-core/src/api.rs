@@ -2379,6 +2379,9 @@ pub struct ProvisionerDaemonResponse {
     /// Tags associated with the daemon.
     #[serde(default, skip_serializing_if = "HashMap::is_empty")]
     pub tags: HashMap<String, String>,
+    /// Provisioner key that authenticated the daemon (if any).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key_id: Option<Uuid>,
 }
 
 // ---------------------------------------------------------------------------

@@ -68,6 +68,7 @@ fn daemon_to_response(
         api_version: d.api_version.clone(),
         provisioners: d.provisioners.clone(),
         tags: d.tags.clone(),
+        key_id: d.key_id,
     }
 }
 

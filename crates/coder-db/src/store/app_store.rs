@@ -8881,6 +8881,7 @@ impl AppStore for PostgresStore {
             FROM provisioner_jobs
             WHERE organization_id = $1
             ORDER BY created_at DESC
+            LIMIT 50
             "#,
         )
         .bind(organization_id)
