@@ -8817,7 +8817,7 @@ impl AppStore for PostgresStore {
                        WHEN started_at IS NOT NULL THEN 'running'
                        ELSE 'pending'
                    END AS job_status,
-                   file_id, type, input, worker_id, tags
+                   file_id, type::text, input, worker_id, tags
             FROM provisioner_jobs
             WHERE id = $1
             "#,
