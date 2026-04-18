@@ -2147,6 +2147,57 @@ impl OAuth2ProviderError {
     }
 }
 
+/// Enforces RFC 8707 §2.1 (authorization-code exchange) resource-indicator
+/// consistency between the authorization step and the token step:
+///
+/// * Stored empty + requested empty → ok.
+/// * Stored empty + requested set → `invalid_target` (binding introduced
+///   after the code was minted).
+/// * Stored set + requested empty → `invalid_target` (binding dropped).
+/// * Stored set + requested set + mismatch → `invalid_target`.
+///
+/// Mirrors Go's `exchangeAuthorizationCode` error branches at
+/// `coder/coderd/oauth2provider/tokens.go::errInvalidResource`.
+fn validate_authorization_code_resource(
+    stored: &str,
+    requested: &str,
+) -> Result<(), OAuth2ProviderError> {
+    match (stored.is_empty(), requested.is_empty()) {
+        (true, true) => Ok(()),
+        (true, false) => Err(OAuth2ProviderError::bad_request(
+            "Resource parameter was not specified during authorization.",
+        )),
+        (false, true) => Err(OAuth2ProviderError::bad_request(
+            "Resource parameter is required (bound at authorization).",
+        )),
+        (false, false) => {
+            if stored == requested {
+                Ok(())
+            } else {
+                Err(OAuth2ProviderError::bad_request(
+                    "Resource parameter does not match the value bound at authorization.",
+                ))
+            }
+        }
+    }
+}
+
+/// Enforces RFC 8707 §2.2 (refresh-grant) resource-indicator consistency.
+/// The refresh client MAY omit `resource` to keep the original audience;
+/// if supplied, it must equal the stored audience.
+fn validate_refresh_token_resource(
+    token_audience: &str,
+    requested: &str,
+) -> Result<(), OAuth2ProviderError> {
+    if requested.is_empty() || requested == token_audience {
+        Ok(())
+    } else {
+        Err(OAuth2ProviderError::bad_request(
+            "Resource parameter does not match the refresh token's audience.",
+        ))
+    }
+}
+
 /// OAuth2 provider service for app registration, authorization, and token exchange.
 ///
 /// This implements Coder as an OAuth2 *provider* (not consumer), allowing
@@ -2399,6 +2450,11 @@ where
         client_id: Uuid,
         client_secret: &str,
         code_verifier: &str,
+        // RFC 8707 resource indicator from the token request. Must match the
+        // `resource_uri` captured when the authorization code was issued;
+        // Go's `errInvalidResource` equivalent in
+        // `coder/coderd/oauth2provider/tokens.go::exchangeAuthorizationCode`.
+        resource: &str,
     ) -> Result<OAuth2TokenResult, OAuth2ProviderError> {
         use sha2::Digest;
 
@@ -2531,6 +2587,11 @@ where
             }
         };
 
+        // RFC 8707 §2 resource indicator consistency check. Enforcing this
+        // *before* the single-use code delete keeps the code reusable for a
+        // legitimate retry with the correct resource value.
+        validate_authorization_code_resource(&code_record.resource_uri, resource)?;
+
         // Delete the code (single-use).  Propagate errors so that tokens
         // are never issued if the code cannot be invalidated (RFC 6749 §10.5).
         if !self
@@ -2563,6 +2624,10 @@ where
         refresh_token: &str,
         client_id: Uuid,
         client_secret: &str,
+        // Optional RFC 8707 resource indicator. If the client supplies one,
+        // it must match the token's stored `audience` (set at authorization
+        // time). Empty means "keep the original audience."
+        resource: &str,
     ) -> Result<OAuth2TokenResult, OAuth2ProviderError> {
         use sha2::Digest;
 
@@ -2601,6 +2666,9 @@ where
                 "Refresh token does not belong to this client.",
             ));
         }
+
+        // RFC 8707 §2.2 resource indicator check.
+        validate_refresh_token_resource(&token_record.audience, resource)?;
 
         // Verify the client secret (RFC 6749 Section 6: confidential clients
         // MUST authenticate when refreshing tokens).
@@ -3666,5 +3734,108 @@ mod tests {
     fn test_parse_response_body_invalid_json() {
         let result = parse_response_body(Some("application/json"), "not json at all");
         assert!(result.is_err());
+    }
+
+    // ── RFC 8707 resource-indicator validation (Wave 0 S9) ────
+
+    #[test]
+    fn rfc8707_auth_code_resource_both_empty_ok() {
+        assert!(super::validate_authorization_code_resource("", "").is_ok());
+    }
+
+    #[test]
+    fn rfc8707_auth_code_resource_stored_empty_requested_set_rejects() {
+        // Go: errInvalidResource when resource was not bound at authorize
+        // time but is introduced at token time.
+        let result = super::validate_authorization_code_resource("", "https://api.example.com");
+        assert!(result.is_err());
+        let msg = result
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "<no error>".to_owned());
+        assert!(
+            msg.contains("not specified during authorization"),
+            "error message must cite the binding gap: {msg}"
+        );
+    }
+
+    #[test]
+    fn rfc8707_auth_code_resource_stored_set_requested_empty_rejects() {
+        // Go: errInvalidResource when the authorize step bound a resource
+        // but the token step drops it (audience-binding forgery guard).
+        let result = super::validate_authorization_code_resource("https://api.example.com", "");
+        assert!(result.is_err());
+        let msg = result
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "<no error>".to_owned());
+        assert!(
+            msg.contains("required"),
+            "error message must cite the binding requirement: {msg}"
+        );
+    }
+
+    #[test]
+    fn rfc8707_auth_code_resource_matching_ok() {
+        assert!(
+            super::validate_authorization_code_resource(
+                "https://api.example.com",
+                "https://api.example.com",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rfc8707_auth_code_resource_mismatch_rejects() {
+        let result = super::validate_authorization_code_resource(
+            "https://api.example.com",
+            "https://other.example.com",
+        );
+        assert!(result.is_err());
+        let msg = result
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "<no error>".to_owned());
+        assert!(
+            msg.contains("does not match"),
+            "error message must cite the mismatch: {msg}"
+        );
+    }
+
+    #[test]
+    fn rfc8707_refresh_resource_empty_always_ok() {
+        // §2.2: the refresh request MAY omit `resource`, inheriting the
+        // audience stored on the token record. Two representative cases.
+        assert!(super::validate_refresh_token_resource("https://api.example.com", "").is_ok());
+        assert!(super::validate_refresh_token_resource("", "").is_ok());
+    }
+
+    #[test]
+    fn rfc8707_refresh_resource_match_ok() {
+        assert!(
+            super::validate_refresh_token_resource(
+                "https://api.example.com",
+                "https://api.example.com",
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn rfc8707_refresh_resource_mismatch_rejects() {
+        let result = super::validate_refresh_token_resource(
+            "https://api.example.com",
+            "https://other.example.com",
+        );
+        assert!(result.is_err());
+        let msg = result
+            .err()
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| "<no error>".to_owned());
+        assert!(
+            msg.contains("does not match") && msg.contains("refresh"),
+            "error message must identify the refresh-grant branch: {msg}"
+        );
     }
 }
