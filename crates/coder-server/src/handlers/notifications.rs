@@ -146,6 +146,11 @@ pub(crate) async fn post_test_notification(
         ));
     }
 
+    // The template ID for test notifications is a compile-time constant.
+    // When the notification enqueue path is wired, it will use this constant
+    // as the `notification_template_id` column value.
+    let _template_id = coder_core::TEMPLATE_TEST_NOTIFICATION;
+
     // The test notification endpoint just returns 200 OK to confirm it's reachable.
     // Full dispatch integration is not implemented yet.
     let _ = &state;
@@ -818,6 +823,10 @@ pub(crate) const MAX_CUSTOM_NOTIFICATION_MESSAGE_LEN: usize = 2000;
 /// Validates the request body, ensures the caller is not a system user, and
 /// enqueues a custom notification.  Full dispatch is not yet wired, so the
 /// handler currently returns 204 No Content after validation succeeds.
+///
+/// The template UUID used for custom notifications is
+/// [`coder_core::TEMPLATE_CUSTOM_NOTIFICATION`], a compile-time constant
+/// matching Go's `notifications.TemplateCustomNotification`.
 pub(crate) async fn post_custom_notification(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -866,13 +875,25 @@ pub(crate) async fn post_custom_notification(
         }
     };
 
-    // Validate: title and message must be non-empty
-    if content.title.trim().is_empty() || content.message.trim().is_empty() {
+    // Validate: title must be non-empty
+    if content.title.trim().is_empty() {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
                 "Invalid request body",
-                "provide a non-empty 'content.title' and 'content.message'",
+                "provide a non-empty 'content.title'",
+            )),
+        )
+            .into_response());
+    }
+
+    // Validate: message must be non-empty
+    if content.message.trim().is_empty() {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Invalid request body",
+                "provide a non-empty 'content.message'",
             )),
         )
             .into_response());
@@ -913,10 +934,19 @@ pub(crate) async fn post_custom_notification(
     // check will be added once the identity layer tracks that attribute.
     let _ = &context;
 
-    // Full notification dispatch is not yet wired in the Rust backend.
-    // When dispatch is wired, the inbox insertion path should publish to
+    // NOTE: `enqueue_notification_message` is not yet implemented in the Rust
+    // backend.  The Go handler calls `api.NotificationsEnqueuer.EnqueueWithData`
+    // which inserts into the `notification_messages` table (defined by migration
+    // `20260308000000_notifications_domain.sql`).  When wired, use
+    // `coder_core::TEMPLATE_CUSTOM_NOTIFICATION` as the
+    // `notification_template_id` column value and publish to
     // `inbox_notification_channel(target_user_id)` so SSE subscribers are
     // notified of new notifications in real time.
+    //
+    // The Go `CustomNotificationRequest` does not currently include a `targets`
+    // field (tracked upstream: https://github.com/coder/coder/issues/19768).
+    // Once multi-user targeting is implemented, add a non-empty `targets`
+    // validation here.
 
     // Return 204 No Content to match the Go handler's success response.
     Ok(StatusCode::NO_CONTENT.into_response())
@@ -1244,5 +1274,182 @@ mod tests {
             "expected keepalive `: ping` comment within 20s, got: {text}"
         );
         Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // post_custom_notification tests
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn custom_notification_valid_inputs_returns_204() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base_url}api/v2/notifications/custom"))
+            .header("Coder-Session-Token", &session_token)
+            .json(&serde_json::json!({
+                "content": {
+                    "title": "Test Title",
+                    "message": "Test message body"
+                }
+            }))
+            .send()
+            .await?;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::NO_CONTENT,
+            "expected 204 for valid custom notification"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_notification_missing_content_returns_400() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base_url}api/v2/notifications/custom"))
+            .header("Coder-Session-Token", &session_token)
+            .json(&serde_json::json!({}))
+            .send()
+            .await?;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 when content is missing"
+        );
+        let body: Value = resp.json().await?;
+        assert_eq!(body["detail"], "content is required");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_notification_empty_title_returns_400() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base_url}api/v2/notifications/custom"))
+            .header("Coder-Session-Token", &session_token)
+            .json(&serde_json::json!({
+                "content": {
+                    "title": "",
+                    "message": "Non-empty message"
+                }
+            }))
+            .send()
+            .await?;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 when title is empty"
+        );
+        let body: Value = resp.json().await?;
+        assert_eq!(body["detail"], "provide a non-empty 'content.title'");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_notification_empty_message_returns_400() -> TestResult {
+        let (state, _store) = test_state_with_store(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let session_token = create_and_login(&app).await?;
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base_url}api/v2/notifications/custom"))
+            .header("Coder-Session-Token", &session_token)
+            .json(&serde_json::json!({
+                "content": {
+                    "title": "Valid Title",
+                    "message": "   "
+                }
+            }))
+            .send()
+            .await?;
+
+        assert_eq!(
+            resp.status(),
+            StatusCode::BAD_REQUEST,
+            "expected 400 when message is whitespace-only"
+        );
+        let body: Value = resp.json().await?;
+        assert_eq!(body["detail"], "provide a non-empty 'content.message'");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn custom_notification_rejects_unauthenticated() -> TestResult {
+        let state = crate::app::tests::test_state(true)?;
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+
+        let client = reqwest::Client::new();
+        let resp = client
+            .post(format!("{base_url}api/v2/notifications/custom"))
+            .json(&serde_json::json!({
+                "content": {
+                    "title": "Test",
+                    "message": "Test"
+                }
+            }))
+            .send()
+            .await?;
+
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Compile-time constant UUID tests
+    // -------------------------------------------------------------------
+
+    #[test]
+    fn custom_notification_template_id_matches_expected_value() {
+        assert_eq!(
+            coder_core::TEMPLATE_CUSTOM_NOTIFICATION.to_string(),
+            "39b1e189-c857-4b0c-877a-511144c18516",
+            "TEMPLATE_CUSTOM_NOTIFICATION must match the Go reference value"
+        );
+    }
+
+    #[test]
+    fn test_notification_template_id_matches_expected_value() {
+        assert_eq!(
+            coder_core::TEMPLATE_TEST_NOTIFICATION.to_string(),
+            "c425f63e-716a-4bf4-ae24-78348f706c3f",
+            "TEMPLATE_TEST_NOTIFICATION must match the Go reference value"
+        );
+    }
+
+    #[test]
+    fn prebuilds_system_user_id_matches_expected_value() {
+        assert_eq!(
+            coder_core::PREBUILDS_SYSTEM_USER_ID.to_string(),
+            "c42fdf75-3097-471c-8c33-fb52454d81c0",
+            "PREBUILDS_SYSTEM_USER_ID must match the Go reference value"
+        );
+    }
+
+    #[test]
+    fn compile_time_uuid_constants_are_not_nil() {
+        assert!(!coder_core::TEMPLATE_CUSTOM_NOTIFICATION.is_nil());
+        assert!(!coder_core::TEMPLATE_TEST_NOTIFICATION.is_nil());
+        assert!(!coder_core::PREBUILDS_SYSTEM_USER_ID.is_nil());
     }
 }

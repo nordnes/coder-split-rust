@@ -8591,9 +8591,7 @@ pub(crate) mod tests {
                 return Ok(None);
             }
             // Exclude prebuilds system user workspaces (mirrors SQL).
-            let prebuilds_system_user =
-                Uuid::parse_str("c42fdf75-3097-471c-8c33-fb52454d81c0").unwrap_or_default();
-            if ws.owner_id == prebuilds_system_user {
+            if ws.owner_id == coder_core::PREBUILDS_SYSTEM_USER_ID {
                 return Ok(None);
             }
 
@@ -8658,13 +8656,10 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?;
 
-            let prebuilds_system_user =
-                Uuid::parse_str("c42fdf75-3097-471c-8c33-fb52454d81c0").unwrap_or_default();
-
             let mut results = Vec::new();
 
             for ws in workspaces.values() {
-                if ws.deleted || ws.owner_id == prebuilds_system_user {
+                if ws.deleted || ws.owner_id == coder_core::PREBUILDS_SYSTEM_USER_ID {
                     continue;
                 }
 
