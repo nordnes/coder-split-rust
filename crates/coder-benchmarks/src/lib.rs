@@ -1276,6 +1276,13 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn list_provisioner_jobs_by_organization(
+        &self,
+        _organization_id: Uuid,
+    ) -> Result<Vec<TemplateProvisionerJobRecord>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn cancel_template_provisioner_job(&self, _job_id: Uuid) -> Result<bool, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
