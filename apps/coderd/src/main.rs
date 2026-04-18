@@ -40,6 +40,7 @@ use coder_core::{
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
 use coder_notifications::{NotificationConfig, NotificationDispatchService};
+use coder_provisioner::StaleJobReaperWorker;
 use coder_server::crypto_key_rotator::{CryptoKeyRotator, RotatorOptions};
 use coder_server::{AppState, build_router};
 use coder_workspaces::{
@@ -682,6 +683,17 @@ struct ServerArgs {
     )]
     replica_update_interval_secs: u64,
 
+    /// Poll interval in seconds for the stale-job reaper. Each tick fails
+    /// provisioner jobs that have been pending past the reaper threshold
+    /// or whose daemon heartbeat has gone silent.
+    #[arg(
+        long,
+        env = "CODER_STALE_JOB_REAP_INTERVAL",
+        default_value_t = 60,
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    stale_job_reap_interval_secs: u64,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -944,6 +956,19 @@ async fn run() -> Result<(), MainError> {
         CancellationToken::new(),
     );
 
+    // Start the stale-job reaper: periodically marks provisioner jobs that
+    // have been pending past the reaper threshold or whose daemon heartbeat
+    // has gone silent as failed, so any waiting workspace build can
+    // transition out of pending/running. Mirrors Go's
+    // `coderd/jobreaper/detector.go` (this initial port stops short of
+    // inserting build-log messages and re-fetching inside a transaction).
+    let stale_job_reaper_cancel = CancellationToken::new();
+    let stale_job_reaper = StaleJobReaperWorker::start(
+        store.clone(),
+        config.worker.stale_job_reap_interval_secs,
+        stale_job_reaper_cancel.clone(),
+    );
+
     // Start the replica manager: registers this coderd instance in the
     // `replicas` table on startup, refreshes the row every
     // `replica_update_interval_secs`, and unregisters it on graceful
@@ -1115,6 +1140,14 @@ async fn run() -> Result<(), MainError> {
     //     DB queries finish before the pool is closed.
     coordinator.register("lifecycle_scheduler", async move {
         lifecycle_scheduler.join().await;
+    });
+
+    // 4e. Cancel the stale-job reaper and await completion so any in-flight
+    //     `update_provisioner_job_with_complete_by_id` write lands before
+    //     the pool is closed.
+    coordinator.register("stale_job_reaper", async move {
+        stale_job_reaper_cancel.cancel();
+        stale_job_reaper.join().await;
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight
@@ -1352,6 +1385,7 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             telemetry_flush_interval_secs: args.telemetry_flush_interval_secs,
             lifecycle_check_interval_secs: args.lifecycle_check_interval_secs,
             replica_update_interval_secs: args.replica_update_interval_secs,
+            stale_job_reap_interval_secs: args.stale_job_reap_interval_secs,
         },
         swagger_enabled: args.swagger_enabled,
         update_check: args.update_check,

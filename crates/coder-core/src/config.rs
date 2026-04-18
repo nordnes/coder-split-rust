@@ -1364,6 +1364,11 @@ pub struct WorkerConfig {
     /// `/replicas` handler uses `3 ×` this value as the staleness
     /// cut-off when filtering rows, matching the manager's prune logic.
     pub replica_update_interval_secs: u64,
+    /// Poll interval in seconds for the stale-job reaper. Each tick fails
+    /// provisioner jobs that have been pending past `DEFAULT_MAX_PENDING_AGE_SECS`
+    /// or whose last heartbeat is older than `DEFAULT_HEARTBEAT_TIMEOUT_SECS`
+    /// (thresholds are defined in `coder-provisioner`).
+    pub stale_job_reap_interval_secs: u64,
 }
 
 impl Default for WorkerConfig {
@@ -1375,6 +1380,7 @@ impl Default for WorkerConfig {
             telemetry_flush_interval_secs: 1800,
             lifecycle_check_interval_secs: 30,
             replica_update_interval_secs: 15,
+            stale_job_reap_interval_secs: 60,
         }
     }
 }

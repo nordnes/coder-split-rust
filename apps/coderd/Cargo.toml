@@ -20,6 +20,7 @@ coder-core = { path = "../../crates/coder-core" }
 coder-db = { path = "../../crates/coder-db" }
 coder-license = { path = "../../crates/coder-license" }
 coder-notifications = { path = "../../crates/coder-notifications" }
+coder-provisioner = { path = "../../crates/coder-provisioner" }
 coder-rbac = { path = "../../crates/coder-rbac" }
 coder-server = { path = "../../crates/coder-server" }
 coder-telemetry = { path = "../../crates/coder-telemetry" }

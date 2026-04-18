@@ -865,6 +865,7 @@ dependencies = [
  "thiserror 2.0.18",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "uuid",
 ]
@@ -986,6 +987,7 @@ dependencies = [
  "coder-db",
  "coder-license",
  "coder-notifications",
+ "coder-provisioner",
  "coder-rbac",
  "coder-server",
  "coder-telemetry",

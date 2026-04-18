@@ -366,6 +366,150 @@ impl<S: ProvisionerStore> ProvisionerService<S> {
     }
 }
 
+// ── Stale-job reaper worker ─────────────────────────────────
+//
+// Mirrors Go's `coderd/jobreaper/detector.go`: a ticker periodically asks
+// the store for stale jobs and marks each as failed so any waiting
+// workspace build can transition out of pending/running. Follows the
+// existing worker pattern (`ActivityBumpWorker`, `DormancyCheckerWorker`)
+// from `coder-workspaces`.
+//
+// Scope deliberately narrow for this first cut: no build-log insertion,
+// no pubsub emission, no transactional re-fetch + eligibility re-check
+// that Go does. Those are incremental improvements — the immediate goal
+// is to stop stuck workspaces from staying stuck forever, which just
+// marking the job failed accomplishes.
+
+/// Background worker that periodically reaps stuck provisioner jobs.
+pub struct StaleJobReaperWorker {
+    cancel: tokio_util::sync::CancellationToken,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl StaleJobReaperWorker {
+    /// Starts the reaper loop on the current Tokio runtime.
+    pub fn start<S>(
+        store: Arc<S>,
+        interval_secs: u64,
+        cancel: tokio_util::sync::CancellationToken,
+    ) -> Arc<Self>
+    where
+        S: ProvisionerStore + ?Sized + Send + Sync + 'static,
+    {
+        let cancel_clone = cancel.clone();
+        let task = tokio::spawn(async move {
+            run_stale_job_reaper_loop(store, interval_secs, cancel_clone).await;
+        });
+        tracing::info!(interval_secs, "stale-job reaper worker started");
+        Arc::new(Self { cancel, task })
+    }
+
+    /// Signals the worker to stop.
+    pub fn close(&self) {
+        self.cancel.cancel();
+    }
+
+    /// Cancels the worker and awaits the background task so any in-flight
+    /// store writes finish before the DB pool is closed.
+    pub async fn join(self: Arc<Self>) {
+        self.cancel.cancel();
+        if let Ok(this) = Arc::try_unwrap(self) {
+            let _result = this.task.await;
+        }
+    }
+}
+
+async fn run_stale_job_reaper_loop<S>(
+    store: Arc<S>,
+    interval_secs: u64,
+    cancel: tokio_util::sync::CancellationToken,
+) where
+    S: ProvisionerStore + ?Sized + Send + Sync + 'static,
+{
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+    loop {
+        tokio::select! {
+            _ = cancel.cancelled() => {
+                tracing::info!("stale-job reaper worker cancelled");
+                return;
+            }
+            _ = interval.tick() => {}
+        }
+
+        let now = OffsetDateTime::now_utc();
+        match reap_stale_jobs_once(store.as_ref(), now).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(reaped = n, "stale-job reaper cycle completed"),
+            Err(error) => {
+                tracing::warn!(error = %error, "stale-job reaper cycle failed");
+            }
+        }
+    }
+}
+
+/// Single reap pass. Exposed at the module level so tests can drive it
+/// deterministically.
+async fn reap_stale_jobs_once<S>(store: &S, now: OffsetDateTime) -> Result<usize, StorageError>
+where
+    S: ProvisionerStore + ?Sized,
+{
+    let pending_since = now - time::Duration::seconds(DEFAULT_MAX_PENDING_AGE_SECS);
+    let hung_since = now - time::Duration::seconds(DEFAULT_HEARTBEAT_TIMEOUT_SECS);
+    let stale = store
+        .get_provisioner_jobs_to_be_reaped(GetJobsToBeReapedInput {
+            pending_since,
+            hung_since,
+            max_jobs: DEFAULT_REAP_BATCH_SIZE,
+        })
+        .await?;
+
+    let mut reaped = 0usize;
+    for job in &stale {
+        // `started_at.is_none()` means the job never left PENDING (the
+        // acquire RPC sets started_at when a daemon picks it up).
+        let (reap_type, threshold_secs) = if job.started_at.is_none() {
+            ("pending", DEFAULT_MAX_PENDING_AGE_SECS)
+        } else {
+            ("hung", DEFAULT_HEARTBEAT_TIMEOUT_SECS)
+        };
+        // `{threshold_minutes:.0}` rounds to the nearest whole minute so
+        // the error string matches Go's "%.0f minutes" format from
+        // `coder/coderd/jobreaper/detector.go::reapJob`.
+        #[allow(clippy::cast_precision_loss)]
+        let threshold_minutes = (threshold_secs as f64) / 60.0;
+        let err_msg = format!(
+            "Coder: Build has been detected as {reap_type} for {threshold_minutes:.0} minutes \
+             and has been terminated by the reaper."
+        );
+        match store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: job.id,
+                updated_at: now,
+                completed_at: now,
+                error: err_msg,
+                error_code: String::new(),
+            })
+            .await
+        {
+            Ok(()) => {
+                reaped += 1;
+                tracing::debug!(job_id = %job.id, %reap_type, "reaped stale provisioner job");
+            }
+            Err(error) => {
+                tracing::warn!(
+                    job_id = %job.id,
+                    %error,
+                    "failed to mark stale provisioner job as complete"
+                );
+            }
+        }
+    }
+
+    Ok(reaped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{InitScriptError, ProvisionerService, render_init_script};
@@ -389,6 +533,10 @@ mod tests {
     struct MockStore {
         /// Jobs returned by `get_provisioner_jobs_to_be_reaped`.
         stale_jobs: Vec<ProvisionerJobRecord>,
+        /// Records every `update_provisioner_job_with_complete_by_id` call so
+        /// the reaper-worker tests can assert on the exact error strings the
+        /// stale-job detector writes.
+        completed_jobs: std::sync::Arc<std::sync::Mutex<Vec<CompleteProvisionerJobInput>>>,
         /// If set, every method returns this error.
         force_error: Option<String>,
     }
@@ -397,6 +545,7 @@ mod tests {
         fn new() -> Self {
             Self {
                 stale_jobs: Vec::new(),
+                completed_jobs: std::sync::Arc::new(std::sync::Mutex::new(Vec::new())),
                 force_error: None,
             }
         }
@@ -409,6 +558,13 @@ mod tests {
         fn with_error(mut self, msg: &str) -> Self {
             self.force_error = Some(msg.to_owned());
             self
+        }
+
+        fn take_completed_jobs(&self) -> Vec<CompleteProvisionerJobInput> {
+            match self.completed_jobs.lock() {
+                Ok(mut g) => std::mem::take(&mut *g),
+                Err(p) => std::mem::take(&mut *p.into_inner()),
+            }
         }
 
         fn maybe_err(&self) -> Result<(), StorageError> {
@@ -465,9 +621,12 @@ mod tests {
 
         async fn update_provisioner_job_with_complete_by_id(
             &self,
-            _input: CompleteProvisionerJobInput,
+            input: CompleteProvisionerJobInput,
         ) -> Result<(), StorageError> {
             self.maybe_err()?;
+            if let Ok(mut g) = self.completed_jobs.lock() {
+                g.push(input);
+            }
             Ok(())
         }
 
@@ -1250,5 +1409,99 @@ mod tests {
         // Verify as_str round-trip
         assert_eq!(sources[0].as_str(), "provisioner_daemon");
         assert_eq!(sources[1].as_str(), "provisioner");
+    }
+
+    // ── Stale-job reaper tests ────────────────────────────────
+
+    #[tokio::test]
+    async fn reap_stale_jobs_once_returns_zero_when_none_stale() {
+        let store = MockStore::new();
+        let result = super::reap_stale_jobs_once(&store, OffsetDateTime::now_utc()).await;
+        assert!(result.is_ok(), "reap_stale_jobs_once returned error");
+        assert_eq!(result.unwrap_or(0), 0);
+        assert!(
+            store.take_completed_jobs().is_empty(),
+            "no jobs stale → no completions"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_stale_jobs_once_marks_pending_job_failed_with_pending_message() {
+        let mut pending = make_job_record();
+        pending.started_at = None; // pending: never acquired by a daemon
+        let id = pending.id;
+        let store = MockStore::new().with_stale_jobs(vec![pending]);
+
+        let result = super::reap_stale_jobs_once(&store, OffsetDateTime::now_utc()).await;
+        assert!(result.is_ok(), "reap should succeed");
+        assert_eq!(result.unwrap_or(0), 1);
+
+        let completions = store.take_completed_jobs();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].id, id);
+        assert!(
+            completions[0].error.contains("pending"),
+            "error should identify pending reap type, got: {}",
+            completions[0].error
+        );
+        // 30 minutes pending → "for 30 minutes"
+        assert!(
+            completions[0].error.contains("30 minutes"),
+            "error should report the pending threshold in minutes, got: {}",
+            completions[0].error
+        );
+        assert!(
+            completions[0].error.starts_with("Coder: "),
+            "error must carry the 'Coder:' branded prefix so UIs can treat it as provenance-signed"
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_stale_jobs_once_marks_hung_job_failed_with_hung_message() {
+        let mut hung = make_job_record();
+        hung.started_at = Some(OffsetDateTime::now_utc()); // started → hung, not pending
+        let id = hung.id;
+        let store = MockStore::new().with_stale_jobs(vec![hung]);
+
+        let result = super::reap_stale_jobs_once(&store, OffsetDateTime::now_utc()).await;
+        assert!(result.is_ok(), "reap should succeed");
+        assert_eq!(result.unwrap_or(0), 1);
+
+        let completions = store.take_completed_jobs();
+        assert_eq!(completions.len(), 1);
+        assert_eq!(completions[0].id, id);
+        assert!(
+            completions[0].error.contains("hung"),
+            "error should identify hung reap type, got: {}",
+            completions[0].error
+        );
+    }
+
+    #[tokio::test]
+    async fn reap_stale_jobs_once_propagates_store_read_error() {
+        let store = MockStore::new().with_error("simulated db read failure");
+        let result = super::reap_stale_jobs_once(&store, OffsetDateTime::now_utc()).await;
+        assert!(
+            result
+                .err()
+                .is_some_and(|e| e.to_string().contains("simulated db read failure")),
+            "read failure must bubble up so the tick logs + retries"
+        );
+    }
+
+    #[tokio::test]
+    async fn stale_job_reaper_worker_starts_and_cancels_cleanly() {
+        // Smoke test: the worker shouldn't panic, deadlock, or wedge the
+        // runtime on immediate cancellation. Uses a long poll interval so
+        // the first tick never fires; only the cancel arm is exercised.
+        use std::sync::Arc;
+        use tokio_util::sync::CancellationToken;
+
+        let store = Arc::new(MockStore::new());
+        let cancel = CancellationToken::new();
+        let worker = super::StaleJobReaperWorker::start(store, 3600, cancel.clone());
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(2), worker.join()).await;
+        assert!(result.is_ok(), "worker must shut down promptly after cancel");
     }
 }
