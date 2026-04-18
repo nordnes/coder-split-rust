@@ -10085,7 +10085,7 @@ pub(crate) mod tests {
             .body(Body::empty())
     }
 
-    fn authenticated_json_request<T: Serialize>(
+    pub(crate) fn authenticated_json_request<T: Serialize>(
         method: Method,
         uri: &str,
         session_token: &str,
@@ -10118,7 +10118,10 @@ pub(crate) mod tests {
             .body(Body::empty())
     }
 
-    async fn call(app: Router, request: Request<Body>) -> Result<Response<Body>, Box<dyn Error>> {
+    pub(crate) async fn call(
+        app: Router,
+        request: Request<Body>,
+    ) -> Result<Response<Body>, Box<dyn Error>> {
         let response = match app.oneshot(request).await {
             Ok(response) => response,
             Err(never) => match never {},
@@ -10127,7 +10130,7 @@ pub(crate) mod tests {
         Ok(response)
     }
 
-    async fn response_json(response: Response<Body>) -> Result<Value, Box<dyn Error>> {
+    pub(crate) async fn response_json(response: Response<Body>) -> Result<Value, Box<dyn Error>> {
         let bytes = to_bytes(response.into_body(), usize::MAX).await?;
         Ok(serde_json::from_slice(&bytes)?)
     }
