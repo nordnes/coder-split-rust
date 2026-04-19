@@ -12,6 +12,7 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+coder-agent-rpc = { path = "../coder-agent-rpc" }
 coder-core = { path = "../coder-core" }
 futures-util.workspace = true
 rand.workspace = true

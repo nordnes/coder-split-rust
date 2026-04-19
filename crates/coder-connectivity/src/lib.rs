@@ -18,6 +18,7 @@ pub mod agents;
 pub mod derp;
 pub mod proxy_routing;
 pub mod tailnet;
+pub mod tailnet_rpc;
 use std::{
     collections::HashMap,
     sync::Arc,
