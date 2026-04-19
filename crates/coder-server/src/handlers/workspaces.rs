@@ -238,6 +238,15 @@ pub(crate) async fn patch_workspace(
         else {
             return Ok(resource_not_found_response());
         };
+        record_audit(
+            &state,
+            AuditAction::Write,
+            ResourceKind::Workspace,
+            Some(&context.user),
+            Some(workspace_id.to_string()),
+            format!("renamed workspace {} to {}", workspace.name, updated.name),
+        )
+        .await;
         return Ok((StatusCode::OK, Json(workspace_to_json(&updated))).into_response());
     }
 
@@ -421,6 +430,24 @@ pub(crate) async fn post_workspace_build(
         }
     }
 
+    // Audit the build transition.  Mirrors Go `workspacebuilds.go` which
+    // emits a background audit entry once the build is queued.
+    let (action, verb) = match transition.as_str() {
+        "start" => (AuditAction::Start, "started"),
+        "stop" => (AuditAction::Stop, "stopped"),
+        "delete" => (AuditAction::Delete, "deleted"),
+        _ => (AuditAction::Write, "updated"),
+    };
+    record_audit(
+        &state,
+        action,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("{verb} workspace {} build", workspace.name),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(build_to_json(&build))).into_response())
 }
 
@@ -475,6 +502,16 @@ pub(crate) async fn put_workspace_autostart(
         .update_workspace_autostart(workspace_id, schedule.as_deref())
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("updated workspace {} autostart schedule", workspace.name),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -526,6 +563,16 @@ pub(crate) async fn put_workspace_ttl(
         .store
         .update_workspace_ttl(workspace_id, ttl_ns)
         .await?;
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("updated workspace {} TTL", workspace.name),
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -588,6 +635,21 @@ pub(crate) async fn put_workspace_dormant(
     else {
         return Ok(resource_not_found_response());
     };
+
+    let verb = if dormant {
+        "marked workspace"
+    } else {
+        "reactivated workspace"
+    };
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("{verb} {} dormancy", updated.name),
+    )
+    .await;
 
     Ok((StatusCode::OK, Json(workspace_to_json(&updated))).into_response())
 }
@@ -676,6 +738,16 @@ pub(crate) async fn put_workspace_extend(
         )
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("extended workspace {} deadline", workspace.name),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -730,6 +802,19 @@ pub(crate) async fn put_workspace_autoupdates(
         .update_workspace_automatic_updates(workspace_id, automatic_updates)
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!(
+            "updated workspace {} auto-update policy to {}",
+            workspace.name, automatic_updates
+        ),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -774,6 +859,16 @@ pub(crate) async fn put_workspace_favorite(
         .favorite_workspace(workspace_id, context.user.id, true)
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("favorited workspace {}", workspace.name),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -817,6 +912,16 @@ pub(crate) async fn delete_workspace_favorite(
         .store
         .favorite_workspace(workspace_id, context.user.id, false)
         .await?;
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("unfavorited workspace {}", workspace.name),
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -925,6 +1030,19 @@ pub(crate) async fn post_workspace_port_share(
         })
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!(
+            "upserted port share for workspace {} (agent {} port {})",
+            workspace.name, share.agent_name, share.port
+        ),
+    )
+    .await;
+
     Ok((
         StatusCode::OK,
         Json(json!({
@@ -989,6 +1107,19 @@ pub(crate) async fn delete_workspace_port_share(
         .store
         .delete_workspace_port_share(workspace_id, agent_name, port)
         .await?;
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!(
+            "deleted port share for workspace {} (agent {} port {})",
+            workspace.name, agent_name, port
+        ),
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1116,6 +1247,16 @@ pub(crate) async fn patch_workspace_acl(
         .update_workspace_acl(workspace_id, &input)
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("updated workspace {} ACL", workspace.name),
+    )
+    .await;
+
     Ok(StatusCode::NO_CONTENT.into_response())
 }
 
@@ -1156,6 +1297,16 @@ pub(crate) async fn delete_workspace_acl(
     }
 
     state.store.delete_workspace_acl(workspace_id).await?;
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace_id.to_string()),
+        format!("deleted workspace {} ACL", workspace.name),
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1553,6 +1704,16 @@ pub(crate) async fn patch_cancel_workspace_build(
         )
             .into_response());
     }
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(build.workspace_id.to_string()),
+        format!("canceled workspace {} build", workspace.name),
+    )
+    .await;
 
     Ok(StatusCode::OK.into_response())
 }
@@ -2015,6 +2176,16 @@ pub(crate) async fn post_user_workspace(
         }
     }
 
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace.id.to_string()),
+        format!("created workspace {}", workspace.name),
+    )
+    .await;
+
     Ok((StatusCode::CREATED, Json(workspace_to_json(&workspace))).into_response())
 }
 
@@ -2199,6 +2370,16 @@ pub(crate) async fn post_org_member_workspace(
                 .await?;
         }
     }
+
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::Workspace,
+        Some(&context.user),
+        Some(workspace.id.to_string()),
+        format!("created workspace {}", workspace.name),
+    )
+    .await;
 
     Ok((StatusCode::CREATED, Json(workspace_to_json(&workspace))).into_response())
 }
