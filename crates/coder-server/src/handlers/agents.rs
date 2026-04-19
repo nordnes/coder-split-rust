@@ -1834,8 +1834,9 @@ pub(crate) async fn get_workspace_agent_rpc(
                 .into_response());
         }
         let store_for_drpc = store.clone();
+        let deployment = crate::handlers::agent_rpc_live::build_manifest_deployment_config(&state);
         return Ok(ws.on_upgrade(move |socket| async move {
-            handle_agent_drpc_socket(socket, agent_id, store_for_drpc, ver).await;
+            handle_agent_drpc_socket(socket, agent_id, store_for_drpc, ver, deployment).await;
         }));
     }
 
@@ -1865,6 +1866,7 @@ async fn handle_agent_drpc_socket(
     agent_id: Uuid,
     store: Arc<dyn AppStore>,
     api_version: String,
+    deployment: crate::handlers::agent_rpc_live::ManifestDeploymentConfig,
 ) {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -1873,6 +1875,7 @@ async fn handle_agent_drpc_socket(
         agent_id,
         store,
         api_version,
+        deployment,
     ));
 
     // Ample buffer: DRPC payloads are small (<64 KiB) but we want to

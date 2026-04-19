@@ -19,8 +19,40 @@ use async_trait::async_trait;
 use coder_agent_rpc::AgentRpcHandler;
 use coder_agent_rpc::handlers::RpcError;
 use coder_agent_rpc::proto::agent_v2 as agent;
+use coder_agent_rpc::proto::tailnet_v2 as tailnet;
 use coder_core::AppStore;
+use coder_core::config::DerpRegionConfig;
+use url::Url;
 use uuid::Uuid;
+
+/// Deployment-level configuration forwarded to the `GetManifest` reply.
+///
+/// Ports the trailing fields of `coder/coderd/agentapi/manifest.go::ManifestAPI`
+/// (`AccessURL`, `AppHostname`, `ExternalAuthConfigs`, `DerpForceWebSockets`,
+/// `DerpMapFn`). These values are deployment-wide and do not change across
+/// agent connections, so the router-facing constructor in
+/// `handlers/agents.rs` captures them from [`crate::app::AppState`] once and
+/// hands the snapshot to the handler.
+#[derive(Clone, Debug)]
+pub(crate) struct ManifestDeploymentConfig {
+    /// External access URL for the deployment (e.g. `https://coder.example.com`).
+    /// Used to build the `vs_code_port_proxy_uri` scheme/host.
+    pub(crate) access_url: Url,
+    /// Wildcard app hostname (e.g. `*.apps.example.com`). Empty when
+    /// subdomain app routing is disabled; in that case the Go server emits
+    /// an empty `vs_code_port_proxy_uri`.
+    pub(crate) app_hostname: String,
+    /// Number of Git-capable external-auth providers configured for the
+    /// deployment. Mirrors the Go `Git()` filter applied over
+    /// `ExternalAuthConfigs` in `manifest.go`.
+    pub(crate) git_auth_config_count: u32,
+    /// `DeploymentValues.DERP.Config.ForceWebSockets` — whether agents must
+    /// fall back to WebSocket relays instead of native `Upgrade: derp`.
+    pub(crate) derp_force_websockets: bool,
+    /// DERP regions advertised to agents. Converted to
+    /// `coder.tailnet.v2.DERPMap` at manifest-time.
+    pub(crate) derp_regions: Vec<DerpRegionConfig>,
+}
 
 /// A concrete [`AgentRpcHandler`] that serves the agent DRPC protocol
 /// against a live [`AppStore`]. Scoped to a single agent connection — the
@@ -31,15 +63,155 @@ pub(crate) struct LiveAgentHandler {
     pub(crate) agent_id: Uuid,
     pub(crate) store: Arc<dyn AppStore>,
     pub(crate) api_version: String,
+    pub(crate) deployment: ManifestDeploymentConfig,
 }
 
 impl LiveAgentHandler {
-    pub(crate) fn new(agent_id: Uuid, store: Arc<dyn AppStore>, api_version: String) -> Self {
+    pub(crate) fn new(
+        agent_id: Uuid,
+        store: Arc<dyn AppStore>,
+        api_version: String,
+        deployment: ManifestDeploymentConfig,
+    ) -> Self {
         Self {
             agent_id,
             store,
             api_version,
+            deployment,
         }
+    }
+}
+
+/// Mirrors `coder/coderd/workspaceapps/appurl::SubdomainAppHost`. Returns
+/// the app hostname with a port appended when the access URL specifies one
+/// and the app host itself does not. An empty `app_hostname` yields `""`.
+fn subdomain_app_host(app_hostname: &str, access_url: &Url) -> String {
+    if app_hostname.is_empty() {
+        return String::new();
+    }
+    let access_port = access_url.port();
+    if let Some(port) = access_port {
+        // Parse `https://{host}` to determine if the app host already has a
+        // port. If parsing fails we conservatively append the access URL's
+        // port, matching the Go fallback on `url.Parse` error.
+        let parse_attempt = Url::parse(&format!("https://{app_hostname}"));
+        let app_has_port = parse_attempt.as_ref().is_ok_and(|u| u.port().is_some());
+        if !app_has_port {
+            return format!("{app_hostname}:{port}");
+        }
+    }
+    app_hostname.to_owned()
+}
+
+/// Builds the VS Code port-proxy URI advertised to agents, matching
+/// `coder/coderd/agentapi/manifest.go::vscodeProxyURI`.
+///
+/// Returns an empty string when `app_hostname` is empty (subdomain apps
+/// disabled). The produced string replaces every `*` in the wildcard app
+/// host with the template `{{port}}--{agent}--{workspace}--{owner}`; the
+/// literal `{{port}}` placeholder is later substituted by the VS Code
+/// extension at connect time.
+fn build_vscode_port_proxy_uri(
+    access_url: &Url,
+    app_hostname: &str,
+    agent_name: &str,
+    workspace_name: &str,
+    owner_username: &str,
+) -> String {
+    if app_hostname.is_empty() {
+        return String::new();
+    }
+    let host = subdomain_app_host(app_hostname, access_url);
+    let app_str = format!("{{{{port}}}}--{agent_name}--{workspace_name}--{owner_username}");
+    let replaced = host.replace('*', &app_str);
+    format!("{}://{replaced}", access_url.scheme())
+}
+
+/// Converts the Rust [`DerpRegionConfig`] slice into the protobuf
+/// `coder.tailnet.v2.DERPMap` expected by the agent manifest.
+///
+/// Mirrors `coder/tailnet.DERPMapToProto` over the deployment's configured
+/// regions/nodes, matching the Rust-side translation in
+/// `handlers/agents.rs::build_workspace_agent_connection_info` so direct
+/// and proxied clients see the same topology.
+fn build_derp_map_proto(regions: &[DerpRegionConfig]) -> tailnet::DerpMap {
+    let mut proto_regions = HashMap::with_capacity(regions.len());
+    for region in regions {
+        let nodes: Vec<tailnet::derp_map::region::Node> = region
+            .nodes
+            .iter()
+            .map(|node| tailnet::derp_map::region::Node {
+                name: node.name.clone(),
+                region_id: i64::from(region.id),
+                host_name: node.url.host_str().unwrap_or_default().to_owned(),
+                cert_name: String::new(),
+                ipv4: String::new(),
+                ipv6: String::new(),
+                stun_port: 3478,
+                stun_only: false,
+                derp_port: node.url.port_or_known_default().map_or(443, i32::from),
+                insecure_for_tests: false,
+                force_http: node.url.scheme() == "http",
+                stun_test_ip: String::new(),
+                can_port_80: false,
+            })
+            .collect();
+        proto_regions.insert(
+            i64::from(region.id),
+            tailnet::derp_map::Region {
+                region_id: i64::from(region.id),
+                embedded_relay: false,
+                region_code: region.name.to_lowercase().replace(' ', "-"),
+                region_name: region.name.clone(),
+                avoid: false,
+                nodes,
+            },
+        );
+    }
+    tailnet::DerpMap {
+        home_params: None,
+        regions: proto_regions,
+    }
+}
+
+/// Mirrors `codersdk::EnhancedExternalAuthProvider::Git`. Returns `true`
+/// for the set of providers the Go SDK tags as Git-capable.
+pub(crate) fn is_git_external_auth_provider(provider_type: &str) -> bool {
+    matches!(
+        provider_type,
+        "github"
+            | "gitlab"
+            | "bitbucket-cloud"
+            | "bitbucket-server"
+            | "azure-devops"
+            | "azure-devops-entra"
+            | "gitea"
+    )
+}
+
+/// Snapshot the deployment-level manifest inputs from the shared
+/// [`crate::app::AppState`]. Called once per WebSocket upgrade so the
+/// per-connection [`LiveAgentHandler`] does not need to clone the whole
+/// state on every `GetManifest` call.
+pub(crate) fn build_manifest_deployment_config(
+    state: &crate::app::AppState,
+) -> ManifestDeploymentConfig {
+    let git_auth_config_count = u32::try_from(
+        state
+            .config
+            .external_auth_providers
+            .iter()
+            .filter(|p| is_git_external_auth_provider(&p.provider_type))
+            .count(),
+    )
+    .unwrap_or(u32::MAX);
+
+    ManifestDeploymentConfig {
+        access_url: state.config.access_url.clone(),
+        app_hostname: state.config.wildcard_access_url.clone(),
+        git_auth_config_count,
+        derp_force_websockets: state.config.derp_force_websockets,
+        derp_regions: state.config.derp_regions.clone(),
     }
 }
 
@@ -233,27 +405,33 @@ impl AgentRpcHandler for LiveAgentHandler {
             })
             .collect();
 
+        // Build the VS Code port-proxy URI. When `app_hostname` is empty
+        // (subdomain apps disabled) this returns "" — matching Go.
+        let vscode_proxy_uri = build_vscode_port_proxy_uri(
+            &self.deployment.access_url,
+            &self.deployment.app_hostname,
+            &agent_row.name,
+            &workspace.name,
+            &owner_username,
+        );
+
+        let derp_map = build_derp_map_proto(&self.deployment.derp_regions);
+
         Ok(agent::Manifest {
             agent_id: agent_row.id.as_bytes().to_vec(),
             agent_name: agent_row.name,
             owner_username,
             workspace_id: workspace.id.as_bytes().to_vec(),
             workspace_name: workspace.name,
-            // Git auth configs are deployment-level in Go; we do not yet
-            // expose them here (defaults to 0).
-            git_auth_configs: 0,
+            git_auth_configs: self.deployment.git_auth_config_count,
             environment_variables,
             directory: agent_row.directory,
-            // vscode_port_proxy_uri requires deployment access URL + app host
-            // wiring which lives outside the handler today; emit empty for
-            // now (agents treat empty as "not supported").
-            vs_code_port_proxy_uri: String::new(),
+            vs_code_port_proxy_uri: vscode_proxy_uri,
             motd_path: agent_row.motd_file,
             disable_direct_connections: false,
-            derp_force_websockets: false,
+            derp_force_websockets: self.deployment.derp_force_websockets,
             parent_id: agent_row.parent_id.map(|id| id.as_bytes().to_vec()),
-            // DERP map is owned by the tailnet service; Phase 2 stubs it out.
-            derp_map: None,
+            derp_map: Some(derp_map),
             scripts: scripts_proto,
             apps: apps_proto,
             metadata: metadata_proto,
@@ -375,5 +553,124 @@ impl AgentRpcHandler for LiveAgentHandler {
         }
 
         Ok(agent::BatchUpdateAppHealthResponse::default())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use coder_core::config::DerpNodeConfig;
+
+    #[test]
+    fn git_provider_filter_matches_go_list() {
+        assert!(is_git_external_auth_provider("github"));
+        assert!(is_git_external_auth_provider("gitlab"));
+        assert!(is_git_external_auth_provider("bitbucket-cloud"));
+        assert!(is_git_external_auth_provider("bitbucket-server"));
+        assert!(is_git_external_auth_provider("azure-devops"));
+        assert!(is_git_external_auth_provider("azure-devops-entra"));
+        assert!(is_git_external_auth_provider("gitea"));
+        assert!(!is_git_external_auth_provider("slack"));
+        assert!(!is_git_external_auth_provider("jfrog"));
+        assert!(!is_git_external_auth_provider(""));
+    }
+
+    #[test]
+    fn subdomain_app_host_appends_access_port_when_missing() -> Result<(), url::ParseError> {
+        let access = Url::parse("https://coder.example.com:3000")?;
+        assert_eq!(
+            subdomain_app_host("*.apps.example.com", &access),
+            "*.apps.example.com:3000"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn subdomain_app_host_preserves_explicit_port() -> Result<(), url::ParseError> {
+        let access = Url::parse("https://coder.example.com:3000")?;
+        assert_eq!(
+            subdomain_app_host("*.apps.example.com:8443", &access),
+            "*.apps.example.com:8443"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn subdomain_app_host_empty_when_disabled() -> Result<(), url::ParseError> {
+        let access = Url::parse("https://coder.example.com")?;
+        assert_eq!(subdomain_app_host("", &access), "");
+        Ok(())
+    }
+
+    #[test]
+    fn build_vscode_port_proxy_uri_matches_go_template() -> Result<(), url::ParseError> {
+        // Access URL without port should not alter the app host.
+        let access = Url::parse("https://coder.example.com")?;
+        let uri = build_vscode_port_proxy_uri(
+            &access,
+            "*.apps.example.com",
+            "my-agent",
+            "my-ws",
+            "alice",
+        );
+        assert_eq!(
+            uri,
+            "https://{{port}}--my-agent--my-ws--alice.apps.example.com"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn build_vscode_port_proxy_uri_empty_when_apphost_missing() -> Result<(), url::ParseError> {
+        let access = Url::parse("https://coder.example.com")?;
+        let uri = build_vscode_port_proxy_uri(&access, "", "a", "w", "u");
+        assert_eq!(uri, "");
+        Ok(())
+    }
+
+    #[test]
+    fn build_derp_map_proto_preserves_regions_and_nodes() -> Result<(), url::ParseError> {
+        let region = DerpRegionConfig {
+            id: 10,
+            name: "Test Region".to_owned(),
+            nodes: vec![DerpNodeConfig {
+                name: "node-a".to_owned(),
+                url: Url::parse("https://derp.example.com:4443")?,
+            }],
+        };
+        let map = build_derp_map_proto(&[region]);
+        assert_eq!(map.regions.len(), 1);
+        let region_proto = map.regions.get(&10).ok_or(url::ParseError::EmptyHost)?;
+        assert_eq!(region_proto.region_id, 10);
+        assert_eq!(region_proto.region_name, "Test Region");
+        assert_eq!(region_proto.region_code, "test-region");
+        assert_eq!(region_proto.nodes.len(), 1);
+        let node = &region_proto.nodes[0];
+        assert_eq!(node.name, "node-a");
+        assert_eq!(node.host_name, "derp.example.com");
+        assert_eq!(node.derp_port, 4443);
+        assert!(!node.force_http);
+        Ok(())
+    }
+
+    #[test]
+    fn build_derp_map_proto_force_http_for_http_scheme() -> Result<(), url::ParseError> {
+        let region = DerpRegionConfig {
+            id: 1,
+            name: "local".to_owned(),
+            nodes: vec![DerpNodeConfig {
+                name: "n".to_owned(),
+                url: Url::parse("http://localhost:8080")?,
+            }],
+        };
+        let map = build_derp_map_proto(&[region]);
+        let region_proto = map.regions.get(&1).ok_or(url::ParseError::EmptyHost)?;
+        let node = region_proto
+            .nodes
+            .first()
+            .ok_or(url::ParseError::EmptyHost)?;
+        assert!(node.force_http);
+        assert_eq!(node.derp_port, 8080);
+        Ok(())
     }
 }
