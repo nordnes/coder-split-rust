@@ -4293,6 +4293,7 @@ pub(crate) mod tests {
             _older_than: OffsetDateTime,
             _limit: i64,
         ) -> Result<u64, StorageError> {
+            // FakeStore has no in-memory connection log table; nothing to prune.
             Ok(0)
         }
 
@@ -4300,6 +4301,8 @@ pub(crate) mod tests {
             &self,
             _lock_id: i64,
         ) -> Result<Option<Box<dyn coder_core::AdvisoryLock>>, StorageError> {
+            // Postgres advisory locks have no in-memory analogue; tests that
+            // depend on the locking path run against the real store.
             Ok(None)
         }
 
@@ -28086,6 +28089,201 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        Ok(())
+    }
+
+    // =======================================================================
+    // Audit-sweep coverage for workspace-handlers (gap-doc §B.10.2 / Wave 0 S7)
+    //
+    // Each workspace mutation emits an AuditEvent via `state.audit.record()`.
+    // These tests drive the handlers end-to-end and assert the expected
+    // AuditEvent lands in a captured MemoryAuditSink.
+    // =======================================================================
+
+    /// Asserts that exactly one event with the expected action / resource /
+    /// target landed, regardless of extra events surrounding it (e.g. first-
+    /// user registration).
+    fn audit_event_for<'a>(
+        events: &'a [AuditEvent],
+        action: AuditAction,
+        target_id: &str,
+    ) -> Option<&'a AuditEvent> {
+        events
+            .iter()
+            .find(|e| e.action == action && e.target_id.as_deref() == Some(target_id))
+    }
+
+    #[tokio::test]
+    async fn workspace_build_audits_start_transition() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+        if let Ok(mut templates) = store.templates.lock() {
+            if let Some(t) = templates.get_mut(&tmpl.id) {
+                t.active_version_id = tv.id;
+            }
+        }
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/builds", ws.id),
+                &session_token,
+                &json!({ "transition": "start" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Start, &ws.id.to_string())
+            .ok_or("expected a Start audit event for workspace build")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(
+            event.summary.contains("started"),
+            "summary should reference the start transition, got: {}",
+            event.summary
+        );
+        assert!(event.summary.contains(&ws.name));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_build_audits_delete_transition() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+        if let Ok(mut templates) = store.templates.lock() {
+            if let Some(t) = templates.get_mut(&tmpl.id) {
+                t.active_version_id = tv.id;
+            }
+        }
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/builds", ws.id),
+                &session_token,
+                &json!({ "transition": "delete" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Delete, &ws.id.to_string())
+            .ok_or("expected a Delete audit event for workspace build")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("deleted"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_rename_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+                &json!({ "name": "renamed-workspace" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for workspace rename")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(
+            event.summary.contains("renamed"),
+            "summary should note rename, got: {}",
+            event.summary
+        );
+        assert!(event.summary.contains("renamed-workspace"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_favorite_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/favorite", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for favorite")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("favorited"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn workspace_acl_patch_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{}/acl", ws.id),
+                &session_token,
+                &json!({
+                    "user_roles": {},
+                    "group_roles": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for ACL update")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("ACL"));
         Ok(())
     }
 
