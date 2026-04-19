@@ -3862,6 +3862,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         health: &str,
     ) -> Result<(), StorageError>;
 
+    /// Lists every workspace app that has a non-empty `healthcheck_url` and
+    /// therefore qualifies for server-side probing. Returns each app along
+    /// with its workspace identifier so the caller can publish pubsub
+    /// notifications keyed on the workspace.
+    ///
+    /// Apps belonging to agents attached to deleted workspaces or deleted
+    /// agents are skipped.
+    async fn list_workspace_apps_with_healthchecks(
+        &self,
+    ) -> Result<Vec<WorkspaceAppHealthcheckTarget>, StorageError>;
+
     /// Upserts workspace agent metadata entries.
     async fn upsert_workspace_agent_metadata(
         &self,
@@ -5063,6 +5074,17 @@ pub struct WorkspaceAppRow {
     pub open_in: String,
     /// Display group.
     pub display_group: Option<String>,
+}
+
+/// A workspace app that has a healthcheck URL configured, together with the
+/// workspace it belongs to. Used by the server-side healthcheck prober to
+/// know where to publish notifications when an app's health flips.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAppHealthcheckTarget {
+    /// Workspace identifier the app belongs to.
+    pub workspace_id: Uuid,
+    /// The workspace app row itself.
+    pub app: WorkspaceAppRow,
 }
 
 /// Stored workspace agent script row.

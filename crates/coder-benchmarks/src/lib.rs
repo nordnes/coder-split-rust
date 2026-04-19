@@ -1501,6 +1501,12 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn list_workspace_apps_with_healthchecks(
+        &self,
+    ) -> Result<Vec<coder_core::WorkspaceAppHealthcheckTarget>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn upsert_workspace_agent_metadata(
         &self,
         _agent_id: Uuid,

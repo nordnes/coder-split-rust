@@ -6150,6 +6150,38 @@ impl AppStore for PostgresStore {
         Ok(())
     }
 
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_apps_with_healthchecks(
+        &self,
+    ) -> Result<Vec<coder_core::WorkspaceAppHealthcheckTarget>, StorageError> {
+        let rows = sqlx::query_as::<_, StoredWorkspaceAppHealthcheckTargetRow>(
+            "SELECT
+                build.workspace_id AS workspace_id,
+                app.id, app.created_at, app.agent_id, app.display_name, app.icon,
+                app.command, app.url, app.healthcheck_url, app.healthcheck_interval,
+                app.healthcheck_threshold, app.health::text AS health, app.subdomain,
+                app.sharing_level::text AS sharing_level, app.slug, app.external,
+                app.display_order, app.hidden, app.open_in::text AS open_in,
+                app.display_group
+             FROM workspace_apps app
+             JOIN workspace_agents agent ON agent.id = app.agent_id
+             JOIN workspace_resources resource ON resource.id = agent.resource_id
+             JOIN workspace_builds build ON build.job_id = resource.job_id
+             JOIN workspaces ws ON ws.id = build.workspace_id
+             WHERE
+                 app.healthcheck_url <> ''
+                 AND agent.deleted = false
+                 AND ws.deleted = false",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(workspace_app_healthcheck_target_from_stored)
+            .collect())
+    }
+
     #[instrument(skip(self, entries), err(level = tracing::Level::WARN))]
     async fn upsert_workspace_agent_metadata(
         &self,

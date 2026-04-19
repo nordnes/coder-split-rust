@@ -31,6 +31,7 @@
 #![warn(missing_docs)]
 
 mod app;
+pub mod app_healthcheck;
 pub(crate) mod auth_middleware;
 pub mod connection_guard;
 pub mod crypto_key_rotator;
