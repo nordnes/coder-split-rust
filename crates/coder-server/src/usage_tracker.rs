@@ -8,6 +8,9 @@
 //! [`UsageTrackerOptions::batch_size`] distinct workspace IDs are queued,
 //! whichever fires first.
 //!
+//! TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
+//! through this worker. See `crates/coder-rbac/src/system_actors.rs`.
+//!
 //! The flush replaces the prior synchronous-per-request pattern so a burst
 //! of usage pings collapses to one DB write instead of one per workspace.
 //! For tests that need deterministic semantics the tracker exposes a

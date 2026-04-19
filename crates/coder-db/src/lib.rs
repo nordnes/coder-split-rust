@@ -20,10 +20,12 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod dbauthz;
 pub(crate) mod migrations;
 pub mod pubsub;
 mod store;
 
+pub use dbauthz::{Authorized, DbAuthzError};
 pub use migrations::{
     MigrationError, MigrationReport, MigrationStatus, migration_status, run_migrations,
 };

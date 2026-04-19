@@ -680,6 +680,9 @@ pub struct AutobuildStats {
 /// Mirrors Go's `autobuild.Executor` with a concurrent worker pool
 /// limited to `MAX_CONCURRENT_TRANSITIONS` workers to avoid
 /// overloading the database.
+///
+/// TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
+/// through this executor. See `crates/coder-rbac/src/system_actors.rs`.
 pub struct AutobuildExecutor<S> {
     store: S,
     cancel: CancellationToken,
@@ -1733,6 +1736,9 @@ impl<T: LifecycleStore + ?Sized> LifecycleStore for Arc<T> {
 ///
 /// An optional [`QuietHoursWindow`] can be provided to suppress autostart
 /// during user-configured quiet hours.
+///
+/// TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
+/// through this scheduler. See `crates/coder-rbac/src/system_actors.rs`.
 pub struct LifecycleScheduler {
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,

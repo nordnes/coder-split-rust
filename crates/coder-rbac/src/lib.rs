@@ -20,6 +20,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod system_actors;
+
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
@@ -727,6 +729,124 @@ impl Scope {
             ResourceType::UserSecret,
             Action::Update,
         )
+    }
+
+    /// Low-level scope allowing `ApiKey:create` only. Mirrors Go's
+    /// `coder:api_key:create` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_api_key_create() -> Self {
+        Self::single_permission_scope("api_key:create", ResourceType::ApiKey, Action::Create)
+    }
+
+    /// Low-level scope allowing `ApiKey:update` only. Mirrors Go's
+    /// `coder:api_key:update` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_api_key_write() -> Self {
+        Self::single_permission_scope("api_key:update", ResourceType::ApiKey, Action::Update)
+    }
+
+    /// Low-level scope allowing `ApiKey:delete` only. Mirrors Go's
+    /// `coder:api_key:delete` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_api_key_delete() -> Self {
+        Self::single_permission_scope("api_key:delete", ResourceType::ApiKey, Action::Delete)
+    }
+
+    /// Low-level scope allowing `UserSecret:create` only. Mirrors Go's
+    /// `coder:user_secret:create` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_user_secret_create() -> Self {
+        Self::single_permission_scope(
+            "user_secret:create",
+            ResourceType::UserSecret,
+            Action::Create,
+        )
+    }
+
+    /// Low-level scope allowing `UserSecret:delete` only. Mirrors Go's
+    /// `coder:user_secret:delete` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_user_secret_delete() -> Self {
+        Self::single_permission_scope(
+            "user_secret:delete",
+            ResourceType::UserSecret,
+            Action::Delete,
+        )
+    }
+
+    /// Low-level scope allowing `Task:read` only. Mirrors Go's
+    /// `coder:task:read` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_task_read() -> Self {
+        Self::single_permission_scope("task:read", ResourceType::Task, Action::Read)
+    }
+
+    /// Low-level scope allowing `Task:update` (i.e. write). Mirrors Go's
+    /// `coder:task:update` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_task_write() -> Self {
+        Self::single_permission_scope("task:update", ResourceType::Task, Action::Update)
+    }
+
+    /// Low-level scope allowing `Organization:read` only. Mirrors Go's
+    /// `coder:organization:read` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_organization_read() -> Self {
+        Self::single_permission_scope(
+            "organization:read",
+            ResourceType::Organization,
+            Action::Read,
+        )
+    }
+
+    /// Low-level scope allowing `Organization:update` (i.e. write). Mirrors
+    /// Go's `coder:organization:update` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_organization_write() -> Self {
+        Self::single_permission_scope(
+            "organization:update",
+            ResourceType::Organization,
+            Action::Update,
+        )
+    }
+
+    /// Low-level scope allowing `Workspace:update` (i.e. write). Mirrors Go's
+    /// `coder:workspace:update` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_workspace_write() -> Self {
+        Self::single_permission_scope("workspace:update", ResourceType::Workspace, Action::Update)
+    }
+
+    /// Low-level scope allowing `Workspace:delete` only. Mirrors Go's
+    /// `coder:workspace:delete` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_workspace_delete() -> Self {
+        Self::single_permission_scope("workspace:delete", ResourceType::Workspace, Action::Delete)
+    }
+
+    /// Low-level scope allowing `Template:update` (i.e. write). Mirrors Go's
+    /// `coder:template:update` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_template_write() -> Self {
+        Self::single_permission_scope("template:update", ResourceType::Template, Action::Update)
+    }
+
+    /// Low-level scope allowing `DeploymentConfig:read` only. Mirrors Go's
+    /// `coder:deployment_config:read` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_deployment_config_read() -> Self {
+        Self::single_permission_scope(
+            "deployment_config:read",
+            ResourceType::DeploymentConfig,
+            Action::Read,
+        )
+    }
+
+    /// Low-level scope allowing `AuditLog:read` only. Mirrors Go's
+    /// `coder:audit_log:read` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_audit_log_read() -> Self {
+        Self::single_permission_scope("audit_log:read", ResourceType::AuditLog, Action::Read)
     }
 
     /// Builds a scope for a workspace agent, constraining an API-key actor
@@ -1503,6 +1623,17 @@ pub fn expand_role(name: &str) -> Option<Role> {
         ROLE_AUDITOR => Some(role_auditor()),
         ROLE_TEMPLATE_ADMIN => Some(role_template_admin()),
         ROLE_USER_ADMIN => Some(role_user_admin()),
+        // System actor roles defined in `system_actors.rs`. These are only
+        // ever attached to synthetic actors (e.g. background workers) via
+        // the constructors in `system_actors` — they are not user-facing.
+        // They resolve to the same permission set carried in the actor's
+        // `scope_override`, so that both the scope-check and the role-check
+        // in [`Authorizer::authorize`] succeed for the same action set.
+        system_actors::ROLE_SYSTEM_RESTRICTED => Some(system_actors::role_system_restricted()),
+        system_actors::ROLE_KEY_ROTATOR => Some(system_actors::role_key_rotator()),
+        system_actors::ROLE_PROVISIONERD => Some(system_actors::role_provisionerd()),
+        system_actors::ROLE_NOTIFIER => Some(system_actors::role_notifier()),
+        system_actors::ROLE_RESOURCE_MONITOR => Some(system_actors::role_resource_monitor()),
         _ => None,
     }
 }
@@ -1608,10 +1739,24 @@ impl Authorizer {
                 Some("no_user_data") => Scope::scope_no_user_data(),
                 Some("workspace:read") => Scope::scope_workspace_read(),
                 Some("workspace:start") => Scope::scope_workspace_start(),
+                Some("workspace:update") => Scope::scope_workspace_write(),
+                Some("workspace:delete") => Scope::scope_workspace_delete(),
                 Some("template:read") => Scope::scope_template_read(),
+                Some("template:update") => Scope::scope_template_write(),
                 Some("api_key:read") => Scope::scope_api_key_read(),
+                Some("api_key:create") => Scope::scope_api_key_create(),
+                Some("api_key:update") => Scope::scope_api_key_write(),
+                Some("api_key:delete") => Scope::scope_api_key_delete(),
                 Some("user_secret:read") => Scope::scope_user_secret_read(),
+                Some("user_secret:create") => Scope::scope_user_secret_create(),
                 Some("user_secret:update") => Scope::scope_user_secret_write(),
+                Some("user_secret:delete") => Scope::scope_user_secret_delete(),
+                Some("task:read") => Scope::scope_task_read(),
+                Some("task:update") => Scope::scope_task_write(),
+                Some("organization:read") => Scope::scope_organization_read(),
+                Some("organization:update") => Scope::scope_organization_write(),
+                Some("deployment_config:read") => Scope::scope_deployment_config_read(),
+                Some("audit_log:read") => Scope::scope_audit_log_read(),
                 _ => Scope::scope_all(),
             }
         };
@@ -2836,5 +2981,277 @@ mod tests {
         actor.scope = Some("no_user_data".to_owned());
         let user = Object::new(ResourceType::User);
         assert!(authorizer.authorize(&actor, Action::Read, &user).is_err());
+    }
+
+    // ---------------------------------------------------------------------
+    // New low-level scopes added in W0.S2 (rest). Each mirrors its Go
+    // counterpart in `coder/coderd/rbac/scopes_constants_gen.go`.
+    // Pattern: include the allowed action, exclude one other action.
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn scope_api_key_create_includes_create_excludes_delete() {
+        let scope = Scope::scope_api_key_create();
+        let key = Object::new(ResourceType::ApiKey);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Create,
+            &key,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &key,
+        ));
+    }
+
+    #[test]
+    fn scope_api_key_write_includes_update_excludes_delete() {
+        let scope = Scope::scope_api_key_write();
+        let key = Object::new(ResourceType::ApiKey);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &key,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &key,
+        ));
+    }
+
+    #[test]
+    fn scope_api_key_delete_includes_delete_excludes_read() {
+        let scope = Scope::scope_api_key_delete();
+        let key = Object::new(ResourceType::ApiKey);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &key,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &key,
+        ));
+    }
+
+    #[test]
+    fn scope_user_secret_create_includes_create_excludes_delete() {
+        let scope = Scope::scope_user_secret_create();
+        let secret = Object::new(ResourceType::UserSecret);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Create,
+            &secret,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &secret,
+        ));
+    }
+
+    #[test]
+    fn scope_user_secret_delete_includes_delete_excludes_create() {
+        let scope = Scope::scope_user_secret_delete();
+        let secret = Object::new(ResourceType::UserSecret);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &secret,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Create,
+            &secret,
+        ));
+    }
+
+    #[test]
+    fn scope_task_read_includes_read_excludes_update() {
+        let scope = Scope::scope_task_read();
+        let task = Object::new(ResourceType::Task);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &task,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &task,
+        ));
+    }
+
+    #[test]
+    fn scope_task_write_includes_update_excludes_read() {
+        let scope = Scope::scope_task_write();
+        let task = Object::new(ResourceType::Task);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &task,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &task,
+        ));
+    }
+
+    #[test]
+    fn scope_organization_read_includes_read_excludes_update() {
+        let scope = Scope::scope_organization_read();
+        let org = Object::new(ResourceType::Organization);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &org,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &org,
+        ));
+    }
+
+    #[test]
+    fn scope_organization_write_includes_update_excludes_delete() {
+        let scope = Scope::scope_organization_write();
+        let org = Object::new(ResourceType::Organization);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &org,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &org,
+        ));
+    }
+
+    #[test]
+    fn scope_workspace_write_includes_update_excludes_delete() {
+        let scope = Scope::scope_workspace_write();
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &ws,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &ws,
+        ));
+    }
+
+    #[test]
+    fn scope_workspace_delete_includes_delete_excludes_read() {
+        let scope = Scope::scope_workspace_delete();
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &ws,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &ws,
+        ));
+    }
+
+    #[test]
+    fn scope_template_write_includes_update_excludes_delete() {
+        let scope = Scope::scope_template_write();
+        let tpl = Object::new(ResourceType::Template);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &tpl,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &tpl,
+        ));
+    }
+
+    #[test]
+    fn scope_deployment_config_read_includes_read_excludes_update() {
+        let scope = Scope::scope_deployment_config_read();
+        let cfg = Object::new(ResourceType::DeploymentConfig);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &cfg,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &cfg,
+        ));
+    }
+
+    #[test]
+    fn scope_audit_log_read_includes_read_excludes_create() {
+        let scope = Scope::scope_audit_log_read();
+        let al = Object::new(ResourceType::AuditLog);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &al,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Create,
+            &al,
+        ));
+    }
+
+    #[test]
+    fn actor_named_scope_template_write_allows_update() {
+        // Regression for the named-scope lookup: ensure new scope names
+        // resolve through the string→scope table in `authorize`.
+        let authorizer = Authorizer::new();
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.scope = Some("template:update".to_owned());
+        let tpl = Object::new(ResourceType::Template);
+        // Update allowed by scope.
+        assert!(authorizer.authorize(&actor, Action::Update, &tpl).is_ok());
+        // Delete not allowed by scope (even though owner role allows it).
+        assert!(authorizer.authorize(&actor, Action::Delete, &tpl).is_err());
     }
 }

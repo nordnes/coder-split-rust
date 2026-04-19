@@ -6,6 +6,10 @@
 //! deletions to a bounded row count per tick so a long-lived retention
 //! shrinkage does not pin the write-ahead log on a single sweep.
 //!
+//! TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
+//! through the pruner so deletes go via a `dbauthz::Authorized<_>` wrapper
+//! instead of raw `AppStore`. See `crates/coder-rbac/src/system_actors.rs`.
+//!
 //! Safe on deployments without the `connection_logs` table: the storage
 //! layer maps `undefined_table` (PostgreSQL SQLSTATE `42P01`) to a zero-row
 //! no-op, so the worker simply logs `pruned=0` each tick until the
