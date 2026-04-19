@@ -63,6 +63,48 @@ pub trait AgentRpcHandler: Send + Sync {
     ) -> Result<agent::BatchUpdateAppHealthResponse, RpcError> {
         Err(RpcError::Unimplemented("BatchUpdateAppHealths".into()))
     }
+
+    async fn update_stats(
+        &self,
+        _req: agent::UpdateStatsRequest,
+    ) -> Result<agent::UpdateStatsResponse, RpcError> {
+        Err(RpcError::Unimplemented("UpdateStats".into()))
+    }
+
+    async fn update_lifecycle(
+        &self,
+        _req: agent::UpdateLifecycleRequest,
+    ) -> Result<agent::Lifecycle, RpcError> {
+        Err(RpcError::Unimplemented("UpdateLifecycle".into()))
+    }
+
+    async fn batch_create_logs(
+        &self,
+        _req: agent::BatchCreateLogsRequest,
+    ) -> Result<agent::BatchCreateLogsResponse, RpcError> {
+        Err(RpcError::Unimplemented("BatchCreateLogs".into()))
+    }
+
+    async fn batch_update_metadata(
+        &self,
+        _req: agent::BatchUpdateMetadataRequest,
+    ) -> Result<agent::BatchUpdateMetadataResponse, RpcError> {
+        Err(RpcError::Unimplemented("BatchUpdateMetadata".into()))
+    }
+
+    async fn script_completed(
+        &self,
+        _req: agent::WorkspaceAgentScriptCompletedRequest,
+    ) -> Result<agent::WorkspaceAgentScriptCompletedResponse, RpcError> {
+        Err(RpcError::Unimplemented("ScriptCompleted".into()))
+    }
+
+    async fn get_service_banner(
+        &self,
+        _req: agent::GetServiceBannerRequest,
+    ) -> Result<agent::ServiceBanner, RpcError> {
+        Err(RpcError::Unimplemented("GetServiceBanner".into()))
+    }
 }
 
 /// Opaque per-invocation metadata lifted off any `InvokeMetadata` frames
@@ -196,5 +238,47 @@ impl AgentRpcHandler for StubHandler {
         _req: agent::BatchUpdateAppHealthRequest,
     ) -> Result<agent::BatchUpdateAppHealthResponse, RpcError> {
         Ok(agent::BatchUpdateAppHealthResponse::default())
+    }
+
+    async fn update_stats(
+        &self,
+        _req: agent::UpdateStatsRequest,
+    ) -> Result<agent::UpdateStatsResponse, RpcError> {
+        Ok(agent::UpdateStatsResponse::default())
+    }
+
+    async fn update_lifecycle(
+        &self,
+        req: agent::UpdateLifecycleRequest,
+    ) -> Result<agent::Lifecycle, RpcError> {
+        Ok(req.lifecycle.unwrap_or_default())
+    }
+
+    async fn batch_create_logs(
+        &self,
+        _req: agent::BatchCreateLogsRequest,
+    ) -> Result<agent::BatchCreateLogsResponse, RpcError> {
+        Ok(agent::BatchCreateLogsResponse::default())
+    }
+
+    async fn batch_update_metadata(
+        &self,
+        _req: agent::BatchUpdateMetadataRequest,
+    ) -> Result<agent::BatchUpdateMetadataResponse, RpcError> {
+        Ok(agent::BatchUpdateMetadataResponse::default())
+    }
+
+    async fn script_completed(
+        &self,
+        _req: agent::WorkspaceAgentScriptCompletedRequest,
+    ) -> Result<agent::WorkspaceAgentScriptCompletedResponse, RpcError> {
+        Ok(agent::WorkspaceAgentScriptCompletedResponse::default())
+    }
+
+    async fn get_service_banner(
+        &self,
+        _req: agent::GetServiceBannerRequest,
+    ) -> Result<agent::ServiceBanner, RpcError> {
+        Ok(agent::ServiceBanner::default())
     }
 }

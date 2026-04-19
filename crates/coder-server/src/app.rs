@@ -2007,6 +2007,7 @@ pub(crate) mod tests {
         workspace_agent_scripts: Mutex<Vec<WorkspaceAgentScriptRow>>,
         workspace_agent_metadata: Mutex<Vec<WorkspaceAgentMetadataRow>>,
         workspace_agent_devcontainers: Mutex<Vec<coder_core::WorkspaceAgentDevcontainerRow>>,
+        workspace_agent_script_timings: Mutex<Vec<coder_core::InsertAgentScriptTimingInput>>,
         workspaces: Mutex<HashMap<Uuid, WorkspaceRecord>>,
         workspace_builds: Mutex<HashMap<Uuid, WorkspaceBuildRecord>>,
         workspace_build_parameters: Mutex<HashMap<Uuid, Vec<WorkspaceBuildParameterRecord>>>,
@@ -2121,6 +2122,7 @@ pub(crate) mod tests {
                 workspace_agent_scripts: Mutex::new(Vec::new()),
                 workspace_agent_metadata: Mutex::new(Vec::new()),
                 workspace_agent_devcontainers: Mutex::new(Vec::new()),
+                workspace_agent_script_timings: Mutex::new(Vec::new()),
                 workspaces: Mutex::new(HashMap::new()),
                 workspace_builds: Mutex::new(HashMap::new()),
                 workspace_build_parameters: Mutex::new(HashMap::new()),
@@ -7176,6 +7178,17 @@ pub(crate) mod tests {
             Ok(result)
         }
 
+        async fn insert_workspace_agent_script_timing(
+            &self,
+            input: &coder_core::InsertAgentScriptTimingInput,
+        ) -> Result<(), StorageError> {
+            self.workspace_agent_script_timings
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push(input.clone());
+            Ok(())
+        }
+
         async fn insert_workspace_app_status(
             &self,
             input: &InsertWorkspaceAppStatusInput,
@@ -10269,12 +10282,6 @@ pub(crate) mod tests {
             }
             Ok(total)
         }
-
-        // Note: `delete_old_connection_logs` and `try_acquire_advisory_lock`
-        // are defined earlier in this same `impl AppStore for FakeStore`
-        // block (see lines ~4320/4329). The pre-existing duplicate copies
-        // that lived here are removed so the library test target compiles
-        // for frontend test runs.
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -19025,6 +19032,292 @@ pub(crate) mod tests {
         let body = response_json(response).await?;
         assert_eq!(body, json!([]));
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // agent_rpc_live — tests for the 6 RPCs added alongside
+    // GetManifest/GetAnnouncementBanners/UpdateStartup/BatchUpdateAppHealths.
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn agent_rpc_live_update_stats_empty_returns_interval_only() -> Result<(), Box<dyn Error>>
+    {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let resp = handler
+            .update_stats(agent::UpdateStatsRequest { stats: None })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        let interval = resp.report_interval.ok_or("missing interval")?;
+        assert!(interval.seconds > 0);
+
+        let stored = store
+            .stats_agents
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert!(
+            stored.is_empty(),
+            "no stat should be persisted for empty body"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_update_stats_persists_sample() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+        use std::collections::HashMap;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let mut connections_by_proto: HashMap<String, i64> = HashMap::new();
+        connections_by_proto.insert("tcp".to_owned(), 3);
+        handler
+            .update_stats(agent::UpdateStatsRequest {
+                stats: Some(agent::Stats {
+                    connections_by_proto,
+                    connection_count: 3,
+                    connection_median_latency_ms: 12.5,
+                    rx_packets: 100,
+                    rx_bytes: 4096,
+                    tx_packets: 80,
+                    tx_bytes: 2048,
+                    session_count_vscode: 1,
+                    session_count_jetbrains: 0,
+                    session_count_reconnecting_pty: 0,
+                    session_count_ssh: 2,
+                    metrics: vec![],
+                }),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let stored = store
+            .stats_agents
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert_eq!(stored.len(), 1);
+        let sample = &stored[0];
+        assert_eq!(sample.agent_id, agent_id);
+        assert_eq!(sample.connection_count, 3);
+        assert_eq!(sample.session_count_ssh, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_update_lifecycle_persists_ready_state() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        handler
+            .update_lifecycle(agent::UpdateLifecycleRequest {
+                lifecycle: Some(agent::Lifecycle {
+                    state: agent::lifecycle::State::Ready as i32,
+                    changed_at: None,
+                }),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let agents = store
+            .workspace_agents
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        let row = agents.get(&agent_id).ok_or("agent gone")?;
+        assert_eq!(row.lifecycle_state, "ready");
+        assert!(row.started_at.is_some());
+        assert!(row.ready_at.is_some());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_batch_create_logs_persists_entries() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        // Seed a log source so the agent can reference it.
+        let source = store
+            .insert_workspace_agent_log_source(
+                agent_id,
+                Some(Uuid::new_v4()),
+                "External",
+                "/emojis/1f310.png",
+            )
+            .await?;
+
+        let resp = handler
+            .batch_create_logs(agent::BatchCreateLogsRequest {
+                log_source_id: source.id.as_bytes().to_vec(),
+                logs: vec![
+                    agent::Log {
+                        created_at: None,
+                        output: "hello".to_owned(),
+                        level: agent::log::Level::Info as i32,
+                    },
+                    agent::Log {
+                        created_at: None,
+                        output: "world".to_owned(),
+                        level: agent::log::Level::Error as i32,
+                    },
+                ],
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(!resp.log_limit_exceeded);
+
+        let logs = store
+            .workspace_agent_logs
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        let count = logs.iter().filter(|l| l.agent_id == agent_id).count();
+        assert_eq!(count, 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_batch_update_metadata_upserts_entries() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        // FakeStore's upsert_workspace_agent_metadata only UPDATEs existing
+        // rows (matching PostgresStore semantics — metadata keys are
+        // pre-seeded at provisioning time). Seed a row so the test has
+        // something to update.
+        store
+            .workspace_agent_metadata
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?
+            .push(coder_core::WorkspaceAgentMetadataRow {
+                workspace_agent_id: agent_id,
+                display_name: "OS Version".to_owned(),
+                key: "os_version".to_owned(),
+                script: "cat /etc/os-release".to_owned(),
+                value: String::new(),
+                error: String::new(),
+                timeout: 1,
+                interval: 60,
+                collected_at: OffsetDateTime::now_utc(),
+                display_order: 0,
+            });
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        handler
+            .batch_update_metadata(agent::BatchUpdateMetadataRequest {
+                metadata: vec![agent::Metadata {
+                    key: "os_version".to_owned(),
+                    result: Some(agent::workspace_agent_metadata::Result {
+                        collected_at: None,
+                        age: 0,
+                        value: "Ubuntu 22.04".to_owned(),
+                        error: String::new(),
+                    }),
+                }],
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let metadata = store
+            .workspace_agent_metadata
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        let entry = metadata
+            .iter()
+            .find(|m| m.workspace_agent_id == agent_id && m.key == "os_version")
+            .ok_or("metadata not upserted")?;
+        assert_eq!(entry.value, "Ubuntu 22.04");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_script_completed_persists_timing() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let script_id = Uuid::new_v4();
+        handler
+            .script_completed(agent::WorkspaceAgentScriptCompletedRequest {
+                timing: Some(agent::Timing {
+                    script_id: script_id.as_bytes().to_vec(),
+                    start: Some(prost_types::Timestamp {
+                        seconds: 1_700_000_000,
+                        nanos: 0,
+                    }),
+                    end: Some(prost_types::Timestamp {
+                        seconds: 1_700_000_030,
+                        nanos: 0,
+                    }),
+                    exit_code: 0,
+                    stage: agent::timing::Stage::Start as i32,
+                    status: agent::timing::Status::Ok as i32,
+                }),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let timings = store
+            .workspace_agent_script_timings
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert_eq!(timings.len(), 1);
+        assert_eq!(timings[0].script_id, script_id);
+        assert_eq!(timings[0].stage, "start");
+        assert_eq!(timings[0].status, "ok");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_get_service_banner_falls_back_to_announcement()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+
+        // Seed an announcement banner and leave the service banner empty.
+        {
+            let mut cfg = store
+                .appearance_config
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            cfg.announcement_banners
+                .push(coder_core::api::AnnouncementBannerConfig {
+                    enabled: true,
+                    message: "Scheduled maintenance tonight".to_owned(),
+                    background_color: "#ff0000".to_owned(),
+                });
+        }
+
+        let handler = live_handler_for_store(store, agent_id);
+        let resp = handler
+            .get_service_banner(agent::GetServiceBannerRequest {})
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(resp.enabled);
+        assert_eq!(resp.message, "Scheduled maintenance tonight");
+        assert_eq!(resp.background_color, "#ff0000");
         Ok(())
     }
 

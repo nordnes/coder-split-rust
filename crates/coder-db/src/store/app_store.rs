@@ -6464,6 +6464,29 @@ impl AppStore for PostgresStore {
         Ok(workspace_agent_log_source_row_from_stored(row))
     }
 
+    #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent_script_timing(
+        &self,
+        input: &coder_core::InsertAgentScriptTimingInput,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO workspace_agent_script_timings \
+                (script_id, started_at, ended_at, exit_code, stage, status) \
+             VALUES ($1, $2, $3, $4, $5::workspace_agent_script_timing_stage, \
+                     $6::workspace_agent_script_timing_status)",
+        )
+        .bind(input.script_id)
+        .bind(input.started_at)
+        .bind(input.ended_at)
+        .bind(input.exit_code)
+        .bind(&input.stage)
+        .bind(&input.status)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_app_statuses_by_agent_id(
         &self,

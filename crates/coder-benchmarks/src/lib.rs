@@ -1421,6 +1421,13 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn insert_workspace_agent_script_timing(
+        &self,
+        _input: &coder_core::InsertAgentScriptTimingInput,
+    ) -> Result<(), StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn insert_workspace_app_status(
         &self,
         _input: &InsertWorkspaceAppStatusInput,
