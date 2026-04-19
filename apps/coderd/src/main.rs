@@ -411,6 +411,11 @@ struct ServerArgs {
     #[arg(long, env = "CODER_OIDC_GROUP_FIELD", default_value = "groups")]
     oidc_groups_field: String,
 
+    /// Comma-separated list of groups. If non-empty, users whose parsed
+    /// group claims do not intersect this list are rejected at login.
+    #[arg(long, env = "CODER_OIDC_GROUP_ALLOW_LIST", default_value = "")]
+    oidc_group_allow_list: String,
+
     /// Ignore the email_verified claim from the OIDC provider.
     #[arg(
         long,
@@ -1499,6 +1504,7 @@ async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
                 email_field: args.oidc_email_field,
                 name_field: args.oidc_name_field,
                 groups_field: args.oidc_groups_field,
+                group_allow_list: split_csv(&args.oidc_group_allow_list),
                 ignore_email_verified: args.oidc_ignore_email_verified,
             })
         },

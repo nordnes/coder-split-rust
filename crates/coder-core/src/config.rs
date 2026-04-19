@@ -988,6 +988,11 @@ pub struct OidcConfig {
     /// Defaults to `"groups"`. If empty, group sync from the deployment
     /// OIDC provider is disabled.
     pub groups_field: String,
+    /// If non-empty, users whose group claims do not intersect this list
+    /// are rejected at login. Mirrors Go's `OIDCConfig.GroupAllowList`
+    /// enforcement in `AGPLIDPSync.ParseGroupClaims`
+    /// (`coderd/idpsync/group.go`).
+    pub group_allow_list: Vec<String>,
     /// Whether to ignore the email_verified claim.
     pub ignore_email_verified: bool,
 }
