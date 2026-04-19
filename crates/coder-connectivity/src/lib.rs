@@ -11,6 +11,8 @@
 //! * [`generate_git_ssh_key`] — Ed25519 keypair generation for Git-over-SSH
 //! * [`agents`] — in-memory agent connection provider
 //! * [`tailnet`] — DERP map construction and in-memory coordinator
+//! * [`tailnet_rpc`] — unary Tailnet DRPC handlers (PostTelemetry,
+//!   RefreshResumeToken)
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
@@ -18,6 +20,7 @@ pub mod agents;
 pub mod derp;
 pub mod proxy_routing;
 pub mod tailnet;
+pub mod tailnet_rpc;
 use std::{
     collections::HashMap,
     sync::Arc,
