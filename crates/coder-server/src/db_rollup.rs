@@ -5,6 +5,9 @@
 //! `template_usage_stats` half-hour buckets so the insights endpoints can
 //! read pre-computed aggregates rather than raw event rows.
 //!
+//! TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
+//! through this worker. See `crates/coder-rbac/src/system_actors.rs`.
+//!
 //! # Current status
 //!
 //! This worker wires the ticker into the server process with the correct

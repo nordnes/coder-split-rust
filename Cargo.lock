@@ -852,6 +852,7 @@ dependencies = [
  "base64 0.22.1",
  "coder-core",
  "coder-identity",
+ "coder-rbac",
  "metrics",
  "serde_json",
  "sqlx",

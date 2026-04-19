@@ -14,6 +14,7 @@ workspace = true
 async-trait.workspace = true
 base64.workspace = true
 coder-core = { path = "../coder-core" }
+coder-rbac = { path = "../coder-rbac" }
 metrics.workspace = true
 coder-identity = { path = "../coder-identity" }
 serde_json.workspace = true

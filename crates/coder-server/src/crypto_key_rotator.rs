@@ -201,6 +201,11 @@ impl Default for RotatorOptions {
 /// A crypto-key rotator. Construct with [`CryptoKeyRotator::new`] and drive a
 /// single sweep with [`CryptoKeyRotator::rotate_once`], or run as a background
 /// task with [`CryptoKeyRotator::start`].
+///
+/// TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::key_rotator`] through
+/// here so rotator calls go via a `dbauthz::Authorized<_>` wrapper instead of
+/// raw `AppStore`. See `crates/coder-rbac/src/system_actors.rs` and
+/// `crates/coder-db/src/dbauthz.rs`.
 #[derive(Clone)]
 pub struct CryptoKeyRotator {
     store: Arc<dyn AppStore>,
