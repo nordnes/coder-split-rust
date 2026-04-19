@@ -28786,6 +28786,190 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    // =======================================================================
+    // Audit-sweep follow-up: template-version, template-ACL, and notification
+    // preference mutations (gap-doc §B.10.2 / Wave 0 S7).
+    // =======================================================================
+
+    #[tokio::test]
+    async fn template_version_create_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/organizations/{org_id}/templateversions"),
+                &session_token,
+                &json!({
+                    "name": "v2.0.0",
+                    "template_id": tmpl.id.to_string(),
+                    "provisioner": "terraform",
+                    "tags": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = events
+            .iter()
+            .find(|e| {
+                e.action == AuditAction::Create && e.resource == ResourceKind::TemplateVersion
+            })
+            .ok_or("expected a Create audit event for template version")?;
+        assert!(
+            event.summary.contains("created template version"),
+            "summary should reference create, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_version_archive_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/templateversions/{}/archive", tv.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &tv.id.to_string())
+            .ok_or("expected a Write audit event for template version archive")?;
+        assert_eq!(event.resource, ResourceKind::TemplateVersion);
+        assert!(
+            event.summary.contains("archived"),
+            "summary should note archive, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_acl_patch_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{}/acl", tmpl.id),
+                &session_token,
+                &json!({
+                    "user_perms": {},
+                    "group_perms": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &tmpl.id.to_string())
+            .ok_or("expected a Write audit event for template ACL patch")?;
+        assert_eq!(event.resource, ResourceKind::Template);
+        assert!(
+            event.summary.contains("ACL"),
+            "summary should reference ACL update, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn template_promote_active_version_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/templates/{}/versions", tmpl.id),
+                &session_token,
+                &json!({
+                    "id": tv.id.to_string(),
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &tmpl.id.to_string())
+            .ok_or("expected a Write audit event for active version promotion")?;
+        assert_eq!(event.resource, ResourceKind::Template);
+        assert!(
+            event.summary.contains("promoted"),
+            "summary should note promote, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn notification_preferences_put_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let uid = owner_user_id(&store);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/notifications/preferences",
+                &session_token,
+                &json!({
+                    "template_disabled_map": {},
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &uid.to_string())
+            .ok_or("expected a Write audit event for notification preference update")?;
+        assert_eq!(event.resource, ResourceKind::NotificationTemplate);
+        assert!(
+            event.summary.contains("notification preferences"),
+            "summary should reference notification prefs, got: {}",
+            event.summary
+        );
+        Ok(())
+    }
+
     #[tokio::test]
     async fn workspace_port_share_crud() -> Result<(), Box<dyn Error>> {
         let (state, store) = test_state_with_store(true)?;
