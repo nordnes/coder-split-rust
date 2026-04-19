@@ -3699,6 +3699,7 @@ mod tests {
             username: "admin".to_owned(),
             name: "Admin User".to_owned(),
             password: "securepassword123".to_owned(),
+            ..Default::default()
         };
         let result = service.create_first_user(&request).await;
         assert!(result.is_ok());
@@ -3730,6 +3731,7 @@ mod tests {
             username: "testuser".to_owned(),
             name: "Test User".to_owned(),
             password: "securepassword123".to_owned(),
+            ..Default::default()
         };
         let create_result = service.create_first_user(&request).await;
         assert!(create_result.is_ok());
@@ -3933,6 +3935,7 @@ mod tests {
             username: "admin".to_owned(),
             name: "Admin".to_owned(),
             password: "short".to_owned(),
+            ..Default::default()
         };
         let result = service.create_first_user(&request).await;
         assert!(result.is_err(), "short password should be rejected");
@@ -3947,6 +3950,7 @@ mod tests {
             username: String::new(),
             name: String::new(),
             password: "securepassword123".to_owned(),
+            ..Default::default()
         };
         let result = service.create_first_user(&request).await;
         assert!(result.is_err(), "empty email/username should be rejected");

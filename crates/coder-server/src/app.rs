@@ -71,6 +71,7 @@ use crate::handlers::provisioner_keys::*;
 use crate::handlers::quotas::*;
 use crate::handlers::replicas::*;
 use crate::handlers::scim::*;
+use crate::handlers::support_bundle::*;
 use crate::handlers::tasks::*;
 use crate::handlers::telemetry::*;
 use crate::handlers::templates::*;
@@ -558,6 +559,7 @@ pub fn build_router(
                 .route("/debug/pprof/allocs", get(debug_pprof))
                 .route("/debug/ws", get(debug_websocket))
                 .route("/debug/metrics", get(debug_metrics))
+                .route("/debug/support-bundle", get(get_support_bundle))
                 .route("/insights/daus", get(insights_daus))
                 .route("/insights/templates", get(insights_templates))
                 .route("/insights/user-activity", get(insights_user_activity))
@@ -1197,6 +1199,8 @@ pub fn build_router(
                 // -------------------------------------------------------
                 .route("/", get(api_root))
                 .route("/appearance", get(get_appearance))
+                .route("/appearance/logo", get(get_appearance_logo))
+                .route("/appearance/favicon", get(get_appearance_favicon))
                 .route("/buildinfo", get(build_info))
                 .route("/updatecheck", get(update_check))
                 .route("/csp/reports", post(post_csp_report))
@@ -10203,6 +10207,7 @@ pub(crate) mod tests {
             verify_instance_identity: false,
             aws_instance_identity_certs_dir: None,
             vapid_sub: String::new(),
+            trial_signup_url: String::new(),
         })
     }
 
@@ -10343,6 +10348,7 @@ pub(crate) mod tests {
                     username: "owner".to_owned(),
                     name: "Owner".to_owned(),
                     password: "Password123".to_owned(),
+                    ..Default::default()
                 },
             )?,
         )
@@ -28245,6 +28251,7 @@ pub(crate) mod tests {
                     username: "admin".to_owned(),
                     name: "Admin".to_owned(),
                     password: "Password123".to_owned(),
+                    ..Default::default()
                 },
             )?,
         )
@@ -28275,6 +28282,7 @@ pub(crate) mod tests {
                     username: "owner".to_owned(),
                     name: "Owner".to_owned(),
                     password: "Password123".to_owned(),
+                    ..Default::default()
                 },
             )?,
         )

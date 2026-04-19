@@ -160,6 +160,10 @@ pub struct ServerConfig {
     /// `mailto:admin@example.com`). Used as the `sub` claim in VAPID
     /// signatures sent to push services.
     pub vapid_sub: String,
+    /// URL of the external trial-signup endpoint. When empty the trial
+    /// redirector is disabled and `CreateFirstUserRequest.trial = true`
+    /// is accepted but ignored. Mirrors Go's `TrialGenerator` wiring.
+    pub trial_signup_url: String,
 }
 
 impl ServerConfig {
@@ -239,8 +243,8 @@ impl ServerConfig {
             ConfigOption {
                 name: "access-url",
                 env: "CODER_ACCESS_URL",
-                default: Some("http://127.0.0.1:3000"),
-                description: "External access URL advertised by the service.",
+                default: None,
+                description: "External access URL advertised by the service. When unset, the server auto-detects from the bind address or public IP, falling back to http://localhost:<port>.",
             },
             ConfigOption {
                 name: "wildcard-access-url",
@@ -1585,6 +1589,7 @@ mod tests {
             verify_instance_identity: false,
             aws_instance_identity_certs_dir: None,
             vapid_sub: String::new(),
+            trial_signup_url: String::new(),
         }
     }
 

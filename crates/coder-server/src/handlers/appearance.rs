@@ -73,3 +73,66 @@ pub(crate) async fn put_appearance(
 
     Ok((StatusCode::OK, Json(new_config)).into_response())
 }
+
+/// GET /api/v2/appearance/logo — serve the configured deployment logo.
+///
+/// The stored `AppearanceConfig.logo_url` is the canonical branding asset
+/// location. When set, this endpoint issues a 302 redirect so browsers and
+/// other HTTP clients can load the asset via a stable URL under the Coder
+/// API surface (e.g. for dashboards that expect a relative path). When the
+/// logo URL is unset, the endpoint returns 404 so callers can distinguish
+/// "no custom branding configured" from "branding is configured but the
+/// target URL failed".
+pub(crate) async fn get_appearance_logo(
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    serve_branding_asset(&state, BrandingAsset::Logo).await
+}
+
+/// GET /api/v2/appearance/favicon — serve the configured deployment favicon.
+///
+/// Same semantics as [`get_appearance_logo`]. The `AppearanceConfig`
+/// struct only exposes `logo_url` today, but the favicon endpoint is
+/// wired so the UI can use a consistent API surface when a favicon field
+/// is added in the future; until then the handler returns 404.
+pub(crate) async fn get_appearance_favicon(
+    State(state): State<AppState>,
+) -> Result<Response, AppError> {
+    serve_branding_asset(&state, BrandingAsset::Favicon).await
+}
+
+/// Which branding asset to serve.
+#[derive(Debug, Clone, Copy)]
+enum BrandingAsset {
+    Logo,
+    Favicon,
+}
+
+async fn serve_branding_asset(
+    state: &AppState,
+    asset: BrandingAsset,
+) -> Result<Response, AppError> {
+    let config = state.store.appearance_config().await?;
+    let target = match asset {
+        BrandingAsset::Logo => config.logo_url.as_str(),
+        // `AppearanceConfig` has no favicon URL yet; 404 until it does.
+        BrandingAsset::Favicon => "",
+    };
+    if target.is_empty() {
+        return Ok(resource_not_found_response());
+    }
+
+    let header_value = match HeaderValue::from_str(target) {
+        Ok(v) => v,
+        Err(_) => return Ok(resource_not_found_response()),
+    };
+    let cache_control = HeaderValue::from_static("public, max-age=300, stale-while-revalidate=60");
+    Ok((
+        StatusCode::FOUND,
+        [
+            (LOCATION, header_value),
+            (axum::http::header::CACHE_CONTROL, cache_control),
+        ],
+    )
+        .into_response())
+}
