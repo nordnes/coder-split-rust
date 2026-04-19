@@ -13,6 +13,7 @@ workspace = true
 [dependencies]
 async-trait.workspace = true
 coder-core = { path = "../coder-core" }
+futures-util.workspace = true
 rand.workspace = true
 reqwest.workspace = true
 serde.workspace = true
@@ -21,6 +22,7 @@ ssh-key.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+tokio-tungstenite.workspace = true
 tracing.workspace = true
 uuid.workspace = true
 
