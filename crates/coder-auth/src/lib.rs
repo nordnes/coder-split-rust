@@ -35,7 +35,7 @@ use coder_core::{
     UpdateUserPasswordRequest, UpsertExternalAuthLinkInput, UserLoginType, UserRecord, UserStatus,
     ValidateUserPasswordRequest, ValidateUserPasswordResponse, ValidationError,
 };
-use coder_rbac::Actor;
+use coder_rbac::{Actor, Scope};
 use http::HeaderMap;
 use serde_json::{Value, json};
 use subtle::ConstantTimeEq;
@@ -89,7 +89,11 @@ pub fn cookie_from_headers(headers: &HeaderMap, name: &str) -> Option<String> {
 }
 
 /// Authenticated request actor derived from the current session token.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// Note: this struct carries an [`Actor`] whose `scope_override` field
+/// holds a rich [`Scope`] that does not implement `PartialEq`. The struct
+/// therefore cannot derive equality; no call site requires it today.
+#[derive(Clone, Debug)]
 pub struct AuthenticatedRequest {
     /// Opaque session token as supplied by the client.
     pub session_token: String,
@@ -1087,7 +1091,34 @@ pub fn actor_from_user(user: &AuthenticatedUser) -> Actor {
         org_roles: user.org_roles.clone(),
         groups: vec![],
         scope: None,
+        scope_override: None,
     }
+}
+
+/// Builds an [`Actor`] for a workspace-agent API key. The returned actor
+/// inherits the workspace owner's roles and org memberships (agents act on
+/// the owner's behalf) but is constrained by [`Scope::scope_workspace_agent`]
+/// so it can only read/update the specific workspace it belongs to, read its
+/// template, and read the owning user.
+///
+/// This mirrors Go's `WorkspaceAgentScope` wiring in `coder/coderd/rbac/scopes.go`.
+/// Without this scope, an agent actor would default to `ScopeAll` and be
+/// able to authorise against arbitrary workspaces (B.11.3 S1 regression).
+#[must_use]
+pub fn actor_from_workspace_agent(
+    owner: &AuthenticatedUser,
+    workspace_id: Uuid,
+    template_id: Uuid,
+    block_user_data: bool,
+) -> Actor {
+    let mut actor = actor_from_user(owner);
+    actor.scope_override = Some(Scope::scope_workspace_agent(
+        workspace_id,
+        template_id,
+        owner.id,
+        block_user_data,
+    ));
+    actor
 }
 
 fn validate_first_user_request(request: &CreateFirstUserRequest) -> Vec<ValidationError> {
