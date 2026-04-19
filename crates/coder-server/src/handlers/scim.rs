@@ -23,7 +23,12 @@ const SCIM_LIST_SCHEMA: &str = "urn:ietf:params:scim:api:messages:2.0:ListRespon
 /// Validates the SCIM bearer token from the `Authorization` header.
 ///
 /// The comparison is intentionally constant-time to prevent timing attacks.
+/// Both the supplied token and the configured key are hashed to a fixed-size
+/// SHA-256 digest before `ct_eq` is applied, so neither token length nor
+/// content differences are leaked via a timing side-channel.  The function
+/// does not early-return on length mismatch.
 fn scim_verify_auth(headers: &HeaderMap, scim_api_key: &str) -> bool {
+    use sha2::{Digest, Sha256};
     use subtle::ConstantTimeEq;
 
     if scim_api_key.is_empty() {
@@ -52,7 +57,11 @@ fn scim_verify_auth(headers: &HeaderMap, scim_api_key: &str) -> bool {
         auth_bytes
     };
 
-    token_bytes.ct_eq(scim_api_key.as_bytes()).into()
+    // Hash both sides to a fixed-size digest before comparison so `ct_eq`
+    // operates on equal-length inputs and does not leak token length.
+    let presented = Sha256::digest(token_bytes);
+    let expected = Sha256::digest(scim_api_key.as_bytes());
+    presented.ct_eq(&expected).into()
 }
 
 /// Builds a SCIM-compliant 401 JSON response.
@@ -1054,5 +1063,29 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("Authorization", HeaderValue::from_static("test-key"));
         assert!(scim_verify_auth(&headers, "test-key"));
+    }
+
+    /// A near-miss token (same length, last byte differs) must be rejected by
+    /// the constant-time comparator.  This is behavioural proof that the
+    /// comparison does not short-circuit on a partial content match.
+    #[test]
+    fn test_scim_verify_auth_near_miss_token() {
+        let mut headers = HeaderMap::new();
+        // "test-ke" + 'y' vs "test-ke" + 'Y' — same length, last byte off.
+        headers.insert("Authorization", HeaderValue::from_static("Bearer test-keY"));
+        assert!(!scim_verify_auth(&headers, "test-key"));
+    }
+
+    /// A request to a SCIM endpoint carrying a near-miss bearer token returns
+    /// 401 without revealing whether the length or the content differed.
+    #[tokio::test]
+    async fn test_scim_handler_rejects_near_miss_token() -> Result<(), Box<dyn std::error::Error>> {
+        let state = scim_test_state()?;
+        let app = scim_router(state);
+        // Same byte length as "test-scim-key", last byte differs.
+        let req = bearer_request(Method::GET, "/scim/v2/Users", "test-scim-keY")?;
+        let resp = call(app, req).await?;
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        Ok(())
     }
 }

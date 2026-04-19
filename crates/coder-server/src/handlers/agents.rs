@@ -1526,12 +1526,36 @@ pub(crate) async fn get_workspace_agent_external_auth(
 
     loop {
         // Check whether the workspace owner has linked this external auth provider.
-        let link = state
+        let mut link = state
             .store
             .find_external_auth_link(owner_id, &query.id)
             .await?;
 
-        let authenticated = link
+        // Proactively refresh tokens that are near expiry, and probe the
+        // provider's `validate_url` (if configured) so that we never hand a
+        // stale token to the calling agent.  Mirrors the Go flow which calls
+        // `Config.RefreshToken` and `Config.ValidateToken` on every request.
+        if let Some(existing) = link.clone() {
+            match state
+                .external_auth
+                .refresh_if_expiring(provider_config, owner_id, &existing)
+                .await
+            {
+                Ok(refreshed) => link = Some(refreshed),
+                Err(error) => {
+                    tracing::warn!(
+                        error = %error,
+                        provider = %query.id,
+                        "proactive external-auth refresh failed; continuing with stored token",
+                    );
+                }
+            }
+        }
+
+        // Compute authentication state: the token must be self-marked
+        // authenticated, free of stored validation errors, unexpired, and — if
+        // the provider advertises a `validate_url` — must pass a live probe.
+        let mut authenticated = link
             .as_ref()
             .map(|l| {
                 l.authenticated
@@ -1539,6 +1563,21 @@ pub(crate) async fn get_workspace_agent_external_auth(
                     && l.expires > OffsetDateTime::now_utc()
             })
             .unwrap_or(false);
+
+        if authenticated {
+            if let Some(l) = link.as_ref() {
+                match state.external_auth.validate_url(provider_config, l).await {
+                    Ok(live) => authenticated = live,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            provider = %query.id,
+                            "external-auth validate_url probe failed; falling back to stored state",
+                        );
+                    }
+                }
+            }
+        }
 
         // If not listening or already authenticated, return immediately.
         if !query.listen || authenticated {
