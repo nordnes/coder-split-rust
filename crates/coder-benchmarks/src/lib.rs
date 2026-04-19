@@ -2002,6 +2002,32 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn bulk_mark_notification_messages_sent(
+        &self,
+        _ids: &[Uuid],
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn bulk_mark_notification_messages_failed(
+        &self,
+        _ids: &[Uuid],
+        _statuses: &[NotificationMessageStatus],
+        _status_reasons: &[String],
+        _max_attempts: u32,
+        _retry_interval_secs: u32,
+    ) -> Result<u64, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn find_user_notification_preference(
+        &self,
+        _user_id: Uuid,
+        _notification_template_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn update_workspace_dormant_deleting_at(
         &self,
         _workspace_id: Uuid,
