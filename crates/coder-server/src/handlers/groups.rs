@@ -391,6 +391,7 @@ pub(crate) async fn post_org_group(
         organization_id: org.id,
         avatar_url: request.avatar_url,
         quota_allowance: request.quota_allowance,
+        source: None,
     };
 
     let group = match state.store.create_group(&input).await {

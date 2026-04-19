@@ -364,6 +364,10 @@ struct ServerArgs {
     #[arg(long, env = "CODER_OIDC_NAME_FIELD", default_value = "name")]
     oidc_name_field: String,
 
+    /// OIDC claim field to use for group membership during IDP group sync.
+    #[arg(long, env = "CODER_OIDC_GROUP_FIELD", default_value = "groups")]
+    oidc_groups_field: String,
+
     /// Ignore the email_verified claim from the OIDC provider.
     #[arg(
         long,
@@ -1444,6 +1448,7 @@ async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
                 username_field: args.oidc_username_field,
                 email_field: args.oidc_email_field,
                 name_field: args.oidc_name_field,
+                groups_field: args.oidc_groups_field,
                 ignore_email_verified: args.oidc_ignore_email_verified,
             })
         },

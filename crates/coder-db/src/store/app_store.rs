@@ -7062,8 +7062,8 @@ impl AppStore for PostgresStore {
             String,
             OffsetDateTime,
         ) = sqlx::query_as(
-            "INSERT INTO groups (name, display_name, organization_id, avatar_url, quota_allowance)
-             VALUES ($1, $2, $3, $4, $5)
+            "INSERT INTO groups (name, display_name, organization_id, avatar_url, quota_allowance, source)
+             VALUES ($1, $2, $3, $4, $5, COALESCE($6::group_source, 'user'::group_source))
              RETURNING id, name, display_name, organization_id, avatar_url,
                        quota_allowance, source, created_at",
         )
@@ -7072,6 +7072,7 @@ impl AppStore for PostgresStore {
         .bind(input.organization_id)
         .bind(&input.avatar_url)
         .bind(input.quota_allowance)
+        .bind(input.source.as_deref())
         .fetch_one(&self.pool)
         .await
         .map_err(|e| {

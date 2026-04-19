@@ -3008,6 +3008,7 @@ mod tests {
                 organization_id: org_id,
                 avatar_url: "".to_string(),
                 quota_allowance: 0,
+                source: None,
             })
             .await?;
 
@@ -3040,6 +3041,7 @@ mod tests {
                 organization_id: org_id,
                 avatar_url: "".to_string(),
                 quota_allowance: 0,
+                source: None,
             })
             .await?;
 
@@ -3073,6 +3075,7 @@ mod tests {
                 organization_id: org_id,
                 avatar_url: "".to_string(),
                 quota_allowance: 0,
+                source: None,
             })
             .await?;
 
@@ -3112,6 +3115,7 @@ mod tests {
                 organization_id: org_id,
                 avatar_url: "".to_string(),
                 quota_allowance: 0,
+                source: None,
             })
             .await?;
 
@@ -7029,6 +7033,7 @@ mod tests {
             organization_id: org_id,
             avatar_url: String::new(),
             quota_allowance: 0,
+            source: None,
         };
 
         // First creation succeeds
