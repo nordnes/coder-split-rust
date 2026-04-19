@@ -34,6 +34,7 @@ use coder_core::IdentityStore;
 use coder_core::api::{WebpushMessage, WebpushSubscription};
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
 use futures_util::StreamExt;
+use handlebars::Handlebars;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
@@ -239,10 +240,18 @@ where
                 continue;
             }
 
-            let result = match message.method {
-                NotificationMethod::Email => self.dispatch_email(&message).await,
-                NotificationMethod::Webhook => self.dispatch_webhook(&message).await,
-                NotificationMethod::Inbox => self.dispatch_inbox(&message).await,
+            // Render `title_template` / `body_template` from the stored
+            // template against the per-message parameters *before* handing
+            // off to a transport. Mirrors Go's `notifier.prepare` in
+            // `coder/coderd/notifications/notifier.go`, which renders each
+            // message immediately before the dispatcher's `Send`.
+            let result = match render_message(&self.store, &message).await {
+                Ok(rendered) => match message.method {
+                    NotificationMethod::Email => self.dispatch_email(&message, &rendered).await,
+                    NotificationMethod::Webhook => self.dispatch_webhook(&message, &rendered).await,
+                    NotificationMethod::Inbox => self.dispatch_inbox(&message, &rendered).await,
+                },
+                Err(err) => Err(err),
             };
 
             let new_status = match &result {
@@ -336,6 +345,7 @@ where
     async fn dispatch_email(
         &self,
         message: &coder_core::identity::NotificationMessageRecord,
+        rendered: &RenderedMessage,
     ) -> Result<(), NotificationDispatchError> {
         if self.config.smtp_host.is_empty() {
             return Err(NotificationDispatchError::ConfigMissing(
@@ -348,7 +358,12 @@ where
             ));
         }
 
-        let email = build_email(message, &self.config.smtp_from, &self.config.smtp_hello)?;
+        let email = build_email(
+            message,
+            rendered,
+            &self.config.smtp_from,
+            &self.config.smtp_hello,
+        )?;
         let transport = build_smtp_transport(&self.config)?;
 
         match transport.send(email).await {
@@ -378,6 +393,7 @@ where
     async fn dispatch_webhook(
         &self,
         message: &coder_core::identity::NotificationMessageRecord,
+        rendered: &RenderedMessage,
     ) -> Result<(), NotificationDispatchError> {
         // The targets_json field contains the webhook endpoint URL.
         let endpoint: String = serde_json::from_str(&message.targets_json)
@@ -397,11 +413,27 @@ where
             ));
         }
 
+        // Merge the rendered title / body onto the original payload so the
+        // webhook receives both the untouched template context and the
+        // rendered strings. Mirrors Go's `dispatch/webhook.go` which POSTs
+        // a `{msg_id, payload, title, body}` envelope.
+        let payload_value: serde_json::Value =
+            serde_json::from_str(&message.input_json).unwrap_or(serde_json::Value::Null);
+        let envelope = serde_json::json!({
+            "msg_id": message.id,
+            "title": rendered.title,
+            "body": rendered.body,
+            "payload": payload_value,
+        });
+        let body = serde_json::to_string(&envelope).map_err(|e| {
+            NotificationDispatchError::Permanent(format!("serialize webhook envelope: {e}"))
+        })?;
+
         let send_result = self
             .http_client
             .post(&endpoint)
             .header("Content-Type", "application/json")
-            .body(message.input_json.clone())
+            .body(body)
             .send()
             .await;
 
@@ -443,12 +475,15 @@ where
     async fn dispatch_inbox(
         &self,
         message: &coder_core::identity::NotificationMessageRecord,
+        rendered: &RenderedMessage,
     ) -> Result<(), NotificationDispatchError> {
         // Inbox notifications are stored in the database and served via the
         // inbox API. The fetch marks them as sent automatically.
         info!(
             message_id = %message.id,
             user_id = %message.user_id,
+            title = %rendered.title,
+            body_len = rendered.body.len(),
             "inbox notification delivered"
         );
         Ok(())
@@ -536,14 +571,153 @@ fn backoff_duration(attempt: u32, base_secs: u64, max_secs: u64) -> Duration {
     Duration::from_millis(backoff_ms.saturating_add(jitter_ms))
 }
 
+/// Rendered notification fields produced by [`render_message`].
+///
+/// The dispatch loop threads this into the per-method dispatchers so that
+/// downstream handlers do not each have to re-parse `input_json` or
+/// re-render templates.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct RenderedMessage {
+    /// Rendered `title_template` — used as the email subject, webhook
+    /// `title` field, and inbox/webpush title.
+    title: String,
+    /// Rendered `body_template` — used as the email plain-text body,
+    /// webhook `body` field, and inbox/webpush body.
+    body: String,
+}
+
+impl RenderedMessage {
+    /// Test helper returning a rendered message with empty title/body.
+    /// The production rendering path never emits this — unit tests that
+    /// exercise a single dispatcher in isolation use it so they don't
+    /// need to stand up a template fixture.
+    #[cfg(test)]
+    fn empty_for_tests() -> Self {
+        Self {
+            title: String::new(),
+            body: String::new(),
+        }
+    }
+}
+
+/// Returns `true` when `s` contains a Handlebars-style substitution
+/// marker. Used by [`render_message`] to detect messages that were
+/// enqueued pre-rendered (i.e. before the in-dispatch rendering
+/// feature landed).
+fn looks_like_template(s: &str) -> bool {
+    s.contains("{{")
+}
+
+/// Renders the stored notification template against the per-message
+/// `input_json` parameters.
+///
+/// Two backward-compatibility paths are supported:
+///
+/// 1. **Pre-rendered payload** — if `input_json` already carries literal
+///    `subject`/`title` + `plain_body`/`body` strings that contain no
+///    `{{` markers, we treat them as already rendered and return them
+///    verbatim. This handles messages enqueued before the in-dispatch
+///    rendering feature landed and any caller that deliberately wants
+///    to bypass templating.
+/// 2. **Template rendering** — otherwise the dispatcher fetches the
+///    `notification_templates` row matching `notification_template_id`
+///    and renders `title_template` / `body_template` with Handlebars,
+///    using the parsed `input_json` object as the substitution context.
+///
+/// `Err(NotificationDispatchError::Permanent(_))` is returned when the
+/// template is missing, the payload is malformed, or rendering fails.
+/// The caller is expected to mark the message `permanent_failure` —
+/// retrying a broken template just burns the attempt budget.
+///
+/// See `coder/coderd/notifications/render/render.go`. The Go reference
+/// uses `text/template` (`{{.Name}}`); Handlebars is the closest stdlib
+/// equivalent in Rust (`{{name}}`). This is an acceptable divergence
+/// called out in the PR body — existing template strings stored in the
+/// database will need to be updated to Handlebars syntax.
+async fn render_message<S>(
+    store: &S,
+    message: &coder_core::identity::NotificationMessageRecord,
+) -> Result<RenderedMessage, NotificationDispatchError>
+where
+    S: IdentityStore + ?Sized,
+{
+    let payload: serde_json::Value = serde_json::from_str(&message.input_json).map_err(|e| {
+        NotificationDispatchError::Permanent(format!("notification payload is not valid JSON: {e}"))
+    })?;
+
+    // Prefer pre-rendered `subject` / `plain_body` keys (the historical
+    // payload shape we've been using) when they contain no substitution
+    // markers. Fall back to `title` / `body` for future-compatible
+    // payload producers. This keeps existing queued messages deliverable
+    // after the in-dispatch rendering feature lands.
+    let pre_title = payload
+        .get("subject")
+        .or_else(|| payload.get("title"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let pre_body = payload
+        .get("plain_body")
+        .or_else(|| payload.get("body"))
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+
+    if let (Some(title), Some(body)) = (pre_title.as_ref(), pre_body.as_ref()) {
+        if !looks_like_template(title) && !looks_like_template(body) {
+            return Ok(RenderedMessage {
+                title: title.clone(),
+                body: body.clone(),
+            });
+        }
+    }
+
+    let template = store
+        .get_notification_template_by_id(message.notification_template_id)
+        .await
+        .map_err(|e| {
+            NotificationDispatchError::Permanent(format!(
+                "fetch notification template {}: {e}",
+                message.notification_template_id
+            ))
+        })?
+        .ok_or_else(|| {
+            NotificationDispatchError::Permanent(format!(
+                "notification template {} not found",
+                message.notification_template_id
+            ))
+        })?;
+
+    let mut hb = Handlebars::new();
+    // Strict mode surfaces missing keys as an explicit error rather than
+    // substituting an empty string — matches Go's `missingkey=invalid`
+    // option passed to `text/template` in `render/render.go`.
+    hb.set_strict_mode(true);
+
+    let title = hb
+        .render_template(&template.title_template, &payload)
+        .map_err(|e| {
+            NotificationDispatchError::Permanent(format!("template render error (title): {e}"))
+        })?;
+    let body = hb
+        .render_template(&template.body_template, &payload)
+        .map_err(|e| {
+            NotificationDispatchError::Permanent(format!("template render error (body): {e}"))
+        })?;
+
+    Ok(RenderedMessage { title, body })
+}
+
 /// Builds a lettre [`Message`] from a notification record.
 ///
-/// The message's `input_json` payload is expected to contain `user_email`,
-/// `subject`, `plain_body`, and `html_body` fields. Missing fields surface as
-/// [`NotificationDispatchError::ConfigMissing`] so the message stays
-/// retryable (the enqueuer can be re-run).
+/// The subject and plain-text body come from the already-rendered
+/// [`RenderedMessage`]. The HTML body, when present, is pulled from the
+/// payload (`html_body` field) so that enqueuers which want richer email
+/// formatting can still pre-populate it. The recipient is taken from
+/// `payload.user_email` — it is captured at enqueue time and cannot be
+/// rendered, so a missing address surfaces as a retryable
+/// [`NotificationDispatchError::ConfigMissing`].
 fn build_email(
     message: &coder_core::identity::NotificationMessageRecord,
+    rendered: &RenderedMessage,
     from_address: &str,
     hello: &str,
 ) -> Result<Message, NotificationDispatchError> {
@@ -562,16 +736,12 @@ fn build_email(
         ));
     }
 
-    let subject = payload
-        .get("subject")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
-    let plain_body = payload
-        .get("plain_body")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_owned();
+    let subject = rendered.title.clone();
+    let plain_body = rendered.body.clone();
+    // `html_body` is optional — when omitted, lettre's alternative-part
+    // builder still produces a valid multipart email with an empty HTML
+    // alternative. Most callers will either supply pre-rendered HTML or
+    // prefer the plain-text-only path via a separate transport.
     let html_body = payload
         .get("html_body")
         .and_then(|v| v.as_str())
@@ -1321,6 +1491,7 @@ mod tests {
         attempt_increments: Arc<Mutex<Vec<Uuid>>>,
         force_error: Option<String>,
         notifier_paused: bool,
+        templates: Arc<Mutex<HashMap<Uuid, coder_core::api::NotificationTemplate>>>,
     }
 
     impl MockStore {
@@ -1331,6 +1502,7 @@ mod tests {
                 attempt_increments: Arc::new(Mutex::new(Vec::new())),
                 force_error: None,
                 notifier_paused: false,
+                templates: Arc::new(Mutex::new(HashMap::new())),
             }
         }
 
@@ -1346,6 +1518,16 @@ mod tests {
 
         fn with_notifier_paused(mut self, paused: bool) -> Self {
             self.notifier_paused = paused;
+            self
+        }
+
+        /// Registers a notification template so the dispatch loop's
+        /// `get_notification_template_by_id` lookup resolves to this row.
+        fn with_template(self, template: coder_core::api::NotificationTemplate) -> Self {
+            self.templates
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(template.id, template);
             self
         }
 
@@ -1836,6 +2018,19 @@ mod tests {
             Ok(true)
         }
 
+        async fn get_notification_template_by_id(
+            &self,
+            template_id: Uuid,
+        ) -> Result<Option<coder_core::api::NotificationTemplate>, StorageError> {
+            self.maybe_err()?;
+            Ok(self
+                .templates
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&template_id)
+                .cloned())
+        }
+
         // ----- OAuth2 Provider (stubs for test mock) -----
 
         async fn list_oauth2_provider_apps(
@@ -2057,6 +2252,23 @@ mod tests {
     }
 
     fn make_message(method: NotificationMethod, targets_json: &str) -> NotificationMessageRecord {
+        // The default payload carries pre-rendered `subject` and `plain_body`
+        // fields so the dispatch loop's backward-compat path short-circuits
+        // template rendering. Tests that exercise the render path register
+        // a template via `MockStore::with_template` and construct a
+        // parameter-only `input_json` themselves.
+        make_message_with_json(
+            method,
+            targets_json,
+            r#"{"subject":"test subject","plain_body":"test body","user_email":"to@example.com"}"#,
+        )
+    }
+
+    fn make_message_with_json(
+        method: NotificationMethod,
+        targets_json: &str,
+        input_json: &str,
+    ) -> NotificationMessageRecord {
         let now = OffsetDateTime::now_utc();
         NotificationMessageRecord {
             id: Uuid::new_v4(),
@@ -2065,7 +2277,7 @@ mod tests {
             method,
             status: NotificationMessageStatus::Pending,
             attempt_count: 0,
-            input_json: r#"{"key":"value"}"#.to_owned(),
+            input_json: input_json.to_owned(),
             targets_json: targets_json.to_owned(),
             created_at: now,
             updated_at: now,
@@ -2161,6 +2373,81 @@ mod tests {
         let transport_err = NotificationDispatchError::Transport("connection refused".to_owned());
         assert!(transport_err.to_string().contains("transport error"));
         assert!(transport_err.to_string().contains("connection refused"));
+    }
+
+    // ── Template rendering (B.0.1) ──────────────────────────
+
+    fn make_template(title: &str, body: &str) -> (Uuid, coder_core::api::NotificationTemplate) {
+        let id = Uuid::new_v4();
+        (
+            id,
+            coder_core::api::NotificationTemplate {
+                id,
+                name: "test".to_owned(),
+                title_template: title.to_owned(),
+                body_template: body.to_owned(),
+                actions: None,
+                group: None,
+                method: None,
+                kind: "test".to_owned(),
+                enabled_by_default: true,
+            },
+        )
+    }
+
+    #[tokio::test]
+    async fn render_message_substitutes_handlebars_parameters() {
+        let (tpl_id, template) =
+            make_template("Hello {{user_username}}", "Welcome to {{workspace_name}}");
+        let payload = r#"{"user_username":"alice","workspace_name":"my-workspace"}"#;
+        let mut msg = make_message_with_json(NotificationMethod::Inbox, "{}", payload);
+        msg.notification_template_id = tpl_id;
+
+        let store = MockStore::new().with_template(template);
+        let rendered = render_message(&store, &msg)
+            .await
+            .unwrap_or_else(|e| panic!("render should succeed: {e}"));
+        assert_eq!(rendered.title, "Hello alice");
+        assert_eq!(rendered.body, "Welcome to my-workspace");
+    }
+
+    #[tokio::test]
+    async fn render_message_missing_parameter_returns_permanent_failure() {
+        let (tpl_id, template) = make_template("Hello {{missing}}", "Body");
+        let payload = r#"{"user_username":"alice"}"#;
+        let mut msg = make_message_with_json(NotificationMethod::Inbox, "{}", payload);
+        msg.notification_template_id = tpl_id;
+
+        let store = MockStore::new().with_template(template);
+        let err = render_message(&store, &msg)
+            .await
+            .err()
+            .unwrap_or_else(|| panic!("missing parameter should surface as an error"));
+        assert!(
+            err.is_permanent(),
+            "missing-parameter render must be permanent: {err}"
+        );
+        assert!(
+            err.to_string().contains("template render error"),
+            "error should mention render failure: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn render_message_prerendered_payload_bypasses_template_lookup() {
+        // Payload carries literal `subject`/`plain_body` strings with no
+        // `{{` markers — the dispatch loop should skip the template
+        // lookup entirely, so we leave the MockStore without a matching
+        // template and expect the render to still succeed.
+        let payload = r#"{"subject":"already rendered","plain_body":"pre-rendered body text"}"#;
+        let msg = make_message_with_json(NotificationMethod::Inbox, "{}", payload);
+
+        let store = MockStore::new();
+        let rendered = render_message(&store, &msg)
+            .await
+            .unwrap_or_else(|e| panic!("pre-rendered payload should succeed: {e}"));
+        assert_eq!(rendered.title, "already rendered");
+        assert_eq!(rendered.body, "pre-rendered body text");
     }
 
     // ── 6. Service creation and config accessor ─────────────
@@ -2824,7 +3111,10 @@ mod tests {
         let store = MockStore::new();
         let config = NotificationConfig::default();
         let service = make_service(store, config);
-        let err = match service.dispatch_webhook(&msg).await {
+        let err = match service
+            .dispatch_webhook(&msg, &RenderedMessage::empty_for_tests())
+            .await
+        {
             Err(e) => e,
             Ok(()) => panic!("missing URL should fail"),
         };
@@ -2845,7 +3135,10 @@ mod tests {
         let store = MockStore::new();
         let config = NotificationConfig::default();
         let service = make_service(store, config);
-        let err = match service.dispatch_webhook(&msg).await {
+        let err = match service
+            .dispatch_webhook(&msg, &RenderedMessage::empty_for_tests())
+            .await
+        {
             Err(e) => e,
             Ok(()) => panic!("403 should fail"),
         };
@@ -2862,7 +3155,10 @@ mod tests {
         let store = MockStore::new();
         let config = NotificationConfig::default();
         let service = make_service(store, config);
-        let err = match service.dispatch_webhook(&msg).await {
+        let err = match service
+            .dispatch_webhook(&msg, &RenderedMessage::empty_for_tests())
+            .await
+        {
             Err(e) => e,
             Ok(()) => panic!("500 should fail"),
         };
@@ -2884,7 +3180,7 @@ mod tests {
         let config = NotificationConfig::default();
         let service = make_service(store, config);
         service
-            .dispatch_webhook(&msg)
+            .dispatch_webhook(&msg, &RenderedMessage::empty_for_tests())
             .await
             .unwrap_or_else(|e| panic!("200 should succeed: {e}"));
     }
@@ -2905,7 +3201,9 @@ mod tests {
         let service = make_service(store, config);
 
         // First attempt: 500 → Retryable transport error.
-        let first = service.dispatch_webhook(&msg).await;
+        let first = service
+            .dispatch_webhook(&msg, &RenderedMessage::empty_for_tests())
+            .await;
         assert!(
             matches!(first, Err(NotificationDispatchError::Transport(_))),
             "expected retryable transport error, got {first:?}"
@@ -2913,7 +3211,7 @@ mod tests {
 
         // Retry: hits 200.
         service
-            .dispatch_webhook(&msg)
+            .dispatch_webhook(&msg, &RenderedMessage::empty_for_tests())
             .await
             .unwrap_or_else(|e| panic!("retry should succeed: {e}"));
     }
@@ -3140,8 +3438,12 @@ mod tests {
             ..NotificationConfig::default()
         };
         let service = make_service(store, config);
+        let rendered = RenderedMessage {
+            title: "Hello".to_owned(),
+            body: "Plain text body".to_owned(),
+        };
         service
-            .dispatch_email(&msg)
+            .dispatch_email(&msg, &rendered)
             .await
             .unwrap_or_else(|e| panic!("SMTP dispatch should succeed: {e}"));
 
@@ -3184,7 +3486,10 @@ mod tests {
             ..NotificationConfig::default()
         };
         let service = make_service(store, config);
-        let err = match service.dispatch_email(&msg).await {
+        let err = match service
+            .dispatch_email(&msg, &RenderedMessage::empty_for_tests())
+            .await
+        {
             Err(e) => e,
             Ok(()) => panic!("permanent 5xx should fail"),
         };
@@ -3206,7 +3511,10 @@ mod tests {
             ..NotificationConfig::default()
         };
         let service = make_service(store, config);
-        let err = match service.dispatch_email(&msg).await {
+        let err = match service
+            .dispatch_email(&msg, &RenderedMessage::empty_for_tests())
+            .await
+        {
             Err(e) => e,
             Ok(()) => panic!("missing recipient should fail"),
         };

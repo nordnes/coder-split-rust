@@ -2248,6 +2248,19 @@ pub trait IdentityStore: Send + Sync {
         &self,
         message_id: Uuid,
     ) -> Result<bool, StorageError>;
+
+    /// Fetches a single notification template by id.
+    ///
+    /// Used by the dispatch loop to look up the stored `title_template` /
+    /// `body_template` strings at send time and render them against the
+    /// per-message parameters captured in `input_json`. Returns `None`
+    /// when the template id does not exist (e.g. was pruned while a
+    /// message was queued) so the caller can classify the dispatch as a
+    /// permanent failure without blowing up on `?`.
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError>;
 }
 
 /// Narrow storage contract for operational and deployment-owned state.
@@ -4697,6 +4710,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         message_id: Uuid,
     ) -> Result<bool, StorageError>;
 
+    /// Fetches a single notification template by id.
+    ///
+    /// Used by the dispatch loop to render `title_template` /
+    /// `body_template` against per-message parameters at send time.
+    /// Returns `None` when the template id was pruned while a message
+    /// was queued.
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError>;
+
     // ----- Custom roles -----
 
     /// Lists custom roles, optionally filtered by organization.
@@ -6483,6 +6507,13 @@ where
     ) -> Result<bool, StorageError> {
         AppStore::increment_notification_message_attempt_count(self, message_id).await
     }
+
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        AppStore::get_notification_template_by_id(self, template_id).await
+    }
 }
 
 #[async_trait]
@@ -7111,6 +7142,13 @@ where
         (**self)
             .increment_notification_message_attempt_count(message_id)
             .await
+    }
+
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        (**self).get_notification_template_by_id(template_id).await
     }
 }
 

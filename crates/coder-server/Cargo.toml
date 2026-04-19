@@ -41,6 +41,7 @@ metrics-exporter-prometheus.workspace = true
 regex.workspace = true
 reqwest.workspace = true
 rsa.workspace = true
+rust-embed.workspace = true
 semver.workspace = true
 serde.workspace = true
 rand.workspace = true

@@ -33,9 +33,10 @@ use coder_core::{
     ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError,
     config::{
-        DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig, LoggingConfig,
-        NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SecurityHeadersConfig,
-        SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig, WorkspaceConfig,
+        DangerousConfig, FrontendConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig,
+        LoggingConfig, NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig,
+        SecurityHeadersConfig, SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig,
+        WorkspaceConfig,
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
@@ -719,6 +720,14 @@ struct ServerArgs {
     /// Used as the `sub` claim in VAPID signatures sent to push services.
     #[arg(long, env = "CODER_VAPID_SUB", default_value = "")]
     vapid_sub: String,
+
+    /// Disable the embedded React SPA served from the catch-all fallback.
+    /// Useful when `coderd` runs behind a standalone static-file server
+    /// (e.g. a CDN or reverse proxy) that already handles `/` and
+    /// `/assets/*`. When disabled, the fallback handler returns the
+    /// historical `SLIM_BUILD_MESSAGE` text at `/` only.
+    #[arg(long, env = "CODER_DISABLE_EMBEDDED_FRONTEND", default_value_t = false)]
+    disable_embedded_frontend: bool,
 }
 
 #[derive(Debug, Error)]
@@ -1417,6 +1426,9 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         verify_instance_identity: args.verify_instance_identity,
         aws_instance_identity_certs_dir: args.aws_instance_identity_certs_dir,
         vapid_sub: args.vapid_sub,
+        frontend: FrontendConfig {
+            enabled: !args.disable_embedded_frontend,
+        },
     })
 }
 

@@ -86,6 +86,14 @@ web-push = "0.11"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "builder", "pool", "hostname"] }
 yamux = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
+# Embedded React SPA assets (infrastructure for the frontend-embed slice —
+# the `site/out/` build output is baked into the `coderd` binary at compile
+# time so a single artefact can serve both the API and the UI).
+rust-embed = { version = "8.5", default-features = false }
+# Server-side template rendering for DB-stored notification templates.
+# The Go reference uses `text/template`; Rust's standard ecosystem is
+# Handlebars, which differs syntactically (`{{name}}` vs `{{.Name}}`).
+handlebars = { version = "6.2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

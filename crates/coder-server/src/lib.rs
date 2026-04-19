@@ -36,6 +36,7 @@ pub mod connection_guard;
 pub mod crypto_key_rotator;
 mod error;
 mod extractors;
+pub(crate) mod frontend;
 mod handlers;
 pub(crate) mod helpers;
 pub(crate) mod instance_identity;

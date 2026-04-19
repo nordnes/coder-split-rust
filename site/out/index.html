@@ -1,0 +1,46 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Coder (Rust backend)</title>
+    <style>
+        :root {
+            color-scheme: light dark;
+        }
+        body {
+            font-family: system-ui, -apple-system, sans-serif;
+            margin: 0;
+            padding: 4rem 2rem;
+            max-width: 48rem;
+            margin-inline: auto;
+            line-height: 1.5;
+        }
+        code {
+            font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+            padding: 0.1em 0.3em;
+            background: rgba(128, 128, 128, 0.15);
+            border-radius: 4px;
+        }
+        a {
+            color: #4f8cff;
+        }
+    </style>
+</head>
+<body>
+    <h1>Coder</h1>
+    <p>This deployment is running the Rust backend rewrite of Coder. The
+    embedded React SPA build output (<code>site/out/</code>) has not been
+    populated in this build, so this placeholder is served from the
+    single-binary <code>rust-embed</code> fallback instead.</p>
+    <p>The API remains fully functional:</p>
+    <ul>
+        <li><a href="/api/v2/buildinfo">/api/v2/buildinfo</a> — running version &amp; metadata</li>
+        <li><a href="/healthz">/healthz</a> — liveness probe</li>
+        <li><a href="/api/v2">/api/v2</a> — REST API root</li>
+    </ul>
+    <p>To build with the real SPA, run the Coder frontend build so
+    <code>site/out/index.html</code> is overwritten before compiling
+    <code>coderd</code>.</p>
+</body>
+</html>
