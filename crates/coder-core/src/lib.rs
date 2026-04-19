@@ -151,7 +151,7 @@ pub use identity::{
     CreateOrganizationInput, CreateOrganizationStoreError, CreateUserInput, CreateUserStoreError,
     CustomRoleRecord, FirstUserRecord, GroupMemberRecord, GroupRecord,
     InsertOrganizationMemberError, LoginType, NotificationMessageRecord, NotificationMessageStatus,
-    NotificationMethod, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
+    NotificationMethod, OAuth2PendingConsent, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
     OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrgResourceCounts,
     OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
     SlimRoleRecord, TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput,

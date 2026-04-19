@@ -2186,6 +2186,43 @@ mod tests {
             Err(StorageError::unavailable("not implemented in MockStore"))
         }
 
+        async fn has_oauth2_provider_app_user_approval(
+            &self,
+            _app_id: Uuid,
+            _user_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn insert_oauth2_provider_app_user_approval(
+            &self,
+            _app_id: Uuid,
+            _user_id: Uuid,
+            _scope: &str,
+        ) -> Result<(), StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn insert_oauth2_pending_consent(
+            &self,
+            _app_id: Uuid,
+            _user_id: Uuid,
+            _state: &str,
+            _resource: &str,
+            _code_challenge: &str,
+            _code_challenge_method: &str,
+            _expires_at: time::OffsetDateTime,
+        ) -> Result<Uuid, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
+        async fn take_oauth2_pending_consent(
+            &self,
+            _nonce: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2PendingConsent>, StorageError> {
+            Err(StorageError::unavailable("not implemented in MockStore"))
+        }
+
         async fn list_oauth2_provider_app_secrets(
             &self,
             _app_id: Uuid,

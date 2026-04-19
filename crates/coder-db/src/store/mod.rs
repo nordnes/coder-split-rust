@@ -48,30 +48,31 @@ use coder_core::{
     InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
     InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord, LoginType, MinimalOrganization,
     MinimalUser, NotificationMessageRecord, NotificationMessageStatus, NotificationMethod,
-    OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord, OAuth2ProviderAppSecretRecord,
-    OAuth2ProviderAppTokenRecord, OrgResourceCounts, OrganizationMemberListFilter,
-    OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
-    ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
-    ProvisionerJobLogRecord, ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerJobStatus,
-    ProvisionerJobTimingRecord, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerStore, ProvisionerType, ReplicaRow,
-    SessionCountDeploymentStatsResponse, SlimRoleRecord, StorageError, TaskListFilter, TaskRecord,
-    TaskSnapshotRecord, TaskStatus, TokenConfigRecord, UpdateChatMessageContentInput,
-    UpdateChatModelConfigInput, UpdateChatProviderInput, UpdateGroupInput,
-    UpdateOAuth2ProviderAppInput, UpdateOrganizationInput, UpdateOrganizationStoreError,
-    UpdateWorkspaceProxyInput, UpdateWorkspaceProxyRegistrationInput, UpsertAgentMetadataEntry,
-    UpsertCustomRoleInput, UpsertExternalAuthLinkInput, UpsertPortShareInput,
-    UpsertProvisionerDaemonInput, UpsertReplicaInput, UpsertUserLinkInput, UserAppearanceRecord,
-    UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
-    UserRecord, UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord,
-    WorkspaceAgentDevcontainerRow, WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow,
-    WorkspaceAgentMetadataRow, WorkspaceAgentPortShareRecord, WorkspaceAgentRow,
-    WorkspaceAgentScriptRow, WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput,
-    WorkspaceAppRow, WorkspaceAppStatusRow, WorkspaceBuildParameterRecord, WorkspaceBuildRecord,
-    WorkspaceBuildStatsInput, WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse,
-    WorkspaceListFilter, WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceProxyRow,
-    WorkspaceRecord, WorkspaceResourceMetadataRecord, WorkspaceResourceRecord,
-    WorkspaceSharingMode, WorkspaceStatsWorkspaceInput,
+    OAuth2PendingConsent, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
+    OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrgResourceCounts,
+    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
+    PersistAuditLogInput, ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord,
+    ProvisionerDaemonRecord, ProvisionerJobLogRecord, ProvisionerJobRecord,
+    ProvisionerJobStatsInput, ProvisionerJobStatus, ProvisionerJobTimingRecord,
+    ProvisionerJobTimingStage, ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod,
+    ProvisionerStore, ProvisionerType, ReplicaRow, SessionCountDeploymentStatsResponse,
+    SlimRoleRecord, StorageError, TaskListFilter, TaskRecord, TaskSnapshotRecord, TaskStatus,
+    TokenConfigRecord, UpdateChatMessageContentInput, UpdateChatModelConfigInput,
+    UpdateChatProviderInput, UpdateGroupInput, UpdateOAuth2ProviderAppInput,
+    UpdateOrganizationInput, UpdateOrganizationStoreError, UpdateWorkspaceProxyInput,
+    UpdateWorkspaceProxyRegistrationInput, UpsertAgentMetadataEntry, UpsertCustomRoleInput,
+    UpsertExternalAuthLinkInput, UpsertPortShareInput, UpsertProvisionerDaemonInput,
+    UpsertReplicaInput, UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord,
+    UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord, UserRecord,
+    UserStatus, UserStatusChangeRecord, WebpushSubscriptionRecord, WorkspaceAgentDevcontainerRow,
+    WorkspaceAgentLogRow, WorkspaceAgentLogSourceRow, WorkspaceAgentMetadataRow,
+    WorkspaceAgentPortShareRecord, WorkspaceAgentRow, WorkspaceAgentScriptRow,
+    WorkspaceAgentScriptTimingRow, WorkspaceAgentStatInput, WorkspaceAppRow, WorkspaceAppStatusRow,
+    WorkspaceBuildParameterRecord, WorkspaceBuildRecord, WorkspaceBuildStatsInput,
+    WorkspaceConnectionLatencyMs, WorkspaceDeploymentStatsResponse, WorkspaceListFilter,
+    WorkspaceProxyHealthInput, WorkspaceProxyHealthRecord, WorkspaceProxyRow, WorkspaceRecord,
+    WorkspaceResourceMetadataRecord, WorkspaceResourceRecord, WorkspaceSharingMode,
+    WorkspaceStatsWorkspaceInput,
 };
 use coder_core::{
     InboxNotification, InboxNotificationAction, NotificationPreference, NotificationTemplate,
@@ -896,6 +897,7 @@ struct StoredOAuth2ProviderAppRow {
     redirect_uris: Vec<String>,
     created_by: Option<Uuid>,
     registration_access_token: Option<Vec<u8>>,
+    first_party: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -2258,6 +2260,7 @@ fn oauth2_provider_app_from_row(row: StoredOAuth2ProviderAppRow) -> OAuth2Provid
         redirect_uris: row.redirect_uris,
         created_by: row.created_by,
         registration_access_token: row.registration_access_token,
+        first_party: row.first_party,
     }
 }
 
@@ -2737,6 +2740,7 @@ mod tests {
                 icon: "https://example.com/icon.png".to_string(),
                 callback_url: "https://example.com/callback".to_string(),
                 created_by: Some(user_id),
+                first_party: true,
             })
             .await?;
 
@@ -2792,6 +2796,7 @@ mod tests {
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
                 created_by: Some(user_id),
+                first_party: true,
             })
             .await?;
 
@@ -2851,6 +2856,7 @@ mod tests {
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
                 created_by: Some(user_id),
+                first_party: true,
             })
             .await?;
 
@@ -2938,6 +2944,7 @@ mod tests {
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
                 created_by: Some(user_id),
+                first_party: true,
             })
             .await?;
 
@@ -4956,6 +4963,7 @@ mod tests {
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
                 created_by: Some(user_id),
+                first_party: true,
             })
             .await?;
 
@@ -5077,6 +5085,7 @@ mod tests {
                 icon: "".to_string(),
                 callback_url: "https://example.com/cb".to_string(),
                 created_by: Some(user_id),
+                first_party: true,
             })
             .await?;
 

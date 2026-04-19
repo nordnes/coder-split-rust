@@ -649,6 +649,72 @@ pub(crate) async fn get_oauth2_authorize(
         }
     };
 
+    // W4.38: Third-party clients must go through a user-facing consent page
+    // unless the user has already approved this app. First-party clients
+    // (admin-registered) auto-approve, preserving the pre-consent behaviour.
+    let approval = if app.first_party {
+        true
+    } else {
+        state
+            .store
+            .has_oauth2_provider_app_user_approval(client_id, context.user.id)
+            .await
+            .map_err(AppError::from)?
+    };
+
+    if !approval {
+        // Render the consent page. Persist a pending-consent nonce so the
+        // POST /oauth2/authorize/consent endpoint can confirm the user
+        // agreed to these exact authorize parameters.
+        // 10-minute window for the consent page (matches typical auth-code TTL).
+        let expires_at = OffsetDateTime::now_utc() + ::time::Duration::minutes(10);
+        let nonce = state
+            .store
+            .insert_oauth2_pending_consent(
+                client_id,
+                context.user.id,
+                &params.state,
+                &params.resource,
+                &params.code_challenge,
+                &params.code_challenge_method,
+                expires_at,
+            )
+            .await
+            .map_err(AppError::from)?;
+
+        // Build cancel URL (redirect_uri?error=access_denied&state=...).
+        let mut cancel_url = redirect_url.clone();
+        cancel_url
+            .query_pairs_mut()
+            .append_pair("error", "access_denied");
+        if !params.state.is_empty() {
+            cancel_url
+                .query_pairs_mut()
+                .append_pair("state", &params.state);
+        }
+
+        let body = render_consent_page(&ConsentTemplate {
+            app_name: &app.name,
+            app_icon: &app.icon,
+            callback_url: &app.callback_url,
+            scope: &params.scope,
+            nonce: nonce.to_string().as_str(),
+            cancel_url: cancel_url.as_str(),
+        });
+
+        return Ok((
+            StatusCode::OK,
+            [
+                ("content-type", "text/html; charset=utf-8"),
+                // Prevent clickjacking per coder/security#121.
+                ("content-security-policy", "frame-ancestors 'none'"),
+                ("x-frame-options", "DENY"),
+            ],
+            body,
+        )
+            .into_response());
+    }
+
     let raw_code = match state
         .oauth2_provider
         .create_authorization_code(
@@ -675,6 +741,225 @@ pub(crate) async fn get_oauth2_authorize(
         [("location", redirect_url.as_str())],
     )
         .into_response())
+}
+
+/// Fields consumed by the tiny HTML consent template. All values are HTML
+/// escaped before substitution.
+struct ConsentTemplate<'a> {
+    app_name: &'a str,
+    app_icon: &'a str,
+    callback_url: &'a str,
+    scope: &'a str,
+    nonce: &'a str,
+    cancel_url: &'a str,
+}
+
+/// Minimal `{{PLACEHOLDER}}` substitution so we don't pull in a templating
+/// engine for a single static page.
+const CONSENT_TEMPLATE: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Authorize {{APP_NAME}}</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 28rem; margin: 3rem auto; padding: 1rem; }
+  .app { display: flex; align-items: center; gap: 0.75rem; margin-bottom: 1rem; }
+  .app img { width: 48px; height: 48px; border-radius: 6px; }
+  .scopes { margin: 1rem 0; padding: 0.75rem 1rem; background: #f4f4f5; border-radius: 6px; }
+  button, .cancel { padding: 0.5rem 1.25rem; border-radius: 6px; font-size: 1rem; cursor: pointer; }
+  button { background: #0369a1; color: #fff; border: 0; }
+  .cancel { background: transparent; border: 1px solid #a1a1aa; color: #18181b; text-decoration: none; }
+  .actions { display: flex; gap: 0.75rem; }
+</style>
+</head>
+<body>
+<h1>Authorize {{APP_NAME}}</h1>
+<div class="app">
+  {{APP_ICON_TAG}}
+  <div>
+    <strong>{{APP_NAME}}</strong><br>
+    <small>redirects to {{CALLBACK_URL}}</small>
+  </div>
+</div>
+<p>This application is requesting access to your Coder account.</p>
+<div class="scopes"><strong>Scopes:</strong> {{SCOPE_OR_DEFAULT}}</div>
+<form method="POST" action="/oauth2/authorize/consent">
+  <input type="hidden" name="nonce" value="{{NONCE}}">
+  <div class="actions">
+    <button type="submit" name="decision" value="approve">Approve</button>
+    <a class="cancel" href="{{CANCEL_URL}}">Deny</a>
+  </div>
+</form>
+</body>
+</html>
+"#;
+
+fn render_consent_page(t: &ConsentTemplate<'_>) -> String {
+    let icon_tag = if t.app_icon.is_empty() {
+        String::new()
+    } else {
+        format!("<img src=\"{}\" alt=\"\">", html_escape(t.app_icon))
+    };
+    let scope_or_default = if t.scope.trim().is_empty() {
+        "(default)".to_owned()
+    } else {
+        html_escape(t.scope)
+    };
+    CONSENT_TEMPLATE
+        .replace("{{APP_NAME}}", &html_escape(t.app_name))
+        .replace("{{APP_ICON_TAG}}", &icon_tag)
+        .replace("{{CALLBACK_URL}}", &html_escape(t.callback_url))
+        .replace("{{SCOPE_OR_DEFAULT}}", &scope_or_default)
+        .replace("{{NONCE}}", &html_escape(t.nonce))
+        .replace("{{CANCEL_URL}}", &html_escape(t.cancel_url))
+}
+
+/// Minimal HTML-entity escaping — the consent page only interpolates values
+/// whose characters may include `<`, `>`, `&`, `"`, or `'`.
+fn html_escape(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    for c in input.chars() {
+        match c {
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '&' => out.push_str("&amp;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Form body for `POST /oauth2/authorize/consent`.
+#[derive(Debug, Deserialize)]
+pub(crate) struct OAuth2ConsentForm {
+    pub nonce: String,
+    #[serde(default)]
+    pub decision: String,
+}
+
+/// `POST /oauth2/authorize/consent` — completes the consent flow.
+///
+/// Validates the pending-consent nonce against the session user, records an
+/// approval in `oauth2_provider_app_user_approvals`, then issues an
+/// authorization code and redirects to the app's callback URL.
+pub(crate) async fn post_oauth2_authorize_consent(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Form(form): Form<OAuth2ConsentForm>,
+) -> Result<Response, AppError> {
+    let Some(context) = authenticate_request(&state, &headers).await? else {
+        return Ok(unauthorized_response("Missing or invalid session token."));
+    };
+
+    let nonce = match Uuid::parse_str(&form.nonce) {
+        Ok(n) => n,
+        Err(_) => {
+            return Ok(OAuth2Error::bad_request(
+                OAuth2ErrorCode::InvalidRequest,
+                "Invalid consent nonce.",
+            )
+            .into_response());
+        }
+    };
+
+    let pending = match state
+        .store
+        .take_oauth2_pending_consent(nonce)
+        .await
+        .map_err(AppError::from)?
+    {
+        Some(p) => p,
+        None => {
+            return Ok(OAuth2Error::bad_request(
+                OAuth2ErrorCode::InvalidRequest,
+                "Consent session has expired or is invalid.",
+            )
+            .into_response());
+        }
+    };
+
+    // Lock the pending consent to the session user — this is the defence
+    // against another user replaying a stolen nonce.
+    if pending.user_id != context.user.id {
+        return Ok(OAuth2Error::bad_request(
+            OAuth2ErrorCode::InvalidRequest,
+            "Consent session does not match the authenticated user.",
+        )
+        .into_response());
+    }
+
+    // Look up the app for the callback URL.
+    let app = match state.oauth2_provider.get_app(pending.app_id).await {
+        Ok(app) => app,
+        Err(error) => return Ok(oauth2_provider_error_to_oauth2_error(error).into_response()),
+    };
+    let mut redirect_url = match url::Url::parse(&app.callback_url) {
+        Ok(url) => url,
+        Err(_) => {
+            return Ok(
+                OAuth2Error::server_error("App has invalid callback URL configured.")
+                    .into_response(),
+            );
+        }
+    };
+
+    if form.decision != "approve" {
+        redirect_url
+            .query_pairs_mut()
+            .append_pair("error", "access_denied");
+        if !pending.state.is_empty() {
+            redirect_url
+                .query_pairs_mut()
+                .append_pair("state", &pending.state);
+        }
+        return Ok((StatusCode::SEE_OTHER, [("location", redirect_url.as_str())]).into_response());
+    }
+
+    // Record the approval so subsequent authorize requests skip consent.
+    state
+        .store
+        .insert_oauth2_provider_app_user_approval(pending.app_id, context.user.id, "")
+        .await
+        .map_err(AppError::from)?;
+
+    let raw_code = match state
+        .oauth2_provider
+        .create_authorization_code(
+            pending.app_id,
+            context.user.id,
+            &pending.resource,
+            &pending.code_challenge,
+            &pending.code_challenge_method,
+        )
+        .await
+    {
+        Ok(code) => code,
+        Err(error) => return Ok(oauth2_provider_error_to_oauth2_error(error).into_response()),
+    };
+
+    redirect_url
+        .query_pairs_mut()
+        .append_pair("code", &raw_code);
+    if !pending.state.is_empty() {
+        redirect_url
+            .query_pairs_mut()
+            .append_pair("state", &pending.state);
+    }
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Oauth2ProviderApp,
+        Some(&context.user),
+        Some(pending.app_id.to_string()),
+        "user approved oauth2 provider app (consent screen)",
+    )
+    .await;
+
+    // 303 so the browser follows the redirect with GET to the callback URL.
+    Ok((StatusCode::SEE_OTHER, [("location", redirect_url.as_str())]).into_response())
 }
 
 pub(crate) async fn post_oauth2_authorize(
@@ -1064,9 +1349,11 @@ pub(crate) async fn post_oauth2_register(
     // Go behavior where only the primary redirect_uri is stored.
     let callback_url = req.redirect_uris.first().cloned().unwrap_or_default();
 
+    // Dynamic registrations are third-party by definition — trigger the
+    // consent screen on first authorize (W4.38).
     let app = match state
         .oauth2_provider
-        .create_app(&client_name, &req.logo_uri, &callback_url, None)
+        .create_app_dynamic(&client_name, &req.logo_uri, &callback_url)
         .await
     {
         Ok(app) => app,
@@ -1295,6 +1582,32 @@ pub(crate) async fn put_oauth2_client_configuration(
         }
     };
 
+    // RFC 7592 §2.1: the server MAY rotate the registration access token on
+    // each successful update. We always rotate — the prior token is
+    // invalidated by overwriting its stored hash with the new one, matching
+    // the Go reference behaviour (W4.39).
+    let new_registration_access_token = generate_registration_token();
+    {
+        use sha2::Digest;
+        let token_hash = sha2::Sha256::digest(new_registration_access_token.as_bytes()).to_vec();
+        if let Err(e) = state
+            .store
+            .update_oauth2_provider_app_registration_token(app.id, &token_hash)
+            .await
+        {
+            tracing::error!(
+                app_id = %app.id,
+                error = %e,
+                "failed to persist rotated registration access token hash"
+            );
+            return Ok(oauth2_registration_error(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "server_error",
+                "Failed to rotate registration access token",
+            ));
+        }
+    }
+
     let access_url = state.config.access_url.to_string();
     let access_url = access_url.trim_end_matches('/');
 
@@ -1313,7 +1626,9 @@ pub(crate) async fn put_oauth2_client_configuration(
         token_endpoint_auth_method: req.token_endpoint_auth_method,
         scope: req.scope,
         contacts: req.contacts,
-        registration_access_token: String::new(), // RFC 7592: Not returned for security
+        // RFC 7592 §2.1: return the rotated registration access token in
+        // the PUT response — the only channel the client has to learn it.
+        registration_access_token: new_registration_access_token,
         registration_client_uri: format!("{access_url}/oauth2/clients/{}", app.id),
     };
 
