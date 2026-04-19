@@ -2,6 +2,174 @@
 
 use super::*;
 
+// ---------------------------------------------------------------------------
+// RFC 6749 error envelope — typed wrapper + `IntoResponse` mapping
+// ---------------------------------------------------------------------------
+
+/// RFC 6749 §5.2 error codes recognised by the token, authorize, and revoke
+/// endpoints. Constructing any other error code would put us outside the RFC,
+/// so this enum is the only source of error identifiers for those handlers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum OAuth2ErrorCode {
+    /// The request is missing a required parameter, includes an unsupported
+    /// parameter value, or is otherwise malformed.
+    InvalidRequest,
+    /// Client authentication failed (unknown client, no credentials, or
+    /// unsupported auth method).
+    InvalidClient,
+    /// The provided authorization grant or refresh token is invalid,
+    /// expired, revoked, or was issued to another client.
+    InvalidGrant,
+    /// The authenticated client is not authorized to use this grant type.
+    #[allow(dead_code)]
+    UnauthorizedClient,
+    /// The authorization grant type is not supported by the server.
+    UnsupportedGrantType,
+    /// The requested scope is invalid, unknown, malformed, or exceeds the
+    /// scope granted by the resource owner.
+    InvalidScope,
+    /// The resource owner or authorization server denied the request.
+    #[allow(dead_code)]
+    AccessDenied,
+    /// The authorization server encountered an unexpected condition.
+    ServerError,
+    /// The authorization server is currently unable to handle the request.
+    #[allow(dead_code)]
+    TemporarilyUnavailable,
+    /// RFC 8707: the requested `resource` indicator is invalid or not
+    /// permitted for this client.
+    InvalidTarget,
+}
+
+impl OAuth2ErrorCode {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::InvalidRequest => "invalid_request",
+            Self::InvalidClient => "invalid_client",
+            Self::InvalidGrant => "invalid_grant",
+            Self::UnauthorizedClient => "unauthorized_client",
+            Self::UnsupportedGrantType => "unsupported_grant_type",
+            Self::InvalidScope => "invalid_scope",
+            Self::AccessDenied => "access_denied",
+            Self::ServerError => "server_error",
+            Self::TemporarilyUnavailable => "temporarily_unavailable",
+            Self::InvalidTarget => "invalid_target",
+        }
+    }
+}
+
+/// An RFC 6749 §5.2 compliant error returned from the OAuth2 token,
+/// authorize, and revoke endpoints.
+///
+/// Implements `IntoResponse` so handlers can return `Err(OAuth2Error{…})`
+/// without duplicating the status-code/JSON-body construction.
+#[derive(Clone, Debug)]
+pub(crate) struct OAuth2Error {
+    pub(crate) status: StatusCode,
+    pub(crate) code: OAuth2ErrorCode,
+    pub(crate) description: String,
+}
+
+impl OAuth2Error {
+    pub(crate) fn new(
+        status: StatusCode,
+        code: OAuth2ErrorCode,
+        description: impl Into<String>,
+    ) -> Self {
+        Self {
+            status,
+            code,
+            description: description.into(),
+        }
+    }
+
+    /// RFC 6749 §5.2 prescribes `400 Bad Request` for most token-endpoint
+    /// errors (`invalid_request`, `invalid_grant`, `unsupported_grant_type`,
+    /// `invalid_scope`, `invalid_target`).
+    pub(crate) fn bad_request(code: OAuth2ErrorCode, description: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, code, description)
+    }
+
+    /// RFC 6749 §5.2 requires `401 Unauthorized` for `invalid_client` when
+    /// client authentication is attempted but fails.
+    pub(crate) fn invalid_client(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::UNAUTHORIZED,
+            OAuth2ErrorCode::InvalidClient,
+            description,
+        )
+    }
+
+    /// Unexpected server-side failures — the body is still RFC 6749 compliant.
+    pub(crate) fn server_error(description: impl Into<String>) -> Self {
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            OAuth2ErrorCode::ServerError,
+            description,
+        )
+    }
+
+    fn into_response_impl(self) -> Response {
+        (
+            self.status,
+            Json(OAuth2ErrorResponse {
+                error: self.code.as_str().to_owned(),
+                error_description: self.description,
+                error_uri: String::new(),
+            }),
+        )
+            .into_response()
+    }
+}
+
+impl IntoResponse for OAuth2Error {
+    fn into_response(self) -> Response {
+        self.into_response_impl()
+    }
+}
+
+/// Translates an [`OAuth2ProviderError`] (from the provider service) into the
+/// appropriate [`OAuth2Error`] so handlers on the token/authorize endpoints
+/// can use RFC 6749 error bodies consistently.
+///
+/// The provider error semantics map:
+/// * `Storage` → `500 server_error` (DB failure).
+/// * `BadRequest` → `400`; the message is scanned for known tags so RFC
+///   8707 `invalid_target` and scope errors surface with the correct code.
+/// * `NotFound` → `400 invalid_request` (missing client, missing secret).
+/// * `Unauthorized` → `401 invalid_grant` (bad code/token/client secret).
+fn oauth2_provider_error_to_oauth2_error(error: OAuth2ProviderError) -> OAuth2Error {
+    match error {
+        OAuth2ProviderError::Storage(e) => OAuth2Error::server_error(format!("{e}")),
+        OAuth2ProviderError::BadRequest { message } => {
+            // The provider uses these message substrings for the two
+            // resource-indicator branches that map to RFC 8707
+            // `invalid_target`; everything else maps to `invalid_request`.
+            let lower = message.to_ascii_lowercase();
+            let code = if lower.contains("resource parameter") {
+                OAuth2ErrorCode::InvalidTarget
+            } else {
+                OAuth2ErrorCode::InvalidRequest
+            };
+            OAuth2Error::bad_request(code, message)
+        }
+        OAuth2ProviderError::NotFound { message } => {
+            OAuth2Error::bad_request(OAuth2ErrorCode::InvalidRequest, message)
+        }
+        OAuth2ProviderError::Unauthorized { message } => {
+            // Treat every unauthorized as `invalid_grant` for the token
+            // endpoint — bad code, bad refresh, bad secret. The
+            // `invalid_client` branch is only exercised from HTTP-Basic
+            // handling, which does not go through this function.
+            OAuth2Error::new(
+                StatusCode::UNAUTHORIZED,
+                OAuth2ErrorCode::InvalidGrant,
+                message,
+            )
+        }
+    }
+}
+
 pub(crate) async fn list_oauth2_provider_apps(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -448,26 +616,20 @@ pub(crate) async fn get_oauth2_authorize(
         return Ok(unauthorized_response("Missing or invalid session token."));
     };
     if params.response_type != "code" {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "response_type must be \"code\".",
-                "Only the authorization code flow is supported.",
-            )),
+        return Ok(OAuth2Error::bad_request(
+            OAuth2ErrorCode::InvalidRequest,
+            "response_type must be \"code\".",
         )
-            .into_response());
+        .into_response());
     }
     let client_id = match Uuid::parse_str(&params.client_id) {
         Ok(id) => id,
         Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(
-                    "Invalid client_id.",
-                    "The client_id must be a valid UUID.",
-                )),
+            return Ok(OAuth2Error::bad_request(
+                OAuth2ErrorCode::InvalidRequest,
+                "Invalid client_id: must be a valid UUID.",
             )
-                .into_response());
+            .into_response());
         }
     };
 
@@ -475,19 +637,15 @@ pub(crate) async fn get_oauth2_authorize(
     // code.  This prevents orphaned codes when the callback URL is invalid.
     let app = match state.oauth2_provider.get_app(client_id).await {
         Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
+        Err(error) => return Ok(oauth2_provider_error_to_oauth2_error(error).into_response()),
     };
     let mut redirect_url = match url::Url::parse(&app.callback_url) {
         Ok(url) => url,
         Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(
-                    "App has invalid callback URL.",
-                    "The callback URL configured for this app is not a valid URL.",
-                )),
-            )
-                .into_response());
+            return Ok(
+                OAuth2Error::server_error("App has invalid callback URL configured.")
+                    .into_response(),
+            );
         }
     };
 
@@ -503,7 +661,7 @@ pub(crate) async fn get_oauth2_authorize(
         .await
     {
         Ok(code) => code,
-        Err(error) => return handle_oauth2_provider_error(error),
+        Err(error) => return Ok(oauth2_provider_error_to_oauth2_error(error).into_response()),
     };
 
     // Build the redirect URL with the code and state.
@@ -529,29 +687,29 @@ pub(crate) async fn post_oauth2_authorize(
     };
     let Json(params) = match payload {
         Ok(p) => p,
-        Err(error) => return Ok(invalid_json_response(error)),
+        Err(error) => {
+            return Ok(OAuth2Error::bad_request(
+                OAuth2ErrorCode::InvalidRequest,
+                format!("Invalid JSON body: {error}"),
+            )
+            .into_response());
+        }
     };
     if params.response_type != "code" {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "response_type must be \"code\".",
-                "Only the authorization code flow is supported.",
-            )),
+        return Ok(OAuth2Error::bad_request(
+            OAuth2ErrorCode::InvalidRequest,
+            "response_type must be \"code\".",
         )
-            .into_response());
+        .into_response());
     }
     let client_id = match Uuid::parse_str(&params.client_id) {
         Ok(id) => id,
         Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(
-                    "Invalid client_id.",
-                    "The client_id must be a valid UUID.",
-                )),
+            return Ok(OAuth2Error::bad_request(
+                OAuth2ErrorCode::InvalidRequest,
+                "Invalid client_id: must be a valid UUID.",
             )
-                .into_response());
+            .into_response());
         }
     };
 
@@ -559,19 +717,15 @@ pub(crate) async fn post_oauth2_authorize(
     // code.  This prevents orphaned codes when the callback URL is invalid.
     let app = match state.oauth2_provider.get_app(client_id).await {
         Ok(app) => app,
-        Err(error) => return handle_oauth2_provider_error(error),
+        Err(error) => return Ok(oauth2_provider_error_to_oauth2_error(error).into_response()),
     };
     let mut redirect_url = match url::Url::parse(&app.callback_url) {
         Ok(url) => url,
         Err(_) => {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(ApiResponse::error(
-                    "App has invalid callback URL.",
-                    "The callback URL configured for this app is not a valid URL.",
-                )),
-            )
-                .into_response());
+            return Ok(
+                OAuth2Error::server_error("App has invalid callback URL configured.")
+                    .into_response(),
+            );
         }
     };
 
@@ -587,7 +741,7 @@ pub(crate) async fn post_oauth2_authorize(
         .await
     {
         Ok(code) => code,
-        Err(error) => return handle_oauth2_provider_error(error),
+        Err(error) => return Ok(oauth2_provider_error_to_oauth2_error(error).into_response()),
     };
 
     // Build the redirect URL with the code and state.
@@ -647,16 +801,11 @@ pub(crate) async fn post_oauth2_token(
         let body_has_id = !request.client_id.is_empty();
         let body_has_secret = !request.client_secret.is_empty();
         if body_has_id || body_has_secret {
-            return Ok((
-                StatusCode::BAD_REQUEST,
-                Json(OAuth2ErrorResponse {
-                    error: "invalid_request".to_owned(),
-                    error_description:
-                        "Use either HTTP Basic authentication or body credentials, not both."
-                            .to_owned(),
-                }),
+            return Ok(OAuth2Error::bad_request(
+                OAuth2ErrorCode::InvalidRequest,
+                "Use either HTTP Basic authentication or body credentials, not both.",
             )
-                .into_response());
+            .into_response());
         }
         request.client_id = basic_id;
         request.client_secret = basic_secret;
@@ -667,14 +816,10 @@ pub(crate) async fn post_oauth2_token(
             let client_id = match Uuid::parse_str(&request.client_id) {
                 Ok(id) => id,
                 Err(_) => {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::error(
-                            "Invalid client_id.",
-                            "The client_id must be a valid UUID.",
-                        )),
+                    return Ok(OAuth2Error::invalid_client(
+                        "Invalid client_id: must be a valid UUID.",
                     )
-                        .into_response());
+                    .into_response());
                 }
             };
             let result = match state
@@ -689,7 +834,9 @@ pub(crate) async fn post_oauth2_token(
                 .await
             {
                 Ok(result) => result,
-                Err(error) => return handle_oauth2_provider_error(error),
+                Err(error) => {
+                    return Ok(oauth2_provider_error_to_oauth2_error(error).into_response());
+                }
             };
             let response = OAuth2TokenResponse {
                 access_token: result.access_token,
@@ -703,16 +850,26 @@ pub(crate) async fn post_oauth2_token(
             let client_id = match Uuid::parse_str(&request.client_id) {
                 Ok(id) => id,
                 Err(_) => {
-                    return Ok((
-                        StatusCode::BAD_REQUEST,
-                        Json(ApiResponse::error(
-                            "Invalid client_id.",
-                            "The client_id must be a valid UUID.",
-                        )),
+                    return Ok(OAuth2Error::invalid_client(
+                        "Invalid client_id: must be a valid UUID.",
                     )
-                        .into_response());
+                    .into_response());
                 }
             };
+
+            // RFC 6749 §6: if the client supplies a `scope` parameter, the
+            // requested scope MUST NOT exceed the scope originally granted
+            // by the resource owner. The current backend issues tokens with
+            // the advertised "external" scope set as the effective grant,
+            // so any requested scope that is not in that advertised set is
+            // rejected with `invalid_scope`. An empty `scope` preserves the
+            // original grant (no narrowing), matching the RFC default.
+            if !request.scope.trim().is_empty()
+                && let Err(err) = validate_refresh_scope(&request.scope)
+            {
+                return Ok(err.into_response());
+            }
+
             let result = match state
                 .oauth2_provider
                 .refresh_token(
@@ -724,7 +881,9 @@ pub(crate) async fn post_oauth2_token(
                 .await
             {
                 Ok(result) => result,
-                Err(error) => return handle_oauth2_provider_error(error),
+                Err(error) => {
+                    return Ok(oauth2_provider_error_to_oauth2_error(error).into_response());
+                }
             };
             let response = OAuth2TokenResponse {
                 access_token: result.access_token,
@@ -734,15 +893,33 @@ pub(crate) async fn post_oauth2_token(
             };
             Ok((StatusCode::OK, Json(response)).into_response())
         }
-        _ => Ok((
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "Unsupported grant_type.",
-                "Supported grant types are: authorization_code, refresh_token.",
-            )),
+        _ => Ok(OAuth2Error::bad_request(
+            OAuth2ErrorCode::UnsupportedGrantType,
+            "Supported grant types are: authorization_code, refresh_token.",
         )
-            .into_response()),
+        .into_response()),
     }
+}
+
+/// Validates that every space-separated scope in `requested` is within the
+/// advertised external scope set (which represents the "original grant" for
+/// tokens minted by this provider).
+///
+/// Returns `Err(OAuth2Error)` with `invalid_scope` on the first unknown
+/// scope. An empty `requested` string should be filtered out by the caller
+/// so `preserve original scope` remains the default.
+fn validate_refresh_scope(requested: &str) -> Result<(), OAuth2Error> {
+    let allowed = external_scope_names();
+    for scope in requested.split_whitespace() {
+        // Case-sensitive match per RFC 6749 §3.3 scope-token ABNF.
+        if !allowed.iter().any(|s| s == scope) {
+            return Err(OAuth2Error::bad_request(
+                OAuth2ErrorCode::InvalidScope,
+                format!("Requested scope \"{scope}\" is not within the scope originally granted."),
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `DELETE /oauth2/tokens` — revokes all tokens for the OAuth2 app identified
@@ -1228,14 +1405,11 @@ pub(crate) async fn post_oauth2_revoke(
 ) -> Result<Response, AppError> {
     // RFC 7009 requires the 'token' parameter.
     if req.token.is_empty() {
-        return Ok((
-            StatusCode::BAD_REQUEST,
-            Json(OAuth2ErrorResponse {
-                error: "invalid_request".to_owned(),
-                error_description: "Missing token parameter".to_owned(),
-            }),
+        return Ok(OAuth2Error::bad_request(
+            OAuth2ErrorCode::InvalidRequest,
+            "Missing token parameter.",
         )
-            .into_response());
+        .into_response());
     }
 
     // Parse client_id to find the app.
@@ -1491,6 +1665,7 @@ fn oauth2_registration_error(status: StatusCode, error_code: &str, description: 
         Json(OAuth2ErrorResponse {
             error: error_code.to_owned(),
             error_description: description.to_owned(),
+            error_uri: String::new(),
         }),
     )
         .into_response()

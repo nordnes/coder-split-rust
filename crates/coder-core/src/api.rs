@@ -1825,6 +1825,10 @@ pub struct OAuth2TokenRequest {
     /// Resource URI.
     #[serde(default)]
     pub resource: String,
+    /// Requested scope (space-delimited) — used on refresh to narrow
+    /// the returned access token's scope per RFC 6749 §6.
+    #[serde(default)]
+    pub scope: String,
 }
 
 /// OAuth2 token response.
@@ -2122,7 +2126,7 @@ pub struct OAuth2ClientConfiguration {
     pub registration_client_uri: String,
 }
 
-/// OAuth2 error response per RFC 6749.
+/// OAuth2 error response per RFC 6749 §5.2.
 #[derive(Clone, Debug, Serialize)]
 pub struct OAuth2ErrorResponse {
     /// Error code.
@@ -2130,6 +2134,10 @@ pub struct OAuth2ErrorResponse {
     /// Human-readable error description.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub error_description: String,
+    /// URI identifying a human-readable web page with information about the
+    /// error (RFC 6749 §5.2).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub error_uri: String,
 }
 
 /// OAuth2 token revocation request per RFC 7009.

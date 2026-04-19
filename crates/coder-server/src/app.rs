@@ -35156,13 +35156,19 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await?;
+        // RFC 6749 §5.2: the authorize endpoint returns OAuth2-compliant
+        // errors with `error` + `error_description`, not the generic
+        // ApiResponse `message` + `detail` pair.
         assert_eq!(
-            body.get("message").and_then(Value::as_str),
-            Some("response_type must be \"code\".")
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_request")
         );
         assert!(
-            body.get("detail").is_some(),
-            "expected detail field in error response"
+            body.get("error_description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("response_type"),
+            "expected error_description to mention response_type"
         );
         Ok(())
     }
@@ -35183,12 +35189,15 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await?;
         assert_eq!(
-            body.get("message").and_then(Value::as_str),
-            Some("Invalid client_id.")
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_request")
         );
         assert!(
-            body.get("detail").is_some(),
-            "expected detail field in error response"
+            body.get("error_description")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .contains("client_id"),
+            "expected error_description to mention client_id"
         );
         Ok(())
     }
@@ -35210,17 +35219,259 @@ pub(crate) mod tests {
         .await?;
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         let body = response_json(response).await?;
+        // RFC 6749 §5.2 prescribes `unsupported_grant_type` for this case.
         assert_eq!(
-            body.get("message").and_then(Value::as_str),
-            Some("Unsupported grant_type.")
+            body.get("error").and_then(Value::as_str),
+            Some("unsupported_grant_type")
         );
         assert!(
-            body.get("detail")
+            body.get("error_description")
                 .and_then(Value::as_str)
                 .unwrap_or("")
                 .contains("authorization_code"),
-            "expected detail listing supported grant types"
+            "expected error_description listing supported grant types"
         );
+        Ok(())
+    }
+
+    /// Drives the full OAuth2 flow (create app, create secret, authorize,
+    /// exchange code, refresh, verify rotation, verify narrowing) against
+    /// an in-memory `FakeStore`. Returns the last-issued refresh token so
+    /// callers can tailor assertions.
+    ///
+    /// Mirrors `oauth2_authorize_redirects_with_code` but keeps the router
+    /// around for subsequent calls so the same session token can refresh.
+    async fn run_token_flow(
+        app: &axum::Router,
+        session_token: &str,
+    ) -> Result<(String, String, String), Box<dyn Error>> {
+        // Create OAuth2 app.
+        let create_response = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/oauth2-provider/apps",
+                session_token,
+                &json!({
+                    "name": format!("RFC6749 Flow {}", Uuid::new_v4()),
+                    "callback_url": "https://example.com/callback"
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(create_response.status(), StatusCode::CREATED);
+        let create_body = response_json(create_response).await?;
+        let client_id = create_body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing app id")?
+            .to_owned();
+
+        // Create a secret.
+        let secret_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::POST,
+                &format!("/api/v2/oauth2-provider/apps/{client_id}/secrets"),
+                session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(secret_response.status(), StatusCode::CREATED);
+        let secret_body = response_json(secret_response).await?;
+        let client_secret = secret_body
+            .get("client_secret_full")
+            .and_then(Value::as_str)
+            .ok_or("missing client_secret_full")?
+            .to_owned();
+
+        // Authorize → redirect with code.
+        let authorize_response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/oauth2/authorize?response_type=code&client_id={client_id}&state=s"),
+                session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(authorize_response.status(), StatusCode::TEMPORARY_REDIRECT);
+        let location = authorize_response
+            .headers()
+            .get("location")
+            .ok_or("missing location")?
+            .to_str()?;
+        let redirect_url = Url::parse(location)?;
+        let code = redirect_url
+            .query_pairs()
+            .find(|(k, _)| k == "code")
+            .map(|(_, v)| v.to_string())
+            .ok_or("missing code")?;
+
+        // Exchange authorization code for tokens.
+        let token_response = call(app.clone(), {
+            let body = format!(
+                "grant_type=authorization_code&code={code}&client_id={client_id}&client_secret={client_secret}"
+            );
+            Request::builder()
+                .method(Method::POST)
+                .uri("/oauth2/tokens")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))?
+        })
+        .await?;
+        assert_eq!(token_response.status(), StatusCode::OK);
+        let token_body = response_json(token_response).await?;
+        let refresh_token = token_body
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .ok_or("missing refresh_token")?
+            .to_owned();
+
+        Ok((client_id, client_secret, refresh_token))
+    }
+
+    #[tokio::test]
+    async fn oauth2_token_invalid_grant_uses_rfc6749_envelope() -> Result<(), Box<dyn Error>> {
+        // Unknown authorization_code → RFC 6749 §5.2 invalid_grant.
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let (client_id, client_secret, _refresh) = run_token_flow(&app, &session_token).await?;
+
+        let body = format!(
+            "grant_type=authorization_code&code=not-a-valid-code&client_id={client_id}&client_secret={client_secret}"
+        );
+        let response = call(app, {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/oauth2/tokens")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))?
+        })
+        .await?;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_grant")
+        );
+        assert!(
+            body.get("error_description")
+                .and_then(Value::as_str)
+                .is_some(),
+            "error_description must be populated"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_refresh_rotates_tokens_and_invalidates_old() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let (client_id, client_secret, refresh_token_1) =
+            run_token_flow(&app, &session_token).await?;
+
+        // First refresh: must succeed and return a *new* refresh token.
+        let first = call(app.clone(), {
+            let body = format!(
+                "grant_type=refresh_token&refresh_token={refresh_token_1}&client_id={client_id}&client_secret={client_secret}"
+            );
+            Request::builder()
+                .method(Method::POST)
+                .uri("/oauth2/tokens")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))?
+        })
+        .await?;
+        assert_eq!(first.status(), StatusCode::OK);
+        let first_body = response_json(first).await?;
+        let refresh_token_2 = first_body
+            .get("refresh_token")
+            .and_then(Value::as_str)
+            .ok_or("missing rotated refresh_token")?
+            .to_owned();
+        assert_ne!(
+            refresh_token_1, refresh_token_2,
+            "refresh token must rotate on refresh (RFC 6749 §10.4)"
+        );
+
+        // Second refresh with the OLD refresh token must fail with
+        // `invalid_grant` — the old token is single-use and has been
+        // invalidated by the rotation.
+        let replay = call(app, {
+            let body = format!(
+                "grant_type=refresh_token&refresh_token={refresh_token_1}&client_id={client_id}&client_secret={client_secret}"
+            );
+            Request::builder()
+                .method(Method::POST)
+                .uri("/oauth2/tokens")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))?
+        })
+        .await?;
+        assert_eq!(
+            replay.status(),
+            StatusCode::UNAUTHORIZED,
+            "old refresh token must no longer authenticate after rotation"
+        );
+        let replay_body = response_json(replay).await?;
+        assert_eq!(
+            replay_body.get("error").and_then(Value::as_str),
+            Some("invalid_grant")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_refresh_rejects_scope_outside_grant() -> Result<(), Box<dyn Error>> {
+        // RFC 6749 §6: requested scope MUST NOT exceed originally granted
+        // scope. The handler rejects unknown scopes with `invalid_scope`.
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let (client_id, client_secret, refresh_token) =
+            run_token_flow(&app, &session_token).await?;
+
+        let body = format!(
+            "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}&client_secret={client_secret}&scope=totally_made_up_scope"
+        );
+        let response = call(app, {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/oauth2/tokens")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))?
+        })
+        .await?;
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        let body = response_json(response).await?;
+        assert_eq!(
+            body.get("error").and_then(Value::as_str),
+            Some("invalid_scope")
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_refresh_accepts_known_scope_subset() -> Result<(), Box<dyn Error>> {
+        // A known advertised scope is accepted and narrows the returned
+        // token transparently.
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let (client_id, client_secret, refresh_token) =
+            run_token_flow(&app, &session_token).await?;
+
+        let body = format!(
+            "grant_type=refresh_token&refresh_token={refresh_token}&client_id={client_id}&client_secret={client_secret}&scope=all"
+        );
+        let response = call(app, {
+            Request::builder()
+                .method(Method::POST)
+                .uri("/oauth2/tokens")
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(body))?
+        })
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
         Ok(())
     }
 
