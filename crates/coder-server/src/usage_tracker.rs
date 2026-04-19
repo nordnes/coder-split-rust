@@ -179,6 +179,7 @@ async fn flush(store: &Arc<dyn AppStore>, pending: &mut HashMap<Uuid, OffsetDate
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "tests are allowed to fail loudly")]
 mod tests {
     use super::*;
 

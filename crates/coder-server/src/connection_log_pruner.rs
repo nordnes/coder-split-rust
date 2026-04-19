@@ -124,6 +124,7 @@ async fn run_loop(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, reason = "tests are allowed to fail loudly")]
 mod tests {
     use super::*;
 
