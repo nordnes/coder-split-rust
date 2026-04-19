@@ -22,13 +22,17 @@
 use std::sync::Arc;
 
 use base64::Engine as _;
+use coder_agent_rpc::handlers::RpcError;
 use coder_agent_rpc::proto::tailnet_v2 as tailnet;
+use futures_util::Stream;
 use prost_types::{Duration as PbDuration, Timestamp as PbTimestamp};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use uuid::Uuid;
+
+use crate::tailnet::{InMemoryCoordinator, PeerKind, TailnetCoordinator};
 
 /// Resume-token TTL chosen to match Go's `DefaultResumeTokenExpiry`
 /// (`coder/tailnet/resume.go`).
@@ -179,6 +183,9 @@ pub struct TailnetRpcService {
     /// Default resume-token lifetime; clients should refresh at half of
     /// this.
     token_ttl_secs: i64,
+    /// Optional coordinator used by streaming RPCs (e.g. `Coordinate`).
+    /// `None` for the unary-only construction paths.
+    coordinator: Option<Arc<InMemoryCoordinator>>,
 }
 
 impl TailnetRpcService {
@@ -191,7 +198,17 @@ impl TailnetRpcService {
             telemetry_tx,
             signing_key: Arc::from(signing_key),
             token_ttl_secs: DEFAULT_RESUME_TOKEN_EXPIRY_SECS,
+            coordinator: None,
         }
+    }
+
+    /// Attaches the in-memory tailnet coordinator used by streaming RPCs
+    /// such as `Coordinate`. Without a coordinator, the `coordinate` method
+    /// returns an error on the first frame.
+    #[must_use]
+    pub fn with_coordinator(mut self, coordinator: Arc<InMemoryCoordinator>) -> Self {
+        self.coordinator = Some(coordinator);
+        self
     }
 
     /// Creates the service with a hardcoded placeholder key. Intended
@@ -256,11 +273,145 @@ impl TailnetRpcService {
     pub fn signing_key(&self) -> &[u8] {
         &self.signing_key
     }
+
+    /// Implements the bidi-stream `Coordinate` RPC — **handshake + peer
+    /// registration only**.
+    ///
+    /// Pulls the first `CoordinateRequest` off `incoming`, treats it as a
+    /// handshake frame, derives a stable peer id from the Wireguard public
+    /// key carried in `update_self.node.key`, registers the peer in the
+    /// attached [`InMemoryCoordinator`], and emits a single empty
+    /// `CoordinateResponse` as the handshake acknowledgement. Subsequent
+    /// frames are logged at `debug` and dropped; the stream then parks
+    /// until the incoming side closes.
+    ///
+    /// `TODO-tailnet-coordinate-node-updates`: route subsequent
+    /// `update_self` / `add_tunnel` / `remove_tunnel` / `disconnect` /
+    /// `ready_for_handshake` frames through
+    /// `InMemoryCoordinator::process_request` (converting proto `Node` →
+    /// `NodeInfo`), and fan coordinator response messages back onto the
+    /// outbound stream as per-peer `PeerUpdate` entries. Multi-peer routing
+    /// is also deferred.
+    pub fn coordinate(
+        &self,
+        incoming: impl Stream<Item = tailnet::CoordinateRequest> + Send + Unpin + 'static,
+    ) -> impl Stream<Item = Result<tailnet::CoordinateResponse, RpcError>> + Send + 'static {
+        let coordinator = self.coordinator.clone();
+        async_stream::stream! {
+            use futures_util::StreamExt as _;
+
+            let mut incoming = incoming;
+            // 1. Pull the handshake frame (must carry update_self.node.key).
+            let Some(first) = incoming.next().await else {
+                yield Err(RpcError::InvalidArgument(
+                    "coordinate: no handshake frame received".into(),
+                ));
+                return;
+            };
+
+            let Some(node) = first.update_self.as_ref().and_then(|u| u.node.as_ref()) else {
+                yield Err(RpcError::InvalidArgument(
+                    "coordinate: handshake frame must contain update_self.node".into(),
+                ));
+                return;
+            };
+            if node.key.is_empty() {
+                yield Err(RpcError::InvalidArgument(
+                    "coordinate: handshake node.key must be non-empty".into(),
+                ));
+                return;
+            }
+
+            let Some(coord) = coordinator else {
+                yield Err(RpcError::Internal(
+                    "coordinate: no coordinator attached to service".into(),
+                ));
+                return;
+            };
+
+            // Derive a stable peer id from the Wireguard public key bytes so
+            // reconnecting peers land on the same coordinator entry. We take
+            // the first 16 bytes of SHA-256(key) to avoid pulling a uuid v5
+            // feature dependency.
+            let digest = Sha256::digest(&node.key);
+            let mut bytes = [0u8; 16];
+            bytes.copy_from_slice(&digest[..16]);
+            let peer_id = Uuid::from_bytes(bytes);
+            let name = format!("peer-{}", &peer_id.as_simple().to_string()[..8]);
+
+            // 2. Register in the coordinator. We intentionally register as
+            // `Client`; distinguishing Agent vs Client requires auth context
+            // that is not wired through the DRPC transport yet (deferred).
+            let handle = coord.coordinate(peer_id, name, PeerKind::Client);
+            tracing::info!(
+                peer_id = %peer_id,
+                key_len = node.key.len(),
+                "tailnet: coordinate handshake accepted",
+            );
+
+            // 3. Emit the handshake acknowledgement: an empty peer_updates /
+            // no-error response signals successful registration.
+            yield Ok(tailnet::CoordinateResponse::default());
+
+            // Park on the incoming stream; log and drop subsequent frames.
+            // TODO-tailnet-coordinate-node-updates.
+            loop {
+                tokio::select! {
+                    msg = incoming.next() => {
+                        match msg {
+                            Some(_req) => {
+                                tracing::debug!(
+                                    peer_id = %peer_id,
+                                    "tailnet: coordinate frame received (node-update fan-out TODO)",
+                                );
+                            }
+                            None => break,
+                        }
+                    }
+                }
+            }
+
+            // Ensure the peer is deregistered when the stream ends.
+            coord.close_coordination(peer_id, handle.session_id);
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tailnet::InMemoryCoordinator;
+    use coder_core::api::DERPMap;
+    use futures_util::StreamExt as _;
+
+    #[tokio::test]
+    async fn coordinate_handshake_registers_peer() {
+        let (tx, _rx) = telemetry_channel();
+        let coord = InMemoryCoordinator::new(DERPMap::default());
+        let svc = TailnetRpcService::with_stub_key(tx).with_coordinator(coord.clone());
+
+        let handshake = tailnet::CoordinateRequest {
+            update_self: Some(tailnet::coordinate_request::UpdateSelf {
+                node: Some(tailnet::Node {
+                    key: b"wg-public-key-bytes".to_vec(),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        let incoming = futures_util::stream::iter(vec![handshake]);
+
+        let mut out = Box::pin(svc.coordinate(incoming));
+        let Some(Ok(ack)) = out.next().await else {
+            unreachable!("expected coordinate ack frame");
+        };
+        assert!(ack.peer_updates.is_empty());
+        assert!(ack.error.is_empty());
+
+        // The coordinator must now have exactly one registered peer.
+        let debug = coord.debug_json();
+        assert_eq!(debug["total_peers"], 1);
+    }
 
     #[test]
     fn post_telemetry_drops_events_on_sink() {
