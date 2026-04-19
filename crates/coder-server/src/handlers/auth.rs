@@ -780,23 +780,68 @@ pub(crate) async fn get_oidc_callback(
         }
     };
 
-    // IDP group sync (best-effort). Runs between the user upsert and the
-    // session issue so the freshly-logged-in user already sees the right
-    // group memberships on the first request. Errors are logged and
-    // swallowed — login must succeed even when sync breaks.
+    // IDP sync (best-effort). Runs between the user upsert and the
+    // session issue so the freshly-logged-in user already sees the
+    // right memberships/roles on the first request. Errors are logged
+    // and swallowed — login must succeed even when sync breaks.
     //
-    // Ports Go's `AGPLIDPSync.SyncGroups` invocation from
-    // `coderd/userauth.go`. See §B.12.1 / Wave 0 S5.
+    // Ports Go's `AGPLIDPSync.{SyncOrganizations,SyncRoles,SyncGroups}`
+    // invocations from `coderd/userauth.go`. See §B.12.1 / Wave 0 S5.
     //
-    // NOTE: Organization sync and role sync are NOT yet wired in. See
-    // Go `coderd/idpsync/organization.go` and `role.go` for the
-    // remaining work — to be ported in follow-up batches.
+    // Order matters: organization membership must exist before role /
+    // group sync, because both scope their work to the orgs the user
+    // is a member of.
     let merged_claims = serde_json::Value::Object(user_link_claims.merged_claims.clone());
+
+    // 1. Organization sync.
+    match state.store.get_organization_idp_sync_settings().await {
+        Ok(org_settings) => {
+            let raw_orgs =
+                coder_auth::idpsync::claims::parse_org_claims(&org_settings.field, &merged_claims);
+            if let Err(err) = coder_auth::idpsync::organization::sync_organizations(
+                &state.store,
+                user.id,
+                &raw_orgs,
+                &org_settings,
+                None,
+            )
+            .await
+            {
+                tracing::warn!(
+                    user_id = %user.id,
+                    error = %err,
+                    "IDP organization sync failed",
+                );
+            }
+        }
+        Err(err) => {
+            tracing::warn!(
+                user_id = %user.id,
+                error = %err,
+                "failed to load IDP organization sync settings",
+            );
+        }
+    }
+
+    // 2. Role sync. Site-role sync is AGPL-disabled in Go
+    //    (`SiteRoleSyncEnabled` returns false); we mirror that by
+    //    passing `sync_site_wide = false` and an empty claim set until
+    //    enterprise role sync lands. Per-org role sync is driven by
+    //    each org's own `RoleSyncSettings`.
+    if let Err(err) =
+        coder_auth::idpsync::role::sync_roles(&state.store, user.id, &merged_claims, &[], false)
+            .await
+    {
+        tracing::warn!(
+            user_id = %user.id,
+            error = %err,
+            "IDP role sync failed",
+        );
+    }
+
+    // 3. Group sync.
     let raw_groups = coder_auth::idpsync::claims::parse_group_claims(oidc_config, &merged_claims);
     if !raw_groups.is_empty() || !oidc_config.groups_field.is_empty() {
-        // Sync against every organization the user is already a member
-        // of. Once `SyncOrganizations` lands, membership will be
-        // discovered from the claims instead.
         match state.store.list_user_memberships(user.id).await {
             Ok(memberships) => {
                 for membership in memberships {

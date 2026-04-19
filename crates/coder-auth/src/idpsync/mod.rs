@@ -1,30 +1,38 @@
 //! IDP (Identity Provider) sync runtime.
 //!
-//! Ports the first slice of Go's `coderd/idpsync/` package: parsing group
-//! claims out of OIDC userinfo + id_token, then reconciling the user's group
-//! memberships against the per-organization sync settings.
+//! Ports Go's `coderd/idpsync/` package: parsing OIDC claims and
+//! reconciling the authenticated user's group memberships, organization
+//! memberships, and RBAC roles against the configured sync settings.
 //!
-//! Higher-level concerns (organization sync, role sync) are intentionally
-//! deferred to follow-up batches. See Go `idpsync/organization.go` and
-//! `idpsync/role.go` for the remaining work.
+//! # Scope
 //!
-//! # Scope of this batch
-//!
-//! * [`claims::parse_group_claims`] — extract the raw list of group names
-//!   from `merged_claims[groups_field]`.
-//! * [`group_sync::sync_groups`] — apply regex filter + mapping, auto-create
-//!   missing groups (if enabled), and reconcile `group_members` memberships.
-//! * The OIDC callback hook in `coder-server::handlers::auth` calls
-//!   `parse_group_claims` and `sync_groups` between token verification and
-//!   session issue.
+//! * [`claims::parse_group_claims`] — extract the raw list of group
+//!   names from `merged_claims[groups_field]`, enforcing the deployment
+//!   `group_allow_list` when configured.
+//! * [`claims::parse_org_claims`] — extract the raw list of org names
+//!   from `merged_claims[<org_field>]`.
+//! * [`claims::parse_role_claims`] — extract the raw list of role names
+//!   from `merged_claims[<role_field>]`.
+//! * [`group_sync::sync_groups`] — apply regex filter + mapping,
+//!   auto-create missing groups (if enabled), and reconcile
+//!   `group_members` memberships.
+//! * [`organization::sync_organizations`] — apply regex filter +
+//!   mapping + assign-default, and reconcile `organization_members`.
+//! * [`role::sync_roles`] — reconcile site-wide roles and per-org
+//!   member roles (the latter reads per-org `RoleSyncSettings`).
+//! * The OIDC callback in `coder-server::handlers::auth` calls
+//!   `sync_organizations` + `sync_roles` + `sync_groups` (in that
+//!   order) between token verification and session issue.
 //!
 //! # Failure semantics
 //!
-//! Matching Go, a sync error is logged at WARN level but does **not** fail
-//! the login. Identity must work even when sync is misconfigured.
+//! Matching Go, a sync error is logged at WARN level but does **not**
+//! fail the login. Identity must work even when sync is misconfigured.
 
 pub mod claims;
 pub mod group_sync;
+pub mod organization;
+pub mod role;
 
 use thiserror::Error;
 
@@ -40,7 +48,7 @@ pub enum IdpSyncError {
     InvalidRegex(#[from] regex::Error),
 }
 
-/// Summary of an applied sync, for logs and metrics.
+/// Summary of an applied group sync, for logs and metrics.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct GroupSyncResult {
     /// Number of group memberships inserted for the user.

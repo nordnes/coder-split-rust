@@ -1010,6 +1010,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: String::new(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         };
         assert!(oidc_check_email_domain(&config, "user@anything.com"));
@@ -1028,6 +1029,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: String::new(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         };
         assert!(oidc_check_email_domain(&config, "user@example.com"));
@@ -1139,6 +1141,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: String::new(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         };
         let result = validate_oidc_claims(&claims, &config);
@@ -1174,6 +1177,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: String::new(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         };
         let result = validate_oidc_claims(&claims, &config);
@@ -1215,6 +1219,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: String::new(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         };
         let result = validate_oidc_claims(&claims, &config);
@@ -1256,6 +1261,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: String::new(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         };
         let result = validate_oidc_claims(&claims, &config);
@@ -1327,6 +1333,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: String::new(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         };
         // Should not panic on multi-byte chars, and should produce a valid username

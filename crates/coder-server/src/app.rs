@@ -36421,6 +36421,7 @@ pub(crate) mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: "groups".to_owned(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         });
         let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));

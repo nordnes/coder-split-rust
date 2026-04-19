@@ -1,7 +1,7 @@
-//! Parsing IDP group claims out of the merged OIDC claim set.
+//! Parsing IDP claims out of the merged OIDC claim set.
 //!
-//! Mirrors Go's `AGPLIDPSync.ParseGroupClaims` + `ParseStringSliceClaim`
-//! from `coderd/idpsync/group.go` and `coderd/idpsync/idpsync.go`.
+//! Mirrors Go's `AGPLIDPSync.ParseGroupClaims` / `ParseStringSliceClaim`
+//! / `ParseOrganizationClaims` / `RolesFromClaim` from `coderd/idpsync/`.
 
 use coder_core::config::OidcConfig;
 use serde_json::Value;
@@ -19,6 +19,13 @@ use serde_json::Value;
 ///   the login hot path and errors would fail logins for one bad claim).
 /// * A single bare string is also accepted (ADFS quirk).
 /// * Duplicates are removed; ordering is stable based on first occurrence.
+/// * If `config.group_allow_list` is non-empty, any group not present
+///   in the allow list is dropped. This matches Go's allow-list
+///   short-circuit in `ParseGroupClaims` — except that here we simply
+///   filter rather than failing the login; the callee handles an empty
+///   list as "no groups to sync". Login rejection on an empty allow-list
+///   intersection is deferred to the callback, where the full
+///   `HTTPError` context is available.
 pub fn parse_group_claims(config: &OidcConfig, merged_claims: &Value) -> Vec<String> {
     let field = if config.groups_field.is_empty() {
         "groups"
@@ -26,10 +33,49 @@ pub fn parse_group_claims(config: &OidcConfig, merged_claims: &Value) -> Vec<Str
         config.groups_field.as_str()
     };
 
+    let parsed = parse_string_slice(field, merged_claims);
+
+    if config.group_allow_list.is_empty() {
+        return parsed;
+    }
+    let allow: std::collections::HashSet<&str> =
+        config.group_allow_list.iter().map(String::as_str).collect();
+    parsed
+        .into_iter()
+        .filter(|g| allow.contains(g.as_str()))
+        .collect()
+}
+
+/// Parses the organization list from `merged_claims[field]`.
+///
+/// `field` is the org-claim name configured on
+/// [`coder_core::api::OrganizationSyncSettings`]. Empty field or absent
+/// claim yields an empty `Vec`. Parsing edge cases mirror
+/// [`parse_group_claims`].
+pub fn parse_org_claims(field: &str, merged_claims: &Value) -> Vec<String> {
+    if field.is_empty() {
+        return Vec::new();
+    }
+    parse_string_slice(field, merged_claims)
+}
+
+/// Parses the role list from `merged_claims[field]`.
+///
+/// Mirrors Go's `AGPLIDPSync.RolesFromClaim`. Absent claim yields an
+/// empty vector (no diagnostics: Go treats "no claim" as "user is only
+/// a member", which is the same as the empty-list case).
+pub fn parse_role_claims(field: &str, merged_claims: &Value) -> Vec<String> {
+    if field.is_empty() {
+        return Vec::new();
+    }
+    parse_string_slice(field, merged_claims)
+}
+
+fn parse_string_slice(field: &str, merged_claims: &Value) -> Vec<String> {
     let raw = match merged_claims.get(field) {
         Some(v) => v,
         None => {
-            tracing::debug!(field, "OIDC claim field absent; skipping group sync");
+            tracing::debug!(field, "OIDC claim field absent; skipping");
             return Vec::new();
         }
     };
@@ -45,7 +91,7 @@ pub fn parse_group_claims(config: &OidcConfig, merged_claims: &Value) -> Vec<Str
                             field,
                             index = idx,
                             kind = other_kind(other),
-                            "dropping non-string element in OIDC groups claim",
+                            "dropping non-string element in OIDC claim",
                         );
                     }
                 }
@@ -58,7 +104,7 @@ pub fn parse_group_claims(config: &OidcConfig, merged_claims: &Value) -> Vec<Str
             tracing::debug!(
                 field,
                 kind = other_kind(other),
-                "OIDC claim is not an array or string; skipping group sync",
+                "OIDC claim is not an array or string; skipping",
             );
             return Vec::new();
         }
@@ -108,6 +154,7 @@ mod tests {
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
             groups_field: groups_field.to_owned(),
+            group_allow_list: Vec::new(),
             ignore_email_verified: false,
         }
     }
@@ -175,5 +222,90 @@ mod tests {
             parse_group_claims(&config, &claims),
             vec!["fallback".to_owned()],
         );
+    }
+
+    #[test]
+    fn group_allow_list_filters_out_disallowed() {
+        let mut config = oidc_config("groups");
+        config.group_allow_list = vec!["admin".to_owned(), "ops".to_owned()];
+        let claims = json!({ "groups": ["admin", "devs", "ops", "contractors"] });
+        assert_eq!(
+            parse_group_claims(&config, &claims),
+            vec!["admin".to_owned(), "ops".to_owned()],
+        );
+    }
+
+    #[test]
+    fn empty_allow_list_preserves_all_groups() {
+        let config = oidc_config("groups");
+        let claims = json!({ "groups": ["admin", "devs"] });
+        assert_eq!(
+            parse_group_claims(&config, &claims),
+            vec!["admin".to_owned(), "devs".to_owned()],
+        );
+    }
+
+    #[test]
+    fn allow_list_with_no_match_returns_empty() {
+        let mut config = oidc_config("groups");
+        config.group_allow_list = vec!["staff".to_owned()];
+        let claims = json!({ "groups": ["admin", "devs"] });
+        assert!(parse_group_claims(&config, &claims).is_empty());
+    }
+
+    #[test]
+    fn parse_org_claims_array() {
+        let claims = json!({ "orgs": ["o1", "o2", "o1"] });
+        assert_eq!(
+            parse_org_claims("orgs", &claims),
+            vec!["o1".to_owned(), "o2".to_owned()],
+        );
+    }
+
+    #[test]
+    fn parse_org_claims_empty_field() {
+        let claims = json!({ "orgs": ["o1"] });
+        assert!(parse_org_claims("", &claims).is_empty());
+    }
+
+    #[test]
+    fn parse_org_claims_absent() {
+        let claims = json!({ "email": "x@y.z" });
+        assert!(parse_org_claims("orgs", &claims).is_empty());
+    }
+
+    #[test]
+    fn parse_org_claims_non_array() {
+        let claims = json!({ "orgs": 42 });
+        assert!(parse_org_claims("orgs", &claims).is_empty());
+    }
+
+    #[test]
+    fn parse_org_claims_single_string() {
+        let claims = json!({ "orgs": "solo" });
+        assert_eq!(parse_org_claims("orgs", &claims), vec!["solo".to_owned()],);
+    }
+
+    #[test]
+    fn parse_role_claims_array() {
+        let claims = json!({ "roles": ["a", "b"] });
+        assert_eq!(
+            parse_role_claims("roles", &claims),
+            vec!["a".to_owned(), "b".to_owned()],
+        );
+    }
+
+    #[test]
+    fn parse_role_claims_empty_field() {
+        let claims = json!({ "roles": ["a"] });
+        assert!(parse_role_claims("", &claims).is_empty());
+    }
+
+    #[test]
+    fn parse_role_claims_absent_returns_empty() {
+        // Go treats absence as "user is only a member", which is identical
+        // to an empty set — no error.
+        let claims = json!({ "email": "x@y.z" });
+        assert!(parse_role_claims("roles", &claims).is_empty());
     }
 }
