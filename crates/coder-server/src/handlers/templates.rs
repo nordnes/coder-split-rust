@@ -672,6 +672,16 @@ pub(crate) async fn post_org_template_version(
         })
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::TemplateVersion,
+        Some(&context.user),
+        Some(ver.id.to_string()),
+        format!("created template version {}", ver.name),
+    )
+    .await;
+
     let resp = build_tv_response(&state, &ver).await?;
     Ok((StatusCode::CREATED, Json(resp)).into_response())
 }
@@ -1145,6 +1155,15 @@ pub(crate) async fn post_archive_template_version(
     if !archived {
         return Ok(not_found_response("Template version not found."));
     }
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::TemplateVersion,
+        Some(&context.user),
+        Some(version_id.to_string()),
+        format!("archived template version {}", ver.name),
+    )
+    .await;
     Ok((
         StatusCode::OK,
         Json(ApiResponse::ok("Template version archived.")),
@@ -1776,6 +1795,19 @@ pub(crate) async fn patch_active_template_version(
         return Ok(not_found_response("Template not found."));
     }
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Template,
+        Some(&context.user),
+        Some(template.id.to_string()),
+        format!(
+            "promoted template version {} to active on template {}",
+            ver.name, template.name
+        ),
+    )
+    .await;
+
     Ok(StatusCode::OK.into_response())
 }
 
@@ -1827,6 +1859,20 @@ pub(crate) async fn post_archive_template_versions(
         .store
         .archive_unused_template_versions(template_id, req.all)
         .await?;
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Template,
+        Some(&context.user),
+        Some(template_id.to_string()),
+        format!(
+            "archived {} unused template versions for template {}",
+            archived_ids.len(),
+            template.name
+        ),
+    )
+    .await;
 
     let response = ArchiveTemplateVersionsResponse {
         template_id,
@@ -2140,6 +2186,15 @@ pub(crate) async fn post_unarchive_template_version(
     if !unarchived {
         return Ok(not_found_response("Template version not found."));
     }
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::TemplateVersion,
+        Some(&context.user),
+        Some(version_id.to_string()),
+        format!("unarchived template version {}", ver.name),
+    )
+    .await;
     Ok((
         StatusCode::OK,
         Json(ApiResponse::ok("Template version unarchived.")),
@@ -2459,6 +2514,16 @@ pub(crate) async fn patch_template_acl(
         group_acl,
     };
     state.store.update_template_acl(template_id, &input).await?;
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::Template,
+        Some(&context.user),
+        Some(template_id.to_string()),
+        format!("updated ACL for template {}", template.name),
+    )
+    .await;
 
     Ok((
         StatusCode::OK,

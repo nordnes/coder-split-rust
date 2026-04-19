@@ -213,7 +213,21 @@ pub(crate) async fn put_notification_template_method(
         .await?;
 
     match template {
-        Some(t) => Ok((StatusCode::OK, Json(t)).into_response()),
+        Some(t) => {
+            record_audit(
+                &state,
+                AuditAction::Write,
+                ResourceKind::NotificationTemplate,
+                Some(&context.user),
+                Some(id.to_string()),
+                match method_ref {
+                    Some(m) => format!("updated notification template method to {m}"),
+                    None => "reset notification template method to default".to_owned(),
+                },
+            )
+            .await;
+            Ok((StatusCode::OK, Json(t)).into_response())
+        }
         None => Ok(not_found_response("Notification template not found.")),
     }
 }
@@ -330,6 +344,19 @@ pub(crate) async fn put_user_notification_preferences(
         .store
         .update_user_notification_preferences(target_user.id, &template_ids, &disableds)
         .await?;
+
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::NotificationTemplate,
+        Some(&context.user),
+        Some(target_user.id.to_string()),
+        format!(
+            "updated notification preferences for {} template(s)",
+            template_ids.len()
+        ),
+    )
+    .await;
 
     let preferences = state
         .store
