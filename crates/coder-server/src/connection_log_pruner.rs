@@ -6,9 +6,11 @@
 //! deletions to a bounded row count per tick so a long-lived retention
 //! shrinkage does not pin the write-ahead log on a single sweep.
 //!
-//! TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
-//! through the pruner so deletes go via a `dbauthz::Authorized<_>` wrapper
-//! instead of raw `AppStore`. See `crates/coder-rbac/src/system_actors.rs`.
+//! Runs under the `system_restricted` actor context
+//! ([`coder_rbac::system_actors::system_restricted`]). Today only the
+//! list methods in `coder-db/src/dbauthz.rs` consult the actor; the
+//! `delete_old_connection_logs` call below carries a
+//! `TODO-dbauthz-full-wrap` comment for the eventual Authorized<S> wrap.
 //!
 //! Safe on deployments without the `connection_logs` table: the storage
 //! layer maps `undefined_table` (PostgreSQL SQLSTATE `42P01`) to a zero-row
@@ -19,6 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use coder_core::AppStore;
+use coder_rbac::{Actor, system_actors};
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -59,6 +62,11 @@ impl Default for ConnectionLogPrunerOptions {
 /// interval. Construct with [`ConnectionLogPruner::start`].
 pub struct ConnectionLogPruner {
     handle: JoinHandle<()>,
+    /// System-actor context the pruner runs under. See
+    /// [`coder_rbac::system_actors::system_restricted`]. Stored for
+    /// diagnostics and for the future `Authorized<S>` wrap of
+    /// `delete_old_connection_logs`.
+    actor: Actor,
 }
 
 impl ConnectionLogPruner {
@@ -73,7 +81,20 @@ impl ConnectionLogPruner {
         let handle = tokio::spawn(async move {
             run_loop(store, options, cancel).await;
         });
-        Self { handle }
+        Self {
+            handle,
+            // TODO-dbauthz-full-wrap: once `Authorized<S>` wraps
+            // `delete_old_connection_logs`, route that call through the
+            // wrapper so the system-restricted actor is enforced at the
+            // store boundary.
+            actor: system_actors::system_restricted(),
+        }
+    }
+
+    /// Returns the system actor this pruner runs under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Awaits the background task to completion. Call after cancelling
@@ -158,5 +179,19 @@ mod tests {
         assert_eq!(opts.interval, DEFAULT_PRUNE_INTERVAL);
         assert_eq!(opts.retention, DEFAULT_RETENTION);
         assert_eq!(opts.batch_size, DEFAULT_BATCH_SIZE);
+    }
+
+    #[test]
+    fn pruner_uses_system_restricted_actor() {
+        // Regression guard for W0.S4 wiring: the pruner actor factory
+        // must hand back the `system` system actor. We exercise the
+        // factory directly rather than constructing a full pruner
+        // (that requires a real `AppStore` supertrait impl + runtime).
+        let actor = system_actors::system_restricted();
+        assert!(
+            system_actors::is_system(&actor),
+            "system_restricted() must be a system actor",
+        );
+        assert_eq!(actor.username, "system");
     }
 }

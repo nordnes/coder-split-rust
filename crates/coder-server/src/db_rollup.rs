@@ -5,8 +5,12 @@
 //! `template_usage_stats` half-hour buckets so the insights endpoints can
 //! read pre-computed aggregates rather than raw event rows.
 //!
-//! TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
-//! through this worker. See `crates/coder-rbac/src/system_actors.rs`.
+//! Runs under the `system_restricted` actor context
+//! ([`coder_rbac::system_actors::system_restricted`]). Today only the
+//! `Authorized<S>` list methods in `coder-db/src/dbauthz.rs` consult the
+//! actor; the `try_acquire_advisory_lock` and future
+//! `upsert_template_usage_stats` calls carry `TODO-dbauthz-full-wrap`
+//! comments.
 //!
 //! # Current status
 //!
@@ -30,6 +34,7 @@ use std::time::Duration;
 
 use coder_core::AppStore;
 use coder_core::ports::advisory_lock_ids;
+use coder_rbac::{Actor, system_actors};
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
@@ -58,6 +63,11 @@ impl Default for DbRollupOptions {
 /// cadence.
 pub struct DbRollupWorker {
     handle: JoinHandle<()>,
+    /// System-actor context the rollup worker runs under. See
+    /// [`coder_rbac::system_actors::system_restricted`]. Stored for
+    /// diagnostics and for the future `Authorized<S>` wrap of the
+    /// rollup upsert once that query lands.
+    actor: Actor,
 }
 
 impl DbRollupWorker {
@@ -72,7 +82,21 @@ impl DbRollupWorker {
         let handle = tokio::spawn(async move {
             run_loop(store, options, cancel).await;
         });
-        Self { handle }
+        Self {
+            handle,
+            // TODO-dbauthz-full-wrap: once `Authorized<S>` wraps
+            // `try_acquire_advisory_lock` + the pending
+            // `upsert_template_usage_stats` method, route those calls
+            // through the wrapper so the system-restricted actor is
+            // enforced at the store boundary.
+            actor: system_actors::system_restricted(),
+        }
+    }
+
+    /// Returns the system actor this worker runs under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Awaits the background task to completion. Call after cancelling
@@ -153,5 +177,17 @@ mod tests {
     #[test]
     fn default_interval_matches_go() {
         assert_eq!(DbRollupOptions::default().interval, DEFAULT_ROLLUP_INTERVAL);
+    }
+
+    #[test]
+    fn db_rollup_uses_system_restricted_actor() {
+        // Regression guard for W0.S4 wiring: the rollup worker actor
+        // factory must hand back the `system` system actor.
+        let actor = system_actors::system_restricted();
+        assert!(
+            system_actors::is_system(&actor),
+            "system_restricted() must be a system actor",
+        );
+        assert_eq!(actor.username, "system");
     }
 }

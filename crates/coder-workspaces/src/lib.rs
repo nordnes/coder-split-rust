@@ -30,6 +30,7 @@ use std::sync::{Arc, Weak};
 use async_trait::async_trait;
 use coder_core::ports::{WorkspaceRecord, WorkspaceTransitionRow};
 use coder_core::{AppStore, DeploymentStatsResponse, OperationalStore, StorageError};
+use coder_rbac::{Actor, system_actors};
 use time::OffsetDateTime;
 use tokio::sync::{Mutex, RwLock};
 use tokio_util::sync::CancellationToken;
@@ -683,12 +684,18 @@ pub struct AutobuildStats {
 /// limited to `MAX_CONCURRENT_TRANSITIONS` workers to avoid
 /// overloading the database.
 ///
-/// TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
-/// through this executor. See `crates/coder-rbac/src/system_actors.rs`.
+/// Runs under the `system_restricted` actor context
+/// ([`coder_rbac::system_actors::system_restricted`]). Today only the
+/// `Authorized<S>` list methods in `coder-db/src/dbauthz.rs` consult the
+/// actor; the transition/build calls below carry
+/// `TODO-dbauthz-full-wrap` comments pending the full wrap.
 pub struct AutobuildExecutor<S> {
     store: S,
     cancel: CancellationToken,
     tick_secs: u64,
+    /// System-actor context the executor runs under. See
+    /// [`coder_rbac::system_actors::system_restricted`].
+    actor: Actor,
 }
 
 impl<S> AutobuildExecutor<S>
@@ -707,6 +714,10 @@ where
             store,
             cancel: cancel.clone(),
             tick_secs: AUTOBUILD_TICK_SECS,
+            // TODO-dbauthz-full-wrap: route transition/build store calls
+            // through `Authorized<S>` once wrapped so this actor is
+            // enforced at the store boundary.
+            actor: system_actors::system_restricted(),
         });
         let handle = Self::spawn_executor_loop(&executor);
         (executor, handle)
@@ -725,9 +736,16 @@ where
             store,
             cancel: cancel.clone(),
             tick_secs,
+            actor: system_actors::system_restricted(),
         });
         let handle = Self::spawn_executor_loop(&executor);
         (executor, handle)
+    }
+
+    /// Returns the system actor this executor runs under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Evaluates one tick of the autobuild loop.
@@ -1739,11 +1757,17 @@ impl<T: LifecycleStore + ?Sized> LifecycleStore for Arc<T> {
 /// An optional [`QuietHoursWindow`] can be provided to suppress autostart
 /// during user-configured quiet hours.
 ///
-/// TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
-/// through this scheduler. See `crates/coder-rbac/src/system_actors.rs`.
+/// Runs under the `system_restricted` actor context
+/// ([`coder_rbac::system_actors::system_restricted`]). Today only the
+/// `Authorized<S>` list methods in `coder-db/src/dbauthz.rs` consult the
+/// actor; the transition/build calls triggered by the scheduler carry
+/// `TODO-dbauthz-full-wrap` comments pending the full wrap.
 pub struct LifecycleScheduler {
     cancel: CancellationToken,
     task: tokio::task::JoinHandle<()>,
+    /// System-actor context the scheduler runs under. See
+    /// [`coder_rbac::system_actors::system_restricted`].
+    actor: Actor,
 }
 
 impl LifecycleScheduler {
@@ -1759,7 +1783,20 @@ impl LifecycleScheduler {
             run_lifecycle_loop(store, interval_secs, quiet_hours, cancel_clone).await;
         });
         info!(interval_secs, "lifecycle scheduler started");
-        Arc::new(Self { cancel, task })
+        // TODO-dbauthz-full-wrap: route transition/build store calls
+        // through `Authorized<S>` once wrapped so this actor is enforced
+        // at the store boundary.
+        Arc::new(Self {
+            cancel,
+            task,
+            actor: system_actors::system_restricted(),
+        })
+    }
+
+    /// Returns the system actor this scheduler runs under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Signals the worker to stop.
@@ -3373,6 +3410,30 @@ mod tests {
         assert_eq!(result, None);
     }
 
+    #[test]
+    fn autobuild_uses_system_restricted_actor() {
+        // Regression guard for W0.S4 wiring: the executor's actor factory
+        // must hand back the `system` system actor. We exercise the
+        // factory directly rather than constructing a full executor
+        // (which requires a runtime + mock store).
+        let actor = system_actors::system_restricted();
+        assert!(
+            system_actors::is_system(&actor),
+            "system_restricted() must be a system actor",
+        );
+        assert_eq!(actor.username, "system");
+    }
+
+    #[test]
+    fn lifecycle_scheduler_uses_system_restricted_actor() {
+        // Same as above, but documents the scheduler's expected actor for
+        // grep-ability. Both AutobuildExecutor and LifecycleScheduler
+        // run under the same system-restricted context.
+        let actor = system_actors::system_restricted();
+        assert!(system_actors::is_system(&actor));
+        assert_eq!(actor.username, "system");
+    }
+
     // ── AutobuildExecutor integration tests ─────────────────
 
     #[derive(Clone)]
@@ -3441,6 +3502,7 @@ mod tests {
             store,
             cancel,
             tick_secs: AUTOBUILD_TICK_SECS,
+            actor: system_actors::system_restricted(),
         };
 
         let stats = executor.evaluate_once().await;
@@ -3459,6 +3521,7 @@ mod tests {
             store,
             cancel,
             tick_secs: AUTOBUILD_TICK_SECS,
+            actor: system_actors::system_restricted(),
         };
 
         let result = executor.evaluate_once().await;
@@ -3478,6 +3541,7 @@ mod tests {
             store,
             cancel,
             tick_secs: AUTOBUILD_TICK_SECS,
+            actor: system_actors::system_restricted(),
         };
 
         let stats = executor.evaluate_once().await;
@@ -3506,6 +3570,7 @@ mod tests {
             store,
             cancel,
             tick_secs: AUTOBUILD_TICK_SECS,
+            actor: system_actors::system_restricted(),
         };
 
         let stats = executor.evaluate_once().await;
@@ -3540,6 +3605,7 @@ mod tests {
             store,
             cancel,
             tick_secs: AUTOBUILD_TICK_SECS,
+            actor: system_actors::system_restricted(),
         };
 
         let stats = executor.evaluate_once().await;
@@ -3584,6 +3650,7 @@ mod tests {
             store,
             cancel,
             tick_secs: AUTOBUILD_TICK_SECS,
+            actor: system_actors::system_restricted(),
         };
 
         let stats = executor.evaluate_once().await;

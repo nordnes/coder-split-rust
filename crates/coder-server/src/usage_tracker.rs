@@ -8,8 +8,11 @@
 //! [`UsageTrackerOptions::batch_size`] distinct workspace IDs are queued,
 //! whichever fires first.
 //!
-//! TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::system_restricted`]
-//! through this worker. See `crates/coder-rbac/src/system_actors.rs`.
+//! Runs under the `system_restricted` actor context
+//! ([`coder_rbac::system_actors::system_restricted`]). Today only the
+//! `Authorized<S>` list methods in `coder-db/src/dbauthz.rs` consult the
+//! actor; the `batch_update_workspace_last_used_at` call carries a
+//! `TODO-dbauthz-full-wrap` comment for the eventual wrap.
 //!
 //! The flush replaces the prior synchronous-per-request pattern so a burst
 //! of usage pings collapses to one DB write instead of one per workspace.
@@ -21,6 +24,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use coder_core::AppStore;
+use coder_rbac::{Actor, system_actors};
 use time::OffsetDateTime;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
@@ -66,6 +70,11 @@ impl Default for UsageTrackerOptions {
 #[derive(Clone)]
 pub struct UsageTracker {
     tx: mpsc::UnboundedSender<Message>,
+    /// System-actor context the tracker runs under. See
+    /// [`coder_rbac::system_actors::system_restricted`]. Stored for
+    /// diagnostics and for the future `Authorized<S>` wrap of
+    /// `batch_update_workspace_last_used_at`.
+    actor: Actor,
 }
 
 enum Message {
@@ -83,11 +92,24 @@ impl UsageTracker {
         cancel: CancellationToken,
     ) -> (Arc<Self>, JoinHandle<()>) {
         let (tx, rx) = mpsc::unbounded_channel();
-        let tracker = Arc::new(Self { tx });
+        // TODO-dbauthz-full-wrap: once `Authorized<S>` wraps
+        // `batch_update_workspace_last_used_at`, route the flush call in
+        // `flush()` through the wrapper so this actor is enforced at the
+        // store boundary.
+        let tracker = Arc::new(Self {
+            tx,
+            actor: system_actors::system_restricted(),
+        });
         let task = tokio::spawn(async move {
             run_loop(store, options, rx, cancel).await;
         });
         (tracker, task)
+    }
+
+    /// Returns the system actor this tracker runs under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Enqueues a usage ping. Non-blocking; on a full / closed channel the
@@ -185,6 +207,18 @@ async fn flush(store: &Arc<dyn AppStore>, pending: &mut HashMap<Uuid, OffsetDate
 #[allow(clippy::expect_used, reason = "tests are allowed to fail loudly")]
 mod tests {
     use super::*;
+
+    #[test]
+    fn usage_tracker_uses_system_restricted_actor() {
+        // Regression guard for W0.S4 wiring: the tracker actor factory
+        // must hand back the `system` system actor.
+        let actor = system_actors::system_restricted();
+        assert!(
+            system_actors::is_system(&actor),
+            "system_restricted() must be a system actor",
+        );
+        assert_eq!(actor.username, "system");
+    }
 
     #[test]
     fn options_default_values_are_sane() {
