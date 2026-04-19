@@ -2254,10 +2254,8 @@ pub trait IdentityStore: Send + Sync {
     /// Clears `leased_until` / `next_retry_after`, sets `status = 'sent'`, and
     /// increments `attempt_count`. Mirrors Go's `BulkMarkNotificationMessagesSent`
     /// (`coder/coderd/database/queries/notifications.sql`).
-    async fn bulk_mark_notification_messages_sent(
-        &self,
-        ids: &[Uuid],
-    ) -> Result<u64, StorageError>;
+    async fn bulk_mark_notification_messages_sent(&self, ids: &[Uuid])
+    -> Result<u64, StorageError>;
 
     /// Bulk-marks a set of notification messages as failed.
     ///
@@ -4734,10 +4732,8 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     ) -> Result<bool, StorageError>;
 
     /// Bulk-marks a set of notification messages as successfully sent.
-    async fn bulk_mark_notification_messages_sent(
-        &self,
-        ids: &[Uuid],
-    ) -> Result<u64, StorageError>;
+    async fn bulk_mark_notification_messages_sent(&self, ids: &[Uuid])
+    -> Result<u64, StorageError>;
 
     /// Bulk-marks a set of notification messages as failed.
     async fn bulk_mark_notification_messages_failed(

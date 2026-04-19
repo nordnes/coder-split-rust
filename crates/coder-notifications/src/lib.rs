@@ -145,7 +145,7 @@ const MAX_CONCURRENT_SENDS: usize = 10;
 /// Maximum retry attempts for transient push service failures (5xx).
 const MAX_SEND_RETRIES: u32 = 3;
 /// Initial backoff duration (500 ms) for retry attempts; doubles each retry.
-const INITIAL_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Configuration for the notification dispatch pipeline.
 ///
@@ -574,8 +574,8 @@ where
         // rather than deferring to the dispatcher). The `X-Message-Id`
         // header carries the message ID out-of-band so receivers can
         // correlate deliveries without parsing the body.
-        let payload: serde_json::Value = serde_json::from_str(&message.input_json)
-            .unwrap_or(serde_json::Value::Null);
+        let payload: serde_json::Value =
+            serde_json::from_str(&message.input_json).unwrap_or(serde_json::Value::Null);
         let extract = |k: &str| -> String {
             payload
                 .get(k)
@@ -1129,7 +1129,7 @@ impl Webpusher {
             body: "This is a test Web Push notification".to_owned(),
             tag: String::new(),
             actions: Vec::new(),
-            data: std::collections::HashMap::new(),
+            data: HashMap::new(),
         };
         let msg_json = serde_json::to_vec(&test_msg)
             .map_err(|e| WebpushError::Serialization(e.to_string()))?;
@@ -1588,8 +1588,7 @@ mod tests {
             template_id: Uuid,
             disabled: bool,
         ) -> Self {
-            self.disabled_prefs
-                .insert((user_id, template_id), disabled);
+            self.disabled_prefs.insert((user_id, template_id), disabled);
             self
         }
 
@@ -3644,7 +3643,7 @@ mod tests {
         // vapid_key, client.  If someone accidentally adds a
         // second client or removes the shared one, this size assertion
         // will break.
-        let size = std::mem::size_of::<Webpusher>();
+        let size = size_of::<Webpusher>();
         assert!(
             size > 0,
             "Webpusher should be a non-zero-sized type (contains shared client)"
@@ -3663,7 +3662,7 @@ mod tests {
     #[test]
     fn retry_constants_are_sensible() {
         assert_eq!(MAX_SEND_RETRIES, 3);
-        assert_eq!(INITIAL_RETRY_BACKOFF, std::time::Duration::from_millis(500));
+        assert_eq!(INITIAL_RETRY_BACKOFF, Duration::from_millis(500));
     }
 
     // ── 32. Notifier-paused: still-landed regression ────────────
@@ -3773,8 +3772,8 @@ mod tests {
     async fn dispatch_webhook_body_is_envelope_with_x_message_id() {
         // Stand up a tiny axum-on-tokio webhook endpoint that captures the
         // body + headers of the incoming request and returns 200.
-        use tokio::net::TcpListener;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
 
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
@@ -3806,14 +3805,14 @@ mod tests {
                 })
                 .unwrap_or_default();
             let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_owned();
-            *captured_clone.lock().unwrap_or_else(|e| e.into_inner()) =
-                Some((x_message_id, body));
+            *captured_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some((x_message_id, body));
             let _ = sock
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
                 .await;
         });
 
-        let input_json = r#"{"subject":"S","plain_body":"PB","html_body":"<p>HB</p>","user_email":"a@b.c"}"#;
+        let input_json =
+            r#"{"subject":"S","plain_body":"PB","html_body":"<p>HB</p>","user_email":"a@b.c"}"#;
         let targets_json = format!(r#"{{"url":"http://{addr}/hook"}}"#);
         let mut msg = make_message(NotificationMethod::Webhook, &targets_json);
         msg.input_json = input_json.to_owned();
