@@ -409,6 +409,8 @@ pub enum AutobuildAction {
 /// The reason a workspace is being transitioned.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BuildReason {
+    /// User-initiated build (default).
+    Initiator,
     /// Automatic start based on schedule.
     Autostart,
     /// Automatic stop based on TTL or deadline.
@@ -417,6 +419,166 @@ pub enum BuildReason {
     Dormancy,
     /// Workspace auto-deleted after dormancy period.
     Autodelete,
+    /// Build retry after a previous failure.
+    FailureRetry,
+}
+
+impl BuildReason {
+    /// Returns the canonical string used in the `workspace_builds.reason` column.
+    ///
+    /// Mirrors Go's `database.BuildReason` constants in
+    /// `coder/coderd/database/models.go`.
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BuildReason::Initiator => "initiator",
+            BuildReason::Autostart => "autostart",
+            BuildReason::Autostop => "autostop",
+            BuildReason::Dormancy => "dormancy",
+            BuildReason::Autodelete => "autodelete",
+            BuildReason::FailureRetry => "failed_build_retry",
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Autostop requirement / quiet-hours MaxDeadline
+// ---------------------------------------------------------------------------
+
+/// Bitmask bit index for Monday in the template's `autostop_requirement_days_of_week`.
+///
+/// Matches Go's `coder/coderd/schedule/template.go` `DaysOfWeek` ordering:
+/// bit 0 = Monday, bit 1 = Tuesday, …, bit 6 = Sunday, bit 7 unused.
+pub const AUTOSTOP_REQUIREMENT_MONDAY_BIT: u8 = 1 << 0;
+
+/// Amount of leeway before skipping today's quiet-hours window.
+///
+/// Mirrors Go's `autostopRequirementLeeway` in
+/// `coder/coderd/schedule/autostop.go`.
+const AUTOSTOP_REQUIREMENT_LEEWAY: chrono::Duration = chrono::Duration::hours(2);
+
+/// Returns whether the Monday-indexed bit for a given weekday is set.
+///
+/// `bitmap` follows the Go ordering: bit 0 is Monday, ..., bit 6 is Sunday.
+#[must_use]
+fn autostop_requirement_day_is_set(bitmap: i16, weekday: chrono::Weekday) -> bool {
+    // Map chrono's Weekday::num_days_from_monday (0..=6) onto the bitmap.
+    let bit = 1_i16 << weekday.num_days_from_monday();
+    (bitmap & bit) != 0
+}
+
+/// Computes the `max_deadline` (quiet-hours clamp) for a new workspace build.
+///
+/// Ported from Go's `schedule.CalculateAutostop` in
+/// `coder/coderd/schedule/autostop.go`.
+///
+/// Returns `None` if the template has no autostop requirement
+/// (`autostop_requirement_days_of_week == 0`) or if no quiet-hours window is
+/// configured for the owning user and deployment.
+///
+/// Parameters:
+/// * `autostop_requirement_days_of_week` — Monday-indexed bitmask of days on
+///   which the workspace must be restarted (bit 0 = Monday, … bit 6 = Sunday).
+/// * `autostop_requirement_weeks` — number of weeks between restarts
+///   (`<= 1` means weekly).
+/// * `quiet_hours` — parsed quiet-hours window (user-override or deployment default).
+/// * `build_completed_at` — the time the build completed (typically "now").
+#[must_use]
+pub fn compute_max_deadline(
+    autostop_requirement_days_of_week: i16,
+    autostop_requirement_weeks: i64,
+    quiet_hours: Option<&QuietHoursWindow>,
+    build_completed_at: OffsetDateTime,
+) -> Option<OffsetDateTime> {
+    if autostop_requirement_days_of_week == 0 {
+        return None;
+    }
+    let quiet_hours = quiet_hours?;
+
+    // Work in UTC for all calculations — the window is already expressed in UTC.
+    let completed_ts = build_completed_at.unix_timestamp();
+    let completed = chrono::DateTime::<chrono::Utc>::from_timestamp(completed_ts, 0)?;
+
+    // Find the earliest candidate midnight (start of stop day) that lies on a
+    // matching weekday, N weeks out.
+    let with_leeway = completed + AUTOSTOP_REQUIREMENT_LEEWAY;
+    let mut day = truncate_utc_midnight(with_leeway);
+
+    // If the template requires >= 2-week spacing, jump to the next aligned Monday.
+    let weeks = autostop_requirement_weeks.max(1);
+    if weeks > 1 {
+        day = next_applicable_monday_of_n_weeks(day, weeks)?;
+    }
+
+    // Skip today if the quiet-hours window has already elapsed relative to the
+    // build's completion (plus leeway), matching Go's
+    // `checkSchedule.Before(buildCompletedAtInLoc.Add(leeway))` heuristic.
+    if let Some(today_window_start) = quiet_window_on_date(day, quiet_hours) {
+        if today_window_start < with_leeway {
+            day = day + chrono::Duration::days(1);
+        }
+    }
+
+    // Iterate up to 7 days to find a matching weekday.
+    use chrono::Datelike;
+    for _ in 0..8 {
+        if autostop_requirement_day_is_set(autostop_requirement_days_of_week, day.weekday()) {
+            break;
+        }
+        day = day + chrono::Duration::days(1);
+    }
+
+    // Emit the quiet-hours window start on that day as the max deadline.
+    let start = quiet_window_on_date(day, quiet_hours)?;
+    let ts = start.timestamp();
+    let odt = OffsetDateTime::from_unix_timestamp(ts).ok()?;
+    Some(odt)
+}
+
+/// Truncates a UTC `DateTime` to the start of that calendar day (00:00 UTC).
+fn truncate_utc_midnight(dt: chrono::DateTime<chrono::Utc>) -> chrono::DateTime<chrono::Utc> {
+    let naive = dt.date_naive().and_hms_opt(0, 0, 0).unwrap_or_default();
+    chrono::DateTime::<chrono::Utc>::from_naive_utc_and_offset(naive, chrono::Utc)
+}
+
+/// Returns the timestamp of the quiet-hours window start on the given UTC day.
+fn quiet_window_on_date(
+    day: chrono::DateTime<chrono::Utc>,
+    quiet_hours: &QuietHoursWindow,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    let naive = day
+        .date_naive()
+        .and_hms_opt(u32::from(quiet_hours.start_hour), 0, 0)?;
+    chrono::Utc.from_local_datetime(&naive).single()
+}
+
+/// Returns the Monday of the next week aligned to `n` weeks since the Go
+/// autostop-requirement epoch (2023-01-02 Monday UTC).
+///
+/// If the current week is already aligned, returns the provided time truncated
+/// to the most recent Monday.
+fn next_applicable_monday_of_n_weeks(
+    now: chrono::DateTime<chrono::Utc>,
+    n: i64,
+) -> Option<chrono::DateTime<chrono::Utc>> {
+    use chrono::TimeZone;
+    let epoch = chrono::Utc.with_ymd_and_hms(2023, 1, 2, 0, 0, 0).single()?;
+    if now < epoch {
+        return None;
+    }
+    let days_since = (now - epoch).num_days();
+    let weeks_since = days_since / 7;
+    let remainder = weeks_since % n;
+    if remainder == 0 {
+        // Current week aligned — use the Monday of this week.
+        let monday_days = weeks_since * 7;
+        let monday = epoch + chrono::Duration::days(monday_days);
+        return Some(truncate_utc_midnight(monday));
+    }
+    let target_week = weeks_since + (n - remainder);
+    let monday = epoch + chrono::Duration::days(target_week * 7);
+    Some(truncate_utc_midnight(monday))
 }
 
 // ---------------------------------------------------------------------------
@@ -773,6 +935,10 @@ async fn evaluate_workspace<S: AutobuildStore>(
             );
             // In the full implementation this would trigger a stop build
             // via the workspace builder.
+        }
+        BuildReason::Initiator | BuildReason::FailureRetry => {
+            // User-initiated / failure-retry builds are not driven by the
+            // autobuild loop; they come from explicit HTTP requests.
         }
     }
 
@@ -2434,6 +2600,95 @@ mod tests {
         // 10:00 UTC - should not be quiet
         let t3 = time::macros::datetime!(2026-03-09 10:00:00 UTC);
         assert!(!window.is_quiet(t3));
+    }
+
+    // ── compute_max_deadline (quiet-hours clamp) ─────────────
+
+    #[test]
+    fn quiet_hours_max_deadline_none_when_no_autostop_requirement() {
+        // No autostop requirement → None regardless of quiet-hours window.
+        let window = QuietHoursWindow {
+            start_hour: 2,
+            end_hour: 8,
+        };
+        let now = time::macros::datetime!(2026-03-09 12:00:00 UTC);
+        let result = compute_max_deadline(0, 1, Some(&window), now);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn quiet_hours_max_deadline_none_without_quiet_hours_window() {
+        // Autostop requirement set but no quiet-hours window → None (quiet
+        // hours are an enterprise feature; absent schedule → no clamp).
+        let now = time::macros::datetime!(2026-03-09 12:00:00 UTC);
+        // bit 5 = Saturday in the Monday-first bitmap.
+        let result = compute_max_deadline(0b0010_0000, 1, None, now);
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn quiet_hours_max_deadline_multi_day_bitmask_picks_nearest() {
+        // Build completes on Mon 2026-03-09 at noon UTC. Quiet hours at 02:00
+        // UTC.  Bitmap = Wed (bit 2) | Sat (bit 5). Next matching day is Wed
+        // 2026-03-11 at 02:00 UTC.
+        let window = QuietHoursWindow {
+            start_hour: 2,
+            end_hour: 8,
+        };
+        let now = time::macros::datetime!(2026-03-09 12:00:00 UTC);
+        let bitmap = (1_i16 << 2) | (1_i16 << 5); // Wed + Sat
+        let max = compute_max_deadline(bitmap, 1, Some(&window), now)
+            .unwrap_or_else(|| unreachable!("should produce a deadline"));
+        assert_eq!(max, time::macros::datetime!(2026-03-11 02:00:00 UTC));
+    }
+
+    #[test]
+    fn quiet_hours_max_deadline_user_default_vs_override() {
+        // Same bitmap and now, but different quiet-hours windows (a user's
+        // override vs the deployment default). The returned deadline tracks
+        // whichever window was supplied.
+        let now = time::macros::datetime!(2026-03-09 12:00:00 UTC);
+        let bitmap = 1_i16 << 5; // Saturday
+        let default_window = QuietHoursWindow {
+            start_hour: 0,
+            end_hour: 6,
+        };
+        let user_window = QuietHoursWindow {
+            start_hour: 4,
+            end_hour: 10,
+        };
+        let default_deadline = compute_max_deadline(bitmap, 1, Some(&default_window), now)
+            .unwrap_or_else(|| unreachable!("default deadline"));
+        let user_deadline = compute_max_deadline(bitmap, 1, Some(&user_window), now)
+            .unwrap_or_else(|| unreachable!("user deadline"));
+        // Both land on the upcoming Saturday (2026-03-14) but at different
+        // hours as dictated by the quiet window start.
+        assert_eq!(
+            default_deadline,
+            time::macros::datetime!(2026-03-14 00:00:00 UTC)
+        );
+        assert_eq!(
+            user_deadline,
+            time::macros::datetime!(2026-03-14 04:00:00 UTC)
+        );
+    }
+
+    #[test]
+    fn quiet_hours_max_deadline_multi_week_horizon_aligns_to_n_weeks() {
+        // Weeks = 3 with Saturday bit, building on Monday 2026-03-09 UTC.  The
+        // autostop requirement epoch (2023-01-02 Mon UTC) puts 2026-03-09
+        // 166 weeks out (166 % 3 = 1).  With n=3 the next aligned Monday is
+        // therefore 166 + (3-1) = 168 weeks past epoch, i.e. 2026-03-23, and
+        // the following Saturday is 2026-03-28.
+        let window = QuietHoursWindow {
+            start_hour: 3,
+            end_hour: 9,
+        };
+        let now = time::macros::datetime!(2026-03-09 12:00:00 UTC);
+        let bitmap = 1_i16 << 5; // Saturday
+        let max = compute_max_deadline(bitmap, 3, Some(&window), now)
+            .unwrap_or_else(|| unreachable!("should produce a deadline"));
+        assert_eq!(max, time::macros::datetime!(2026-03-28 03:00:00 UTC));
     }
 
     #[test]

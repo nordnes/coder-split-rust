@@ -27,6 +27,50 @@ async fn build_provisioner_tags(
     Ok(coder_core::mutate_tags(owner_id, &[&prior_tags]))
 }
 
+/// Computes the workspace build's `max_deadline` based on the template's
+/// autostop requirement and the user's (or deployment default) quiet hours.
+///
+/// Mirrors Go's `schedule.CalculateAutostop` call from
+/// `coder/coderd/wsbuilder/wsbuilder.go`.  Returns `None` when the template
+/// has no autostop requirement configured or no quiet-hours window resolves.
+pub(crate) async fn resolve_build_max_deadline(
+    state: &AppState,
+    template: &TemplateRecord,
+    owner_id: Uuid,
+    now: OffsetDateTime,
+) -> Result<Option<OffsetDateTime>, AppError> {
+    if template.autostop_requirement_days_of_week == 0 {
+        return Ok(None);
+    }
+
+    // Prefer the user's override, fall back to the deployment default.
+    // Mirrors the enterprise `UserQuietHoursScheduleStore.Get` behavior.
+    let user_can_set = state.config.workspace.allow_user_custom_quiet_hours;
+    let raw_schedule = if user_can_set {
+        match state
+            .store
+            .get_user_config(owner_id, "quiet_hours_schedule")
+            .await?
+        {
+            Some(record) if !record.value.is_empty() => record.value,
+            _ => state.config.workspace.default_quiet_hours_schedule.clone(),
+        }
+    } else {
+        state.config.workspace.default_quiet_hours_schedule.clone()
+    };
+
+    let Some(window) = coder_workspaces::parse_quiet_hours_schedule(&raw_schedule) else {
+        return Ok(None);
+    };
+
+    Ok(coder_workspaces::compute_max_deadline(
+        template.autostop_requirement_days_of_week,
+        template.autostop_requirement_weeks,
+        Some(&window),
+        now,
+    ))
+}
+
 #[derive(Debug, Default, Deserialize)]
 pub(crate) struct WorkspacesQuery {
     owner: Option<String>,
@@ -285,18 +329,16 @@ pub(crate) async fn post_workspace_build(
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok());
 
-    let tv_id = if let Some(id) = template_version_id {
-        id
-    } else {
-        let Some(template) = state
-            .store
-            .find_template_by_id(workspace.template_id)
-            .await?
-        else {
-            return Ok(not_found_response("Template not found."));
-        };
-        template.active_version_id
+    // Always resolve the template row so we can compute the quiet-hours
+    // max_deadline even when the caller supplied an explicit template version.
+    let Some(template) = state
+        .store
+        .find_template_by_id(workspace.template_id)
+        .await?
+    else {
+        return Ok(not_found_response("Template not found."));
     };
+    let tv_id = template_version_id.unwrap_or(template.active_version_id);
 
     let job_id = Uuid::new_v4();
     let build_id = Uuid::new_v4();
@@ -318,6 +360,13 @@ pub(crate) async fn post_workspace_build(
         })
         .await?;
 
+    // Compute the max_deadline (quiet-hours clamp) for templates that declare
+    // an autostop requirement.  Mirrors Go's `wsbuilder` path which invokes
+    // `schedule.CalculateAutostop`.
+    let now = OffsetDateTime::now_utc();
+    let max_deadline =
+        resolve_build_max_deadline(&state, &template, workspace.owner_id, now).await?;
+
     // build_number is computed atomically inside insert_workspace_build.
     let build = state
         .store
@@ -330,8 +379,8 @@ pub(crate) async fn post_workspace_build(
             initiator_id: context.user.id,
             job_id,
             reason: "initiator".to_owned(),
-            deadline: None,
-            max_deadline: None,
+            deadline: max_deadline,
+            max_deadline,
         })
         .await?;
 
@@ -1916,6 +1965,12 @@ pub(crate) async fn post_user_workspace(
         })
         .await?;
 
+    // Compute the max_deadline (quiet-hours clamp) for templates that declare
+    // an autostop requirement.
+    let now_ts = OffsetDateTime::now_utc();
+    let max_deadline =
+        resolve_build_max_deadline(&state, &template, workspace.owner_id, now_ts).await?;
+
     // build_number is computed atomically inside insert_workspace_build.
     let _build = state
         .store
@@ -1928,8 +1983,8 @@ pub(crate) async fn post_user_workspace(
             initiator_id: context.user.id,
             job_id,
             reason: "initiator".to_owned(),
-            deadline: None,
-            max_deadline: None,
+            deadline: max_deadline,
+            max_deadline,
         })
         .await?;
 
@@ -2096,6 +2151,12 @@ pub(crate) async fn post_org_member_workspace(
         })
         .await?;
 
+    // Compute the max_deadline (quiet-hours clamp) for templates that declare
+    // an autostop requirement.
+    let now_ts = OffsetDateTime::now_utc();
+    let max_deadline =
+        resolve_build_max_deadline(&state, &template, workspace.owner_id, now_ts).await?;
+
     let _build = state
         .store
         .insert_workspace_build(CreateWorkspaceBuildInput {
@@ -2107,8 +2168,8 @@ pub(crate) async fn post_org_member_workspace(
             initiator_id: context.user.id,
             job_id,
             reason: "initiator".to_owned(),
-            deadline: None,
-            max_deadline: None,
+            deadline: max_deadline,
+            max_deadline,
         })
         .await?;
 
