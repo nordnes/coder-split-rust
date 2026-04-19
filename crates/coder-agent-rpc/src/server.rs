@@ -194,6 +194,48 @@ async fn dispatch<H: AgentRpcHandler + ?Sized>(
             let resp = handler.batch_update_app_health(req).await?;
             encode(&resp)
         }
+        "/coder.agent.v2.Agent/ReportConnection" => {
+            let req = decode::<agent::ReportConnectionRequest>(body)?;
+            handler.report_connection(req).await?;
+            // The Go service returns `google.protobuf.Empty`, which has no
+            // fields and therefore serialises as zero bytes on the wire.
+            Ok(Vec::new())
+        }
+        "/coder.agent.v2.Agent/GetResourcesMonitoringConfiguration" => {
+            let req = decode::<agent::GetResourcesMonitoringConfigurationRequest>(body)?;
+            let resp = handler.get_resources_monitoring_configuration(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/PushResourcesMonitoringUsage" => {
+            let req = decode::<agent::PushResourcesMonitoringUsageRequest>(body)?;
+            let resp = handler.push_resources_monitoring_usage(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/CreateSubAgent" => {
+            let req = decode::<agent::CreateSubAgentRequest>(body)?;
+            let resp = handler.create_sub_agent(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/DeleteSubAgent" => {
+            let req = decode::<agent::DeleteSubAgentRequest>(body)?;
+            let resp = handler.delete_sub_agent(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/ListSubAgents" => {
+            let req = decode::<agent::ListSubAgentsRequest>(body)?;
+            let resp = handler.list_sub_agents(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/ReportBoundaryLogs" => {
+            let req = decode::<agent::ReportBoundaryLogsRequest>(body)?;
+            let resp = handler.report_boundary_logs(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/UpdateAppStatus" => {
+            let req = decode::<agent::UpdateAppStatusRequest>(body)?;
+            let resp = handler.update_app_status(req).await?;
+            encode(&resp)
+        }
         other => Err(RpcError::Unimplemented(other.to_string())),
     }
 }
@@ -304,6 +346,111 @@ mod tests {
         )
         .await?;
         let _ = agent::BatchUpdateAppHealthResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_report_connection() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/ReportConnection",
+            &agent::ReportConnectionRequest::default().encode_to_vec(),
+        )
+        .await?;
+        // `google.protobuf.Empty` is empty on the wire.
+        assert!(body.is_empty(), "Empty response must be zero bytes");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_get_resources_monitoring_configuration() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/GetResourcesMonitoringConfiguration",
+            &agent::GetResourcesMonitoringConfigurationRequest::default().encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::GetResourcesMonitoringConfigurationResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_push_resources_monitoring_usage() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/PushResourcesMonitoringUsage",
+            &agent::PushResourcesMonitoringUsageRequest { datapoints: vec![] }.encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::PushResourcesMonitoringUsageResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_create_sub_agent() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/CreateSubAgent",
+            &agent::CreateSubAgentRequest {
+                name: "sub-one".into(),
+                directory: "/workspaces".into(),
+                architecture: "amd64".into(),
+                operating_system: "linux".into(),
+                apps: vec![],
+                display_apps: vec![],
+                id: None,
+            }
+            .encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::CreateSubAgentResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_delete_sub_agent() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/DeleteSubAgent",
+            &agent::DeleteSubAgentRequest { id: vec![0u8; 16] }.encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::DeleteSubAgentResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_list_sub_agents() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/ListSubAgents",
+            &agent::ListSubAgentsRequest::default().encode_to_vec(),
+        )
+        .await?;
+        let resp = agent::ListSubAgentsResponse::decode(&body[..])?;
+        assert!(resp.agents.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_report_boundary_logs() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/ReportBoundaryLogs",
+            &agent::ReportBoundaryLogsRequest { logs: vec![] }.encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::ReportBoundaryLogsResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_update_app_status() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/UpdateAppStatus",
+            &agent::UpdateAppStatusRequest {
+                slug: "ide".into(),
+                state: agent::update_app_status_request::AppStatusState::Working as i32,
+                message: "hello".into(),
+                uri: String::new(),
+            }
+            .encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::UpdateAppStatusResponse::decode(&body[..])?;
         Ok(())
     }
 

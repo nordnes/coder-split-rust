@@ -63,6 +63,66 @@ pub trait AgentRpcHandler: Send + Sync {
     ) -> Result<agent::BatchUpdateAppHealthResponse, RpcError> {
         Err(RpcError::Unimplemented("BatchUpdateAppHealths".into()))
     }
+
+    async fn report_connection(
+        &self,
+        _req: agent::ReportConnectionRequest,
+    ) -> Result<(), RpcError> {
+        Err(RpcError::Unimplemented("ReportConnection".into()))
+    }
+
+    async fn get_resources_monitoring_configuration(
+        &self,
+        _req: agent::GetResourcesMonitoringConfigurationRequest,
+    ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        Err(RpcError::Unimplemented(
+            "GetResourcesMonitoringConfiguration".into(),
+        ))
+    }
+
+    async fn push_resources_monitoring_usage(
+        &self,
+        _req: agent::PushResourcesMonitoringUsageRequest,
+    ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
+        Err(RpcError::Unimplemented(
+            "PushResourcesMonitoringUsage".into(),
+        ))
+    }
+
+    async fn create_sub_agent(
+        &self,
+        _req: agent::CreateSubAgentRequest,
+    ) -> Result<agent::CreateSubAgentResponse, RpcError> {
+        Err(RpcError::Unimplemented("CreateSubAgent".into()))
+    }
+
+    async fn delete_sub_agent(
+        &self,
+        _req: agent::DeleteSubAgentRequest,
+    ) -> Result<agent::DeleteSubAgentResponse, RpcError> {
+        Err(RpcError::Unimplemented("DeleteSubAgent".into()))
+    }
+
+    async fn list_sub_agents(
+        &self,
+        _req: agent::ListSubAgentsRequest,
+    ) -> Result<agent::ListSubAgentsResponse, RpcError> {
+        Err(RpcError::Unimplemented("ListSubAgents".into()))
+    }
+
+    async fn report_boundary_logs(
+        &self,
+        _req: agent::ReportBoundaryLogsRequest,
+    ) -> Result<agent::ReportBoundaryLogsResponse, RpcError> {
+        Err(RpcError::Unimplemented("ReportBoundaryLogs".into()))
+    }
+
+    async fn update_app_status(
+        &self,
+        _req: agent::UpdateAppStatusRequest,
+    ) -> Result<agent::UpdateAppStatusResponse, RpcError> {
+        Err(RpcError::Unimplemented("UpdateAppStatus".into()))
+    }
 }
 
 /// Opaque per-invocation metadata lifted off any `InvokeMetadata` frames
@@ -196,5 +256,61 @@ impl AgentRpcHandler for StubHandler {
         _req: agent::BatchUpdateAppHealthRequest,
     ) -> Result<agent::BatchUpdateAppHealthResponse, RpcError> {
         Ok(agent::BatchUpdateAppHealthResponse::default())
+    }
+
+    async fn report_connection(
+        &self,
+        _req: agent::ReportConnectionRequest,
+    ) -> Result<(), RpcError> {
+        Ok(())
+    }
+
+    async fn get_resources_monitoring_configuration(
+        &self,
+        _req: agent::GetResourcesMonitoringConfigurationRequest,
+    ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        Ok(agent::GetResourcesMonitoringConfigurationResponse::default())
+    }
+
+    async fn push_resources_monitoring_usage(
+        &self,
+        _req: agent::PushResourcesMonitoringUsageRequest,
+    ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
+        Ok(agent::PushResourcesMonitoringUsageResponse::default())
+    }
+
+    async fn create_sub_agent(
+        &self,
+        _req: agent::CreateSubAgentRequest,
+    ) -> Result<agent::CreateSubAgentResponse, RpcError> {
+        Ok(agent::CreateSubAgentResponse::default())
+    }
+
+    async fn delete_sub_agent(
+        &self,
+        _req: agent::DeleteSubAgentRequest,
+    ) -> Result<agent::DeleteSubAgentResponse, RpcError> {
+        Ok(agent::DeleteSubAgentResponse::default())
+    }
+
+    async fn list_sub_agents(
+        &self,
+        _req: agent::ListSubAgentsRequest,
+    ) -> Result<agent::ListSubAgentsResponse, RpcError> {
+        Ok(agent::ListSubAgentsResponse::default())
+    }
+
+    async fn report_boundary_logs(
+        &self,
+        _req: agent::ReportBoundaryLogsRequest,
+    ) -> Result<agent::ReportBoundaryLogsResponse, RpcError> {
+        Ok(agent::ReportBoundaryLogsResponse::default())
+    }
+
+    async fn update_app_status(
+        &self,
+        _req: agent::UpdateAppStatusRequest,
+    ) -> Result<agent::UpdateAppStatusResponse, RpcError> {
+        Ok(agent::UpdateAppStatusResponse::default())
     }
 }

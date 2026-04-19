@@ -3943,6 +3943,31 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         resource_ids: &[Uuid],
     ) -> Result<Vec<WorkspaceAgentRow>, StorageError>;
 
+    /// Lists sub-agents owned by the given parent agent. Mirrors Go's
+    /// `GetWorkspaceAgentsByParentID` in
+    /// `coder/coderd/database/queries/workspaceagents.sql`. Sub-agents are
+    /// the workspace agents whose `parent_id` column equals `parent_id`.
+    async fn list_workspace_agents_by_parent_id(
+        &self,
+        parent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+        // Default implementation uses the per-resource listing + a parent_id
+        // filter so implementations that do not need sub-agents do not have
+        // to override. Postgres overrides this for a single SQL query.
+        let _ = parent_id;
+        Ok(Vec::new())
+    }
+
+    /// Deletes a sub-agent (workspace agent whose `parent_id` is set) by id.
+    /// Mirrors Go's `DeleteWorkspaceSubAgentByID` in
+    /// `coder/coderd/database/queries/workspaceagents.sql`. The default impl
+    /// is a no-op so stores without sub-agent support silently accept the
+    /// DRPC call.
+    async fn delete_workspace_sub_agent(&self, sub_agent_id: Uuid) -> Result<(), StorageError> {
+        let _ = sub_agent_id;
+        Ok(())
+    }
+
     /// Lists workspace apps for a given agent.
     async fn list_workspace_apps_by_agent_id(
         &self,

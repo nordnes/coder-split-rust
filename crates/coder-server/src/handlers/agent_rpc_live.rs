@@ -21,6 +21,7 @@ use coder_agent_rpc::handlers::RpcError;
 use coder_agent_rpc::proto::agent_v2 as agent;
 use coder_agent_rpc::proto::tailnet_v2 as tailnet;
 use coder_core::AppStore;
+use coder_core::InsertWorkspaceAppStatusInput;
 use coder_core::config::DerpRegionConfig;
 use url::Url;
 use uuid::Uuid;
@@ -553,6 +554,234 @@ impl AgentRpcHandler for LiveAgentHandler {
         }
 
         Ok(agent::BatchUpdateAppHealthResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/connectionlog.go::ReportConnection`.
+    ///
+    /// The Rust rewrite does not yet ship the `connection_logs` table in its
+    /// migrations (mirrored by the no-op `list_connection_logs` / `delete_old`
+    /// in the store) — `enterprise/coderd/connectionlog.go` gates writes
+    /// behind a licensed feature. Accept the payload, log at debug, and
+    /// return `Empty` so agents do not error on every SSH / VS Code / web
+    /// terminal connection event.
+    async fn report_connection(&self, req: agent::ReportConnectionRequest) -> Result<(), RpcError> {
+        let conn = req
+            .connection
+            .ok_or_else(|| RpcError::InvalidArgument("connection is required".into()))?;
+        // Validate the connection ID like the Go implementation — rejecting a
+        // zero or malformed UUID prevents the agent from silently corrupting
+        // any future persistence path.
+        let conn_id = Uuid::from_slice(&conn.id)
+            .map_err(|e| RpcError::InvalidArgument(format!("connection id from bytes: {e}")))?;
+        if conn_id.is_nil() {
+            return Err(RpcError::InvalidArgument(
+                "connection ID cannot be nil".into(),
+            ));
+        }
+        tracing::debug!(
+            target: "coder_server::agent_rpc_live",
+            agent_id = %self.agent_id,
+            connection_id = %conn_id,
+            action = conn.action,
+            kind = conn.r#type,
+            "agent reported connection",
+        );
+        Ok(())
+    }
+
+    /// Ports `coder/coderd/agentapi/resources_monitoring.go::GetResourcesMonitoringConfiguration`.
+    ///
+    /// Returns the deployment's collection cadence plus the set of memory /
+    /// volume monitors the operator has enabled for this agent. The Rust
+    /// rewrite does not yet ship the `workspace_agent_memory_resource_monitor`
+    /// or `workspace_agent_volume_resource_monitor` tables, so the reply
+    /// omits both — the agent interprets a missing `memory` field as
+    /// "disabled" and an empty `volumes` vec as "no volumes monitored".
+    async fn get_resources_monitoring_configuration(
+        &self,
+        _req: agent::GetResourcesMonitoringConfigurationRequest,
+    ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        // Values match the Go defaults in
+        // `coder/coderd/agentapi/resourcesmonitor/config.go` (10s interval,
+        // 20-sample window). Tracked by the resource-monitor port; once the
+        // schema lands this should read from the deployment config.
+        Ok(agent::GetResourcesMonitoringConfigurationResponse {
+            config: Some(
+                agent::get_resources_monitoring_configuration_response::Config {
+                    num_datapoints: 20,
+                    collection_interval_seconds: 10,
+                },
+            ),
+            memory: None,
+            volumes: Vec::new(),
+        })
+    }
+
+    /// Ports `coder/coderd/agentapi/resources_monitoring.go::PushResourcesMonitoringUsage`.
+    ///
+    /// Accepts the datapoint batch but does not yet persist it (see
+    /// `get_resources_monitoring_configuration` for the schema gap). Logging
+    /// the batch size gives operators visibility that usage is arriving.
+    async fn push_resources_monitoring_usage(
+        &self,
+        req: agent::PushResourcesMonitoringUsageRequest,
+    ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
+        tracing::debug!(
+            target: "coder_server::agent_rpc_live",
+            agent_id = %self.agent_id,
+            datapoints = req.datapoints.len(),
+            "agent pushed resource monitoring usage",
+        );
+        Ok(agent::PushResourcesMonitoringUsageResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/subagent.go::CreateSubAgent`.
+    ///
+    /// Devcontainer sub-agent creation writes into `workspace_agents` with a
+    /// `parent_id` pointing at this agent. The Rust rewrite does not yet
+    /// expose `insert_workspace_agent`, so return an unimplemented DRPC code
+    /// rather than corrupt the manifest view.
+    async fn create_sub_agent(
+        &self,
+        _req: agent::CreateSubAgentRequest,
+    ) -> Result<agent::CreateSubAgentResponse, RpcError> {
+        Err(RpcError::Unimplemented("CreateSubAgent".into()))
+    }
+
+    /// Ports `coder/coderd/agentapi/subagent.go::DeleteSubAgent`.
+    async fn delete_sub_agent(
+        &self,
+        req: agent::DeleteSubAgentRequest,
+    ) -> Result<agent::DeleteSubAgentResponse, RpcError> {
+        let sub_id = Uuid::from_slice(&req.id)
+            .map_err(|e| RpcError::InvalidArgument(format!("sub agent id from bytes: {e}")))?;
+        self.store
+            .delete_workspace_sub_agent(sub_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("delete sub agent: {e}")))?;
+        Ok(agent::DeleteSubAgentResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/subagent.go::ListSubAgents`.
+    async fn list_sub_agents(
+        &self,
+        _req: agent::ListSubAgentsRequest,
+    ) -> Result<agent::ListSubAgentsResponse, RpcError> {
+        let agents = self
+            .store
+            .list_workspace_agents_by_parent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("list sub agents: {e}")))?;
+
+        Ok(agent::ListSubAgentsResponse {
+            agents: agents
+                .into_iter()
+                .map(|a| agent::SubAgent {
+                    name: a.name,
+                    id: a.id.as_bytes().to_vec(),
+                    auth_token: a.auth_token.as_bytes().to_vec(),
+                })
+                .collect(),
+        })
+    }
+
+    /// Ports `coder/coderd/agentapi/boundary_logs.go::ReportBoundaryLogs`.
+    ///
+    /// Boundary emits one log per allowed / denied resource access. The Go
+    /// implementation forwards them to structured logs and tallies them in a
+    /// `BoundaryUsageTracker`. The Rust rewrite mirrors the logging (for
+    /// operator visibility) without yet wiring the tracker — safe because
+    /// the tracker is advisory telemetry, not load-bearing state.
+    async fn report_boundary_logs(
+        &self,
+        req: agent::ReportBoundaryLogsRequest,
+    ) -> Result<agent::ReportBoundaryLogsResponse, RpcError> {
+        let mut allowed = 0u64;
+        let mut denied = 0u64;
+        for log in &req.logs {
+            if log.allowed {
+                allowed += 1;
+            } else {
+                denied += 1;
+            }
+        }
+        if allowed + denied > 0 {
+            tracing::info!(
+                target: "coder_server::agent_rpc_live",
+                agent_id = %self.agent_id,
+                allowed,
+                denied,
+                "agent reported boundary logs",
+            );
+        }
+        Ok(agent::ReportBoundaryLogsResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/apps.go::UpdateAppStatus`.
+    async fn update_app_status(
+        &self,
+        req: agent::UpdateAppStatusRequest,
+    ) -> Result<agent::UpdateAppStatusResponse, RpcError> {
+        // Message length cap mirrors the 160-character validation in the Go
+        // handler; the client surfaces the status string in a UI badge so
+        // long messages would overflow.
+        if req.message.chars().count() > 160 {
+            return Err(RpcError::InvalidArgument(
+                "Message must be less than 160 characters.".into(),
+            ));
+        }
+
+        let state = app_status_state_proto_to_db(req.state).ok_or_else(|| {
+            RpcError::InvalidArgument(
+                "State must be one of: complete, failure, working, idle.".into(),
+            )
+        })?;
+
+        let app = self
+            .store
+            .find_workspace_app_by_agent_and_slug(self.agent_id, &req.slug)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find workspace app: {e}")))?
+            .ok_or_else(|| {
+                RpcError::InvalidArgument(format!("No app found with slug {:?}", req.slug))
+            })?;
+
+        let workspace = self
+            .store
+            .find_workspace_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find workspace: {e}")))?
+            .ok_or_else(|| RpcError::Internal("workspace not found for agent".into()))?;
+
+        self.store
+            .insert_workspace_app_status(&InsertWorkspaceAppStatusInput {
+                agent_id: self.agent_id,
+                app_id: app.id,
+                workspace_id: workspace.id,
+                state: state.to_owned(),
+                message: req.message,
+                uri: if req.uri.is_empty() {
+                    None
+                } else {
+                    Some(req.uri)
+                },
+            })
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert workspace app status: {e}")))?;
+
+        Ok(agent::UpdateAppStatusResponse::default())
+    }
+}
+
+/// Maps the on-the-wire `UpdateAppStatusRequest.AppStatusState` enum to the
+/// database `workspace_app_status_state` enum. Mirrors the switch in
+/// `coder/coderd/agentapi/apps.go::UpdateAppStatus`.
+fn app_status_state_proto_to_db(value: i32) -> Option<&'static str> {
+    match agent::update_app_status_request::AppStatusState::try_from(value).ok()? {
+        agent::update_app_status_request::AppStatusState::Working => Some("working"),
+        agent::update_app_status_request::AppStatusState::Idle => Some("idle"),
+        agent::update_app_status_request::AppStatusState::Complete => Some("complete"),
+        agent::update_app_status_request::AppStatusState::Failure => Some("failure"),
     }
 }
 
