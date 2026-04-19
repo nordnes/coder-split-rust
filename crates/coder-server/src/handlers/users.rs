@@ -328,6 +328,35 @@ pub(crate) async fn get_user_autofill_parameters(
     Ok(Json(Vec::<UserParameter>::new()).into_response())
 }
 
+/// Minimal auditable view of a user, used by `put_user_profile` to demonstrate
+/// the structured-diff path. Mirrors the per-field policies from Go's
+/// `audit/table.go` at a reduced-surface level (full roll-out deferred).
+#[derive(Debug, Clone, serde::Serialize, coder_audit::Auditable)]
+struct AuditUserView {
+    #[audit(track)]
+    id: Uuid,
+    #[audit(track)]
+    email: String,
+    #[audit(track)]
+    username: String,
+    #[audit(track)]
+    name: String,
+    #[audit(ignore)]
+    last_seen_at: Option<OffsetDateTime>,
+}
+
+impl AuditUserView {
+    fn from_record(record: &coder_core::identity::UserRecord) -> Self {
+        Self {
+            id: record.id,
+            email: record.email.clone(),
+            username: record.username.clone(),
+            name: record.name.clone(),
+            last_seen_at: record.last_seen_at,
+        }
+    }
+}
+
 /// PUT /api/v2/users/:user/profile — update a user's display name and username.
 pub(crate) async fn put_user_profile(
     State(state): State<AppState>,
@@ -343,6 +372,19 @@ pub(crate) async fn put_user_profile(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
+
+    // Capture a best-effort "before" view so we can emit a structured
+    // field-level audit diff alongside the existing summary string. If the
+    // lookup fails for any reason we simply skip the structured diff — the
+    // summary remains the primary record.
+    let before_view = state
+        .identity
+        .get_user(&context.actor, &context.user, &user)
+        .await
+        .ok()
+        .as_ref()
+        .map(AuditUserView::from_record);
+
     let updated_user = match state
         .identity
         .update_user_profile(&context.actor, &context.user, &user, &request)
@@ -352,15 +394,23 @@ pub(crate) async fn put_user_profile(
         Err(error) => return handle_identity_error(error),
     };
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::User,
-        Some(&context.user),
-        Some(updated_user.id.to_string()),
-        "updated user profile",
-    )
-    .await;
+    let after_view = AuditUserView::from_record(&updated_user);
+    let audit_diff = before_view.map(|before| {
+        use coder_audit::Auditable as _;
+        before.audit_diff(&after_view)
+    });
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::User,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(updated_user.id.to_string()),
+            summary: format!("updated user profile for {}", updated_user.username),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok((StatusCode::OK, Json(UserResponse::from(updated_user))).into_response())
 }

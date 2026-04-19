@@ -14,7 +14,22 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+// Allow the `#[derive(Auditable)]` macro (which resolves types against the
+// absolute path `::coder_audit::…`) to also work when the macro is invoked
+// inside this crate's own tests.
+extern crate self as coder_audit;
+
 pub mod batched_sink;
+pub mod diff;
+
+pub use coder_audit_derive::Auditable;
+pub use diff::{_macro_support, AuditDiff, AuditFieldDiff};
+
+// Re-export the trait at crate root under the name `Auditable`. This is
+// allowed alongside the derive re-export above because derive macros and
+// traits live in separate namespaces (same pattern as `serde::Serialize`).
+#[doc(inline)]
+pub use diff::Auditable;
 
 use async_trait::async_trait;
 use coder_rbac::ResourceKind;
@@ -76,7 +91,15 @@ impl AuditAction {
 }
 
 /// Structured audit event emitted by mutating or authentication handlers.
-#[derive(Clone, Debug, PartialEq, Eq)]
+///
+/// The [`summary`](Self::summary) string remains the primary human-readable
+/// description consumed by the existing batched sink / database row. When a
+/// handler can produce one, it may additionally populate
+/// [`diff`](Self::diff) with a structured per-field change map via
+/// [`Auditable::audit_diff`](crate::Auditable::audit_diff). This is the
+/// foundation for Go parity with `coderd/audit/diff.go` — a full roll-out
+/// (and a dedicated JSONB storage column) is tracked as a follow-up.
+#[derive(Clone, Debug, PartialEq)]
 pub struct AuditEvent {
     /// Normalized audit action.
     pub action: AuditAction,
@@ -86,8 +109,12 @@ pub struct AuditEvent {
     pub actor_user_id: Option<Uuid>,
     /// Target object identifier when one exists.
     pub target_id: Option<String>,
-    /// Human-readable summary for operational inspection.
+    /// Human-readable summary for operational inspection. Always populated.
     pub summary: String,
+    /// Structured field-level diff, when available. `None` for events that
+    /// do not represent an update (e.g. `Login`, `Create` without a prior
+    /// state) or for call sites not yet migrated to the diff system.
+    pub diff: Option<AuditDiff>,
 }
 
 /// Sink abstraction for backend audit events.
@@ -193,6 +220,7 @@ mod tests {
             actor_user_id: Some(user_id),
             target_id: Some("target-123".to_owned()),
             summary: "Created user".to_owned(),
+            diff: None,
         };
 
         assert_eq!(event.action, AuditAction::Create);
@@ -209,6 +237,7 @@ mod tests {
             actor_user_id: None,
             target_id: None,
             summary: String::new(),
+            diff: None,
         };
 
         assert!(event.actor_user_id.is_none());
@@ -225,6 +254,7 @@ mod tests {
             actor_user_id: Some(nil),
             target_id: Some(nil.to_string()),
             summary: "nil uuid login".to_owned(),
+            diff: None,
         };
 
         assert_eq!(event.actor_user_id, Some(Uuid::nil()));
@@ -244,6 +274,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: Some("org-1".to_owned()),
             summary: "Updated org settings".to_owned(),
+            diff: None,
         };
 
         let cloned = event.clone();
@@ -291,6 +322,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: Some("ws-42".to_owned()),
             summary: "Deleted workspace".to_owned(),
+            diff: None,
         };
 
         sink.record(event.clone()).await;
@@ -318,6 +350,7 @@ mod tests {
                 actor_user_id: None,
                 target_id: None,
                 summary: format!("action: {}", action.as_str()),
+                diff: None,
             })
             .await;
         }
@@ -346,6 +379,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: Some("new-user".to_owned()),
             summary: "User registered".to_owned(),
+            diff: None,
         })
         .await;
 
@@ -356,6 +390,7 @@ mod tests {
             actor_user_id: None,
             target_id: None,
             summary: String::new(),
+            diff: None,
         })
         .await;
     }
@@ -370,6 +405,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: Some("ws-123".to_owned()),
             summary: "Started workspace".to_owned(),
+            diff: None,
         };
         assert_eq!(event.action, AuditAction::Start);
         assert_eq!(event.resource, ResourceKind::Workspace);
@@ -383,6 +419,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: Some("tmpl-abc".to_owned()),
             summary: "Updated template version".to_owned(),
+            diff: None,
         };
         assert_eq!(event.action, AuditAction::Write);
         assert_eq!(event.resource, ResourceKind::Template);
@@ -398,6 +435,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: Some(org_id.to_string()),
             summary: format!("Created organization {org_id}"),
+            diff: None,
         };
         assert_eq!(event.resource, ResourceKind::Organization);
         assert!(
@@ -416,6 +454,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: None,
             summary: "User logged in via password".to_owned(),
+            diff: None,
         };
         assert_eq!(event.action, AuditAction::Login);
         assert_eq!(event.resource, ResourceKind::Authentication);
@@ -432,6 +471,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: Some("user-1".to_owned()),
             summary: long_summary.clone(),
+            diff: None,
         };
         assert_eq!(event.summary.len(), 10_000);
         assert_eq!(event.summary, long_summary);
@@ -447,6 +487,7 @@ mod tests {
             actor_user_id: Some(Uuid::nil()),
             target_id: Some("t".to_owned()),
             summary: "summary".to_owned(),
+            diff: None,
         };
         let modified = AuditEvent {
             action: AuditAction::Delete,
@@ -463,6 +504,7 @@ mod tests {
             actor_user_id: None,
             target_id: None,
             summary: String::new(),
+            diff: None,
         };
         let modified = AuditEvent {
             resource: ResourceKind::Workspace,
@@ -506,6 +548,7 @@ mod tests {
                 actor_user_id: None,
                 target_id: None,
                 summary: format!("testing {}", action.as_str()),
+                diff: None,
             })
             .await;
         }
@@ -532,10 +575,158 @@ mod tests {
             actor_user_id: Some(user_id),
             target_id: Some("key-99".to_owned()),
             summary: "Deleted API key".to_owned(),
+            diff: None,
         };
         let debug = format!("{event:?}");
         assert!(debug.contains("Delete"), "debug should contain action");
         assert!(debug.contains("ApiKey"), "debug should contain resource");
         assert!(debug.contains("key-99"), "debug should contain target_id");
+    }
+
+    // ── AuditDiff derive + runtime ──────────────────────────
+
+    use serde::Serialize;
+
+    #[derive(Clone, Debug, Serialize, Auditable)]
+    struct DemoUser {
+        #[audit(track)]
+        id: u64,
+        #[audit(track)]
+        email: String,
+        #[audit(secret)]
+        hashed_password: String,
+        #[audit(ignore)]
+        last_seen_at: i64,
+    }
+
+    #[derive(Clone, Debug, Serialize, Auditable)]
+    struct DefaultUser {
+        id: u64,
+        email: String,
+        nickname: String,
+    }
+
+    fn demo(id: u64, email: &str, hp: &str, last_seen_at: i64) -> DemoUser {
+        DemoUser {
+            id,
+            email: email.to_owned(),
+            hashed_password: hp.to_owned(),
+            last_seen_at,
+        }
+    }
+
+    #[test]
+    fn diff_reports_single_changed_tracked_field() {
+        let before = demo(1, "a@b", "h1", 10);
+        let after = demo(1, "c@d", "h1", 10);
+        let diff = before.audit_diff(&after);
+
+        assert_eq!(diff.len(), 1);
+        let Some(change) = diff.changes.get("email") else {
+            unreachable!("email change must be present")
+        };
+        assert_eq!(change.old, serde_json::json!("a@b"));
+        assert_eq!(change.new, serde_json::json!("c@d"));
+        assert!(!change.secret);
+    }
+
+    #[test]
+    fn diff_marks_secret_field_without_hiding_values() {
+        let before = demo(1, "a@b", "old_hash", 10);
+        let after = demo(1, "a@b", "new_hash", 10);
+        let diff = before.audit_diff(&after);
+
+        assert_eq!(diff.len(), 1);
+        let Some(change) = diff.changes.get("hashed_password") else {
+            unreachable!("hashed_password change must be present")
+        };
+        assert!(change.secret);
+        assert_eq!(change.old, serde_json::json!("old_hash"));
+        assert_eq!(change.new, serde_json::json!("new_hash"));
+    }
+
+    #[test]
+    fn diff_omits_ignored_field_even_when_changed() {
+        let before = demo(1, "a@b", "h", 10);
+        let after = demo(1, "a@b", "h", 999);
+        let diff = before.audit_diff(&after);
+
+        assert!(diff.is_empty(), "ignored fields must never appear");
+    }
+
+    #[test]
+    fn diff_untagged_fields_default_to_tracking() {
+        let before = DefaultUser {
+            id: 1,
+            email: "a@b".to_owned(),
+            nickname: "n1".to_owned(),
+        };
+        let after = DefaultUser {
+            id: 1,
+            email: "a@b".to_owned(),
+            nickname: "n2".to_owned(),
+        };
+        let diff = before.audit_diff(&after);
+
+        assert_eq!(diff.len(), 1);
+        assert!(diff.changes.contains_key("nickname"));
+        assert!(!diff.changes["nickname"].secret);
+    }
+
+    #[test]
+    fn diff_identical_structs_produce_empty_diff() {
+        let a = demo(1, "a@b", "h", 10);
+        let b = demo(1, "a@b", "h", 10);
+        assert!(a.audit_diff(&b).is_empty());
+    }
+
+    #[test]
+    fn diff_merge_into_appends_human_readable_summary() {
+        let before = demo(1, "a@b", "old_hash", 10);
+        let after = demo(1, "c@d", "new_hash", 10);
+        let diff = before.audit_diff(&after);
+
+        let mut summary = "updated user 1".to_owned();
+        diff.merge_into(&mut summary);
+
+        assert!(summary.starts_with("updated user 1 — changes: "));
+        assert!(summary.contains("email"));
+        // Secret field should be redacted in the merged summary.
+        assert!(summary.contains("hashed_password=(secret)"));
+        assert!(!summary.contains("old_hash"));
+        assert!(!summary.contains("new_hash"));
+    }
+
+    #[test]
+    fn diff_to_json_round_trip() {
+        let before = demo(1, "a@b", "h", 10);
+        let after = demo(2, "a@b", "h", 10);
+        let diff = before.audit_diff(&after);
+        let value = diff.to_json();
+
+        let expected = serde_json::json!({
+            "id": { "old": 1, "new": 2, "secret": false },
+        });
+        assert_eq!(value, expected);
+    }
+
+    #[test]
+    fn audit_event_carries_optional_diff() {
+        let before = demo(1, "a@b", "h", 0);
+        let after = demo(1, "c@d", "h", 0);
+        let diff = before.audit_diff(&after);
+
+        let event = AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::User,
+            actor_user_id: None,
+            target_id: Some("user-1".to_owned()),
+            summary: "updated user".to_owned(),
+            diff: Some(diff),
+        };
+        let Some(carried) = event.diff.as_ref() else {
+            unreachable!("event should carry diff")
+        };
+        assert!(carried.changes.contains_key("email"));
     }
 }
