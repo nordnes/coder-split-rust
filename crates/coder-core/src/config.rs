@@ -170,6 +170,13 @@ pub struct ServerConfig {
     pub trial_signup_url: String,
     /// Embedded React SPA settings. See [`FrontendConfig`].
     pub frontend: FrontendConfig,
+    /// Whether RBAC partial-eval SQL filter pushdown is enabled for list
+    /// endpoints (`list_workspaces`, `list_templates`, `list_audit_logs`).
+    /// Mirrors Go's `regosql` OPA → SQL translation but with a narrower
+    /// Rust-native implementation. Operators can disable this via
+    /// `CODER_RBAC_SQL_FILTER=false` to fall back to the legacy in-memory
+    /// post-filter path if the new path misbehaves. Defaults to `true`.
+    pub rbac_sql_filter_enabled: bool,
 }
 
 impl ServerConfig {
@@ -941,6 +948,12 @@ impl ServerConfig {
                 env: "CODER_REPLICA_UPDATE_INTERVAL",
                 default: Some("15"),
                 description: "Heartbeat interval in seconds for the HA replica manager. Stale rows are pruned at 3× this value.",
+            },
+            ConfigOption {
+                name: "rbac-sql-filter",
+                env: "CODER_RBAC_SQL_FILTER",
+                default: Some("true"),
+                description: "Whether to use the RBAC partial-eval SQL filter pushdown for list endpoints (workspaces, templates, audit logs). Falls back to the in-memory post-filter path when false.",
             },
         ]
     }
@@ -1723,6 +1736,7 @@ mod tests {
             vapid_sub: String::new(),
             trial_signup_url: String::new(),
             frontend: FrontendConfig::default(),
+            rbac_sql_filter_enabled: true,
         }
     }
 

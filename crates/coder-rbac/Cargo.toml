@@ -11,5 +11,6 @@ version.workspace = true
 workspace = true
 
 [dependencies]
+coder-core = { path = "../coder-core" }
 serde.workspace = true
 uuid.workspace = true

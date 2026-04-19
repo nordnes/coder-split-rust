@@ -135,6 +135,25 @@ pub(crate) async fn list_workspaces(
         limit: clamp_pagination_limit(query.limit.unwrap_or(25)),
         offset: query.offset.unwrap_or(0),
         viewer_id: Some(context.user.id),
+        // RBAC partial-eval SQL filter (CODER_RBAC_SQL_FILTER). Built from
+        // the actor so the store can push the row predicate into Postgres.
+        // When the feature flag is off, leaves this as `None` and the store
+        // keeps running the legacy query unchanged.
+        authz_filter: if state.config.rbac_sql_filter_enabled {
+            Some(
+                coder_rbac::regosql::SqlFilterBuilder::new(
+                    &context.actor,
+                    coder_rbac::ResourceType::Workspace,
+                    coder_rbac::Action::Read,
+                )
+                .with_org_column("w.organization_id")
+                .with_owner_column("w.owner_id")
+                .with_id_column("w.id")
+                .build(),
+            )
+        } else {
+            None
+        },
     };
 
     let (workspaces, count) = state.store.list_workspaces(filter).await?;

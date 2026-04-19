@@ -10361,6 +10361,7 @@ pub(crate) mod tests {
             // the embedded SPA clone this config and flip `enabled = true`
             // before constructing `AppState`.
             frontend: coder_core::config::FrontendConfig { enabled: false },
+            rbac_sql_filter_enabled: true,
         })
     }
 
@@ -37943,6 +37944,7 @@ pub(crate) mod tests {
             search: String::new(),
             limit: 10,
             offset: 0,
+            authz_filter: None,
         };
         let response = store.list_audit_logs(filter).await?;
         assert!(response.count >= 1, "should have at least one audit log");
@@ -37961,6 +37963,7 @@ pub(crate) mod tests {
             search: String::new(),
             limit: 10,
             offset: 0,
+            authz_filter: None,
         };
         let response = store.list_audit_logs(filter).await?;
         assert_eq!(response.count, 0, "empty store should have zero audit logs");

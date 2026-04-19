@@ -336,6 +336,7 @@ pub(crate) async fn list_org_templates(
             exact_name: query.exact_name,
             search: query.search,
             deleted: query.deleted.unwrap_or(false),
+            authz_filter: build_template_authz_filter(&state, &context.actor),
         })
         .await?;
 
@@ -703,6 +704,7 @@ pub(crate) async fn list_all_templates(
             exact_name: query.exact_name,
             search: query.search,
             deleted: query.deleted.unwrap_or(false),
+            authz_filter: build_template_authz_filter(&state, &context.actor),
         })
         .await?;
 
@@ -719,6 +721,28 @@ pub(crate) async fn list_all_templates(
         .map(template_response)
         .collect();
     Ok((StatusCode::OK, Json(body)).into_response())
+}
+
+/// Builds the optional RBAC partial-eval SQL filter for `list_templates`.
+/// Returns `None` when the feature flag `CODER_RBAC_SQL_FILTER` is off,
+/// so the legacy in-memory post-filter path stays unchanged.
+fn build_template_authz_filter(
+    state: &AppState,
+    actor: &coder_rbac::Actor,
+) -> Option<coder_core::RbacAuthzFilter> {
+    if !state.config.rbac_sql_filter_enabled {
+        return None;
+    }
+    Some(
+        coder_rbac::regosql::SqlFilterBuilder::new(
+            actor,
+            coder_rbac::ResourceType::Template,
+            coder_rbac::Action::Read,
+        )
+        .with_org_column("t.organization_id")
+        .with_id_column("t.id")
+        .build(),
+    )
 }
 
 /// GET /templates/examples

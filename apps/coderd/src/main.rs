@@ -746,6 +746,12 @@ struct ServerArgs {
     )]
     stale_job_reap_interval_secs: u64,
 
+    /// Whether RBAC partial-eval SQL filter pushdown is enabled for list
+    /// endpoints (`list_workspaces`, `list_templates`, `list_audit_logs`).
+    /// When `false`, falls back to the legacy in-memory post-filter path.
+    #[arg(long, env = "CODER_RBAC_SQL_FILTER", default_value_t = true)]
+    rbac_sql_filter_enabled: bool,
+
     /// Comma-separated list of allowed CORS origins.  When empty every origin
     /// is permitted (wildcard).
     #[arg(
@@ -1644,6 +1650,7 @@ async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         frontend: FrontendConfig {
             enabled: !args.disable_embedded_frontend,
         },
+        rbac_sql_filter_enabled: args.rbac_sql_filter_enabled,
     };
 
     // Validate TLS / ACME configuration pair. Reject mutually-exclusive

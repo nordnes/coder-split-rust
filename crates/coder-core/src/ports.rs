@@ -479,6 +479,44 @@ pub struct AuditLogListFilter {
     pub limit: u32,
     /// Page offset.
     pub offset: u32,
+    /// RBAC partial-eval SQL filter appended to the `WHERE` clause for row
+    /// prefiltering. `None` means no authz pushdown (fall back to in-memory
+    /// post-filter). See [`RbacAuthzFilter`].
+    pub authz_filter: Option<RbacAuthzFilter>,
+}
+
+/// RBAC partial-eval SQL filter fragment, produced by
+/// `coder_rbac::regosql::SqlFilterBuilder` and consumed by list queries
+/// that want to push authz predicates down into Postgres.
+///
+/// The `clause` contains `{uuid$N}` / `{uuid_array$N}` placeholder tokens
+/// that `coder-db` rewrites into concrete `$k` bind slots when building
+/// the final query. Two sentinel clauses are emitted verbatim:
+/// * `"TRUE"` — no filter (site owner).
+/// * `"FALSE"` — deny (empty result).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RbacAuthzFilter {
+    /// The SQL clause with placeholder tokens.
+    pub clause: String,
+    /// Single-UUID bind parameters (bound first, in order).
+    pub uuid_params: Vec<Uuid>,
+    /// `UUID[]` bind parameters (bound after `uuid_params`, in order).
+    pub uuid_array_params: Vec<Vec<Uuid>>,
+}
+
+impl RbacAuthzFilter {
+    /// Returns true if this filter is `"TRUE"` and the caller may skip it.
+    #[must_use]
+    pub fn is_allow_all(&self) -> bool {
+        self.clause == "TRUE"
+    }
+
+    /// Returns true if this filter is `"FALSE"` and the caller should
+    /// short-circuit to an empty result.
+    #[must_use]
+    pub fn is_deny_all(&self) -> bool {
+        self.clause == "FALSE"
+    }
 }
 
 /// Pagination and search filter for `GET /api/v2/connectionlog`.
@@ -1384,6 +1422,8 @@ pub struct WorkspaceListFilter {
     pub offset: u32,
     /// Viewer user ID for computing per-user fields (e.g. favorite).
     pub viewer_id: Option<Uuid>,
+    /// RBAC partial-eval SQL filter. See [`RbacAuthzFilter`].
+    pub authz_filter: Option<RbacAuthzFilter>,
 }
 
 /// Input for creating a workspace.

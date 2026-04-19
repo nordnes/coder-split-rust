@@ -1000,6 +1000,7 @@ dependencies = [
 name = "coder-rbac"
 version = "0.1.0"
 dependencies = [
+ "coder-core",
  "serde",
  "uuid",
 ]

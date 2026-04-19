@@ -3166,6 +3166,7 @@ mod tests {
             limit: 100,
             offset: 0,
             viewer_id: None,
+            authz_filter: None,
         }
     }
 
@@ -6467,6 +6468,7 @@ mod tests {
                 search: target.clone(),
                 limit: 10,
                 offset: 0,
+                authz_filter: None,
             })
             .await?;
         assert!(response.count >= 1, "should find at least 1 audit log");
@@ -8461,6 +8463,7 @@ mod tests {
                 search: target.clone(),
                 limit: 10,
                 offset: 0,
+                authz_filter: None,
             })
             .await?;
 
