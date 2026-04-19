@@ -22,6 +22,8 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod prebuilds_reconciler;
+
 use std::str::FromStr;
 use std::sync::{Arc, Weak};
 
@@ -2126,6 +2128,14 @@ mod tests {
                 connection_logs: Vec::new(),
                 count: 0,
             })
+        }
+
+        async fn delete_old_connection_logs(
+            &self,
+            _older_than: OffsetDateTime,
+            _limit: i64,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
         }
 
         async fn batch_insert_workspace_build_parameters(

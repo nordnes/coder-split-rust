@@ -191,12 +191,13 @@ pub use ports::{
 };
 pub use provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
-    GetJobsToBeReapedInput, InsertProvisionerJobInput, InsertProvisionerJobLogsInput,
-    InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput, ProvisionerDaemonRecord,
-    ProvisionerJobRecord, ProvisionerJobStatus, ProvisionerJobTimingStage, ProvisionerJobType,
-    ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType, SCOPE_ORGANIZATION,
-    SCOPE_USER, TAG_OWNER, TAG_SCOPE, UpsertProvisionerDaemonInput, mutate_tags,
-    provisioner_tagset_matches, tags_from_json,
+    DaemonScopePreference, GetJobsToBeReapedInput, InsertProvisionerJobInput,
+    InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
+    ProvisionerDaemonRecord, ProvisionerJobRecord, ProvisionerJobStatus, ProvisionerJobTimingStage,
+    ProvisionerJobType, ProvisionerKeyRecord, ProvisionerStorageMethod, ProvisionerType,
+    SCOPE_ORGANIZATION, SCOPE_USER, TAG_OWNER, TAG_SCOPE, TAG_WILDCARD,
+    UpsertProvisionerDaemonInput, daemon_scope_preference, mutate_tags, provisioner_tagset_matches,
+    tags_from_json,
 };
 pub use template::{
     CreateProvisionerJobInput, CreateTemplateInput, CreateTemplateStoreError,
