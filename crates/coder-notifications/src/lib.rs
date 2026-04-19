@@ -87,12 +87,65 @@ pub const STATUS: &str = "active";
 const DISPATCH_BATCH_SIZE: u32 = 50;
 const MAX_DISPATCH_ATTEMPTS: u32 = 3;
 
+// ── Prometheus metric names ─────────────────────────────────────────────
+//
+// Emitted via the `metrics` crate (the workspace-level exporter is
+// `metrics-exporter-prometheus`). Names mirror Go's
+// `coderd_notifications_*` histograms/counters/gauges
+// (`coderd/notifications/metrics.go`). We intentionally drop the
+// `coderd_notifications_` namespace prefix since the Rust exporter
+// is scoped per process and the matrix specifies the short names.
+const METRIC_DISPATCH_ATTEMPTS: &str = "notifier_dispatch_attempts";
+const METRIC_RETRY_COUNT: &str = "notifier_retry_count";
+const METRIC_SEND_SECONDS: &str = "notifier_send_seconds";
+const METRIC_QUEUED_SECONDS: &str = "notifier_queued_seconds";
+const METRIC_INFLIGHT: &str = "notifier_inflight";
+
+// Label values for `notifier_dispatch_attempts{result=…}`. Tracks Go's
+// ResultSuccess / ResultTempFail / ResultPermFail constants, with
+// an extra `inhibited` bucket for user-disabled templates.
+const RESULT_SUCCESS: &str = "success";
+const RESULT_TEMP_FAIL: &str = "temp_fail";
+const RESULT_PERM_FAIL: &str = "perm_fail";
+const RESULT_INHIBITED: &str = "inhibited";
+
+/// Returns the stable `method=` label for a dispatch method. Metric label
+/// values must be `&'static str` so we map through a small match rather
+/// than formatting enum names at runtime.
+fn method_label(method: NotificationMethod) -> &'static str {
+    match method {
+        NotificationMethod::Email => "smtp",
+        NotificationMethod::Webhook => "webhook",
+        NotificationMethod::Inbox => "inbox",
+    }
+}
+
+/// RAII gauge guard: increments `notifier_inflight{method=…}` on entry and
+/// decrements on drop. Ensures the gauge stays consistent even if the
+/// dispatch future is cancelled or returns an error early.
+struct InflightGuard {
+    method: &'static str,
+}
+
+impl InflightGuard {
+    fn enter(method: &'static str) -> Self {
+        metrics::gauge!(METRIC_INFLIGHT, "method" => method).increment(1.0);
+        Self { method }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        metrics::gauge!(METRIC_INFLIGHT, "method" => self.method).decrement(1.0);
+    }
+}
+
 /// Maximum number of concurrent web push sends per dispatch call.
 const MAX_CONCURRENT_SENDS: usize = 10;
 /// Maximum retry attempts for transient push service failures (5xx).
 const MAX_SEND_RETRIES: u32 = 3;
 /// Initial backoff duration (500 ms) for retry attempts; doubles each retry.
-const INITIAL_RETRY_BACKOFF: std::time::Duration = std::time::Duration::from_millis(500);
+const INITIAL_RETRY_BACKOFF: Duration = Duration::from_millis(500);
 
 /// Configuration for the notification dispatch pipeline.
 ///
@@ -223,21 +276,74 @@ where
 
         let count = u32::try_from(messages.len()).unwrap_or(u32::MAX);
 
+        // Accumulators for bulk-mark at the end of the cycle. Rather than
+        // firing one UPDATE per message (2 UPDATEs per failure: one for the
+        // attempt counter, one for the status) we group terminal outcomes
+        // by kind and flush in a single round trip per group.
+        //
+        // Mirrors Go's `bulkUpdate` path in `notifications/manager.go` which
+        // calls `BulkMarkNotificationMessagesSent` + `BulkMarkNotificationMessagesFailed`.
+        let mut sent_ids: Vec<Uuid> = Vec::new();
+        let mut failed_ids: Vec<Uuid> = Vec::new();
+        let mut failed_statuses: Vec<NotificationMessageStatus> = Vec::new();
+        let mut failed_reasons: Vec<String> = Vec::new();
+
         for message in messages {
+            let method_label = method_label(message.method);
+
+            // `queued_seconds` reports how long the message sat in the
+            // queue before dispatch picked it up. Mirrors Go's
+            // `coderd_notifications_queued_seconds` histogram. `created_at`
+            // is set at enqueue time; if it's in the future (clock skew)
+            // we clamp to zero.
+            let queued_seconds =
+                (time::OffsetDateTime::now_utc() - message.created_at).as_seconds_f64();
+            metrics::histogram!(
+                METRIC_QUEUED_SECONDS,
+                "method" => method_label,
+            )
+            .record(queued_seconds.max(0.0));
+
+            // Before any dispatch attempt, honour the per-template preference
+            // for this user. If the template is disabled, the message is
+            // marked `inhibited` with the fixed reason "disabled by user",
+            // matching Go's `newInhibitedDispatch` (`notifier.go`). Inhibited
+            // messages are terminal: they are never retried.
+            if let Ok(Some(true)) = self
+                .store
+                .find_user_notification_preference(
+                    message.user_id,
+                    message.notification_template_id,
+                )
+                .await
+            {
+                failed_ids.push(message.id);
+                failed_statuses.push(NotificationMessageStatus::Inhibited);
+                failed_reasons.push("disabled by user".to_owned());
+                metrics::counter!(
+                    METRIC_DISPATCH_ATTEMPTS,
+                    "method" => method_label,
+                    "result" => RESULT_INHIBITED,
+                )
+                .increment(1);
+                continue;
+            }
+
             // Dispatch-loop hook: gate retryable messages behind exponential
             // backoff. When we skip, we release the lease back to the pending
             // pool so the next acquire cycle can pick it up once the backoff
             // window elapses.
             if self.is_in_backoff(&message.id) {
-                let _ = self
-                    .store
-                    .update_notification_message_status(
-                        message.id,
-                        NotificationMessageStatus::TemporaryFailure,
-                    )
-                    .await;
+                failed_ids.push(message.id);
+                failed_statuses.push(NotificationMessageStatus::TemporaryFailure);
+                failed_reasons.push("backoff".to_owned());
                 continue;
             }
+
+            // Inflight gauge: counts the number of in-progress dispatches
+            // for this method. Decremented on the RAII handle drop.
+            let _inflight = InflightGuard::enter(method_label);
+            let send_start = Instant::now();
 
             let result = match message.method {
                 NotificationMethod::Email => self.dispatch_email(&message).await,
@@ -245,10 +351,22 @@ where
                 NotificationMethod::Inbox => self.dispatch_inbox(&message).await,
             };
 
-            let new_status = match &result {
+            metrics::histogram!(
+                METRIC_SEND_SECONDS,
+                "method" => method_label,
+            )
+            .record(send_start.elapsed().as_secs_f64());
+
+            match &result {
                 Ok(()) => {
                     self.clear_backoff(&message.id);
-                    NotificationMessageStatus::Sent
+                    sent_ids.push(message.id);
+                    metrics::counter!(
+                        METRIC_DISPATCH_ATTEMPTS,
+                        "method" => method_label,
+                        "result" => RESULT_SUCCESS,
+                    )
+                    .increment(1);
                 }
                 Err(err) => {
                     warn!(
@@ -258,32 +376,83 @@ where
                         permanent = err.is_permanent(),
                         "notification dispatch failed"
                     );
-                    let _ = self
-                        .store
-                        .increment_notification_message_attempt_count(message.id)
-                        .await;
                     // Permanent errors skip retry entirely. Retryable errors
                     // fall back to TemporaryFailure until the attempt budget
-                    // is exhausted.
+                    // is exhausted — the bulk-mark path will coerce to
+                    // PermanentFailure at the DB level when
+                    // `attempt_count + 1 >= max_attempts`.
                     let attempts_exhausted =
                         message.attempt_count + 1 >= MAX_DISPATCH_ATTEMPTS as i32;
                     if err.is_permanent() || attempts_exhausted {
                         self.clear_backoff(&message.id);
-                        NotificationMessageStatus::PermanentFailure
+                        failed_ids.push(message.id);
+                        failed_statuses.push(NotificationMessageStatus::PermanentFailure);
+                        failed_reasons.push(err.to_string());
+                        metrics::counter!(
+                            METRIC_DISPATCH_ATTEMPTS,
+                            "method" => method_label,
+                            "result" => RESULT_PERM_FAIL,
+                        )
+                        .increment(1);
                     } else {
                         // Schedule the next retry via exponential backoff.
                         let next_attempt =
                             u32::try_from(message.attempt_count + 1).unwrap_or(u32::MAX);
                         self.schedule_backoff(message.id, next_attempt);
-                        NotificationMessageStatus::TemporaryFailure
+                        failed_ids.push(message.id);
+                        failed_statuses.push(NotificationMessageStatus::TemporaryFailure);
+                        failed_reasons.push(err.to_string());
+                        metrics::counter!(
+                            METRIC_DISPATCH_ATTEMPTS,
+                            "method" => method_label,
+                            "result" => RESULT_TEMP_FAIL,
+                        )
+                        .increment(1);
+                        metrics::counter!(
+                            METRIC_RETRY_COUNT,
+                            "method" => method_label,
+                        )
+                        .increment(1);
                     }
                 }
-            };
+            }
+        }
 
-            let _ = self
+        // Flush accumulated terminal outcomes in two bulk updates rather
+        // than per-row UPDATEs. Errors here are logged but not returned —
+        // the leased rows will be re-acquired on the next cycle since
+        // their `leased_until` will eventually expire.
+        if !sent_ids.is_empty() {
+            if let Err(err) = self
                 .store
-                .update_notification_message_status(message.id, new_status)
-                .await;
+                .bulk_mark_notification_messages_sent(&sent_ids)
+                .await
+            {
+                warn!(
+                    count = sent_ids.len(),
+                    error = %err,
+                    "bulk_mark_notification_messages_sent failed"
+                );
+            }
+        }
+        if !failed_ids.is_empty() {
+            if let Err(err) = self
+                .store
+                .bulk_mark_notification_messages_failed(
+                    &failed_ids,
+                    &failed_statuses,
+                    &failed_reasons,
+                    MAX_DISPATCH_ATTEMPTS,
+                    u32::try_from(self.config.base_retry_interval_secs).unwrap_or(u32::MAX),
+                )
+                .await
+            {
+                warn!(
+                    count = failed_ids.len(),
+                    error = %err,
+                    "bulk_mark_notification_messages_failed failed"
+                );
+            }
         }
 
         Ok(count)
@@ -397,11 +566,42 @@ where
             ));
         }
 
+        // Build the WebhookPayload envelope. Mirrors Go's
+        // `dispatch.WebhookPayload` (`coder/coderd/notifications/dispatch/webhook.go`):
+        // the raw `input_json` is nested under `payload`, and the
+        // rendered `title` / `body` fields are pulled from the same
+        // payload object (the Rust enqueuer renders them at enqueue time
+        // rather than deferring to the dispatcher). The `X-Message-Id`
+        // header carries the message ID out-of-band so receivers can
+        // correlate deliveries without parsing the body.
+        let payload: serde_json::Value =
+            serde_json::from_str(&message.input_json).unwrap_or(serde_json::Value::Null);
+        let extract = |k: &str| -> String {
+            payload
+                .get(k)
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned()
+        };
+        let envelope = WebhookPayload {
+            version: "1.1".to_owned(),
+            msg_id: message.id,
+            payload: &payload,
+            title: extract("subject"),
+            title_markdown: extract("subject"),
+            body: extract("plain_body"),
+            body_markdown: extract("html_body"),
+        };
+        let body_json = serde_json::to_vec(&envelope).map_err(|e| {
+            NotificationDispatchError::Permanent(format!("serialize webhook envelope: {e}"))
+        })?;
+
         let send_result = self
             .http_client
             .post(&endpoint)
             .header("Content-Type", "application/json")
-            .body(message.input_json.clone())
+            .header("X-Message-Id", message.id.to_string())
+            .body(body_json)
             .send()
             .await;
 
@@ -493,6 +693,26 @@ impl NotificationDispatchError {
     pub fn is_permanent(&self) -> bool {
         matches!(self, Self::Permanent(_))
     }
+}
+
+/// Envelope posted to webhook endpoints when a notification is dispatched.
+///
+/// Mirrors Go's `dispatch.WebhookPayload`
+/// (`coder/coderd/notifications/dispatch/webhook.go`). The concrete payload
+/// field embeds the full `MessagePayload` JSON (labels, data, targets,
+/// template id, etc.) so receivers can key off template and user without
+/// re-fetching from the API.
+#[derive(serde::Serialize)]
+struct WebhookPayload<'a> {
+    #[serde(rename = "_version")]
+    version: String,
+    msg_id: Uuid,
+    /// The original enqueue-time payload, verbatim.
+    payload: &'a serde_json::Value,
+    title: String,
+    title_markdown: String,
+    body: String,
+    body_markdown: String,
 }
 
 /// Classification of a webhook HTTP response used by [`dispatch_webhook`].
@@ -909,7 +1129,7 @@ impl Webpusher {
             body: "This is a test Web Push notification".to_owned(),
             tag: String::new(),
             actions: Vec::new(),
-            data: std::collections::HashMap::new(),
+            data: HashMap::new(),
         };
         let msg_json = serde_json::to_vec(&test_msg)
             .map_err(|e| WebpushError::Serialization(e.to_string()))?;
@@ -1311,6 +1531,10 @@ mod tests {
 
     // ── Mock store ───────────────────────────────────────────
 
+    /// A single captured call to `bulk_mark_notification_messages_failed`.
+    /// Factored out to appease `clippy::type_complexity`.
+    type BulkFailCall = (Vec<Uuid>, Vec<NotificationMessageStatus>, Vec<String>);
+
     /// Configurable mock that controls what `acquire_pending_notification_messages`
     /// returns and records calls to `update_notification_message_status` and
     /// `increment_notification_message_attempt_count`.
@@ -1319,8 +1543,14 @@ mod tests {
         pending_messages: Vec<NotificationMessageRecord>,
         status_updates: Arc<Mutex<Vec<(Uuid, NotificationMessageStatus)>>>,
         attempt_increments: Arc<Mutex<Vec<Uuid>>>,
+        bulk_sent: Arc<Mutex<Vec<Vec<Uuid>>>>,
+        bulk_failed: Arc<Mutex<Vec<BulkFailCall>>>,
         force_error: Option<String>,
         notifier_paused: bool,
+        /// `(user_id, template_id) -> disabled` preference lookups. Tests
+        /// use `with_disabled_preference` to seed a row; absence means
+        /// "no preference row" which maps to not-disabled.
+        disabled_prefs: HashMap<(Uuid, Uuid), bool>,
     }
 
     impl MockStore {
@@ -1329,8 +1559,11 @@ mod tests {
                 pending_messages: Vec::new(),
                 status_updates: Arc::new(Mutex::new(Vec::new())),
                 attempt_increments: Arc::new(Mutex::new(Vec::new())),
+                bulk_sent: Arc::new(Mutex::new(Vec::new())),
+                bulk_failed: Arc::new(Mutex::new(Vec::new())),
                 force_error: None,
                 notifier_paused: false,
+                disabled_prefs: HashMap::new(),
             }
         }
 
@@ -1346,6 +1579,16 @@ mod tests {
 
         fn with_notifier_paused(mut self, paused: bool) -> Self {
             self.notifier_paused = paused;
+            self
+        }
+
+        fn with_disabled_preference(
+            mut self,
+            user_id: Uuid,
+            template_id: Uuid,
+            disabled: bool,
+        ) -> Self {
+            self.disabled_prefs.insert((user_id, template_id), disabled);
             self
         }
 
@@ -1834,6 +2077,72 @@ mod tests {
                 .unwrap_or_else(|e| e.into_inner())
                 .push(message_id);
             Ok(true)
+        }
+
+        async fn bulk_mark_notification_messages_sent(
+            &self,
+            ids: &[Uuid],
+        ) -> Result<u64, StorageError> {
+            self.maybe_err()?;
+            // Mirror the real store's behaviour of incrementing attempts on
+            // success. Tests assert on both the bulk-sent capture and the
+            // per-message status_updates vector (populated via a side effect
+            // here), so `dispatch_once_…` tests that only inspect
+            // `status_updates` keep working unchanged.
+            for id in ids {
+                self.status_updates
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((*id, NotificationMessageStatus::Sent));
+            }
+            self.bulk_sent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push(ids.to_vec());
+            Ok(ids.len() as u64)
+        }
+
+        async fn bulk_mark_notification_messages_failed(
+            &self,
+            ids: &[Uuid],
+            statuses: &[NotificationMessageStatus],
+            status_reasons: &[String],
+            _max_attempts: u32,
+            _retry_interval_secs: u32,
+        ) -> Result<u64, StorageError> {
+            self.maybe_err()?;
+            for (id, status) in ids.iter().zip(statuses.iter()) {
+                self.status_updates
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .push((*id, *status));
+                // Only count a "real" attempt increment for non-inhibited
+                // rows — inhibited messages are terminal and never consume
+                // retry budget.
+                if !matches!(status, NotificationMessageStatus::Inhibited) {
+                    self.attempt_increments
+                        .lock()
+                        .unwrap_or_else(|e| e.into_inner())
+                        .push(*id);
+                }
+            }
+            self.bulk_failed
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .push((ids.to_vec(), statuses.to_vec(), status_reasons.to_vec()));
+            Ok(ids.len() as u64)
+        }
+
+        async fn find_user_notification_preference(
+            &self,
+            user_id: Uuid,
+            notification_template_id: Uuid,
+        ) -> Result<Option<bool>, StorageError> {
+            self.maybe_err()?;
+            Ok(self
+                .disabled_prefs
+                .get(&(user_id, notification_template_id))
+                .copied())
         }
 
         // ----- OAuth2 Provider (stubs for test mock) -----
@@ -3334,7 +3643,7 @@ mod tests {
         // vapid_key, client.  If someone accidentally adds a
         // second client or removes the shared one, this size assertion
         // will break.
-        let size = std::mem::size_of::<Webpusher>();
+        let size = size_of::<Webpusher>();
         assert!(
             size > 0,
             "Webpusher should be a non-zero-sized type (contains shared client)"
@@ -3353,6 +3662,234 @@ mod tests {
     #[test]
     fn retry_constants_are_sensible() {
         assert_eq!(MAX_SEND_RETRIES, 3);
-        assert_eq!(INITIAL_RETRY_BACKOFF, std::time::Duration::from_millis(500));
+        assert_eq!(INITIAL_RETRY_BACKOFF, Duration::from_millis(500));
+    }
+
+    // ── 32. Notifier-paused: still-landed regression ────────────
+    //
+    // The guard in `dispatch_once` short-circuits when
+    // `notifier_paused` is true. This test just re-asserts the
+    // behaviour in a minimal form so a refactor that accidentally
+    // removes the check fails loudly. The fuller test above
+    // (`dispatch_once_skips_when_notifier_paused`) exercises the
+    // call-count invariants.
+    #[tokio::test]
+    async fn notifier_paused_check_still_present() {
+        let msg = make_message(NotificationMethod::Inbox, "{}");
+        let store = MockStore::new()
+            .with_pending(vec![msg])
+            .with_notifier_paused(true);
+        let service = make_service(store.clone(), NotificationConfig::default());
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 0, "paused dispatcher should report zero dispatched");
+        assert!(
+            store
+                .bulk_sent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "paused dispatcher should not invoke bulk_mark_sent"
+        );
+    }
+
+    // ── 33. Inhibited handling: disabled-by-user skips dispatch ──
+
+    #[tokio::test]
+    async fn dispatch_once_marks_message_inhibited_when_template_disabled() {
+        let msg = make_message(NotificationMethod::Inbox, "{}");
+        let msg_id = msg.id;
+        let user_id = msg.user_id;
+        let template_id = msg.notification_template_id;
+
+        let store = MockStore::new()
+            .with_pending(vec![msg])
+            .with_disabled_preference(user_id, template_id, true);
+        let service = make_service(store.clone(), NotificationConfig::default());
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 1, "message should have been acquired");
+
+        // The inhibited message should be flushed through the bulk-failed
+        // path, not dispatched and not bulk-sent.
+        assert!(
+            store
+                .bulk_sent
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .is_empty(),
+            "inhibited messages must not be reported as sent"
+        );
+
+        let bulk_failed = store
+            .bulk_failed
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(bulk_failed.len(), 1, "expected one bulk-failed flush");
+        let (ids, statuses, reasons) = &bulk_failed[0];
+        assert_eq!(ids.as_slice(), &[msg_id]);
+        assert_eq!(statuses.as_slice(), &[NotificationMessageStatus::Inhibited]);
+        assert_eq!(reasons[0], "disabled by user");
+    }
+
+    // ── 34. Inhibited handling: disabled=false preserves delivery ─
+
+    #[tokio::test]
+    async fn dispatch_once_does_not_inhibit_when_preference_not_disabled() {
+        let msg = make_message(NotificationMethod::Inbox, "{}");
+        let user_id = msg.user_id;
+        let template_id = msg.notification_template_id;
+
+        let store = MockStore::new()
+            .with_pending(vec![msg])
+            .with_disabled_preference(user_id, template_id, false);
+        let service = make_service(store.clone(), NotificationConfig::default());
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 1);
+
+        // Inbox dispatch always succeeds, so the message should be bulk-sent.
+        let sent = store
+            .bulk_sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(sent.len(), 1);
+    }
+
+    // ── 35. Webhook envelope: body wraps input_json and X-Message-Id is set ─
+
+    #[tokio::test]
+    async fn dispatch_webhook_body_is_envelope_with_x_message_id() {
+        // Stand up a tiny axum-on-tokio webhook endpoint that captures the
+        // body + headers of the incoming request and returns 200.
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0")
+            .await
+            .unwrap_or_else(|e| panic!("bind: {e}"));
+        let addr = listener
+            .local_addr()
+            .unwrap_or_else(|e| panic!("local_addr: {e}"));
+        let captured: Arc<Mutex<Option<(String, String)>>> = Arc::new(Mutex::new(None));
+        let captured_clone = captured.clone();
+
+        // Accept one request, read headers + body, capture them, then 200.
+        tokio::spawn(async move {
+            let (mut sock, _) = match listener.accept().await {
+                Ok(v) => v,
+                Err(_) => return,
+            };
+            let mut buf = [0u8; 8192];
+            let n = sock.read(&mut buf).await.unwrap_or(0);
+            let raw = String::from_utf8_lossy(&buf[..n]).into_owned();
+            // Very small HTTP/1.1 parse — just good enough for the test.
+            let x_message_id = raw
+                .lines()
+                .find_map(|l| {
+                    let l = l.trim_end_matches('\r');
+                    let lower = l.to_ascii_lowercase();
+                    lower
+                        .strip_prefix("x-message-id:")
+                        .map(|s| s.trim().to_owned())
+                })
+                .unwrap_or_default();
+            let body = raw.split("\r\n\r\n").nth(1).unwrap_or("").to_owned();
+            *captured_clone.lock().unwrap_or_else(|e| e.into_inner()) = Some((x_message_id, body));
+            let _ = sock
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .await;
+        });
+
+        let input_json =
+            r#"{"subject":"S","plain_body":"PB","html_body":"<p>HB</p>","user_email":"a@b.c"}"#;
+        let targets_json = format!(r#"{{"url":"http://{addr}/hook"}}"#);
+        let mut msg = make_message(NotificationMethod::Webhook, &targets_json);
+        msg.input_json = input_json.to_owned();
+        let msg_id = msg.id;
+
+        let service = make_service(MockStore::new(), NotificationConfig::default());
+        let res = service.dispatch_webhook(&msg).await;
+        assert!(res.is_ok(), "webhook dispatch should succeed");
+
+        // The capturing task writes after the 200 is flushed, give it a moment.
+        for _ in 0..50 {
+            if captured.lock().unwrap_or_else(|e| e.into_inner()).is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        let (x_msg, body) = captured
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
+            .unwrap_or_else(|| panic!("request never captured"));
+        assert_eq!(x_msg, msg_id.to_string(), "X-Message-Id must match msg id");
+
+        // Envelope shape: _version, msg_id, payload (nested), title, body.
+        let parsed: serde_json::Value = serde_json::from_str(&body)
+            .unwrap_or_else(|e| panic!("envelope body is not JSON: {e}: {body}"));
+        assert_eq!(parsed["_version"], "1.1");
+        assert_eq!(parsed["msg_id"], msg_id.to_string());
+        assert_eq!(parsed["title"], "S");
+        assert_eq!(parsed["title_markdown"], "S");
+        assert_eq!(parsed["body"], "PB");
+        assert_eq!(parsed["body_markdown"], "<p>HB</p>");
+        // Raw input_json nested under `payload`.
+        assert_eq!(parsed["payload"]["subject"], "S");
+        assert_eq!(parsed["payload"]["plain_body"], "PB");
+    }
+
+    // ── 36. Bulk mark: dispatch_once flushes sent via bulk UPDATE ─
+
+    #[tokio::test]
+    async fn dispatch_once_flushes_sent_via_bulk_mark() {
+        let msg1 = make_message(NotificationMethod::Inbox, "{}");
+        let msg2 = make_message(NotificationMethod::Inbox, "{}");
+        let id1 = msg1.id;
+        let id2 = msg2.id;
+        let store = MockStore::new().with_pending(vec![msg1, msg2]);
+        let service = make_service(store.clone(), NotificationConfig::default());
+
+        let count = service
+            .dispatch_once()
+            .await
+            .unwrap_or_else(|e| panic!("dispatch_once failed: {e}"));
+        assert_eq!(count, 2);
+
+        // Bulk-sent should have been called exactly once with both IDs.
+        let sent_batches = store
+            .bulk_sent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone();
+        assert_eq!(
+            sent_batches.len(),
+            1,
+            "expected a single bulk UPDATE, got {}",
+            sent_batches.len()
+        );
+        let batch = &sent_batches[0];
+        assert_eq!(batch.len(), 2);
+        assert!(batch.contains(&id1) && batch.contains(&id2));
+    }
+
+    // ── 37. Method labels are stable ────────────────────────────
+
+    #[test]
+    fn method_label_matches_wire_names() {
+        assert_eq!(method_label(NotificationMethod::Email), "smtp");
+        assert_eq!(method_label(NotificationMethod::Webhook), "webhook");
+        assert_eq!(method_label(NotificationMethod::Inbox), "inbox");
     }
 }

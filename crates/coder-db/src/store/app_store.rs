@@ -5573,10 +5573,20 @@ impl AppStore for PostgresStore {
         limit: u32,
         max_attempt_count: u32,
     ) -> Result<Vec<NotificationMessageRecord>, StorageError> {
+        // `FOR UPDATE SKIP LOCKED` in the inner SELECT prevents two notifier
+        // replicas from leasing the same row: the second replica skips any
+        // row another replica is still updating. The lease tag written to
+        // `status_reason` mirrors Go's `AcquireNotificationMessages`
+        // (`coder/coderd/database/queries/notifications.sql`) — it's not
+        // needed for correctness but helps operators reason about stuck
+        // messages when inspecting the table directly.
+        let notifier_id = Uuid::new_v4();
         let rows = sqlx::query_as::<_, StoredNotificationMessageRow>(
             r#"UPDATE notification_messages
                SET status = 'leased'::notification_message_status,
+                   status_reason = 'Leased by notifier ' || $3::uuid,
                    leased_until = NOW() + INTERVAL '30 seconds',
+                   queued_seconds = GREATEST(0, EXTRACT(EPOCH FROM (NOW() - updated_at)))::FLOAT,
                    updated_at = NOW()
                WHERE id IN (
                    SELECT id
@@ -5600,6 +5610,7 @@ impl AppStore for PostgresStore {
         )
         .bind(limit as i64)
         .bind(max_attempt_count as i32)
+        .bind(notifier_id)
         .fetch_all(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -5657,6 +5668,134 @@ impl AppStore for PostgresStore {
         .map_err(storage_error)?;
 
         Ok(result.rows_affected() > 0)
+    }
+
+    #[instrument(skip(self, ids), fields(n = ids.len()), err(level = tracing::Level::WARN))]
+    async fn bulk_mark_notification_messages_sent(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<u64, StorageError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        let result = sqlx::query(
+            r#"UPDATE notification_messages
+               SET queued_seconds = 0,
+                   updated_at = NOW(),
+                   attempt_count = COALESCE(attempt_count, 0) + 1,
+                   status = 'sent'::notification_message_status,
+                   status_reason = NULL,
+                   leased_until = NULL,
+                   next_retry_after = NULL
+               WHERE id = ANY($1::uuid[])"#,
+        )
+        .bind(ids)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected())
+    }
+
+    #[instrument(
+        skip(self, ids, statuses, status_reasons),
+        fields(n = ids.len()),
+        err(level = tracing::Level::WARN)
+    )]
+    async fn bulk_mark_notification_messages_failed(
+        &self,
+        ids: &[Uuid],
+        statuses: &[NotificationMessageStatus],
+        status_reasons: &[String],
+        max_attempts: u32,
+        retry_interval_secs: u32,
+    ) -> Result<u64, StorageError> {
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        if ids.len() != statuses.len() || ids.len() != status_reasons.len() {
+            return Err(StorageError::invalid_data(
+                "bulk_mark_notification_messages_failed: ids, statuses, status_reasons must be the same length",
+            ));
+        }
+        // Serialise the enum values to the Postgres text form; UNNEST casts
+        // them back via the `notification_message_status` enum.
+        let status_strs: Vec<&'static str> = statuses
+            .iter()
+            .map(|s| match s {
+                NotificationMessageStatus::Pending => "pending",
+                NotificationMessageStatus::Leased => "leased",
+                NotificationMessageStatus::Sent => "sent",
+                NotificationMessageStatus::TemporaryFailure => "temporary_failure",
+                NotificationMessageStatus::PermanentFailure => "permanent_failure",
+                NotificationMessageStatus::Unknown => "unknown",
+                NotificationMessageStatus::Inhibited => "inhibited",
+            })
+            .collect();
+        let status_strings: Vec<String> = status_strs.iter().map(|s| (*s).to_owned()).collect();
+        let ids_vec: Vec<Uuid> = ids.to_vec();
+        let reasons_vec: Vec<String> = status_reasons.to_vec();
+
+        // Mirrors Go's BulkMarkNotificationMessagesFailed query: each row
+        // receives its own status/reason, and rows whose next attempt would
+        // exceed `max_attempts` are coerced to permanent_failure.
+        let result = sqlx::query(
+            r#"UPDATE notification_messages AS nm
+               SET queued_seconds = 0,
+                   updated_at = NOW(),
+                   attempt_count = COALESCE(nm.attempt_count, 0) + 1,
+                   status = CASE
+                       WHEN COALESCE(nm.attempt_count, 0) + 1 < $4::int
+                            AND subquery.status <> 'inhibited'::notification_message_status
+                         THEN subquery.status
+                       WHEN subquery.status = 'inhibited'::notification_message_status
+                         THEN 'inhibited'::notification_message_status
+                       ELSE 'permanent_failure'::notification_message_status
+                   END,
+                   status_reason = subquery.status_reason,
+                   leased_until = NULL,
+                   next_retry_after = CASE
+                       WHEN COALESCE(nm.attempt_count, 0) + 1 < $4::int
+                            AND subquery.status = 'temporary_failure'::notification_message_status
+                         THEN NOW() + ($5::int || ' seconds')::interval
+                   END
+               FROM (
+                   SELECT UNNEST($1::uuid[]) AS id,
+                          UNNEST($2::notification_message_status[]) AS status,
+                          UNNEST($3::text[]) AS status_reason
+               ) AS subquery
+               WHERE nm.id = subquery.id"#,
+        )
+        .bind(&ids_vec)
+        .bind(&status_strings)
+        .bind(&reasons_vec)
+        .bind(max_attempts as i32)
+        .bind(retry_interval_secs as i32)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(result.rows_affected())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn find_user_notification_preference(
+        &self,
+        user_id: Uuid,
+        notification_template_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        let row: Option<(bool,)> = sqlx::query_as(
+            "SELECT disabled
+             FROM notification_preferences
+             WHERE user_id = $1 AND notification_template_id = $2",
+        )
+        .bind(user_id)
+        .bind(notification_template_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(row.map(|(d,)| d))
     }
 
     // -----------------------------------------------------------------------

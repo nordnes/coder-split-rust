@@ -8691,6 +8691,71 @@ pub(crate) mod tests {
             }
         }
 
+        async fn bulk_mark_notification_messages_sent(
+            &self,
+            ids: &[Uuid],
+        ) -> Result<u64, StorageError> {
+            let mut messages = self
+                .notification_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let now = OffsetDateTime::now_utc();
+            let mut count = 0u64;
+            for msg in messages.iter_mut() {
+                if ids.contains(&msg.id) {
+                    msg.status = NotificationMessageStatus::Sent;
+                    msg.updated_at = now;
+                    msg.attempt_count = msg.attempt_count.saturating_add(1);
+                    count += 1;
+                }
+            }
+            Ok(count)
+        }
+
+        async fn bulk_mark_notification_messages_failed(
+            &self,
+            ids: &[Uuid],
+            statuses: &[NotificationMessageStatus],
+            _status_reasons: &[String],
+            max_attempts: u32,
+            _retry_interval_secs: u32,
+        ) -> Result<u64, StorageError> {
+            let mut messages = self
+                .notification_messages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let now = OffsetDateTime::now_utc();
+            let mut count = 0u64;
+            for (idx, id) in ids.iter().enumerate() {
+                let Some(msg) = messages.iter_mut().find(|m| m.id == *id) else {
+                    continue;
+                };
+                let next = msg.attempt_count.saturating_add(1);
+                let status = statuses
+                    .get(idx)
+                    .copied()
+                    .unwrap_or(NotificationMessageStatus::TemporaryFailure);
+                msg.status = if (next as u32) >= max_attempts {
+                    NotificationMessageStatus::PermanentFailure
+                } else {
+                    status
+                };
+                msg.attempt_count = next;
+                msg.updated_at = now;
+                count += 1;
+            }
+            Ok(count)
+        }
+
+        async fn find_user_notification_preference(
+            &self,
+            _user_id: Uuid,
+            _notification_template_id: Uuid,
+        ) -> Result<Option<bool>, StorageError> {
+            // In-memory stub: no preference tracked; treat as enabled.
+            Ok(None)
+        }
+
         async fn update_workspace_dormant_deleting_at(
             &self,
             workspace_id: Uuid,

@@ -2248,6 +2248,40 @@ pub trait IdentityStore: Send + Sync {
         &self,
         message_id: Uuid,
     ) -> Result<bool, StorageError>;
+
+    /// Bulk-marks a set of notification messages as successfully sent.
+    ///
+    /// Clears `leased_until` / `next_retry_after`, sets `status = 'sent'`, and
+    /// increments `attempt_count`. Mirrors Go's `BulkMarkNotificationMessagesSent`
+    /// (`coder/coderd/database/queries/notifications.sql`).
+    async fn bulk_mark_notification_messages_sent(&self, ids: &[Uuid])
+    -> Result<u64, StorageError>;
+
+    /// Bulk-marks a set of notification messages as failed.
+    ///
+    /// Each ID receives the corresponding status (typically
+    /// `temporary_failure` or `inhibited`) and status reason. Rows whose next
+    /// attempt would exceed `max_attempts` are coerced to `permanent_failure`.
+    /// Mirrors Go's `BulkMarkNotificationMessagesFailed`.
+    async fn bulk_mark_notification_messages_failed(
+        &self,
+        ids: &[Uuid],
+        statuses: &[crate::identity::NotificationMessageStatus],
+        status_reasons: &[String],
+        max_attempts: u32,
+        retry_interval_secs: u32,
+    ) -> Result<u64, StorageError>;
+
+    /// Returns a single notification preference for (user, template), if any.
+    ///
+    /// Used by the dispatch loop to inhibit messages whose template the user
+    /// has disabled. Mirrors the `LEFT JOIN notification_preferences`
+    /// used by Go's `AcquireNotificationMessages` query.
+    async fn find_user_notification_preference(
+        &self,
+        user_id: Uuid,
+        notification_template_id: Uuid,
+    ) -> Result<Option<bool>, StorageError>;
 }
 
 /// Narrow storage contract for operational and deployment-owned state.
@@ -4708,6 +4742,28 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         message_id: Uuid,
     ) -> Result<bool, StorageError>;
 
+    /// Bulk-marks a set of notification messages as successfully sent.
+    async fn bulk_mark_notification_messages_sent(&self, ids: &[Uuid])
+    -> Result<u64, StorageError>;
+
+    /// Bulk-marks a set of notification messages as failed.
+    async fn bulk_mark_notification_messages_failed(
+        &self,
+        ids: &[Uuid],
+        statuses: &[crate::identity::NotificationMessageStatus],
+        status_reasons: &[String],
+        max_attempts: u32,
+        retry_interval_secs: u32,
+    ) -> Result<u64, StorageError>;
+
+    /// Returns the `disabled` flag for a (user, notification_template) pair
+    /// if a row exists in `notification_preferences`.
+    async fn find_user_notification_preference(
+        &self,
+        user_id: Uuid,
+        notification_template_id: Uuid,
+    ) -> Result<Option<bool>, StorageError>;
+
     // ----- Custom roles -----
 
     /// Lists custom roles, optionally filtered by organization.
@@ -6505,6 +6561,40 @@ where
     ) -> Result<bool, StorageError> {
         AppStore::increment_notification_message_attempt_count(self, message_id).await
     }
+
+    async fn bulk_mark_notification_messages_sent(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<u64, StorageError> {
+        AppStore::bulk_mark_notification_messages_sent(self, ids).await
+    }
+
+    async fn bulk_mark_notification_messages_failed(
+        &self,
+        ids: &[Uuid],
+        statuses: &[crate::identity::NotificationMessageStatus],
+        status_reasons: &[String],
+        max_attempts: u32,
+        retry_interval_secs: u32,
+    ) -> Result<u64, StorageError> {
+        AppStore::bulk_mark_notification_messages_failed(
+            self,
+            ids,
+            statuses,
+            status_reasons,
+            max_attempts,
+            retry_interval_secs,
+        )
+        .await
+    }
+
+    async fn find_user_notification_preference(
+        &self,
+        user_id: Uuid,
+        notification_template_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        AppStore::find_user_notification_preference(self, user_id, notification_template_id).await
+    }
 }
 
 #[async_trait]
@@ -7132,6 +7222,42 @@ where
     ) -> Result<bool, StorageError> {
         (**self)
             .increment_notification_message_attempt_count(message_id)
+            .await
+    }
+
+    async fn bulk_mark_notification_messages_sent(
+        &self,
+        ids: &[Uuid],
+    ) -> Result<u64, StorageError> {
+        (**self).bulk_mark_notification_messages_sent(ids).await
+    }
+
+    async fn bulk_mark_notification_messages_failed(
+        &self,
+        ids: &[Uuid],
+        statuses: &[crate::identity::NotificationMessageStatus],
+        status_reasons: &[String],
+        max_attempts: u32,
+        retry_interval_secs: u32,
+    ) -> Result<u64, StorageError> {
+        (**self)
+            .bulk_mark_notification_messages_failed(
+                ids,
+                statuses,
+                status_reasons,
+                max_attempts,
+                retry_interval_secs,
+            )
+            .await
+    }
+
+    async fn find_user_notification_preference(
+        &self,
+        user_id: Uuid,
+        notification_template_id: Uuid,
+    ) -> Result<Option<bool>, StorageError> {
+        (**self)
+            .find_user_notification_preference(user_id, notification_template_id)
             .await
     }
 }
