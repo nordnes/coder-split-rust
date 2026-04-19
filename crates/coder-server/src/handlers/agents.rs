@@ -989,11 +989,30 @@ pub(crate) async fn get_workspace_agent_logs(
     Ok((StatusCode::OK, Json(logs)).into_response())
 }
 
+/// Query string for the reconnecting-PTY WebSocket endpoint.
+///
+/// The `reconnect_id` keys the server-side session store. A client that
+/// reconnects with the same id gets the scrollback buffer replayed and
+/// rejoins the live output fan-out, so a transient WebSocket drop does
+/// not kill the user's shell. Go reference:
+/// `coder/coderd/workspaceagents.go` (`workspaceAgentReconnectingPTY`).
+#[derive(Debug, Deserialize)]
+pub(crate) struct ReconnectingPtyQuery {
+    pub(crate) reconnect_id: Option<Uuid>,
+}
+
 /// GET /api/v2/workspaceagents/{agent}/pty — WebSocket terminal.
+///
+/// Uses the server-side [`crate::reconnecting_pty::ReconnectingPtyStore`]
+/// to maintain a scrollback ring buffer keyed by `reconnect_id`. On
+/// reconnect the buffer is replayed to the new socket before live output
+/// resumes. If the agent side drops, a short grace window keeps
+/// scrollback readable; outside the grace window attach returns 404/close.
 pub(crate) async fn get_workspace_agent_pty(
     State(state): State<AppState>,
     headers: HeaderMap,
     Path(agent_id): Path<Uuid>,
+    Query(query): Query<ReconnectingPtyQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
     let Some(_context) = authenticate_request(&state, &headers).await? else {
@@ -1004,67 +1023,142 @@ pub(crate) async fn get_workspace_agent_pty(
         return Ok(resource_not_found_response());
     };
 
+    let Some(reconnect_id) = query.reconnect_id else {
+        return Ok((
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Missing reconnect_id query parameter.",
+                "reconnecting PTY sessions require a client-supplied reconnect_id UUID",
+            )),
+        )
+            .into_response());
+    };
+
     let pubsub = state.pubsub.clone();
     let agent_provider = state.agent_provider.clone();
+    let reconnecting_pty = state.reconnecting_pty.clone();
 
     Ok(ws.on_upgrade(move |mut socket| async move {
-        // Verify the agent is currently connected before starting the relay.
-        if agent_provider
-            .get_agent_connection(agent_id)
+        // Attach to (or create) the session. Cross-agent re-use of a
+        // reconnect_id, or attaching past an expired grace window, fails
+        // here.
+        let client = match reconnecting_pty
+            .attach_client(reconnect_id, agent_id)
             .await
-            .is_none()
         {
-            let _ = socket
-                .send(Message::Close(Some(CloseFrame {
-                    code: 4002,
-                    reason: "agent is not connected".into(),
-                })))
-                .await;
-            return;
-        }
-
-        // Set up bidirectional relay channels via pubsub.
-        let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
-        let input_channel = coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
-
-        let mut output_sub = match pubsub.subscribe(&output_channel).await {
-            Ok(sub) => sub,
-            Err(e) => {
-                tracing::warn!(
-                    agent_id = %agent_id,
-                    error = %e,
-                    "failed to subscribe to PTY output",
-                );
+            Ok(attach) => attach,
+            Err(err) => {
+                let code = match err {
+                    crate::reconnecting_pty::ReconnectingPtyError::AgentMismatch => 4003,
+                    crate::reconnecting_pty::ReconnectingPtyError::Closed => 4004,
+                };
                 let _ = socket
                     .send(Message::Close(Some(CloseFrame {
-                        code: 1011,
-                        reason: format!("pubsub subscribe failed: {e}").into(),
+                        code,
+                        reason: err.to_string().into(),
                     })))
                     .await;
                 return;
             }
         };
+        let session = client.session.clone();
 
-        // Relay binary frames between WebSocket client and PTY channels.
+        // Replay scrollback to the newly-attached client BEFORE we start
+        // forwarding live output, so order is preserved.
+        let replay = session.scrollback().await;
+        if !replay.is_empty() && socket.send(Message::Binary(replay.into())).await.is_err() {
+            return;
+        }
+
+        // Subscribe to live output after replay so we do not miss bytes
+        // that arrive between replay and subscribe — the fan-out
+        // broadcast buffers new bytes until the receiver catches up.
+        let mut live_rx = session.subscribe();
+
+        // Start the agent-side pump once per session. The pump
+        // subscribes to the pubsub output channel and pushes bytes into
+        // the session's ring buffer + broadcast. It exits when pubsub
+        // closes or the agent disappears; the session is retained until
+        // the grace window closes.
+        if session.start_pump_once().await {
+            let session_for_pump = session.clone();
+            let pubsub_for_pump = pubsub.clone();
+            let agent_provider_for_pump = agent_provider.clone();
+            let reconnecting_pty_for_pump = reconnecting_pty.clone();
+            tokio::spawn(async move {
+                let output_channel =
+                    coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
+                let mut sub = match pubsub_for_pump.subscribe(&output_channel).await {
+                    Ok(sub) => sub,
+                    Err(err) => {
+                        tracing::warn!(
+                            agent_id = %agent_id,
+                            error = %err,
+                            "failed to subscribe to PTY output channel",
+                        );
+                        session_for_pump.mark_pump_stopped().await;
+                        return;
+                    }
+                };
+                let agent_attach = match reconnecting_pty_for_pump
+                    .attach_agent(reconnect_id, agent_id)
+                    .await
+                {
+                    Ok(attach) => attach,
+                    Err(err) => {
+                        tracing::warn!(
+                            reconnect_id = %reconnect_id,
+                            error = %err,
+                            "failed to attach agent pump",
+                        );
+                        session_for_pump.mark_pump_stopped().await;
+                        return;
+                    }
+                };
+                loop {
+                    match sub.recv().await {
+                        Ok(bytes) => session_for_pump.push_output(&bytes).await,
+                        Err(_) => break,
+                    }
+                    // If the agent has disappeared from the agent
+                    // provider, stop pumping so the grace window
+                    // can start.
+                    if agent_provider_for_pump
+                        .get_agent_connection(agent_id)
+                        .await
+                        .is_none()
+                    {
+                        break;
+                    }
+                }
+                drop(agent_attach);
+                session_for_pump.mark_pump_stopped().await;
+            });
+        }
+
+        // Bidirectional relay: input frames go to the pubsub input
+        // channel the agent reads; live output arrives via the
+        // per-session broadcast.
+        let input_channel = coder_core::pubsub::workspace_agent_pty_input_channel(agent_id);
         loop {
             tokio::select! {
                 ws_msg = socket.recv() => {
                     match ws_msg {
                         Some(Ok(Message::Binary(data))) => {
-                            if let Err(e) = pubsub.publish(&input_channel, &data).await {
+                            if let Err(err) = pubsub.publish(&input_channel, &data).await {
                                 tracing::debug!(
                                     agent_id = %agent_id,
-                                    error = %e,
+                                    error = %err,
                                     "failed to publish PTY input",
                                 );
                                 break;
                             }
                         }
                         Some(Ok(Message::Text(text))) => {
-                            if let Err(e) = pubsub.publish(&input_channel, text.as_bytes()).await {
+                            if let Err(err) = pubsub.publish(&input_channel, text.as_bytes()).await {
                                 tracing::debug!(
                                     agent_id = %agent_id,
-                                    error = %e,
+                                    error = %err,
                                     "failed to publish PTY input",
                                 );
                                 break;
@@ -1075,18 +1169,26 @@ pub(crate) async fn get_workspace_agent_pty(
                         _ => continue,
                     }
                 }
-                pty_data = output_sub.recv() => {
-                    match pty_data {
+                recv = live_rx.recv() => {
+                    match recv {
                         Ok(data) => {
                             if socket.send(Message::Binary(data.into())).await.is_err() {
                                 break;
                             }
                         }
-                        Err(_) => break,
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                            // Slow client — skip the dropped frames and
+                            // continue so the shell stays usable.
+                            continue;
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             }
         }
+        // Dropping `client` decrements the reader count. The session is
+        // kept alive until the agent drops or the idle timeout elapses.
+        drop(client);
     }))
 }
 
