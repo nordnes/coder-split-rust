@@ -358,6 +358,7 @@ pub(crate) mod provisioner_keys;
 pub(crate) mod quotas;
 pub(crate) mod replicas;
 pub(crate) mod scim;
+pub(crate) mod support_bundle;
 pub(crate) mod tasks;
 pub(crate) mod telemetry;
 pub(crate) mod templates;

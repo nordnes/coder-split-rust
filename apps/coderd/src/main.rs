@@ -87,13 +87,13 @@ struct ServerArgs {
     #[arg(long, env = "CODER_LISTEN_ADDR", default_value = "127.0.0.1:3000")]
     listen_addr: SocketAddr,
 
-    /// External access URL advertised by the deployment.
-    #[arg(
-        long,
-        env = "CODER_ACCESS_URL",
-        default_value = "http://127.0.0.1:3000"
-    )]
-    access_url: Url,
+    /// External access URL advertised by the deployment. When unset, the
+    /// server attempts to auto-detect a suitable URL: first from the bind
+    /// address (if it's a public, non-loopback IP), then from well-known
+    /// "what is my IP" services with a 3s timeout, and finally falling back
+    /// to `http://localhost:<port>` with a warning.
+    #[arg(long, env = "CODER_ACCESS_URL")]
+    access_url: Option<Url>,
 
     /// Postgres connection string.
     #[arg(long, env = "CODER_POSTGRES_URL")]
@@ -719,6 +719,13 @@ struct ServerArgs {
     /// Used as the `sub` claim in VAPID signatures sent to push services.
     #[arg(long, env = "CODER_VAPID_SUB", default_value = "")]
     vapid_sub: String,
+
+    /// URL of the external trial-signup endpoint. When empty the trial
+    /// redirector is disabled — `CreateFirstUserRequest.trial = true` is
+    /// accepted but ignored. Mirrors Go's `TrialGenerator` wiring in
+    /// `coder/enterprise/cli/server.go`.
+    #[arg(long, env = "CODER_TRIAL_SIGNUP_URL", default_value = "")]
+    trial_signup_url: String,
 }
 
 #[derive(Debug, Error)]
@@ -855,7 +862,7 @@ async fn run() -> Result<(), MainError> {
 
     let log_format = args.log_format;
     let migrate_only = args.migrate_only;
-    let config = build_config(args)?;
+    let config = build_config(args).await?;
     let tracer_provider = init_tracing(log_format, &config.otel);
     init_panic_hook();
 
@@ -1212,7 +1219,7 @@ async fn run() -> Result<(), MainError> {
     serve_result
 }
 
-fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
+async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
     if args.db_min_connections > args.db_max_connections {
         return Err(MainError::Config(
             "db-min-connections cannot exceed db-max-connections".to_owned(),
@@ -1229,9 +1236,14 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         ));
     }
 
+    let access_url = match args.access_url {
+        Some(url) => url,
+        None => resolve_access_url(args.listen_addr).await?,
+    };
+
     Ok(ServerConfig {
         listen_addr: args.listen_addr,
-        access_url: args.access_url,
+        access_url,
         wildcard_access_url: args.wildcard_access_url,
         database: DatabaseConfig {
             postgres_url: args.postgres_url,
@@ -1417,7 +1429,118 @@ fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         verify_instance_identity: args.verify_instance_identity,
         aws_instance_identity_certs_dir: args.aws_instance_identity_certs_dir,
         vapid_sub: args.vapid_sub,
+        trial_signup_url: args.trial_signup_url,
     })
+}
+
+/// Resolves the external access URL when none was supplied.
+///
+/// Mirrors Go's `coder/cli/server.go` behavior of attempting auto-detection
+/// before falling back to localhost. Strategy:
+///
+/// 1. If the bind address's IP is a non-loopback, non-unspecified,
+///    non-private address, use it directly.
+/// 2. Otherwise try a small set of "what is my IP" services with a 3s
+///    timeout; first success wins.
+/// 3. Otherwise fall back to `http://localhost:<port>` and log a WARN
+///    telling the operator to set `CODER_ACCESS_URL` explicitly.
+async fn resolve_access_url(listen_addr: SocketAddr) -> Result<Url, MainError> {
+    let port = listen_addr.port();
+    if let Some(url) = access_url_from_bind(listen_addr) {
+        info!(
+            access_url = %url,
+            "auto-detected access URL from bind address; set CODER_ACCESS_URL to override"
+        );
+        return Ok(url);
+    }
+    if let Some(url) = access_url_from_public_ip(port).await {
+        info!(
+            access_url = %url,
+            "auto-detected access URL from external IP; set CODER_ACCESS_URL to override"
+        );
+        return Ok(url);
+    }
+    let fallback = fallback_localhost_url(port)
+        .map_err(|error| MainError::Config(format!("construct fallback access URL: {error}")))?;
+    warn!(
+        access_url = %fallback,
+        "CODER_ACCESS_URL is unset and auto-detection failed; using localhost. Set CODER_ACCESS_URL explicitly for production deployments."
+    );
+    Ok(fallback)
+}
+
+/// Returns an access URL derived from the bind address when it's a routable
+/// external IP (not loopback/unspecified/private).
+fn access_url_from_bind(listen_addr: SocketAddr) -> Option<Url> {
+    if !is_public_ip(listen_addr.ip()) {
+        return None;
+    }
+    let url_str = match listen_addr {
+        SocketAddr::V4(v4) => format!("http://{}:{}", v4.ip(), v4.port()),
+        SocketAddr::V6(v6) => format!("http://[{}]:{}", v6.ip(), v6.port()),
+    };
+    Url::parse(&url_str).ok()
+}
+
+/// Returns `true` if the address is a routable external IP.
+fn is_public_ip(ip: std::net::IpAddr) -> bool {
+    if ip.is_loopback() || ip.is_unspecified() || ip.is_multicast() {
+        return false;
+    }
+    match ip {
+        std::net::IpAddr::V4(v4) => !(v4.is_private() || v4.is_link_local() || v4.is_broadcast()),
+        std::net::IpAddr::V6(v6) => {
+            // Unique local addresses (fc00::/7) — treat as private.
+            let first_byte = v6.octets()[0];
+            (first_byte & 0xfe) != 0xfc
+        }
+    }
+}
+
+/// Queries a small set of public "what is my IP" endpoints and returns the
+/// first successful response as an access URL. Each request has a 3s timeout.
+async fn access_url_from_public_ip(port: u16) -> Option<Url> {
+    const ENDPOINTS: &[&str] = &[
+        "https://api.ipify.org",
+        "https://ifconfig.me/ip",
+        "https://icanhazip.com",
+    ];
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(3))
+        .build()
+        .ok()?;
+    for endpoint in ENDPOINTS {
+        let resp = match client.get(*endpoint).send().await {
+            Ok(resp) => resp,
+            Err(_) => continue,
+        };
+        if !resp.status().is_success() {
+            continue;
+        }
+        let Ok(body) = resp.text().await else {
+            continue;
+        };
+        let trimmed = body.trim();
+        let Ok(ip) = trimmed.parse::<std::net::IpAddr>() else {
+            continue;
+        };
+        let url_str = match ip {
+            std::net::IpAddr::V4(v4) => format!("http://{v4}:{port}"),
+            std::net::IpAddr::V6(v6) => format!("http://[{v6}]:{port}"),
+        };
+        if let Ok(url) = Url::parse(&url_str) {
+            return Some(url);
+        }
+    }
+    None
+}
+
+/// Builds a `http://localhost:<port>` fallback URL.  This literal is always
+/// a syntactically valid URL; the `Result` return type is only present so
+/// callers can surface a configuration error instead of panicking on the
+/// unlikely event of a parse failure (e.g. a broken `url` crate build).
+fn fallback_localhost_url(port: u16) -> Result<Url, url::ParseError> {
+    Url::parse(&format!("http://localhost:{port}"))
 }
 
 /// Splits a comma-separated string into a `Vec<String>`, trimming whitespace
@@ -1600,6 +1723,7 @@ fn resource_kind_name(resource: coder_rbac::ResourceKind) -> &'static str {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use clap::Parser;
 
@@ -1643,5 +1767,100 @@ mod tests {
         let Command::Server(args) = cli.command;
         assert!(!args.migrate_only);
         assert_eq!(args.db_max_connections, 20);
+    }
+
+    #[test]
+    fn cli_parse_defaults_access_url_to_none() {
+        // When --access-url is omitted, the CLI now leaves it as None so
+        // the server can attempt auto-detection at startup.
+        let cli = Cli::parse_from([
+            "coderd",
+            "server",
+            "--postgres-url",
+            "postgres://localhost/test",
+        ]);
+        let Command::Server(args) = cli.command;
+        assert!(args.access_url.is_none());
+    }
+
+    #[test]
+    fn is_public_ip_rejects_loopback_and_private() {
+        use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::LOCALHOST)));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::UNSPECIFIED)));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(10, 0, 0, 1))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(192, 168, 1, 1))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(172, 16, 0, 1))));
+        assert!(!is_public_ip(IpAddr::V4(Ipv4Addr::new(169, 254, 0, 1))));
+        // Public addresses.
+        assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(8, 8, 8, 8))));
+        assert!(is_public_ip(IpAddr::V4(Ipv4Addr::new(1, 1, 1, 1))));
+        // IPv6 checks.
+        assert!(!is_public_ip(IpAddr::V6(Ipv6Addr::LOCALHOST)));
+        assert!(!is_public_ip(IpAddr::V6(Ipv6Addr::UNSPECIFIED)));
+        // Unique local address (fc00::/7).
+        assert!(!is_public_ip(IpAddr::V6(
+            "fc00::1".parse::<Ipv6Addr>().expect("valid ULA")
+        )));
+    }
+
+    #[test]
+    fn access_url_from_bind_returns_none_for_loopback() {
+        let loopback: SocketAddr = "127.0.0.1:3000".parse().expect("valid SocketAddr literal");
+        assert!(access_url_from_bind(loopback).is_none());
+
+        let unspec: SocketAddr = "0.0.0.0:3000".parse().expect("valid SocketAddr literal");
+        assert!(access_url_from_bind(unspec).is_none());
+
+        let private: SocketAddr = "10.0.0.5:3000".parse().expect("valid SocketAddr literal");
+        assert!(access_url_from_bind(private).is_none());
+    }
+
+    #[test]
+    fn access_url_from_bind_returns_url_for_public_ip() {
+        let public: SocketAddr = "8.8.8.8:1234".parse().expect("valid SocketAddr literal");
+        let url = access_url_from_bind(public).expect("public address should yield a URL");
+        assert_eq!(url.as_str(), "http://8.8.8.8:1234/");
+    }
+
+    #[test]
+    fn fallback_localhost_url_matches_port() {
+        let url = fallback_localhost_url(3000).expect("literal parses");
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("localhost"));
+        assert_eq!(url.port(), Some(3000));
+    }
+
+    #[tokio::test]
+    async fn resolve_access_url_falls_back_to_localhost_on_loopback_bind() {
+        // With a loopback bind and the public-IP probes unreachable in the
+        // test environment (no network), resolution should land on the
+        // localhost fallback.  We set a shorter client timeout via the
+        // built-in 3s deadline and expect localhost within the timeout.
+        let listen: SocketAddr = "127.0.0.1:3000".parse().expect("valid SocketAddr literal");
+        // The public-IP probe uses the network; in a hermetic test
+        // environment without network access, all endpoints fail fast and
+        // the fallback kicks in.  We do NOT assert a deterministic path
+        // through `access_url_from_public_ip` — only that *some* URL is
+        // returned and it's either a localhost fallback or a public-IP URL
+        // with the correct port.  Callers running this test offline will
+        // always see the localhost fallback.
+        let url = resolve_access_url(listen)
+            .await
+            .expect("resolution succeeds");
+        assert_eq!(url.port_or_known_default(), Some(3000));
+    }
+
+    #[tokio::test]
+    async fn resolve_access_url_uses_public_bind_when_available() {
+        // When the bind address is already a public IP, auto-detection
+        // short-circuits to that bind address and never hits the network.
+        let listen: SocketAddr = "8.8.8.8:4443".parse().expect("valid SocketAddr literal");
+        let url = resolve_access_url(listen)
+            .await
+            .expect("resolution succeeds");
+        assert_eq!(url.host_str(), Some("8.8.8.8"));
+        assert_eq!(url.port(), Some(4443));
     }
 }

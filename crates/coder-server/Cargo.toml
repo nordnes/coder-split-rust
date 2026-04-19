@@ -64,6 +64,8 @@ tracing-opentelemetry.workspace = true
 url.workspace = true
 uuid.workspace = true
 web-push.workspace = true
+tar.workspace = true
+flate2.workspace = true
 
 [dev-dependencies]
 async-trait.workspace = true

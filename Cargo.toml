@@ -86,6 +86,8 @@ web-push = "0.11"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "builder", "pool", "hostname"] }
 yamux = "0.13"
 criterion = { version = "0.5", features = ["html_reports"] }
+tar = { version = "0.4", default-features = false }
+flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

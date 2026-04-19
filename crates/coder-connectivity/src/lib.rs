@@ -1416,6 +1416,7 @@ mod tests {
             verify_instance_identity: false,
             aws_instance_identity_certs_dir: None,
             vapid_sub: String::new(),
+            trial_signup_url: String::new(),
         }
     }
 

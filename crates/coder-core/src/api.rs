@@ -908,6 +908,77 @@ pub struct CreateFirstUserRequest {
     pub name: String,
     /// Plain-text password for the first user.
     pub password: String,
+    /// When `true`, the server forwards `trial_info` to the configured trial
+    /// signup endpoint (if any). Mirrors Go's `CreateFirstUserRequest.Trial`.
+    #[serde(default)]
+    pub trial: bool,
+    /// Personal details forwarded to the trial signup endpoint when
+    /// `trial` is `true`.
+    #[serde(default)]
+    pub trial_info: CreateFirstUserTrialInfo,
+}
+
+/// Personal details forwarded to the trial signup endpoint when
+/// [`CreateFirstUserRequest::trial`] is set.
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+pub struct CreateFirstUserTrialInfo {
+    /// First name of the trial requester.
+    #[serde(default)]
+    pub first_name: String,
+    /// Last name of the trial requester.
+    #[serde(default)]
+    pub last_name: String,
+    /// Contact phone number.
+    #[serde(default)]
+    pub phone_number: String,
+    /// Job title at the trial requester's organization.
+    #[serde(default)]
+    pub job_title: String,
+    /// Name of the company requesting the trial.
+    #[serde(default)]
+    pub company_name: String,
+    /// Country of the trial requester.
+    #[serde(default)]
+    pub country: String,
+    /// Free-form description of developer headcount.
+    #[serde(default)]
+    pub developers: String,
+}
+
+/// Payload forwarded to the configured trial-signup endpoint.
+///
+/// Mirrors Go's `codersdk.LicensorTrialRequest` so an existing licensor
+/// service deployed against Go can accept Rust traffic unchanged.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LicensorTrialRequest {
+    /// Opaque deployment identifier used to bind the trial to this server.
+    pub deployment_id: String,
+    /// Email address of the trial requester.
+    pub email: String,
+    /// Signup source string (e.g. `"first_user"` for the initial setup flow).
+    #[serde(default)]
+    pub source: String,
+    /// First name of the trial requester.
+    #[serde(default)]
+    pub first_name: String,
+    /// Last name of the trial requester.
+    #[serde(default)]
+    pub last_name: String,
+    /// Contact phone number.
+    #[serde(default)]
+    pub phone_number: String,
+    /// Job title at the trial requester's organization.
+    #[serde(default)]
+    pub job_title: String,
+    /// Name of the company requesting the trial.
+    #[serde(default)]
+    pub company_name: String,
+    /// Country of the trial requester.
+    #[serde(default)]
+    pub country: String,
+    /// Free-form description of developer headcount.
+    #[serde(default)]
+    pub developers: String,
 }
 
 /// Response payload for `POST /api/v2/users/first`.

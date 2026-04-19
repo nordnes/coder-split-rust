@@ -59,6 +59,11 @@ pub(crate) async fn get_first_user(State(state): State<AppState>) -> Result<Resp
 }
 
 /// POST /api/v2/users/first — create the initial admin user and organization.
+///
+/// When the request has `trial = true` and the deployment has a trial
+/// signup URL configured (`CODER_TRIAL_SIGNUP_URL`), the trial payload is
+/// POSTed to that endpoint before user creation. Mirrors Go's
+/// `postFirstUser` → `TrialGenerator` behavior.
 pub(crate) async fn post_first_user(
     State(state): State<AppState>,
     payload: Result<Json<CreateFirstUserRequest>, JsonRejection>,
@@ -67,6 +72,16 @@ pub(crate) async fn post_first_user(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
+
+    // Trial-signup redirector: forward to the configured endpoint *before*
+    // creating the user, so a failed signup surfaces as a 500 with the
+    // remote's error message (matching Go's ordering).  When the trial URL
+    // is empty, the field is silently ignored.
+    if request.trial && !state.config.trial_signup_url.is_empty() {
+        if let Err(response) = forward_trial_signup(&state, &request).await {
+            return Ok(response);
+        }
+    }
 
     match state.auth.create_first_user(&request).await {
         Ok(created) => {
@@ -91,6 +106,64 @@ pub(crate) async fn post_first_user(
         }
         Err(error) => handle_auth_error(error),
     }
+}
+
+/// POSTs a [`LicensorTrialRequest`] to the configured trial-signup URL.
+/// Returns `Err(Response)` with a 500 body on any failure (network, non-2xx
+/// response, or body read/parse error) so the caller can short-circuit.
+async fn forward_trial_signup(
+    state: &AppState,
+    request: &CreateFirstUserRequest,
+) -> Result<(), Response> {
+    let deployment_id = state.deployment_id.to_string();
+    let payload = coder_core::LicensorTrialRequest {
+        deployment_id,
+        email: request.email.clone(),
+        source: "first_user".to_owned(),
+        first_name: request.trial_info.first_name.clone(),
+        last_name: request.trial_info.last_name.clone(),
+        phone_number: request.trial_info.phone_number.clone(),
+        job_title: request.trial_info.job_title.clone(),
+        company_name: request.trial_info.company_name.clone(),
+        country: request.trial_info.country.clone(),
+        developers: request.trial_info.developers.clone(),
+    };
+
+    let resp = match state
+        .http_client
+        .post(&state.config.trial_signup_url)
+        .json(&payload)
+        .send()
+        .await
+    {
+        Ok(resp) => resp,
+        Err(error) => {
+            return Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error(
+                    "Failed to generate trial",
+                    error.to_string(),
+                )),
+            )
+                .into_response());
+        }
+    };
+
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        // The trial licensor typically returns `{"error":"message"}`.
+        let detail = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|v| v.get("error").and_then(|e| e.as_str()).map(String::from))
+            .unwrap_or(body);
+        return Err((
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ApiResponse::error("Failed to generate trial", detail)),
+        )
+            .into_response());
+    }
+    Ok(())
 }
 
 /// POST /api/v2/users/login — authenticate with email and password.
