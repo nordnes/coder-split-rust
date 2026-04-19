@@ -962,6 +962,70 @@ impl WorkspaceAppServer {
 }
 
 // ---------------------------------------------------------------------------
+// Access-error classification (ported from Go `appErrNotFoundDescription` in
+// coder/coderd/workspaceapps/appurl/errorpage.go)
+// ---------------------------------------------------------------------------
+
+/// Classified, user-facing reasons why a workspace app request was rejected.
+///
+/// The display strings are deliberately kept in sync with the Go reference
+/// (`coder/coderd/workspaceapps/auth.go` and `appurl/errorpage.go`) so that UI
+/// error pages and API clients see identical wording.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum AppAccessError {
+    /// Workspace agent has not connected back to the control plane yet.
+    AgentNotReporting,
+    /// Agent was connected, but has dropped and not returned in time.
+    AgentNotConnected,
+    /// Template policy forbids end-user app access.
+    TemplateDoesNotAllowAppAccess,
+    /// App is present but reporting unhealthy.
+    AppNotRunning,
+    /// App exists but has no configured upstream URL.
+    AppURLNotSet,
+    /// Authenticated user is not a member of the workspace's organization,
+    /// and the app sharing level is set to `organization`.
+    NotOrganizationMember,
+}
+
+impl AppAccessError {
+    /// Returns the message shown to the user. Matches Go exactly.
+    pub(crate) const fn description(&self) -> &'static str {
+        match self {
+            Self::AgentNotReporting => "agent is not reporting",
+            Self::AgentNotConnected => "agent is not connected",
+            Self::TemplateDoesNotAllowAppAccess => "template does not allow app access",
+            Self::AppNotRunning => "app is not running",
+            Self::AppURLNotSet => "app URL is not set",
+            Self::NotOrganizationMember => "user is not a member of the workspace's organization",
+        }
+    }
+
+    /// Returns the HTTP status Go uses for each classification.
+    ///
+    /// Most of these are 404 because Go intentionally hides whether a
+    /// workspace/agent/app exists from users who can't access it — the one
+    /// exception is the organization sharing-level denial, which is a true
+    /// 403.
+    pub(crate) const fn status_code(&self) -> StatusCode {
+        match self {
+            Self::NotOrganizationMember => StatusCode::FORBIDDEN,
+            Self::AgentNotReporting
+            | Self::AgentNotConnected
+            | Self::TemplateDoesNotAllowAppAccess
+            | Self::AppNotRunning
+            | Self::AppURLNotSet => StatusCode::NOT_FOUND,
+        }
+    }
+}
+
+impl std::fmt::Display for AppAccessError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.description())
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Proxy error types
 // ---------------------------------------------------------------------------
 
@@ -1003,31 +1067,54 @@ pub(crate) enum WorkspaceAppError {
     /// Upstream proxy error.
     #[error("proxy error: {0}")]
     ProxyError(String),
+
+    /// App-access classification (mirrors Go's `appErrNotFoundDescription`).
+    #[error("{0}")]
+    Classified(AppAccessError),
+}
+
+impl WorkspaceAppError {
+    /// Short classification string (if any) suitable for structured error
+    /// payloads. `None` for non-classified variants.
+    pub(crate) fn classification(&self) -> Option<&'static str> {
+        match self {
+            Self::Classified(c) => Some(c.description()),
+            _ => None,
+        }
+    }
 }
 
 impl IntoResponse for WorkspaceAppError {
     fn into_response(self) -> Response {
-        let (status, message) = match &self {
-            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone()),
+        let (status, message, detail) = match &self {
+            Self::NotFound(msg) => (StatusCode::NOT_FOUND, msg.clone(), String::new()),
             Self::Unauthorized => (
                 StatusCode::UNAUTHORIZED,
                 "Authentication required.".to_owned(),
+                String::new(),
             ),
-            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone()),
-            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone()),
+            Self::Forbidden(msg) => (StatusCode::FORBIDDEN, msg.clone(), String::new()),
+            Self::BadRequest(msg) => (StatusCode::BAD_REQUEST, msg.clone(), String::new()),
             Self::PathAppsDisabled => (
                 StatusCode::FORBIDDEN,
                 "Path-based applications are disabled on this Coder deployment.".to_owned(),
+                String::new(),
             ),
             Self::WorkspaceOffline => (
                 StatusCode::BAD_REQUEST,
                 "Workspace is offline. Start the workspace to access its applications.".to_owned(),
+                String::new(),
             ),
-            Self::AgentOffline(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
-            Self::Internal(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg.clone()),
-            Self::ProxyError(msg) => (StatusCode::BAD_GATEWAY, msg.clone()),
+            Self::AgentOffline(msg) => (StatusCode::BAD_GATEWAY, msg.clone(), String::new()),
+            Self::Internal(msg) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                msg.clone(),
+                String::new(),
+            ),
+            Self::ProxyError(msg) => (StatusCode::BAD_GATEWAY, msg.clone(), String::new()),
+            Self::Classified(c) => (c.status_code(), c.description().to_owned(), String::new()),
         };
-        (status, Json(ApiResponse::error(message, String::new()))).into_response()
+        (status, Json(ApiResponse::error(message, detail))).into_response()
     }
 }
 
@@ -1364,17 +1451,26 @@ async fn proxy_workspace_app(
 ) -> Result<Response, WorkspaceAppError> {
     // For now, workspace app proxying requires authentication.
     // Public apps would be handled here with sharing level checks.
-    let _user_id = auth_context
+    let user_id = auth_context
         .user_id
         .ok_or(WorkspaceAppError::Unauthorized)?;
 
-    // Resolve the target URL for the app.
-    // In a full implementation, this would look up the workspace, agent, and
-    // app in the database. For now, we build a reasonable proxy target.
-    let app_url = resolve_app_url(state, app_request, slug_is_port).await?;
+    // Resolve the workspace + agent + app in a single pass so we can enforce
+    // sharing-level policy (B.13 item 1) and record session stats (B.13
+    // item 2).
+    let resolved = resolve_app_context(state, app_request, slug_is_port).await?;
+
+    // Organization-scoped sharing enforcement.
+    enforce_organization_sharing(
+        state,
+        &resolved.sharing_level,
+        resolved.workspace_organization_id,
+        Some(user_id),
+    )
+    .await?;
 
     // Validate port.
-    if let Some(port_str) = app_url.port() {
+    if let Some(port_str) = resolved.url.port() {
         if port_str < AGENT_MINIMUM_LISTENING_PORT {
             return Err(WorkspaceAppError::BadRequest(format!(
                 "Application port {} is not permitted. Coder reserves ports less than {} for internal use.",
@@ -1392,8 +1488,22 @@ async fn proxy_workspace_app(
         .into_response());
     }
 
+    // Record session stats for the lifetime of this request. The guard
+    // persists on drop so any early-return error path still flushes.
+    let mut stats_guard = AppStatsGuard::new(
+        state.store.clone(),
+        AppStatsContext {
+            user_id,
+            workspace_id: resolved.workspace_id,
+            agent_id: resolved.agent_id,
+            access_method: app_request.access_method.to_string(),
+            slug_or_port: resolved.slug_or_port.clone(),
+        },
+    );
+    stats_guard.record_request();
+
     // Build the proxy target URL.
-    let mut target_url = app_url.clone();
+    let mut target_url = resolved.url.clone();
     target_url.set_path(app_path);
     if !app_query.is_empty() {
         target_url.set_query(Some(app_query));
@@ -1479,6 +1589,197 @@ async fn proxy_workspace_app(
         .map_err(|e| WorkspaceAppError::Internal(e.to_string()))
 }
 
+// ---------------------------------------------------------------------------
+// Organization sharing-level enforcement
+// ---------------------------------------------------------------------------
+
+/// Verifies that an authenticated user is allowed to access an app based on
+/// the app's sharing level and the workspace's organization.
+///
+/// Ported from Go `coder/coderd/workspaceapps/auth.go`
+/// (`authorizeWorkspaceApp`). The key behaviour this covers is:
+///
+/// - If the app is shared at organization level and the caller is not a
+///   member of the workspace's organization, the request is denied with 403
+///   and the classification `NotOrganizationMember`.
+///
+/// Other sharing levels (owner / authenticated / public) are enforced
+/// elsewhere in the pipeline today; this function is a no-op for them.
+pub(crate) async fn enforce_organization_sharing(
+    state: &AppState,
+    sharing_level: &str,
+    workspace_organization_id: Uuid,
+    user_id: Option<Uuid>,
+) -> Result<(), WorkspaceAppError> {
+    if !sharing_level.eq_ignore_ascii_case("organization") {
+        return Ok(());
+    }
+
+    let user_id = user_id.ok_or(WorkspaceAppError::Unauthorized)?;
+
+    let member = state
+        .store
+        .find_organization_member(workspace_organization_id, user_id)
+        .await
+        .map_err(|e| {
+            WorkspaceAppError::Internal(format!("failed to look up organization member: {e}"))
+        })?;
+
+    if member.is_none() {
+        return Err(WorkspaceAppError::Classified(
+            AppAccessError::NotOrganizationMember,
+        ));
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Session stats recorder
+// ---------------------------------------------------------------------------
+
+/// Context required to record a session's stats to `workspace_app_stats`.
+#[derive(Clone, Debug)]
+pub(crate) struct AppStatsContext {
+    /// Authenticated user.
+    pub user_id: Uuid,
+    /// Workspace that owns the agent/app.
+    pub workspace_id: Uuid,
+    /// Agent the session is proxied through.
+    pub agent_id: Uuid,
+    /// Access method: `path` / `subdomain` / `terminal`.
+    pub access_method: String,
+    /// Slug (for apps) or port number (for port-forwarding).
+    pub slug_or_port: String,
+}
+
+impl AppStatsContext {
+    /// Serializes this record in the same shape expected by
+    /// [`AppStore::insert_workspace_app_stats`].
+    pub(crate) fn to_stat_value(
+        &self,
+        session_id: Uuid,
+        session_started_at: OffsetDateTime,
+        session_ended_at: OffsetDateTime,
+        requests: i32,
+    ) -> Value {
+        let fmt_ts = |ts: OffsetDateTime| {
+            ts.format(&time::format_description::well_known::Rfc3339)
+                .unwrap_or_default()
+        };
+        serde_json::json!({
+            "user_id": self.user_id.to_string(),
+            "workspace_id": self.workspace_id.to_string(),
+            "agent_id": self.agent_id.to_string(),
+            "access_method": self.access_method,
+            "slug_or_port": self.slug_or_port,
+            "session_id": session_id.to_string(),
+            "session_started_at": fmt_ts(session_started_at),
+            "session_ended_at": fmt_ts(session_ended_at),
+            "requests": requests,
+        })
+    }
+}
+
+/// Drop guard that writes a `workspace_app_stats` row when the proxied
+/// request completes.
+///
+/// Ported from the Go stats collector (`coder/coderd/workspaceapps/stats.go`
+/// + `statscollector.go`). We use a fire-and-forget background task on drop
+/// so the response returns to the user without waiting on the DB write.
+pub(crate) struct AppStatsGuard {
+    store: Arc<dyn AppStore>,
+    ctx: AppStatsContext,
+    session_id: Uuid,
+    session_started_at: OffsetDateTime,
+    requests: i32,
+    /// Takes the value when emitting so double-emit on drop is a no-op.
+    emitted: bool,
+}
+
+impl AppStatsGuard {
+    /// Starts recording stats for a new session.
+    pub(crate) fn new(store: Arc<dyn AppStore>, ctx: AppStatsContext) -> Self {
+        Self {
+            store,
+            ctx,
+            session_id: Uuid::new_v4(),
+            session_started_at: OffsetDateTime::now_utc(),
+            requests: 0,
+            emitted: false,
+        }
+    }
+
+    /// Records a completed HTTP request on this session.
+    pub(crate) fn record_request(&mut self) {
+        self.requests = self.requests.saturating_add(1);
+    }
+
+    /// Emits the stats row to the store synchronously. Useful from tests and
+    /// in synchronous shutdown paths.
+    pub(crate) async fn flush(mut self) -> Result<(), StorageError> {
+        self.emitted = true;
+        let ended = OffsetDateTime::now_utc();
+        let stat = self.ctx.to_stat_value(
+            self.session_id,
+            self.session_started_at,
+            ended,
+            self.requests,
+        );
+        self.store.insert_workspace_app_stats(&[stat]).await
+    }
+}
+
+impl Drop for AppStatsGuard {
+    fn drop(&mut self) {
+        if self.emitted {
+            return;
+        }
+        // Best-effort background insert so the response is not delayed. Any
+        // error is logged but does not propagate to the user.
+        let store = self.store.clone();
+        let ctx = self.ctx.clone();
+        let session_id = self.session_id;
+        let session_started_at = self.session_started_at;
+        let ended = OffsetDateTime::now_utc();
+        let requests = self.requests;
+        tokio::spawn(async move {
+            let stat = ctx.to_stat_value(session_id, session_started_at, ended, requests);
+            if let Err(err) = store.insert_workspace_app_stats(&[stat]).await {
+                tracing::warn!(
+                    error = %err,
+                    workspace_id = %ctx.workspace_id,
+                    agent_id = %ctx.agent_id,
+                    "failed to insert workspace app stats"
+                );
+            }
+        });
+    }
+}
+
+// ---------------------------------------------------------------------------
+// URL resolution
+// ---------------------------------------------------------------------------
+
+/// Full context for a resolved app request, populated by
+/// [`resolve_app_context`]. Supersedes the old url-only resolver once the
+/// new path is rolled out.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedApp {
+    /// Upstream URL to forward the request to.
+    pub url: url::Url,
+    /// Agent handling the session.
+    pub agent_id: Uuid,
+    /// Workspace that owns the agent.
+    pub workspace_id: Uuid,
+    /// Workspace organization (used for org sharing-level enforcement).
+    pub workspace_organization_id: Uuid,
+    /// Sharing level for the resolved app (empty string for port-forwarding).
+    pub sharing_level: String,
+    /// Slug or port string as presented to the client (for stats).
+    pub slug_or_port: String,
+}
+
 /// Resolves the target URL for a workspace app.
 ///
 /// For port-based apps (matching `PORT_REGEX`: 4-5 digits, optional `s`
@@ -1490,6 +1791,7 @@ async fn proxy_workspace_app(
 ///
 /// In both cases the proxy routes through the workspace agent's address
 /// rather than the Coder server's own loopback interface, preventing SSRF.
+#[allow(dead_code)] // Kept for reference; superseded by `resolve_app_context`.
 async fn resolve_app_url(
     state: &AppState,
     request: &AppRequest,
@@ -1567,6 +1869,169 @@ async fn resolve_app_url(
 
     url::Url::parse(&app_url_str)
         .map_err(|e| WorkspaceAppError::Internal(format!("invalid app URL: {e}")))
+}
+
+/// Resolves the full app context (agent, workspace, URL, sharing level) for
+/// a proxy request. Used by [`proxy_workspace_app`] to drive both
+/// organization sharing-level enforcement (B.13 item 1) and session-stats
+/// recording (B.13 item 2).
+///
+/// The legacy [`resolve_app_url`] helper is retained for call sites that do
+/// not yet consume the full context.
+async fn resolve_app_context(
+    state: &AppState,
+    request: &AppRequest,
+    slug_is_port: bool,
+) -> Result<ResolvedApp, WorkspaceAppError> {
+    let slug = &request.app_slug_or_port;
+
+    // Step 1: resolve the agent (may parse a UUID directly, or traverse
+    // user → workspace → build → resources → agents).
+    let agent_id = resolve_workspace_agent_id(state, request).await?;
+    let agent = state
+        .store
+        .find_workspace_agent_by_id(agent_id)
+        .await
+        .map_err(|e| {
+            WorkspaceAppError::Internal(format!("failed to look up workspace agent: {e}"))
+        })?
+        .ok_or_else(|| WorkspaceAppError::NotFound("workspace agent not found".into()))?;
+
+    // Step 2: classify the agent connection state so we can return Go's UI
+    // error strings (B.13 item 3). `first_connected_at` being None means the
+    // agent has never reported in; `disconnected_at` being Some means it
+    // dropped out.
+    if agent.first_connected_at.is_none() {
+        return Err(WorkspaceAppError::Classified(
+            AppAccessError::AgentNotReporting,
+        ));
+    }
+    if agent.disconnected_at.is_some() && agent.last_connected_at.is_none() {
+        return Err(WorkspaceAppError::Classified(
+            AppAccessError::AgentNotConnected,
+        ));
+    }
+
+    // Step 3: resolve the workspace record so we can get the organization
+    // for sharing-level enforcement.
+    let workspace = lookup_workspace_for_request(state, request).await?;
+
+    if agent.name.is_empty() {
+        return Err(WorkspaceAppError::Internal(
+            "workspace agent has no name configured".into(),
+        ));
+    }
+    let agent_host = &agent.name;
+
+    // Step 4: port-style slug → synthesize URL from agent host.
+    if appurl::PORT_REGEX.is_match(slug) {
+        let (port_str, protocol) = if slug.ends_with('s') {
+            (&slug[..slug.len() - 1], "https")
+        } else {
+            (slug.as_str(), "http")
+        };
+        if let Ok(port) = port_str.parse::<u16>() {
+            let url_str = format!("{protocol}://{agent_host}:{port}");
+            let url = url::Url::parse(&url_str)
+                .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")))?;
+            return Ok(ResolvedApp {
+                url,
+                agent_id,
+                workspace_id: workspace.id,
+                workspace_organization_id: workspace.organization_id,
+                sharing_level: String::new(),
+                slug_or_port: slug.clone(),
+            });
+        }
+    } else if slug_is_port {
+        if let Ok(port) = slug.parse::<u16>() {
+            let url_str = format!("http://{agent_host}:{port}");
+            let url = url::Url::parse(&url_str)
+                .map_err(|e| WorkspaceAppError::Internal(format!("invalid port URL: {e}")))?;
+            return Ok(ResolvedApp {
+                url,
+                agent_id,
+                workspace_id: workspace.id,
+                workspace_organization_id: workspace.organization_id,
+                sharing_level: String::new(),
+                slug_or_port: slug.clone(),
+            });
+        }
+    }
+
+    // Step 5: slug-based app lookup.
+    let app = state
+        .store
+        .find_workspace_app_by_agent_and_slug(agent_id, slug)
+        .await
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up workspace app: {e}")))?
+        .ok_or_else(|| {
+            WorkspaceAppError::NotFound(format!("application {slug:?} not found for agent"))
+        })?;
+
+    let app_url_str = app.url.clone().unwrap_or_default();
+    if app_url_str.is_empty() {
+        return Err(WorkspaceAppError::Classified(AppAccessError::AppURLNotSet));
+    }
+    let url = url::Url::parse(&app_url_str)
+        .map_err(|e| WorkspaceAppError::Internal(format!("invalid app URL: {e}")))?;
+
+    // Unhealthy app (Go uses `health != healthy && health != disabled` as
+    // the "app is not running" signal; we model the same here).
+    if !app.health.is_empty()
+        && !app.health.eq_ignore_ascii_case("healthy")
+        && !app.health.eq_ignore_ascii_case("disabled")
+    {
+        return Err(WorkspaceAppError::Classified(AppAccessError::AppNotRunning));
+    }
+
+    Ok(ResolvedApp {
+        url,
+        agent_id,
+        workspace_id: workspace.id,
+        workspace_organization_id: workspace.organization_id,
+        sharing_level: app.sharing_level.clone(),
+        slug_or_port: slug.clone(),
+    })
+}
+
+/// Looks up the workspace referenced by the request, accepting either
+/// `workspace_name_or_id` (as a UUID) or falling back to owner+name.
+async fn lookup_workspace_for_request(
+    state: &AppState,
+    request: &AppRequest,
+) -> Result<coder_core::ports::WorkspaceRecord, WorkspaceAppError> {
+    if let Ok(id) = request.workspace_name_or_id.parse::<Uuid>() {
+        if let Some(ws) = state
+            .store
+            .find_workspace_by_id(id, None)
+            .await
+            .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up workspace: {e}")))?
+        {
+            return Ok(ws);
+        }
+    }
+
+    let user = state
+        .store
+        .find_user_by_username(&request.username_or_id)
+        .await
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up user: {e}")))?
+        .ok_or_else(|| {
+            WorkspaceAppError::NotFound(format!("user {:?} not found", request.username_or_id))
+        })?;
+
+    state
+        .store
+        .find_workspace_by_owner_and_name(user.id, &request.workspace_name_or_id, None)
+        .await
+        .map_err(|e| WorkspaceAppError::Internal(format!("failed to look up workspace: {e}")))?
+        .ok_or_else(|| {
+            WorkspaceAppError::NotFound(format!(
+                "workspace {:?} not found for user {:?}",
+                request.workspace_name_or_id, request.username_or_id
+            ))
+        })
 }
 
 /// Resolves the workspace agent ID from the app request.
