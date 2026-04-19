@@ -13,7 +13,11 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod drpc_service;
+pub mod proto;
 pub mod server;
+
+pub use drpc_service::{COMMIT_QUOTA_METHOD, ProvisionerdDrpcService};
 
 use std::sync::Arc;
 

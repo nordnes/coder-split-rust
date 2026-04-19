@@ -1,0 +1,23 @@
+syntax = "proto3";
+
+// Stripped vendoring of the upstream `provisionerd/proto/provisionerd.proto`.
+// Only the messages and RPCs required by the Rust port's CommitQuota DRPC
+// infrastructure slice are retained; the rest (AcquireJob, UpdateJob,
+// FailJob, CompleteJob, UploadFile, DownloadFile) will be added in
+// follow-up batches along with the corresponding `provisionersdk/proto`
+// imports they require.
+//
+// The package name and message field numbers must match upstream so the
+// on-the-wire encoding remains compatible with Go provisioner daemons.
+package provisionerd;
+
+message CommitQuotaRequest {
+  string job_id = 1;
+  int32 daily_cost = 2;
+}
+
+message CommitQuotaResponse {
+  bool ok = 1;
+  int32 credits_consumed = 2;
+  int32 budget = 3;
+}
