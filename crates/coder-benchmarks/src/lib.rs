@@ -2073,6 +2073,13 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn get_notification_template_by_id(
+        &self,
+        _template_id: Uuid,
+    ) -> Result<Option<coder_core::api::NotificationTemplate>, StorageError> {
+        Err(StorageError::unavailable("bench stub"))
+    }
+
     async fn update_workspace_dormant_deleting_at(
         &self,
         _workspace_id: Uuid,

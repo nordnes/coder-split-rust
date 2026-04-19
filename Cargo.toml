@@ -95,6 +95,8 @@ proc-macro2 = "1.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 tar = { version = "0.4", default-features = false }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }
+rust-embed = { version = "8.5", default-features = false }
+handlebars = { version = "6.2", default-features = false }
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

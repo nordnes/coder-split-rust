@@ -168,6 +168,8 @@ pub struct ServerConfig {
     /// redirector is disabled and `CreateFirstUserRequest.trial = true`
     /// is accepted but ignored. Mirrors Go's `TrialGenerator` wiring.
     pub trial_signup_url: String,
+    /// Embedded React SPA settings. See [`FrontendConfig`].
+    pub frontend: FrontendConfig,
 }
 
 impl ServerConfig {
@@ -1485,6 +1487,34 @@ impl Default for WorkerConfig {
     }
 }
 
+// -- Frontend embed configuration --
+
+/// Embedded React SPA configuration.
+///
+/// The Go reference serves its `site/out/` build output from the same
+/// binary as the API via `embed.FS`. The Rust port mirrors that with
+/// `rust-embed`: the directory is baked into the binary at compile time
+/// and served from the catch-all fallback registered after all API
+/// routes, with SPA-style routing (unknown paths fall back to
+/// `index.html`) and sensible `Cache-Control` defaults.
+///
+/// Operators who front `coderd` with a standalone static-file server
+/// can disable the embedded handler entirely by setting
+/// `--disable-embedded-frontend` / `CODER_DISABLE_EMBEDDED_FRONTEND=true`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct FrontendConfig {
+    /// Whether the embedded SPA handler is mounted on the router.
+    /// Defaults to `true` so a plain `cargo run --bin coderd` deployment
+    /// serves the UI without extra configuration.
+    pub enabled: bool,
+}
+
+impl Default for FrontendConfig {
+    fn default() -> Self {
+        Self { enabled: true }
+    }
+}
+
 // -- Public (redacted) configuration types --
 
 /// Redacted deployment configuration exposed over HTTP.
@@ -1687,6 +1717,7 @@ mod tests {
             aws_instance_identity_certs_dir: None,
             vapid_sub: String::new(),
             trial_signup_url: String::new(),
+            frontend: FrontendConfig::default(),
         }
     }
 
