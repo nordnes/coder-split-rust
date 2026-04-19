@@ -26,6 +26,30 @@ pub(crate) async fn resolve_organization(
     Ok(state.store.find_organization_by_name(org_ref).await?)
 }
 
+/// Converts a Monday-first days-of-week bitmask to the list of weekday names
+/// used in the template-schedule response.
+///
+/// Mirrors Go's `codersdk.BitmapToWeekdays` in
+/// `coder/codersdk/templates.go`: bit 0 = Monday, bit 6 = Sunday.
+pub(crate) fn bitmap_to_weekdays(bitmap: i16) -> Vec<String> {
+    const NAMES: [&str; 7] = [
+        "monday",
+        "tuesday",
+        "wednesday",
+        "thursday",
+        "friday",
+        "saturday",
+        "sunday",
+    ];
+    let mut out = Vec::new();
+    for (i, name) in NAMES.iter().enumerate() {
+        if bitmap & (1_i16 << i) != 0 {
+            out.push((*name).to_owned());
+        }
+    }
+    out
+}
+
 /// Converts a `TemplateRecord` into a `TemplateResponse`.
 pub(crate) fn template_response(rec: &TemplateRecord) -> TemplateResponse {
     use coder_core::api::{TemplateAutostartRequirement, TemplateAutostopRequirement};
@@ -50,8 +74,19 @@ pub(crate) fn template_response(rec: &TemplateRecord) -> TemplateResponse {
         icon: rec.icon.clone(),
         default_ttl_ms: rec.default_ttl / 1_000_000,
         activity_bump_ms: rec.activity_bump / 1_000_000,
-        autostop_requirement: TemplateAutostopRequirement::default(),
-        autostart_requirement: TemplateAutostartRequirement::default(),
+        // Surface the template's autostop requirement so clients can display
+        // the quiet-hours clamp.  Both fields live on `templates` in the DB and
+        // are populated by the enterprise schedule store; OSS defaults to 0.
+        autostop_requirement: TemplateAutostopRequirement {
+            days_of_week: bitmap_to_weekdays(rec.autostop_requirement_days_of_week),
+            weeks: rec.autostop_requirement_weeks,
+        },
+        // The DB stores *blocked* days; the response exposes the inverse
+        // *allowed* days.  Mirrors Go's `AutostartAllowedDays` in
+        // `coder/coderd/database/modelmethods.go`.
+        autostart_requirement: TemplateAutostartRequirement {
+            days_of_week: bitmap_to_weekdays(!rec.autostart_block_days_of_week & 0b0111_1111),
+        },
         created_by_id: rec.created_by,
         created_by_name: rec.created_by_name.clone(),
         allow_user_autostart: rec.allow_user_autostart,

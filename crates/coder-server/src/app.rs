@@ -25082,6 +25082,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
         Ok((state, store, audit_sink))
     }
@@ -38448,6 +38449,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
         let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
