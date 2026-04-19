@@ -712,6 +712,7 @@ mod tests {
             org_roles: vec![],
             groups: vec![],
             scope: None,
+            scope_override: None,
         }
     }
 }

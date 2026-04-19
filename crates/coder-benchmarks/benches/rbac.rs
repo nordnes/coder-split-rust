@@ -23,6 +23,7 @@ fn make_actor(site_roles: &[&str], org_ids: &[Uuid], org_roles: &[String]) -> Ac
         org_roles: org_roles.to_vec(),
         groups: Vec::new(),
         scope: None,
+        scope_override: None,
     }
 }
 

@@ -655,6 +655,142 @@ impl Scope {
         }
     }
 
+    /// Returns the built-in `no_user_data` scope — allows the wildcard on
+    /// every resource *except* [`ResourceType::User`]. Mirrors Go's
+    /// `ScopeNoUserData` (`coderd/rbac/scopes.go`). Used by workspace agents
+    /// when `BlockUserData` is set so the agent can mutate its own workspace
+    /// but cannot read the owner's user record.
+    #[must_use]
+    pub fn scope_no_user_data() -> Self {
+        // Site-level: wildcard on every non-User resource. We represent it as
+        // a list of allow-all permissions per resource type.
+        let site = ALL_RESOURCE_TYPES
+            .iter()
+            .copied()
+            .filter(|rt| *rt != ResourceType::User)
+            .map(Permission::allow_all)
+            .collect();
+        Self {
+            role: Role {
+                name: "Scope_no_user_data".to_owned(),
+                org_id: None,
+                display_name: "Scope without access to user data".to_owned(),
+                site,
+                user: Vec::new(),
+                by_org_id: HashMap::new(),
+            },
+            allow_list: vec![(WILDCARD.to_owned(), WILDCARD.to_owned())],
+        }
+    }
+
+    /// Low-level scope allowing `Workspace:read` only. Mirrors Go's
+    /// `coder:workspace:read` low-level scope from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_workspace_read() -> Self {
+        Self::single_permission_scope("workspace:read", ResourceType::Workspace, Action::Read)
+    }
+
+    /// Low-level scope allowing `Workspace:start` only. Mirrors Go's
+    /// `coder:workspace:start`.
+    #[must_use]
+    pub fn scope_workspace_start() -> Self {
+        Self::single_permission_scope("workspace:start", ResourceType::Workspace, Action::Start)
+    }
+
+    /// Low-level scope allowing `Template:read` only. Mirrors Go's
+    /// `coder:template:read`.
+    #[must_use]
+    pub fn scope_template_read() -> Self {
+        Self::single_permission_scope("template:read", ResourceType::Template, Action::Read)
+    }
+
+    /// Low-level scope allowing `ApiKey:read` only. Mirrors Go's
+    /// `coder:api_key:read`.
+    #[must_use]
+    pub fn scope_api_key_read() -> Self {
+        Self::single_permission_scope("api_key:read", ResourceType::ApiKey, Action::Read)
+    }
+
+    /// Low-level scope allowing `UserSecret:read` only. Mirrors Go's
+    /// `coder:user_secret:read`.
+    #[must_use]
+    pub fn scope_user_secret_read() -> Self {
+        Self::single_permission_scope("user_secret:read", ResourceType::UserSecret, Action::Read)
+    }
+
+    /// Low-level scope allowing `UserSecret:update` (i.e. write). Mirrors
+    /// Go's `coder:user_secret:update`.
+    #[must_use]
+    pub fn scope_user_secret_write() -> Self {
+        Self::single_permission_scope(
+            "user_secret:update",
+            ResourceType::UserSecret,
+            Action::Update,
+        )
+    }
+
+    /// Builds a scope for a workspace agent, constraining an API-key actor
+    /// (the agent itself) to the workspace it belongs to, its template, and
+    /// its owning user. Mirrors Go's `WorkspaceAgentScope` in
+    /// `coder/coderd/rbac/scopes.go`.
+    ///
+    /// The resulting scope is:
+    /// * Site role = wildcard except `ResourceType::User` when `block_user_data`,
+    ///   otherwise wildcard on everything (identical to `ScopeAll`'s role).
+    /// * Allow list = the specific workspace / template / owner UUIDs. Any
+    ///   `Authorize()` call that targets a different workspace, template, or
+    ///   user object short-circuits to deny via `allows_object`.
+    #[must_use]
+    pub fn scope_workspace_agent(
+        workspace_id: Uuid,
+        template_id: Uuid,
+        owner_id: Uuid,
+        block_user_data: bool,
+    ) -> Self {
+        // Start from the underlying role/site permissions.
+        let base = if block_user_data {
+            Self::scope_no_user_data()
+        } else {
+            Self::scope_all()
+        };
+        let mut role = base.role;
+        role.name = "Scope_workspace_agent".to_owned();
+        role.display_name = "Workspace agent".to_owned();
+        // Constrain the allow list to the specific resource IDs the agent
+        // is permitted to touch. Any other IDs are rejected by
+        // `allows_object`.
+        let allow_list = vec![
+            (
+                ResourceType::Workspace.as_str().to_owned(),
+                workspace_id.to_string(),
+            ),
+            (
+                ResourceType::Template.as_str().to_owned(),
+                template_id.to_string(),
+            ),
+            (ResourceType::User.as_str().to_owned(), owner_id.to_string()),
+        ];
+        Self { role, allow_list }
+    }
+
+    /// Helper to build a low-level single-permission scope. Mirrors Go's
+    /// `expandLowLevel` in `coder/coderd/rbac/scopes.go`.
+    fn single_permission_scope(name: &str, rt: ResourceType, action: Action) -> Self {
+        Self {
+            role: Role {
+                name: format!("Scope_{name}"),
+                org_id: None,
+                display_name: name.to_owned(),
+                site: vec![Permission::allow(rt, action)],
+                user: Vec::new(),
+                by_org_id: HashMap::new(),
+            },
+            // Low-level scopes intentionally return a wildcard allow list,
+            // matching Go's `expandLowLevel` behaviour.
+            allow_list: vec![(WILDCARD.to_owned(), WILDCARD.to_owned())],
+        }
+    }
+
     /// Returns true if the allow list permits the given object.
     #[must_use]
     pub fn allows_object(&self, object: &Object) -> bool {
@@ -685,7 +821,7 @@ impl Scope {
 // ---------------------------------------------------------------------------
 
 /// Request actor used by the HTTP layer for authorization.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug)]
 pub struct Actor {
     /// Stable user identifier.
     pub user_id: Uuid,
@@ -699,8 +835,15 @@ pub struct Actor {
     pub org_roles: Vec<String>,
     /// Groups the actor belongs to.
     pub groups: Vec<String>,
-    /// API key scope. If `None`, defaults to `ScopeAll`.
+    /// Named API key scope (e.g. `"application_connect"`). If `None` and
+    /// [`Self::scope_override`] is also `None`, defaults to `ScopeAll`.
     pub scope: Option<String>,
+    /// Rich API-key scope override used for scopes that cannot be represented
+    /// by a simple name. When `Some(_)`, this takes precedence over
+    /// [`Self::scope`]. In particular, [`Scope::scope_workspace_agent`]
+    /// populates this so the agent's authorisation is bound to its own
+    /// workspace / template / owner.
+    pub scope_override: Option<Scope>,
 }
 
 impl Actor {
@@ -1402,6 +1545,7 @@ impl std::error::Error for Forbidden {}
 ///     organization_ids: Vec::new(),
 ///     groups: Vec::new(),
 ///     scope: None,
+///     scope_override: None,
 /// };
 ///
 /// // Check whether the actor can read a user resource.
@@ -1451,9 +1595,25 @@ impl Authorizer {
         }
 
         // Step 2: Apply scope restrictions.
-        let scope = match &actor.scope {
-            Some(s) if s == "application_connect" => Scope::scope_application_connect(),
-            _ => Scope::scope_all(),
+        //
+        // `scope_override` (a rich [`Scope`] value) takes precedence over the
+        // named string scope. This is how [`Scope::scope_workspace_agent`]
+        // pins an agent actor to its specific workspace/template/owner —
+        // without this, the allow-list on the override would be ignored.
+        let scope = if let Some(scope) = &actor.scope_override {
+            scope.clone()
+        } else {
+            match actor.scope.as_deref() {
+                Some("application_connect") => Scope::scope_application_connect(),
+                Some("no_user_data") => Scope::scope_no_user_data(),
+                Some("workspace:read") => Scope::scope_workspace_read(),
+                Some("workspace:start") => Scope::scope_workspace_start(),
+                Some("template:read") => Scope::scope_template_read(),
+                Some("api_key:read") => Scope::scope_api_key_read(),
+                Some("user_secret:read") => Scope::scope_user_secret_read(),
+                Some("user_secret:update") => Scope::scope_user_secret_write(),
+                _ => Scope::scope_all(),
+            }
         };
         if !scope.allows_object(object) {
             return Err(Forbidden {
@@ -1642,6 +1802,7 @@ mod tests {
             org_roles: vec![],
             groups: vec![],
             scope: None,
+            scope_override: None,
         }
     }
 
@@ -1654,6 +1815,7 @@ mod tests {
             org_roles: org_roles.iter().map(|r| (*r).to_owned()).collect(),
             groups: vec![],
             scope: None,
+            scope_override: None,
         }
     }
 
@@ -1966,6 +2128,7 @@ mod tests {
             org_roles: vec![],
             groups: vec![group_id.clone()],
             scope: None,
+            scope_override: None,
         };
         let mut acl = HashMap::new();
         acl.insert(group_id, vec![Action::Read, Action::Update]);
@@ -2389,11 +2552,289 @@ mod tests {
             org_roles: vec![],
             groups: vec![],
             scope: None,
+            scope_override: None,
         };
         assert!(
             authorizer
                 .authorize(&other_actor, Action::Read, &object)
                 .is_err()
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // New scopes: one inclusion + one exclusion test per scope, plus the
+    // WorkspaceAgentScope cross-workspace regression. See task B.11.3 / S1-S2.
+    // -----------------------------------------------------------------------
+
+    /// Returns a UUID derived from a stable u128 so tests never alias
+    /// `Uuid::nil()` when a literal is malformed.
+    fn nonzero_uuid(seed: u128) -> Uuid {
+        assert!(seed != 0, "test uuid seed must be non-zero");
+        Uuid::from_u128(seed)
+    }
+
+    #[test]
+    fn scope_no_user_data_includes_workspaces_excludes_users() {
+        // Allows wildcard on a non-User resource (Workspace).
+        let scope = Scope::scope_no_user_data();
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &Object::new(ResourceType::Workspace),
+        ));
+        // Excludes User explicitly.
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &Object::new(ResourceType::User),
+        ));
+    }
+
+    #[test]
+    fn scope_workspace_start_includes_start_excludes_delete() {
+        let scope = Scope::scope_workspace_start();
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Start,
+            &ws,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &ws,
+        ));
+    }
+
+    #[test]
+    fn scope_workspace_read_includes_read_excludes_update() {
+        let scope = Scope::scope_workspace_read();
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &ws,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &ws,
+        ));
+    }
+
+    #[test]
+    fn scope_template_read_includes_read_excludes_workspace() {
+        let scope = Scope::scope_template_read();
+        // Inclusion: read template.
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &Object::new(ResourceType::Template),
+        ));
+        // Exclusion: read workspace is not granted by template scope.
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &Object::new(ResourceType::Workspace),
+        ));
+    }
+
+    #[test]
+    fn scope_api_key_read_includes_read_excludes_delete() {
+        let scope = Scope::scope_api_key_read();
+        let key = Object::new(ResourceType::ApiKey);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &key,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &key,
+        ));
+    }
+
+    #[test]
+    fn scope_user_secret_read_includes_read_excludes_update() {
+        let scope = Scope::scope_user_secret_read();
+        let secret = Object::new(ResourceType::UserSecret);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &secret,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &secret,
+        ));
+    }
+
+    #[test]
+    fn scope_user_secret_write_includes_update_excludes_read() {
+        let scope = Scope::scope_user_secret_write();
+        let secret = Object::new(ResourceType::UserSecret);
+        // The write scope is intentionally update-only; it does not grant read.
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &secret,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &secret,
+        ));
+    }
+
+    #[test]
+    fn scope_workspace_agent_allows_listed_resources() {
+        let workspace_id = nonzero_uuid(0xA1);
+        let template_id = nonzero_uuid(0xA2);
+        let owner_id = nonzero_uuid(0xA3);
+        let scope = Scope::scope_workspace_agent(workspace_id, template_id, owner_id, false);
+
+        // The allow list must include exactly these three resources.
+        for (rt, id) in [
+            (ResourceType::Workspace, workspace_id),
+            (ResourceType::Template, template_id),
+            (ResourceType::User, owner_id),
+        ] {
+            let obj = Object::new(rt).with_id(id);
+            assert!(
+                scope.allows_object(&obj),
+                "workspace-agent scope should allow {rt:?} {id}",
+            );
+        }
+    }
+
+    /// Regression test for the agent-over-privilege bug that was hidden by
+    /// `ScopeAll`. See B.11.3 S1. Before the [`Scope::scope_workspace_agent`]
+    /// variant existed, an agent actor would have `scope_override: None`
+    /// and therefore default to `ScopeAll` — which has a wildcard allow list
+    /// and would happily authorise a read of a *different* workspace.
+    #[test]
+    fn workspace_agent_scope_denies_other_workspace() {
+        let authorizer = Authorizer::new();
+
+        let workspace_a = nonzero_uuid(0xA1);
+        let workspace_b = nonzero_uuid(0xB1);
+        let template_id = nonzero_uuid(0x70);
+        let owner_id = nonzero_uuid(0x0E);
+
+        // Actor: the agent's API key acts as the workspace owner but with a
+        // WorkspaceAgentScope pinned to workspace A.
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.user_id = owner_id;
+        actor.scope_override = Some(Scope::scope_workspace_agent(
+            workspace_a,
+            template_id,
+            owner_id,
+            false,
+        ));
+
+        // Reading its own workspace (A) is allowed.
+        let own_ws = Object::new(ResourceType::Workspace).with_id(workspace_a);
+        assert!(
+            authorizer.authorize(&actor, Action::Read, &own_ws).is_ok(),
+            "agent should be able to read its own workspace",
+        );
+
+        // Reading a *different* workspace (B) must be denied. With the old
+        // ScopeAll default this would have been allowed.
+        let foreign_ws = Object::new(ResourceType::Workspace).with_id(workspace_b);
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Read, &foreign_ws)
+                .is_err(),
+            "agent must not be able to read a foreign workspace",
+        );
+
+        // Reading its own template is allowed.
+        let own_tpl = Object::new(ResourceType::Template).with_id(template_id);
+        assert!(
+            authorizer.authorize(&actor, Action::Read, &own_tpl).is_ok(),
+            "agent should be able to read its own template",
+        );
+
+        // A foreign template is denied.
+        let foreign_tpl = Object::new(ResourceType::Template).with_id(nonzero_uuid(0x71));
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Read, &foreign_tpl)
+                .is_err(),
+            "agent must not be able to read a foreign template",
+        );
+
+        // Reading its owner user record is allowed.
+        let owner_user = Object::new(ResourceType::User).with_id(owner_id);
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Read, &owner_user)
+                .is_ok(),
+            "agent should be able to read its owning user",
+        );
+
+        // Reading a different user is denied.
+        let other_user = Object::new(ResourceType::User).with_id(nonzero_uuid(0x0D));
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Read, &other_user)
+                .is_err(),
+            "agent must not be able to read a different user",
+        );
+    }
+
+    #[test]
+    fn workspace_agent_scope_block_user_data_denies_user_reads() {
+        let authorizer = Authorizer::new();
+        let workspace_id = nonzero_uuid(0xA1);
+        let template_id = nonzero_uuid(0xA2);
+        let owner_id = nonzero_uuid(0xA3);
+
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.user_id = owner_id;
+        actor.scope_override = Some(Scope::scope_workspace_agent(
+            workspace_id,
+            template_id,
+            owner_id,
+            /* block_user_data */ true,
+        ));
+
+        // Even the owner-matching user read is denied because the underlying
+        // role's site permissions no longer cover `ResourceType::User`.
+        let owner_user = Object::new(ResourceType::User).with_id(owner_id);
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Read, &owner_user)
+                .is_err(),
+            "block_user_data must prevent user reads",
+        );
+    }
+
+    #[test]
+    fn actor_named_scope_no_user_data_denies_user_reads() {
+        // Regression for the named-scope lookup: requesting `scope =
+        // Some("no_user_data")` should resolve to [`Scope::scope_no_user_data`].
+        let authorizer = Authorizer::new();
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.scope = Some("no_user_data".to_owned());
+        let user = Object::new(ResourceType::User);
+        assert!(authorizer.authorize(&actor, Action::Read, &user).is_err());
     }
 }
