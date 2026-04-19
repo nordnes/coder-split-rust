@@ -1256,10 +1256,19 @@ pub(crate) async fn post_workspace_usage(
         ));
     }
 
-    state
-        .store
-        .update_workspace_last_used_at(workspace_id, OffsetDateTime::now_utc())
-        .await?;
+    // Prefer the batched usage tracker when present — collapses a burst
+    // of usage pings to one DB write per flush interval. Absent tracker
+    // (e.g. in unit tests that build AppState directly) falls back to
+    // the synchronous update path so behaviour stays correct.
+    let now = OffsetDateTime::now_utc();
+    if let Some(tracker) = state.usage_tracker.as_ref() {
+        tracker.add(workspace_id, now);
+    } else {
+        state
+            .store
+            .update_workspace_last_used_at(workspace_id, now)
+            .await?;
+    }
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }

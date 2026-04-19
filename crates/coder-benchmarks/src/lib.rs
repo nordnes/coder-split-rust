@@ -560,6 +560,14 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    async fn delete_old_connection_logs(
+        &self,
+        _older_than: time::OffsetDateTime,
+        _limit: i64,
+    ) -> Result<u64, StorageError> {
+        Ok(0)
+    }
+
     async fn health_settings(&self) -> Result<HealthSettings, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
@@ -2497,6 +2505,13 @@ impl AppStore for BenchStore {
         _new_row: CryptoKeyRow,
     ) -> Result<CryptoKeyRow, StorageError> {
         Err(StorageError::unavailable("bench stub"))
+    }
+
+    async fn try_acquire_advisory_lock(
+        &self,
+        _lock_id: i64,
+    ) -> Result<Option<Box<dyn coder_core::AdvisoryLock>>, StorageError> {
+        Ok(None)
     }
 
     async fn get_derp_mesh_key(&self) -> Result<Option<String>, StorageError> {

@@ -135,6 +135,47 @@ pub struct PostgresStore {
     pool: PgPool,
 }
 
+/// Guard returned by `AppStore::try_acquire_advisory_lock` that holds a
+/// dedicated Postgres connection while the advisory lock is taken. On
+/// `coder_core::AdvisoryLock::release` the lock is explicitly unlocked
+/// and the connection returned to the pool.
+pub(crate) struct PostgresAdvisoryLockGuard {
+    conn: Option<sqlx::pool::PoolConnection<Postgres>>,
+    lock_id: i64,
+}
+
+#[async_trait]
+impl coder_core::AdvisoryLock for PostgresAdvisoryLockGuard {
+    async fn release(mut self: Box<Self>) -> Result<(), StorageError> {
+        let Some(mut conn) = self.conn.take() else {
+            return Ok(());
+        };
+        let _released: bool = sqlx::query_scalar("SELECT pg_advisory_unlock($1)")
+            .bind(self.lock_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(storage_error)?;
+        Ok(())
+    }
+}
+
+impl Drop for PostgresAdvisoryLockGuard {
+    fn drop(&mut self) {
+        // The advisory lock is attached to the connection session. When
+        // the connection is returned to the pool sqlx runs its reset hook
+        // which frees the lock, so forgetting to `release()` explicitly
+        // does not leak the lock — only the opportunity to surface
+        // release errors. Emit a warn trace so the leak is visible in
+        // tests; production callers always go through `release`.
+        if self.conn.is_some() {
+            tracing::warn!(
+                lock_id = self.lock_id,
+                "PostgresAdvisoryLockGuard dropped without explicit release",
+            );
+        }
+    }
+}
+
 #[derive(Debug, FromRow)]
 struct StoredUserRow {
     id: Uuid,

@@ -34,7 +34,9 @@ mod app;
 pub mod app_healthcheck;
 pub(crate) mod auth_middleware;
 pub mod connection_guard;
+pub mod connection_log_pruner;
 pub mod crypto_key_rotator;
+pub mod db_rollup;
 mod error;
 mod extractors;
 mod handlers;
@@ -45,6 +47,7 @@ pub(crate) mod middleware;
 pub mod rate_limit;
 pub mod replica_manager;
 pub mod update_check;
+pub mod usage_tracker;
 
 pub use app::{AppState, build_router};
 pub use rate_limit::RateLimitState;
