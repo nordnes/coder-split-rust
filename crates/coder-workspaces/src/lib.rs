@@ -22,6 +22,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod builder;
 pub mod prebuilds_reconciler;
 
 use std::str::FromStr;
