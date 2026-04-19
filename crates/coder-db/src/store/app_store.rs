@@ -5193,6 +5193,42 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        let row = sqlx::query_as::<_, StoredNotificationTemplateRow>(
+            r#"SELECT id, name, title_template, body_template, actions::text, "group", method::text,
+                      kind::text, enabled_by_default
+               FROM notification_templates
+               WHERE id = $1"#,
+        )
+        .bind(template_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        match row {
+            Some(r) => Ok(Some(NotificationTemplate {
+                id: r.id,
+                name: r.name,
+                title_template: r.title_template,
+                body_template: r.body_template,
+                actions: r
+                    .actions
+                    .map(|s| from_str(&s))
+                    .transpose()
+                    .map_err(|e| StorageError::invalid_data(e.to_string()))?,
+                group: r.group,
+                method: r.method,
+                kind: r.kind,
+                enabled_by_default: r.enabled_by_default,
+            })),
+            None => Ok(None),
+        }
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn get_notification_templates_by_kind(
         &self,
         kind: &str,

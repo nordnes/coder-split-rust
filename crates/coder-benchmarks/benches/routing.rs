@@ -108,6 +108,7 @@ fn bench_app_state() -> AppState {
         aws_instance_identity_certs_dir: None,
         vapid_sub: String::new(),
         trial_signup_url: String::new(),
+        frontend: coder_core::config::FrontendConfig { enabled: false },
     };
 
     AppState::new(

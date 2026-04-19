@@ -1388,6 +1388,18 @@ pub fn build_router(
         // route_layer runs *after* routing so MatchedPath is populated.
         .route_layer(middleware::from_fn(prometheus_middleware));
 
+    // Mount the embedded React SPA as the very last fallback so every
+    // previously-declared route (API, DERP, workspace apps, SCIM, MCP, …)
+    // takes priority. Unknown paths fall through to `index.html`, letting
+    // client-side routing resolve after a hard refresh. Operators can
+    // disable the embed entirely with `--disable-embedded-frontend` —
+    // useful when a separate static-file server fronts `coderd`.
+    let router = if state.config.frontend.enabled {
+        router.fallback(crate::frontend::router_fallback_handler)
+    } else {
+        router
+    };
+
     // Only add the OTel trace-context propagation middleware when OTel is
     // enabled.  This avoids any per-request overhead (header extraction,
     // propagator calls) in the default disabled configuration.
@@ -1466,8 +1478,15 @@ async fn get_prometheus_metrics(State(state): State<AppState>) -> Response {
     }
 }
 
-async fn server_root() -> impl IntoResponse {
-    (StatusCode::OK, SLIM_BUILD_MESSAGE)
+async fn server_root(State(state): State<AppState>, uri: axum::http::Uri) -> Response {
+    // When the embedded React SPA is enabled, the root URL serves
+    // `index.html` so the frontend boots. Mirrors Go's `site.Handler` in
+    // `coder/site/site.go` where `/` is backed by the same embed.FS that
+    // powers unknown-path fallback.
+    if state.config.frontend.enabled {
+        return crate::frontend::router_fallback_handler(uri).await;
+    }
+    (StatusCode::OK, SLIM_BUILD_MESSAGE).into_response()
 }
 
 async fn api_root() -> Json<ApiResponse> {
@@ -8883,6 +8902,18 @@ pub(crate) mod tests {
             Ok(None)
         }
 
+        async fn get_notification_template_by_id(
+            &self,
+            _template_id: Uuid,
+        ) -> Result<Option<coder_core::api::NotificationTemplate>, StorageError> {
+            // FakeStore's notification tests exercise the dispatch loop via
+            // pre-rendered `subject` / `plain_body` payloads, so the
+            // template lookup is never reached. Returning `None` keeps any
+            // accidental call a permanent-failure branch rather than a
+            // mysterious panic.
+            Ok(None)
+        }
+
         async fn update_workspace_dormant_deleting_at(
             &self,
             workspace_id: Uuid,
@@ -10239,25 +10270,11 @@ pub(crate) mod tests {
             Ok(total)
         }
 
-        async fn delete_old_connection_logs(
-            &self,
-            _older_than: OffsetDateTime,
-            _limit: i64,
-        ) -> Result<u64, StorageError> {
-            // FakeStore does not track connection logs; match the docstring
-            // semantics of "0 rows deleted".
-            Ok(0)
-        }
-
-        async fn try_acquire_advisory_lock(
-            &self,
-            _lock_id: i64,
-        ) -> Result<Option<Box<dyn coder_core::AdvisoryLock>>, StorageError> {
-            // FakeStore has no underlying Postgres session; advisory locks
-            // are unsupported.  Tests that need to coordinate should use a
-            // real Postgres-backed store.
-            Ok(None)
-        }
+        // Note: `delete_old_connection_logs` and `try_acquire_advisory_lock`
+        // are defined earlier in this same `impl AppStore for FakeStore`
+        // block (see lines ~4320/4329). The pre-existing duplicate copies
+        // that lived here are removed so the library test target compiles
+        // for frontend test runs.
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -10333,6 +10350,10 @@ pub(crate) mod tests {
             aws_instance_identity_certs_dir: None,
             vapid_sub: String::new(),
             trial_signup_url: String::new(),
+            // Default tests to the slim-build path — tests that exercise
+            // the embedded SPA clone this config and flip `enabled = true`
+            // before constructing `AppState`.
+            frontend: coder_core::config::FrontendConfig { enabled: false },
         })
     }
 
@@ -10540,6 +10561,81 @@ pub(crate) mod tests {
         assert_eq!(response.status(), StatusCode::OK);
         let bytes = to_bytes(response.into_body(), usize::MAX).await?;
         assert_eq!(String::from_utf8(bytes.to_vec())?, SLIM_BUILD_MESSAGE);
+        Ok(())
+    }
+
+    /// Frontend embed (W4.33): with the SPA enabled, the root endpoint
+    /// serves `index.html` rather than the slim-build message. Verifies
+    /// the `frontend.enabled` plumbing reaches the router and `rust-embed`
+    /// resolves the placeholder we ship in `site/out/`.
+    #[tokio::test]
+    async fn frontend_root_endpoint_serves_spa_when_enabled() -> Result<(), Box<dyn Error>> {
+        let mut state = test_state(true)?;
+        state.config.frontend = coder_core::config::FrontendConfig { enabled: true };
+
+        let app = build_router(state, None);
+        let response = call(app, request(Method::GET, "/")?).await?;
+
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        assert_eq!(content_type, "text/html; charset=utf-8");
+        let bytes = to_bytes(response.into_body(), usize::MAX).await?;
+        let body = String::from_utf8(bytes.to_vec())?;
+        assert!(
+            body.to_ascii_lowercase().contains("coder"),
+            "SPA index.html should mention Coder"
+        );
+        Ok(())
+    }
+
+    /// Frontend embed (W4.33): API routes must take priority over the SPA
+    /// fallback so the embedded frontend can call the API from the same
+    /// origin without shadowing.
+    #[tokio::test]
+    async fn frontend_api_buildinfo_takes_priority_over_spa_fallback() -> Result<(), Box<dyn Error>>
+    {
+        let mut state = test_state(true)?;
+        state.config.frontend = coder_core::config::FrontendConfig { enabled: true };
+
+        let app = build_router(state, None);
+        let response = call(app, request(Method::GET, "/api/v2/buildinfo")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        assert!(
+            content_type.contains("json"),
+            "buildinfo must return JSON, not SPA HTML: {content_type}"
+        );
+        Ok(())
+    }
+
+    /// Frontend embed (W4.33): unknown SPA paths must resolve to
+    /// `index.html` with `text/html` so client-side routing survives a
+    /// hard refresh.
+    #[tokio::test]
+    async fn frontend_unknown_path_falls_back_to_spa_index() -> Result<(), Box<dyn Error>> {
+        let mut state = test_state(true)?;
+        state.config.frontend = coder_core::config::FrontendConfig { enabled: true };
+
+        let app = build_router(state, None);
+        let response = call(app, request(Method::GET, "/workspaces/my-name/foo")?).await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let content_type = response
+            .headers()
+            .get(axum::http::header::CONTENT_TYPE)
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("")
+            .to_owned();
+        assert_eq!(content_type, "text/html; charset=utf-8");
         Ok(())
     }
 

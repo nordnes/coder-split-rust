@@ -2361,6 +2361,18 @@ pub trait IdentityStore: Send + Sync {
         user_id: Uuid,
         notification_template_id: Uuid,
     ) -> Result<Option<bool>, StorageError>;
+
+    /// Returns a notification template row by primary key.
+    ///
+    /// Used by the dispatch loop to render `title_template` / `body_template`
+    /// against per-message parameters. Mirrors Go's
+    /// `GetNotificationTemplateByID` SQL query. Returns `Ok(None)` when the
+    /// template has been removed since the message was enqueued — the
+    /// caller should classify that as a permanent dispatch failure.
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError>;
 }
 
 /// Narrow storage contract for operational and deployment-owned state.
@@ -4559,6 +4571,19 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         kind: &str,
     ) -> Result<Vec<NotificationTemplate>, StorageError>;
+
+    /// Returns a single notification template row by primary key.
+    ///
+    /// Used by the dispatch loop to render `title_template` / `body_template`
+    /// against per-message parameters. Mirrors Go's
+    /// `GetNotificationTemplateByID`. Returns `Ok(None)` when the template
+    /// is absent (e.g. deleted after the message was enqueued) so the
+    /// caller can classify that as a permanent dispatch failure rather
+    /// than a storage error.
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError>;
 
     /// Updates the delivery method for a notification template.
     async fn update_notification_template_method(
@@ -6800,6 +6825,13 @@ where
     ) -> Result<Option<bool>, StorageError> {
         AppStore::find_user_notification_preference(self, user_id, notification_template_id).await
     }
+
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        AppStore::get_notification_template_by_id(self, template_id).await
+    }
 }
 
 #[async_trait]
@@ -7515,6 +7547,13 @@ where
         (**self)
             .find_user_notification_preference(user_id, notification_template_id)
             .await
+    }
+
+    async fn get_notification_template_by_id(
+        &self,
+        template_id: Uuid,
+    ) -> Result<Option<NotificationTemplate>, StorageError> {
+        (**self).get_notification_template_by_id(template_id).await
     }
 }
 

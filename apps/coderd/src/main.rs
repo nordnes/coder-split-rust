@@ -33,10 +33,10 @@ use coder_core::{
     ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError,
     config::{
-        AcmeConfig, DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig,
-        LoggingConfig, NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig,
-        SecurityHeadersConfig, SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig,
-        WorkspaceConfig,
+        AcmeConfig, DangerousConfig, FrontendConfig, GithubOAuthConfig, HealthcheckConfig,
+        HttpCookieConfig, LoggingConfig, NetworkingConfig, OidcConfig, ProvisionerConfig,
+        RateLimitConfig, SecurityHeadersConfig, SessionLifetimeConfig, TelemetryConfig, TlsConfig,
+        WorkerConfig, WorkspaceConfig,
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
@@ -773,6 +773,14 @@ struct ServerArgs {
     /// `coder/enterprise/cli/server.go`.
     #[arg(long, env = "CODER_TRIAL_SIGNUP_URL", default_value = "")]
     trial_signup_url: String,
+
+    /// Disable the embedded React SPA served from the catch-all fallback.
+    /// Useful when `coderd` runs behind a standalone static-file server
+    /// (e.g. a CDN or reverse proxy) that already handles `/` and
+    /// `/assets/*`. When disabled, the root path returns the historical
+    /// `SLIM_BUILD_MESSAGE` text and unknown paths are 404.
+    #[arg(long, env = "CODER_DISABLE_EMBEDDED_FRONTEND", default_value_t = false)]
+    disable_embedded_frontend: bool,
 }
 
 #[derive(Debug, Error)]
@@ -1583,6 +1591,9 @@ async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         aws_instance_identity_certs_dir: args.aws_instance_identity_certs_dir,
         vapid_sub: args.vapid_sub,
         trial_signup_url: args.trial_signup_url,
+        frontend: FrontendConfig {
+            enabled: !args.disable_embedded_frontend,
+        },
     };
 
     // Validate TLS / ACME configuration pair. Reject mutually-exclusive
