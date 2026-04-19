@@ -47,6 +47,7 @@ fn bench_app_state() -> AppState {
             acquire_timeout_secs: 10,
         },
         tls: coder_core::config::TlsConfig::default(),
+        acme: coder_core::config::AcmeConfig::default(),
         networking: coder_core::config::NetworkingConfig::default(),
         http_cookies: coder_core::config::HttpCookieConfig::default(),
         telemetry: coder_core::config::TelemetryConfig::default(),

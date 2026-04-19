@@ -1,6 +1,7 @@
 //! Runtime configuration models for the Rust backend slice.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use url::Url;
@@ -34,6 +35,9 @@ pub struct ServerConfig {
     pub database: DatabaseConfig,
     /// TLS configuration for HTTPS termination.
     pub tls: TlsConfig,
+    /// ACME / Let's Encrypt automatic certificate issuance. Mutually
+    /// exclusive with explicit [`TlsConfig::cert_files`] / [`TlsConfig::key_files`].
+    pub acme: AcmeConfig,
     /// Networking settings (proxy headers, redirect).
     pub networking: NetworkingConfig,
     /// HTTP cookie security settings.
@@ -153,7 +157,7 @@ pub struct ServerConfig {
     /// regions before we pick up new certs) supply their own trust
     /// anchors. Maps to `--aws-instance-identity-certs-dir` /
     /// `CODER_AWS_INSTANCE_IDENTITY_CERTS_DIR`.
-    pub aws_instance_identity_certs_dir: Option<std::path::PathBuf>,
+    pub aws_instance_identity_certs_dir: Option<PathBuf>,
     /// VAPID subscriber contact for web push notifications.
     ///
     /// Should be a `mailto:` URI per RFC 8292 best practice (e.g.
@@ -167,6 +171,17 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    /// Validate the TLS / ACME configuration pair.
+    ///
+    /// Operators must pick exactly one certificate source: explicit files
+    /// on [`TlsConfig`] or ACME issuance on [`AcmeConfig`]. When ACME is
+    /// enabled, it must have domains, a contact address, and a cache
+    /// directory. Returns `Ok(())` if the deployment disables both, which
+    /// simply means plain HTTP.
+    pub fn validate_tls(&self) -> Result<(), TlsConfigError> {
+        self.acme.validate_against(&self.tls)
+    }
+
     /// Returns a redacted view of the runtime configuration.
     #[must_use]
     pub fn public(&self) -> PublicDeploymentConfig {
@@ -1179,6 +1194,83 @@ impl Default for TlsConfig {
     }
 }
 
+/// ACME / Let's Encrypt automatic certificate issuance settings.
+///
+/// When `enabled` is true the server obtains and auto-renews TLS
+/// certificates from an ACME directory (Let's Encrypt by default) for
+/// the configured `domains`. This path is mutually exclusive with
+/// explicit certificate files on [`TlsConfig`]; see
+/// [`AcmeConfig::validate_against`].
+///
+/// Ports the `--tls.acme.*` flags from the Go reference (see
+/// `coder/cli/server.go` for the third-party autocert integration).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct AcmeConfig {
+    /// Whether ACME issuance is enabled.
+    pub enabled: bool,
+    /// Contact addresses submitted to the ACME account (e.g.
+    /// `mailto:admin@example.com`). Required when `enabled` is true.
+    pub contact: Vec<String>,
+    /// Fully-qualified domain names to request certificates for.
+    /// Required (non-empty) when `enabled` is true.
+    pub domains: Vec<String>,
+    /// Directory used to persist the ACME account key and issued
+    /// certificates across restarts.
+    pub cache_dir: PathBuf,
+    /// If true, use the Let's Encrypt staging directory
+    /// (`https://acme-staging-v02.api.letsencrypt.org/directory`) rather
+    /// than production. Useful in development and in tests.
+    pub staging: bool,
+}
+
+/// Error returned by [`AcmeConfig::validate_against`] and
+/// [`ServerConfig::validate_tls`].
+#[derive(Debug, thiserror::Error, PartialEq, Eq)]
+pub enum TlsConfigError {
+    /// ACME and explicit cert/key files were both configured.
+    #[error(
+        "ACME issuance and explicit TLS cert/key files are mutually exclusive; pick exactly one"
+    )]
+    AcmeAndExplicitFiles,
+    /// ACME was enabled without any domains.
+    #[error("ACME issuance is enabled but no domains were configured")]
+    AcmeMissingDomains,
+    /// ACME was enabled without a contact address. ACME CAs require this.
+    #[error("ACME issuance is enabled but no contact address was configured")]
+    AcmeMissingContact,
+    /// ACME was enabled without a cache directory.
+    #[error("ACME issuance is enabled but no cache directory was configured")]
+    AcmeMissingCacheDir,
+}
+
+impl AcmeConfig {
+    /// Validate this ACME configuration against an explicit [`TlsConfig`].
+    ///
+    /// Returns an error if the two conflict (both configured) or if ACME
+    /// is enabled but is missing required settings. If ACME is disabled,
+    /// any [`TlsConfig`] is accepted — the caller is expected to honour
+    /// the explicit cert/key files path on its own.
+    pub fn validate_against(&self, tls: &TlsConfig) -> Result<(), TlsConfigError> {
+        if !self.enabled {
+            return Ok(());
+        }
+        // Mutually exclusive with explicit cert/key files.
+        if !tls.cert_files.is_empty() || !tls.key_files.is_empty() {
+            return Err(TlsConfigError::AcmeAndExplicitFiles);
+        }
+        if self.domains.is_empty() {
+            return Err(TlsConfigError::AcmeMissingDomains);
+        }
+        if self.contact.is_empty() {
+            return Err(TlsConfigError::AcmeMissingContact);
+        }
+        if self.cache_dir.as_os_str().is_empty() {
+            return Err(TlsConfigError::AcmeMissingCacheDir);
+        }
+        Ok(())
+    }
+}
+
 /// Networking settings for proxy and redirect behaviour.
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
 pub struct NetworkingConfig {
@@ -1537,6 +1629,7 @@ mod tests {
                 acquire_timeout_secs: 10,
             },
             tls: TlsConfig::default(),
+            acme: AcmeConfig::default(),
             networking: NetworkingConfig::default(),
             http_cookies: HttpCookieConfig::default(),
             telemetry: TelemetryConfig::default(),
@@ -1713,6 +1806,107 @@ mod tests {
         let config = HttpCookieConfig::default();
         assert!(!config.secure_auth_cookie);
         assert_eq!(config.same_site, "lax");
+    }
+
+    #[test]
+    fn acme_disabled_is_always_valid() {
+        let acme = AcmeConfig::default();
+        let tls = TlsConfig {
+            cert_files: vec!["cert.pem".to_owned()],
+            key_files: vec!["key.pem".to_owned()],
+            ..TlsConfig::default()
+        };
+        assert_eq!(acme.validate_against(&tls), Ok(()));
+    }
+
+    #[test]
+    fn acme_and_explicit_files_conflict() {
+        let acme = AcmeConfig {
+            enabled: true,
+            contact: vec!["mailto:admin@example.com".to_owned()],
+            domains: vec!["example.com".to_owned()],
+            cache_dir: PathBuf::from("/tmp/acme"),
+            staging: false,
+        };
+        let tls_with_cert = TlsConfig {
+            cert_files: vec!["cert.pem".to_owned()],
+            ..TlsConfig::default()
+        };
+        assert_eq!(
+            acme.validate_against(&tls_with_cert),
+            Err(TlsConfigError::AcmeAndExplicitFiles)
+        );
+        let tls_with_key = TlsConfig {
+            key_files: vec!["key.pem".to_owned()],
+            ..TlsConfig::default()
+        };
+        assert_eq!(
+            acme.validate_against(&tls_with_key),
+            Err(TlsConfigError::AcmeAndExplicitFiles)
+        );
+    }
+
+    #[test]
+    fn acme_requires_domains() {
+        let acme = AcmeConfig {
+            enabled: true,
+            contact: vec!["mailto:admin@example.com".to_owned()],
+            domains: Vec::new(),
+            cache_dir: PathBuf::from("/tmp/acme"),
+            staging: false,
+        };
+        assert_eq!(
+            acme.validate_against(&TlsConfig::default()),
+            Err(TlsConfigError::AcmeMissingDomains)
+        );
+    }
+
+    #[test]
+    fn acme_requires_contact() {
+        let acme = AcmeConfig {
+            enabled: true,
+            contact: Vec::new(),
+            domains: vec!["example.com".to_owned()],
+            cache_dir: PathBuf::from("/tmp/acme"),
+            staging: false,
+        };
+        assert_eq!(
+            acme.validate_against(&TlsConfig::default()),
+            Err(TlsConfigError::AcmeMissingContact)
+        );
+    }
+
+    #[test]
+    fn acme_requires_cache_dir() {
+        let acme = AcmeConfig {
+            enabled: true,
+            contact: vec!["mailto:admin@example.com".to_owned()],
+            domains: vec!["example.com".to_owned()],
+            cache_dir: PathBuf::new(),
+            staging: false,
+        };
+        assert_eq!(
+            acme.validate_against(&TlsConfig::default()),
+            Err(TlsConfigError::AcmeMissingCacheDir)
+        );
+    }
+
+    #[test]
+    fn acme_valid_config_is_accepted() {
+        let acme = AcmeConfig {
+            enabled: true,
+            contact: vec!["mailto:admin@example.com".to_owned()],
+            domains: vec!["example.com".to_owned(), "www.example.com".to_owned()],
+            cache_dir: PathBuf::from("/var/lib/coder/acme"),
+            staging: true,
+        };
+        assert_eq!(acme.validate_against(&TlsConfig::default()), Ok(()));
+    }
+
+    #[test]
+    fn server_config_validate_tls_ok_by_default() {
+        let config = test_server_config();
+        assert_eq!(config.validate_tls(), Ok(()));
     }
 
     #[test]

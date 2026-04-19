@@ -10159,6 +10159,26 @@ pub(crate) mod tests {
             }
             Ok(total)
         }
+
+        async fn delete_old_connection_logs(
+            &self,
+            _older_than: OffsetDateTime,
+            _limit: i64,
+        ) -> Result<u64, StorageError> {
+            // FakeStore does not track connection logs; match the docstring
+            // semantics of "0 rows deleted".
+            Ok(0)
+        }
+
+        async fn try_acquire_advisory_lock(
+            &self,
+            _lock_id: i64,
+        ) -> Result<Option<Box<dyn coder_core::AdvisoryLock>>, StorageError> {
+            // FakeStore has no underlying Postgres session; advisory locks
+            // are unsupported.  Tests that need to coordinate should use a
+            // real Postgres-backed store.
+            Ok(None)
+        }
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -10173,6 +10193,7 @@ pub(crate) mod tests {
                 acquire_timeout_secs: 10,
             },
             tls: coder_core::config::TlsConfig::default(),
+            acme: coder_core::config::AcmeConfig::default(),
             networking: coder_core::config::NetworkingConfig::default(),
             http_cookies: coder_core::config::HttpCookieConfig::default(),
             telemetry: coder_core::config::TelemetryConfig::default(),

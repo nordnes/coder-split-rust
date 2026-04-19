@@ -33,9 +33,10 @@ use coder_core::{
     ExternalAuthLinkProvider, LogFormat, OtelConfig, PersistAuditLogInput, ServerConfig, SshConfig,
     StorageError,
     config::{
-        DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig, LoggingConfig,
-        NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig, SecurityHeadersConfig,
-        SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig, WorkspaceConfig,
+        AcmeConfig, DangerousConfig, GithubOAuthConfig, HealthcheckConfig, HttpCookieConfig,
+        LoggingConfig, NetworkingConfig, OidcConfig, ProvisionerConfig, RateLimitConfig,
+        SecurityHeadersConfig, SessionLifetimeConfig, TelemetryConfig, TlsConfig, WorkerConfig,
+        WorkspaceConfig,
     },
 };
 use coder_db::{DatabaseInitError, MigrationError, PostgresPubSub, PostgresStore, run_migrations};
@@ -139,6 +140,48 @@ struct ServerArgs {
     /// Minimum TLS version accepted (tls10, tls11, tls12, tls13).
     #[arg(long, env = "CODER_TLS_MIN_VERSION", default_value = "tls12")]
     tls_min_version: String,
+
+    // ----- ACME / Let's Encrypt -----
+    /// Enable ACME (Let's Encrypt) certificate issuance. Mutually
+    /// exclusive with explicit `--tls-cert-files` / `--tls-key-files`.
+    #[arg(long = "acme", env = "CODER_TLS_ACME_ENABLE", default_value_t = false)]
+    acme: bool,
+
+    /// Comma-separated ACME account contact addresses
+    /// (e.g. `mailto:admin@example.com`). Required when `--acme` is set.
+    #[arg(
+        long = "acme-contact",
+        env = "CODER_TLS_ACME_CONTACT",
+        default_value = ""
+    )]
+    acme_contact: String,
+
+    /// Domain to request an ACME certificate for. Repeat (or supply a
+    /// comma-separated list) to request multiple SANs.
+    #[arg(
+        long = "acme-domain",
+        env = "CODER_TLS_ACME_DOMAINS",
+        value_delimiter = ','
+    )]
+    acme_domain: Vec<String>,
+
+    /// Directory used to persist the ACME account key and issued
+    /// certificates across restarts.
+    #[arg(
+        long = "acme-cache-dir",
+        env = "CODER_TLS_ACME_CACHE_DIR",
+        default_value = ""
+    )]
+    acme_cache_dir: std::path::PathBuf,
+
+    /// Use the Let's Encrypt staging directory rather than production.
+    /// Intended for testing and development.
+    #[arg(
+        long = "acme-staging",
+        env = "CODER_TLS_ACME_STAGING",
+        default_value_t = false
+    )]
+    acme_staging: bool,
 
     // ----- Networking -----
     /// Redirect requests that do not match the access URL host.
@@ -1343,7 +1386,7 @@ async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         None => resolve_access_url(args.listen_addr).await?,
     };
 
-    Ok(ServerConfig {
+    let config = ServerConfig {
         listen_addr: args.listen_addr,
         access_url,
         wildcard_access_url: args.wildcard_access_url,
@@ -1360,6 +1403,13 @@ async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
             cert_files: split_csv(&args.tls_cert_files),
             key_files: split_csv(&args.tls_key_files),
             min_version: args.tls_min_version,
+        },
+        acme: AcmeConfig {
+            enabled: args.acme,
+            contact: split_csv(&args.acme_contact),
+            domains: args.acme_domain,
+            cache_dir: args.acme_cache_dir,
+            staging: args.acme_staging,
         },
         networking: NetworkingConfig {
             redirect_to_access_url: args.redirect_to_access_url,
@@ -1533,7 +1583,15 @@ async fn build_config(args: ServerArgs) -> Result<ServerConfig, MainError> {
         aws_instance_identity_certs_dir: args.aws_instance_identity_certs_dir,
         vapid_sub: args.vapid_sub,
         trial_signup_url: args.trial_signup_url,
-    })
+    };
+
+    // Validate TLS / ACME configuration pair. Reject mutually-exclusive
+    // settings before the listener is started.
+    config
+        .validate_tls()
+        .map_err(|err| MainError::Config(err.to_string()))?;
+
+    Ok(config)
 }
 
 /// Resolves the external access URL when none was supplied.

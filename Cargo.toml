@@ -85,6 +85,9 @@ uuid = { version = "1.8", features = ["serde", "v4"] }
 p256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"] }
 web-push = "0.11"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "builder", "pool", "hostname"] }
+# ACME / Let's Encrypt automatic TLS certificate issuance (opt-in; enabled via
+# `--acme` / `CODER_TLS_ACME_ENABLE` on the `coderd` binary).
+rustls-acme = { version = "0.15", default-features = false, features = ["ring", "tokio"] }
 yamux = "0.13"
 syn = { version = "2.0", features = ["full"] }
 quote = "1.0"
