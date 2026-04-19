@@ -16,9 +16,12 @@
 //! * bits 6..=1 — packet [`Kind`].
 //! * bit 0 — `done` bit; set on the last frame of a packet.
 //!
-//! For method dispatch we only need single-frame packets, which is the only
-//! shape the Go client and server produce in practice for the agent service.
+//! A logical `Packet` may be split across any number of frames all sharing
+//! the same `(kind, stream, message)` identifier — frames with `done=false`
+//! carry partial payload bytes and frames with `done=true` close the packet.
+//! See [`PacketReassembler`] for the receive side of this behaviour.
 
+use std::collections::HashMap;
 use std::io;
 
 // `AsyncReadExt`/`AsyncWriteExt` are brought in explicitly so their
@@ -31,11 +34,13 @@ use crate::error::{DrpcError, DrpcResult};
 /// The size of the fixed portion of a packet kind on the wire.
 pub const MAX_VARINT_LEN: usize = 10;
 
+/// Upper bound on the total bytes a single reassembled packet may hold. The
+/// Go implementation caps individual frames at ~1 MiB in practice; we accept
+/// larger totals to tolerate streaming workloads (e.g. tailnet updates) but
+/// still want a guard against memory exhaustion.
+pub const MAX_PACKET_SIZE: usize = 256 * 1024 * 1024;
+
 /// A DRPC packet kind. Mirrors `drpcwire.Kind` in the Go implementation.
-///
-/// We only implement the kinds used for a straightforward request/response
-/// dispatch loop. Streaming and metadata extensions are not required for the
-/// Phase-1 agent RPC handlers and are rejected at the server layer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Kind {
     /// Start an RPC. Body is the method path, e.g. `/coder.agent.v2.Agent/GetManifest`.
@@ -84,7 +89,7 @@ impl Kind {
 }
 
 /// A packet identifier, scoped to the DRPC stream.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub struct PacketId {
     /// The DRPC stream identifier. Incremented per `Invoke`.
     pub stream: u64,
@@ -100,12 +105,117 @@ pub struct Packet {
     pub data: Vec<u8>,
 }
 
-/// Reads a single DRPC packet from `r`. Only single-frame packets are
-/// accepted; multi-frame packets would require buffering up to
-/// `MAX_PACKET_SIZE` which Phase-1 handlers do not need.
+/// A single DRPC frame — one logical unit on the wire. A `Packet` may span
+/// multiple frames (all sharing the same `(kind, id)`) joined by
+/// [`PacketReassembler`]. Frames with `done=false` are partial; the receiver
+/// concatenates their payloads until a `done=true` frame arrives.
+#[derive(Debug, Clone)]
+pub struct Frame {
+    pub kind: Kind,
+    pub id: PacketId,
+    pub data: Vec<u8>,
+    /// True on the last frame of a packet.
+    pub done: bool,
+}
+
+/// Buffers partial-frame payloads keyed by stream id and yields a full
+/// [`Packet`] once a terminating (`done=true`) frame arrives.
+///
+/// A reassembler retains state across many calls: multiple independent
+/// streams may interleave their frames on the underlying connection (yamux
+/// multiplexing already separates streams at its layer, but at the DRPC
+/// wire level multi-frame packets within a single stream must still be
+/// concatenated). Only one partial packet per stream id is permitted at a
+/// time; encountering a frame whose `kind` disagrees with the buffered
+/// partial is rejected as a protocol error.
+#[derive(Debug, Default)]
+pub struct PacketReassembler {
+    pending: HashMap<u64, PartialPacket>,
+}
+
+#[derive(Debug)]
+struct PartialPacket {
+    kind: Kind,
+    id: PacketId,
+    data: Vec<u8>,
+}
+
+impl PacketReassembler {
+    /// Creates an empty reassembler.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Feeds a frame into the reassembler.
+    ///
+    /// * On a `done=true` frame with no prior partial: returns the single-
+    ///   frame packet directly.
+    /// * On a `done=false` frame: buffers the payload, returns `None`.
+    /// * On a `done=true` frame that completes a buffered partial: returns
+    ///   the concatenated packet.
+    ///
+    /// Errors if a subsequent frame's `kind` disagrees with the buffered
+    /// partial, or if the reassembled total would exceed [`MAX_PACKET_SIZE`].
+    pub fn push(&mut self, frame: Frame) -> DrpcResult<Option<Packet>> {
+        let Frame {
+            kind,
+            id,
+            data,
+            done,
+        } = frame;
+
+        if let Some(mut partial) = self.pending.remove(&id.stream) {
+            if partial.kind != kind {
+                return Err(DrpcError::Protocol(format!(
+                    "multi-frame packet kind mismatch: expected {:?}, got {kind:?}",
+                    partial.kind,
+                )));
+            }
+            if partial.data.len().saturating_add(data.len()) > MAX_PACKET_SIZE {
+                return Err(DrpcError::Protocol(format!(
+                    "reassembled drpc packet exceeds {MAX_PACKET_SIZE} bytes"
+                )));
+            }
+            partial.data.extend_from_slice(&data);
+            if done {
+                Ok(Some(Packet {
+                    kind: partial.kind,
+                    id: partial.id,
+                    data: partial.data,
+                }))
+            } else {
+                // Update the packet id's message field so the caller can see
+                // the latest frame id, though typically callers only inspect
+                // it on the completed packet.
+                partial.id = id;
+                self.pending.insert(id.stream, partial);
+                Ok(None)
+            }
+        } else if done {
+            Ok(Some(Packet { kind, id, data }))
+        } else {
+            if data.len() > MAX_PACKET_SIZE {
+                return Err(DrpcError::Protocol(format!(
+                    "first drpc frame already exceeds {MAX_PACKET_SIZE} bytes"
+                )));
+            }
+            self.pending
+                .insert(id.stream, PartialPacket { kind, id, data });
+            Ok(None)
+        }
+    }
+
+    /// Drops any partial frames associated with `stream_id`, for when a
+    /// stream is closing and its partial packet (if any) should be abandoned.
+    pub fn clear_stream(&mut self, stream_id: u64) {
+        self.pending.remove(&stream_id);
+    }
+}
+
+/// Reads a single DRPC frame from `r` (may be partial — see [`Frame::done`]).
 ///
 /// Returns [`DrpcError::Closed`] on clean EOF before a new frame starts.
-pub async fn read_packet<R: AsyncRead + Unpin>(r: &mut R) -> DrpcResult<Packet> {
+pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> DrpcResult<Frame> {
     let header = match r.read_u8().await {
         Ok(b) => b,
         Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Err(DrpcError::Closed),
@@ -131,28 +241,55 @@ pub async fn read_packet<R: AsyncRead + Unpin>(r: &mut R) -> DrpcResult<Packet> 
     let mut data = vec![0u8; length as usize];
     r.read_exact(&mut data).await?;
 
-    if !done {
-        return Err(DrpcError::Protocol(
-            "multi-frame drpc packets are not supported".into(),
-        ));
-    }
-
-    Ok(Packet {
+    Ok(Frame {
         kind,
         id: PacketId { stream, message },
         data,
+        done,
     })
 }
 
-/// Writes a single DRPC packet as one framed frame with `done = true`.
+/// Reads DRPC frames from `r` and returns once a full packet is assembled.
+///
+/// Unlike [`read_frame`], this tolerates multi-frame packets — it runs a
+/// private [`PacketReassembler`] until it sees a terminating frame. Returns
+/// [`DrpcError::Closed`] on clean EOF between packets.
+pub async fn read_packet<R: AsyncRead + Unpin>(r: &mut R) -> DrpcResult<Packet> {
+    let mut reassembler = PacketReassembler::new();
+    loop {
+        let frame = read_frame(r).await?;
+        if let Some(packet) = reassembler.push(frame)? {
+            return Ok(packet);
+        }
+    }
+}
+
+/// Writes a single DRPC packet as one frame with `done = true`.
 pub async fn write_packet<W: AsyncWrite + Unpin>(w: &mut W, packet: &Packet) -> DrpcResult<()> {
-    let mut buf = Vec::with_capacity(1 + 3 * MAX_VARINT_LEN + packet.data.len());
-    let header = (packet.kind.to_u8() << 1) | 0b0000_0001; // done
+    write_frame(
+        w,
+        &Frame {
+            kind: packet.kind,
+            id: packet.id,
+            data: packet.data.clone(),
+            done: true,
+        },
+    )
+    .await
+}
+
+/// Writes a single DRPC frame. The caller controls the `done` bit — for
+/// server-stream emission of a non-terminal message, set `done=false` and
+/// follow up with additional frames (same `id`, final `done=true`).
+pub async fn write_frame<W: AsyncWrite + Unpin>(w: &mut W, frame: &Frame) -> DrpcResult<()> {
+    let mut buf = Vec::with_capacity(1 + 3 * MAX_VARINT_LEN + frame.data.len());
+    let done_bit = if frame.done { 0b0000_0001 } else { 0 };
+    let header = (frame.kind.to_u8() << 1) | done_bit;
     buf.push(header);
-    encode_varint(&mut buf, packet.id.stream);
-    encode_varint(&mut buf, packet.id.message);
-    encode_varint(&mut buf, packet.data.len() as u64);
-    buf.extend_from_slice(&packet.data);
+    encode_varint(&mut buf, frame.id.stream);
+    encode_varint(&mut buf, frame.id.message);
+    encode_varint(&mut buf, frame.data.len() as u64);
+    buf.extend_from_slice(&frame.data);
     w.write_all(&buf).await?;
     w.flush().await?;
     Ok(())
@@ -248,14 +385,174 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn rejects_multi_frame_packet() -> DrpcResult<()> {
-        // Build a frame with done=false manually.
-        let (mut a, mut b) = duplex(64);
-        let header = (Kind::Message.to_u8() << 1) & !0b0000_0001;
-        let bytes = [header, 0x00, 0x00, 0x00];
-        a.write_all(&bytes).await?;
-        let result = read_packet(&mut b).await;
+    async fn multi_frame_reassembly_concatenates() -> DrpcResult<()> {
+        let mut reasm = PacketReassembler::new();
+        let id = PacketId {
+            stream: 1,
+            message: 1,
+        };
+        // Three partial frames plus a terminator.
+        assert!(
+            reasm
+                .push(Frame {
+                    kind: Kind::Message,
+                    id,
+                    data: b"hello ".to_vec(),
+                    done: false,
+                })?
+                .is_none()
+        );
+        assert!(
+            reasm
+                .push(Frame {
+                    kind: Kind::Message,
+                    id,
+                    data: b"there ".to_vec(),
+                    done: false,
+                })?
+                .is_none()
+        );
+        assert!(
+            reasm
+                .push(Frame {
+                    kind: Kind::Message,
+                    id,
+                    data: b"multi".to_vec(),
+                    done: false,
+                })?
+                .is_none()
+        );
+        let packet = reasm
+            .push(Frame {
+                kind: Kind::Message,
+                id,
+                data: b"-frame".to_vec(),
+                done: true,
+            })?
+            .ok_or_else(|| DrpcError::Protocol("expected completed packet".into()))?;
+
+        assert_eq!(packet.kind, Kind::Message);
+        assert_eq!(packet.data, b"hello there multi-frame");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reassembler_keeps_streams_independent() -> DrpcResult<()> {
+        // Frames from stream 1 and stream 2 interleaved must not pollute
+        // each other's pending buffers.
+        let mut reasm = PacketReassembler::new();
+        let id1 = PacketId {
+            stream: 1,
+            message: 1,
+        };
+        let id2 = PacketId {
+            stream: 2,
+            message: 1,
+        };
+        assert!(
+            reasm
+                .push(Frame {
+                    kind: Kind::Message,
+                    id: id1,
+                    data: b"A1".to_vec(),
+                    done: false,
+                })?
+                .is_none()
+        );
+        assert!(
+            reasm
+                .push(Frame {
+                    kind: Kind::Message,
+                    id: id2,
+                    data: b"B1".to_vec(),
+                    done: false,
+                })?
+                .is_none()
+        );
+        assert!(
+            reasm
+                .push(Frame {
+                    kind: Kind::Message,
+                    id: id1,
+                    data: b"A2".to_vec(),
+                    done: false,
+                })?
+                .is_none()
+        );
+        let pkt2 = reasm
+            .push(Frame {
+                kind: Kind::Message,
+                id: id2,
+                data: b"B2".to_vec(),
+                done: true,
+            })?
+            .ok_or_else(|| DrpcError::Protocol("stream 2 should be complete".into()))?;
+        assert_eq!(pkt2.id.stream, 2);
+        assert_eq!(pkt2.data, b"B1B2");
+
+        let pkt1 = reasm
+            .push(Frame {
+                kind: Kind::Message,
+                id: id1,
+                data: b"A3".to_vec(),
+                done: true,
+            })?
+            .ok_or_else(|| DrpcError::Protocol("stream 1 should be complete".into()))?;
+        assert_eq!(pkt1.id.stream, 1);
+        assert_eq!(pkt1.data, b"A1A2A3");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reassembler_rejects_mixed_kinds() {
+        let mut reasm = PacketReassembler::new();
+        let id = PacketId {
+            stream: 1,
+            message: 1,
+        };
+        let _ = reasm.push(Frame {
+            kind: Kind::Message,
+            id,
+            data: b"partial".to_vec(),
+            done: false,
+        });
+        let result = reasm.push(Frame {
+            kind: Kind::Error,
+            id,
+            data: b"bad".to_vec(),
+            done: true,
+        });
         assert!(matches!(result, Err(DrpcError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn read_packet_joins_multi_frame_wire() -> DrpcResult<()> {
+        // Write two `done=false` frames and one terminator on the same stream
+        // id; verify `read_packet` hands back the joined payload.
+        let (mut a, mut b) = duplex(4096);
+        let id = PacketId {
+            stream: 5,
+            message: 10,
+        };
+        for (data, done) in [
+            (&b"first-"[..], false),
+            (&b"second-"[..], false),
+            (&b"third"[..], true),
+        ] {
+            write_frame(
+                &mut a,
+                &Frame {
+                    kind: Kind::Message,
+                    id,
+                    data: data.to_vec(),
+                    done,
+                },
+            )
+            .await?;
+        }
+        let packet = read_packet(&mut b).await?;
+        assert_eq!(packet.kind, Kind::Message);
+        assert_eq!(packet.data, b"first-second-third");
         Ok(())
     }
 }
