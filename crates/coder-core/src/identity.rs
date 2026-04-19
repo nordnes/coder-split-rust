@@ -814,6 +814,9 @@ pub struct CreateGroupInput {
     pub avatar_url: String,
     /// Resource quota allowance.
     pub quota_allowance: i32,
+    /// Origin of the group (`"user"` or `"oidc"`). If `None`, the database
+    /// default (`"user"`) is used.
+    pub source: Option<String>,
 }
 
 /// Input for updating a group.

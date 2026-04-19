@@ -749,7 +749,7 @@ pub(crate) async fn get_oidc_callback(
                             + time::Duration::seconds(i64::try_from(secs).unwrap_or(3600))
                     })
                     .unwrap_or_else(OffsetDateTime::now_utc),
-                claims: user_link_claims,
+                claims: user_link_claims.clone(),
             };
             state
                 .store
@@ -779,6 +779,70 @@ pub(crate) async fn get_oidc_callback(
             .await?
         }
     };
+
+    // IDP group sync (best-effort). Runs between the user upsert and the
+    // session issue so the freshly-logged-in user already sees the right
+    // group memberships on the first request. Errors are logged and
+    // swallowed — login must succeed even when sync breaks.
+    //
+    // Ports Go's `AGPLIDPSync.SyncGroups` invocation from
+    // `coderd/userauth.go`. See §B.12.1 / Wave 0 S5.
+    //
+    // NOTE: Organization sync and role sync are NOT yet wired in. See
+    // Go `coderd/idpsync/organization.go` and `role.go` for the
+    // remaining work — to be ported in follow-up batches.
+    let merged_claims = serde_json::Value::Object(user_link_claims.merged_claims.clone());
+    let raw_groups = coder_auth::idpsync::claims::parse_group_claims(oidc_config, &merged_claims);
+    if !raw_groups.is_empty() || !oidc_config.groups_field.is_empty() {
+        // Sync against every organization the user is already a member
+        // of. Once `SyncOrganizations` lands, membership will be
+        // discovered from the claims instead.
+        match state.store.list_user_memberships(user.id).await {
+            Ok(memberships) => {
+                for membership in memberships {
+                    let settings = match state
+                        .store
+                        .group_sync_settings(membership.organization_id)
+                        .await
+                    {
+                        Ok(s) => s,
+                        Err(err) => {
+                            tracing::warn!(
+                                user_id = %user.id,
+                                organization_id = %membership.organization_id,
+                                error = %err,
+                                "failed to load IDP group sync settings",
+                            );
+                            continue;
+                        }
+                    };
+                    if let Err(err) = coder_auth::idpsync::group_sync::sync_groups(
+                        &state.store,
+                        user.id,
+                        membership.organization_id,
+                        &raw_groups,
+                        &settings,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            user_id = %user.id,
+                            organization_id = %membership.organization_id,
+                            error = %err,
+                            "IDP group sync failed",
+                        );
+                    }
+                }
+            }
+            Err(err) => {
+                tracing::warn!(
+                    user_id = %user.id,
+                    error = %err,
+                    "failed to enumerate user memberships for IDP group sync",
+                );
+            }
+        }
+    }
 
     // Create session and redirect.
     let session_token = state

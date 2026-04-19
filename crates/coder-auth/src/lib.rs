@@ -17,6 +17,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod idpsync;
 pub mod oauth_login;
 pub mod session_cache;
 

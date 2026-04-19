@@ -9055,7 +9055,7 @@ pub(crate) mod tests {
                 organization_id: input.organization_id,
                 avatar_url: input.avatar_url.clone(),
                 quota_allowance: input.quota_allowance,
-                source: "user".to_owned(),
+                source: input.source.clone().unwrap_or_else(|| "user".to_owned()),
                 created_at: now,
             };
             groups.insert(id, record.clone());
@@ -35723,6 +35723,7 @@ pub(crate) mod tests {
             username_field: "preferred_username".to_owned(),
             email_field: "email".to_owned(),
             name_field: "name".to_owned(),
+            groups_field: "groups".to_owned(),
             ignore_email_verified: false,
         });
         let store: Arc<dyn AppStore> = Arc::new(FakeStore::new(true));
@@ -38390,6 +38391,7 @@ pub(crate) mod tests {
                 organization_id: org_id,
                 avatar_url: String::new(),
                 quota_allowance: 10,
+                source: None,
             })
             .await?;
         assert_eq!(group.name, "devs");
@@ -38432,6 +38434,7 @@ pub(crate) mod tests {
                 organization_id: org_id,
                 avatar_url: String::new(),
                 quota_allowance: 0,
+                source: None,
             })
             .await?;
 

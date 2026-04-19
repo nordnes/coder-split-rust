@@ -1242,6 +1242,7 @@ where
                 display_name: "Everyone".to_owned(),
                 avatar_url: String::new(),
                 quota_allowance: 0,
+                source: None,
             })
             .await
             .map_err(IdentityServiceError::Storage)?;
@@ -1433,6 +1434,7 @@ where
             display_name: display_name.to_owned(),
             avatar_url: avatar_url.to_owned(),
             quota_allowance,
+            source: None,
         };
         self.store.create_group(&input).await.map_err(Into::into)
     }

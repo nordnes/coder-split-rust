@@ -969,6 +969,10 @@ pub struct OidcConfig {
     pub email_field: String,
     /// Claim field to use as the display name.
     pub name_field: String,
+    /// Claim field to use for group membership (for IDP group sync).
+    /// Defaults to `"groups"`. If empty, group sync from the deployment
+    /// OIDC provider is disabled.
+    pub groups_field: String,
     /// Whether to ignore the email_verified claim.
     pub ignore_email_verified: bool,
 }
