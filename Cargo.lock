@@ -1089,6 +1089,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "coder-core",
+ "coder-rbac",
  "cron",
  "metrics",
  "serde_json",

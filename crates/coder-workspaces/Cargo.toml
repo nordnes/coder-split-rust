@@ -15,6 +15,7 @@ async-trait.workspace = true
 chrono.workspace = true
 chrono-tz.workspace = true
 coder-core = { path = "../coder-core" }
+coder-rbac = { path = "../coder-rbac" }
 cron.workspace = true
 metrics.workspace = true
 serde_json.workspace = true

@@ -371,6 +371,26 @@ pub fn resource_monitor() -> Actor {
     )
 }
 
+/// Returns whether the supplied actor carries one of the synthetic
+/// system-subject roles defined in this module (`system`, `keyrotator`,
+/// `provisionerd`, `notifier`, `resourcemonitor`).
+///
+/// Used by background-worker unit tests to assert their construction
+/// path wired the correct system actor in place of the default actor.
+#[must_use]
+pub fn is_system(actor: &Actor) -> bool {
+    actor.site_roles.iter().any(|role| {
+        matches!(
+            role.as_str(),
+            ROLE_SYSTEM_RESTRICTED
+                | ROLE_KEY_ROTATOR
+                | ROLE_PROVISIONERD
+                | ROLE_NOTIFIER
+                | ROLE_RESOURCE_MONITOR
+        )
+    })
+}
+
 /// Actor for a specific resource owner. Mirrors Go's `AsOwner` helper.
 ///
 /// This returns an actor carrying the supplied `user_id` and site
@@ -501,6 +521,17 @@ mod tests {
         // map, so creating a workspace must be denied.
         let ws = Object::new(ResourceType::Workspace);
         assert!(authorizer.authorize(&actor, Action::Create, &ws).is_err());
+    }
+
+    #[test]
+    fn is_system_matches_all_synthetic_actors() {
+        assert!(is_system(&system_restricted()));
+        assert!(is_system(&key_rotator()));
+        assert!(is_system(&provisionerd()));
+        assert!(is_system(&notifier()));
+        assert!(is_system(&resource_monitor()));
+        // owner_of uses ROLE_OWNER, not a synthetic system role.
+        assert!(!is_system(&owner_of(Uuid::nil())));
     }
 
     #[test]

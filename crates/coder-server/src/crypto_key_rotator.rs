@@ -18,6 +18,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use coder_core::enums::CryptoKeyFeature;
 use coder_core::ports::{AdvisoryLock, AppStore, CryptoKeyRow, StorageError, advisory_lock_ids};
+use coder_rbac::{Actor, system_actors};
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
@@ -202,21 +203,45 @@ impl Default for RotatorOptions {
 /// single sweep with [`CryptoKeyRotator::rotate_once`], or run as a background
 /// task with [`CryptoKeyRotator::start`].
 ///
-/// TODO-rbac(W0.S4): thread [`coder_rbac::system_actors::key_rotator`] through
-/// here so rotator calls go via a `dbauthz::Authorized<_>` wrapper instead of
-/// raw `AppStore`. See `crates/coder-rbac/src/system_actors.rs` and
-/// `crates/coder-db/src/dbauthz.rs`.
+/// The rotator carries the `key_rotator` system actor
+/// ([`coder_rbac::system_actors::key_rotator`]) as its authorization
+/// context. Today only the four `Authorized<S>` list methods in
+/// `coder-db/src/dbauthz.rs` consult it; remaining store calls still go
+/// through the raw `AppStore` trait — see `TODO-dbauthz-full-wrap`
+/// call-site comments below.
 #[derive(Clone)]
 pub struct CryptoKeyRotator {
     store: Arc<dyn AppStore>,
     options: RotatorOptions,
+    /// System-actor context used when authorizing store calls. See
+    /// [`coder_rbac::system_actors::key_rotator`]. Only the methods
+    /// wrapped by `dbauthz::Authorized<_>` consult this today; other
+    /// store calls below carry a `TODO-dbauthz-full-wrap` comment.
+    actor: Actor,
 }
 
 impl CryptoKeyRotator {
     /// Creates a new rotator bound to `store` with the supplied `options`.
     #[must_use]
     pub fn new(store: Arc<dyn AppStore>, options: RotatorOptions) -> Self {
-        Self { store, options }
+        Self {
+            store,
+            options,
+            // TODO-dbauthz-full-wrap: once `Authorized<S>` wraps the
+            // crypto-key store methods used below (list_all, insert,
+            // update_deletes_at, delete, rotate_transactional,
+            // try_acquire_rotation_lock), route those calls through the
+            // wrapper so the key-rotator actor is actually enforced at
+            // the store boundary. Until then the actor lives on `Self`
+            // for diagnostics and tests.
+            actor: system_actors::key_rotator(),
+        }
+    }
+
+    /// Returns the system actor this rotator runs under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     /// Spawns the rotator loop on the current Tokio runtime. Runs an initial
@@ -700,6 +725,21 @@ mod tests {
         ) -> Result<Option<Box<dyn AdvisoryLock>>, StorageError> {
             Ok(Some(Box::new(TestLockGuard)))
         }
+    }
+
+    #[test]
+    fn rotator_actor_factory_returns_key_rotator() {
+        // Regression guard for W0.S4 wiring: `CryptoKeyRotator::new` must
+        // stash the `keyrotator` system actor, not the default restricted
+        // actor. We exercise the actor factory directly rather than
+        // constructing a full rotator (which requires a real `AppStore`
+        // supertrait impl).
+        let actor = system_actors::key_rotator();
+        assert!(
+            system_actors::is_system(&actor),
+            "key_rotator() must be a system actor",
+        );
+        assert_eq!(actor.username, "keyrotator");
     }
 
     #[tokio::test]
