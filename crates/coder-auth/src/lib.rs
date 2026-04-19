@@ -20,7 +20,11 @@
 pub mod oauth_login;
 pub mod session_cache;
 
-use std::{sync::Arc, time::Duration};
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use coder_core::{
@@ -61,6 +65,15 @@ pub const OAUTH2_REDIRECT_COOKIE: &str = "oauth_redirect";
 
 const EXTERNAL_AUTH_HTTP_TIMEOUT_SECS: u64 = 10;
 const EXTERNAL_AUTH_REFRESH_WINDOW_SECS: i64 = 60;
+/// Window in seconds ahead of token expiry during which the public
+/// `refresh_if_expiring` entry point proactively refreshes a stored token.
+/// Mirrors the "refresh early" behaviour in Go's
+/// `coderd/externalauth.Config.RefreshToken`, which calls into the oauth2
+/// library's `TokenSource` (default early-expiry window: 5 minutes).
+const EXTERNAL_AUTH_PROACTIVE_REFRESH_WINDOW_SECS: i64 = 5 * 60;
+/// Window in seconds for which a successful `validate_url` probe is cached
+/// per (provider_id, token_hash) tuple to avoid hammering the provider.
+const EXTERNAL_AUTH_VALIDATE_CACHE_TTL_SECS: i64 = 60;
 const NON_EXPIRING_TOKEN_SECS: i64 = 60 * 60 * 24 * 365 * 10;
 const DEFAULT_SESSION_KEY_LIFETIME_SECS: u64 = 60 * 60 * 24;
 const DEFAULT_TOKEN_KEY_LIFETIME_SECS: u64 = 60 * 60 * 24 * 30;
@@ -1522,11 +1535,20 @@ async fn fetch_installations(
     }
 }
 
+/// Cache key for a successful validate-URL probe: `(provider_id,
+/// sha256(access_token))`.
+type ValidateCacheKey = (String, [u8; 32]);
+
+/// Shared 60-second cache of validate-URL results keyed by
+/// `(provider_id, sha256(token))`.
+type ValidateCache = Arc<Mutex<HashMap<ValidateCacheKey, (bool, OffsetDateTime)>>>;
+
 /// External-auth lifecycle service used by the Rust handlers.
 #[derive(Clone)]
 pub struct ExternalAuthService<S> {
     store: S,
     adapter: Arc<dyn ExternalAuthProviderAdapter>,
+    validate_cache: ValidateCache,
 }
 
 impl<S> ExternalAuthService<S>
@@ -1538,7 +1560,17 @@ where
         Ok(Self {
             store,
             adapter: Arc::new(HttpExternalAuthProviderAdapter::new()?),
+            validate_cache: Arc::new(Mutex::new(HashMap::new())),
         })
+    }
+
+    #[cfg(test)]
+    fn with_adapter(store: S, adapter: Arc<dyn ExternalAuthProviderAdapter>) -> Self {
+        Self {
+            store,
+            adapter,
+            validate_cache: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Lists configured providers and linked accounts for one user.
@@ -1656,6 +1688,133 @@ where
                 token_revocation_error: error.detail(),
             },
         }))
+    }
+
+    /// Proactively refreshes `token` if it is within the
+    /// `EXTERNAL_AUTH_PROACTIVE_REFRESH_WINDOW_SECS` window of expiry.
+    ///
+    /// Mirrors Go `coderd/externalauth.Config.RefreshToken`:
+    ///
+    /// * If the stored token is not near expiry (i.e. `expires_at - now > 5
+    ///   minutes`), returns it unchanged with no upstream call.
+    /// * Otherwise, POSTs to the provider's token endpoint with
+    ///   `grant_type=refresh_token&refresh_token=<>`, persists the refreshed
+    ///   token via the store, and returns the new link.
+    /// * On refresh failure, logs the detail and returns the original token
+    ///   unchanged so that callers can still attempt to use it — the upstream
+    ///   may accept the stale token long enough for the user to re-auth.
+    pub async fn refresh_if_expiring(
+        &self,
+        provider: &ExternalAuthLinkProvider,
+        user_id: Uuid,
+        token: &ExternalAuthLinkRecord,
+    ) -> Result<ExternalAuthLinkRecord, ExternalAuthServiceError> {
+        debug_assert!(provider.id.eq_ignore_ascii_case(&token.provider_id));
+
+        if !needs_proactive_refresh(provider, token) {
+            return Ok(token.clone());
+        }
+
+        let tokens = match self.adapter.refresh_token(provider, token).await {
+            Ok(tokens) => tokens,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    provider = provider.id,
+                    "failed to proactively refresh external-auth token; returning original",
+                );
+                return Ok(token.clone());
+            }
+        };
+
+        let now = OffsetDateTime::now_utc();
+        self.store
+            .upsert_external_auth_link(
+                user_id,
+                &UpsertExternalAuthLinkInput {
+                    provider_id: token.provider_id.clone(),
+                    access_token: tokens.access_token,
+                    refresh_token: tokens.refresh_token,
+                    token_type: tokens.token_type,
+                    scopes: tokens.scopes,
+                    expires_at: tokens.expires_at,
+                    authenticated: token.authenticated,
+                    validate_error: token.validate_error.clone(),
+                    refresh_error: String::new(),
+                    last_validated_at: token.last_validated_at,
+                    last_refreshed_at: Some(now),
+                    user: token.user.clone(),
+                    installations: token.installations.clone(),
+                    app_installable: token.app_installable,
+                },
+            )
+            .await
+            .map_err(ExternalAuthServiceError::Storage)
+    }
+
+    /// Probes the provider's configured `validate_url` with the token and
+    /// returns whether the response is a 2xx.
+    ///
+    /// Mirrors Go `coderd/externalauth.Config.ValidateToken`:
+    ///
+    /// * If the provider does not configure a `validate_url`, returns
+    ///   `Ok(true)` (token is assumed valid).
+    /// * Otherwise issues a `GET` with `Authorization: Bearer <token>` and
+    ///   returns `true` on 2xx, `false` on 401/403, and an error on other
+    ///   failure modes.
+    ///
+    /// Successful probes are cached for `EXTERNAL_AUTH_VALIDATE_CACHE_TTL_SECS`
+    /// keyed by `(provider_id, sha256(access_token))` to avoid spamming the
+    /// provider on hot paths.
+    pub async fn validate_url(
+        &self,
+        provider: &ExternalAuthLinkProvider,
+        token: &ExternalAuthLinkRecord,
+    ) -> Result<bool, ExternalAuthServiceError> {
+        if provider.validate_url.trim().is_empty() {
+            return Ok(true);
+        }
+
+        let cache_key = (provider.id.clone(), hash_access_token(&token.access_token));
+        let now = OffsetDateTime::now_utc();
+
+        // Fast path — return a cached probe result if still fresh.
+        if let Some(valid) = self.cached_validation(&cache_key, now) {
+            return Ok(valid);
+        }
+
+        let outcome = self.adapter.validate(provider, &token.access_token).await;
+        let valid = match outcome {
+            Ok(validation) => validation.authenticated,
+            Err(ExternalAuthServiceError::BadRequest(_)) => false,
+            Err(error) => return Err(error),
+        };
+
+        self.insert_validation(cache_key, valid, now);
+        Ok(valid)
+    }
+
+    fn cached_validation(&self, key: &ValidateCacheKey, now: OffsetDateTime) -> Option<bool> {
+        let mut cache = self.validate_cache.lock().ok()?;
+        let entry = cache.get(key)?;
+        if entry.1 >= now {
+            Some(entry.0)
+        } else {
+            cache.remove(key);
+            None
+        }
+    }
+
+    fn insert_validation(&self, key: ValidateCacheKey, valid: bool, now: OffsetDateTime) {
+        let Ok(mut cache) = self.validate_cache.lock() else {
+            return;
+        };
+        let expiry = now
+            .checked_add(time::Duration::seconds(
+                EXTERNAL_AUTH_VALIDATE_CACHE_TTL_SECS,
+            ))
+            .unwrap_or(now);
+        cache.insert(key, (valid, expiry));
     }
 
     async fn reconcile_link(
@@ -1813,6 +1972,36 @@ fn needs_refresh(
         <= now
             .checked_add(time::Duration::seconds(EXTERNAL_AUTH_REFRESH_WINDOW_SECS))
             .unwrap_or(now)
+}
+
+/// Returns `true` when the token is within 5 minutes of expiry and the
+/// provider permits refreshing it.  Used by `refresh_if_expiring` to decide
+/// whether to call the provider's token endpoint.
+fn needs_proactive_refresh(
+    provider: &ExternalAuthLinkProvider,
+    link: &ExternalAuthLinkRecord,
+) -> bool {
+    if provider.no_refresh || !provider.allow_refresh || link.refresh_token.trim().is_empty() {
+        return false;
+    }
+    let now = OffsetDateTime::now_utc();
+    let threshold = now
+        .checked_add(time::Duration::seconds(
+            EXTERNAL_AUTH_PROACTIVE_REFRESH_WINDOW_SECS,
+        ))
+        .unwrap_or(now);
+    link.expires <= threshold
+}
+
+/// Hashes an OAuth access token to a fixed-size digest for use as a cache
+/// key.  Keeping the raw token out of the cache avoids leaking long-lived
+/// credentials via process memory dumps of this map.
+fn hash_access_token(access_token: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(access_token.as_bytes());
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
 }
 
 fn to_public_link(link: ExternalAuthLinkRecord) -> ExternalAuthLink {
@@ -3004,6 +3193,7 @@ mod tests {
         password_users: Vec<PasswordUserRecord>,
         sessions: Vec<(Vec<u8>, Uuid)>,
         api_keys: Vec<ApiKeyRecord>,
+        external_auth_links: Vec<(Uuid, ExternalAuthLinkRecord)>,
     }
 
     #[derive(Default, Clone)]
@@ -3262,33 +3452,92 @@ mod tests {
 
         async fn list_external_auth_links(
             &self,
-            _user_id: Uuid,
+            user_id: Uuid,
         ) -> Result<Vec<ExternalAuthLinkRecord>, StorageError> {
-            Ok(vec![])
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner
+                .external_auth_links
+                .iter()
+                .filter(|(uid, _)| *uid == user_id)
+                .map(|(_, link)| link.clone())
+                .collect())
         }
 
         async fn find_external_auth_link(
             &self,
-            _user_id: Uuid,
-            _provider_id: &str,
+            user_id: Uuid,
+            provider_id: &str,
         ) -> Result<Option<ExternalAuthLinkRecord>, StorageError> {
-            Ok(None)
+            let inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            Ok(inner
+                .external_auth_links
+                .iter()
+                .find(|(uid, link)| *uid == user_id && link.provider_id == provider_id)
+                .map(|(_, link)| link.clone()))
         }
 
         async fn delete_external_auth_link(
             &self,
-            _user_id: Uuid,
-            _provider_id: &str,
+            user_id: Uuid,
+            provider_id: &str,
         ) -> Result<bool, StorageError> {
-            Ok(false)
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            let before = inner.external_auth_links.len();
+            inner
+                .external_auth_links
+                .retain(|(uid, link)| !(*uid == user_id && link.provider_id == provider_id));
+            Ok(inner.external_auth_links.len() < before)
         }
 
         async fn upsert_external_auth_link(
             &self,
-            _user_id: Uuid,
-            _link: &UpsertExternalAuthLinkInput,
+            user_id: Uuid,
+            link: &UpsertExternalAuthLinkInput,
         ) -> Result<ExternalAuthLinkRecord, StorageError> {
-            Err(StorageError::unavailable("not implemented"))
+            let mut inner = self
+                .inner
+                .lock()
+                .map_err(|_| StorageError::unavailable("lock"))?;
+            let now = OffsetDateTime::now_utc();
+            let existing_created_at = inner
+                .external_auth_links
+                .iter()
+                .find(|(uid, l)| *uid == user_id && l.provider_id == link.provider_id)
+                .map(|(_, l)| l.created_at)
+                .unwrap_or(now);
+            let record = ExternalAuthLinkRecord {
+                provider_id: link.provider_id.clone(),
+                created_at: existing_created_at,
+                updated_at: now,
+                has_refresh_token: !link.refresh_token.is_empty(),
+                expires: link.expires_at,
+                access_token: link.access_token.clone(),
+                refresh_token: link.refresh_token.clone(),
+                token_type: link.token_type.clone(),
+                scopes: link.scopes.clone(),
+                authenticated: link.authenticated,
+                validate_error: link.validate_error.clone(),
+                refresh_error: link.refresh_error.clone(),
+                last_validated_at: link.last_validated_at,
+                last_refreshed_at: link.last_refreshed_at,
+                user: link.user.clone(),
+                installations: link.installations.clone(),
+                app_installable: link.app_installable,
+            };
+            inner
+                .external_auth_links
+                .retain(|(uid, l)| !(*uid == user_id && l.provider_id == link.provider_id));
+            inner.external_auth_links.push((user_id, record.clone()));
+            Ok(record)
         }
 
         async fn update_api_key_last_used(
@@ -3951,5 +4200,320 @@ mod tests {
         // "s256". Accept only the exact casing.
         assert!(super::validate_pkce_method("c", "s256").is_err());
         assert!(super::validate_pkce_method("c", "S256").is_ok());
+    }
+
+    // ----------------------------------------------------------------------
+    // External-auth proactive refresh / validate-URL
+    // ----------------------------------------------------------------------
+
+    mod external_auth_tests {
+        use super::super::*;
+        use super::MockStore;
+        use async_trait::async_trait;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        /// Configurable fake provider adapter for exercising
+        /// `refresh_if_expiring` and `validate_url` without network IO.
+        struct FakeAdapter {
+            refresh_calls: AtomicUsize,
+            validate_calls: AtomicUsize,
+            next_refresh: Mutex<Option<Result<ExternalAuthTokenSet, ExternalAuthServiceError>>>,
+            next_validate: Mutex<Option<Result<ExternalAuthValidation, ExternalAuthServiceError>>>,
+        }
+
+        impl FakeAdapter {
+            fn new() -> Self {
+                Self {
+                    refresh_calls: AtomicUsize::new(0),
+                    validate_calls: AtomicUsize::new(0),
+                    next_refresh: Mutex::new(None),
+                    next_validate: Mutex::new(None),
+                }
+            }
+
+            fn set_refresh(&self, outcome: Result<ExternalAuthTokenSet, ExternalAuthServiceError>) {
+                if let Ok(mut slot) = self.next_refresh.lock() {
+                    *slot = Some(outcome);
+                }
+            }
+
+            fn set_validate(
+                &self,
+                outcome: Result<ExternalAuthValidation, ExternalAuthServiceError>,
+            ) {
+                if let Ok(mut slot) = self.next_validate.lock() {
+                    *slot = Some(outcome);
+                }
+            }
+        }
+
+        #[async_trait]
+        impl ExternalAuthProviderAdapter for FakeAdapter {
+            async fn authorize_device(
+                &self,
+                _provider: &ExternalAuthLinkProvider,
+            ) -> Result<ExternalAuthDevice, ExternalAuthServiceError> {
+                Err(ExternalAuthServiceError::Internal("unused".into()))
+            }
+
+            async fn exchange_callback_code(
+                &self,
+                _provider: &ExternalAuthLinkProvider,
+                _code: &str,
+            ) -> Result<ExternalAuthTokenSet, ExternalAuthServiceError> {
+                Err(ExternalAuthServiceError::Internal("unused".into()))
+            }
+
+            async fn exchange_device_code(
+                &self,
+                _provider: &ExternalAuthLinkProvider,
+                _request: &ExternalAuthDeviceExchangeRequest,
+            ) -> Result<ExternalAuthTokenSet, ExternalAuthServiceError> {
+                Err(ExternalAuthServiceError::Internal("unused".into()))
+            }
+
+            async fn refresh_token(
+                &self,
+                _provider: &ExternalAuthLinkProvider,
+                _link: &ExternalAuthLinkRecord,
+            ) -> Result<ExternalAuthTokenSet, ExternalAuthServiceError> {
+                self.refresh_calls.fetch_add(1, Ordering::SeqCst);
+                let Ok(mut slot) = self.next_refresh.lock() else {
+                    return Err(ExternalAuthServiceError::Internal("lock".into()));
+                };
+                slot.take().unwrap_or_else(|| {
+                    Err(ExternalAuthServiceError::Internal(
+                        "no refresh outcome configured".into(),
+                    ))
+                })
+            }
+
+            async fn validate(
+                &self,
+                _provider: &ExternalAuthLinkProvider,
+                _access_token: &str,
+            ) -> Result<ExternalAuthValidation, ExternalAuthServiceError> {
+                self.validate_calls.fetch_add(1, Ordering::SeqCst);
+                let Ok(mut slot) = self.next_validate.lock() else {
+                    return Err(ExternalAuthServiceError::Internal("lock".into()));
+                };
+                slot.take().unwrap_or_else(|| {
+                    Err(ExternalAuthServiceError::Internal(
+                        "no validate outcome configured".into(),
+                    ))
+                })
+            }
+
+            async fn revoke(
+                &self,
+                _provider: &ExternalAuthLinkProvider,
+                _link: &ExternalAuthLinkRecord,
+            ) -> Result<bool, ExternalAuthServiceError> {
+                Ok(false)
+            }
+        }
+
+        fn refreshable_provider() -> ExternalAuthLinkProvider {
+            ExternalAuthLinkProvider {
+                id: "github".to_owned(),
+                provider_type: "github".to_owned(),
+                device: false,
+                display_name: "GitHub".to_owned(),
+                display_icon: String::new(),
+                allow_refresh: true,
+                no_refresh: false,
+                allow_validate: true,
+                supports_revocation: false,
+                code_challenge_methods_supported: vec![],
+                authorize_url: String::new(),
+                token_url: "https://example.test/token".to_owned(),
+                device_authorization_url: String::new(),
+                validate_url: "https://example.test/validate".to_owned(),
+                revoke_url: String::new(),
+                user_url: String::new(),
+                app_installations_url: String::new(),
+                app_install_url: String::new(),
+                client_id: "cid".to_owned(),
+                client_secret: "csec".to_owned(),
+                callback_url: String::new(),
+                scopes: vec![],
+            }
+        }
+
+        fn link(expires_in: time::Duration) -> ExternalAuthLinkRecord {
+            let now = OffsetDateTime::now_utc();
+            ExternalAuthLinkRecord {
+                provider_id: "github".to_owned(),
+                created_at: now,
+                updated_at: now,
+                has_refresh_token: true,
+                expires: now.checked_add(expires_in).unwrap_or(now),
+                access_token: "access".to_owned(),
+                refresh_token: "refresh".to_owned(),
+                token_type: "bearer".to_owned(),
+                scopes: vec![],
+                authenticated: true,
+                validate_error: String::new(),
+                refresh_error: String::new(),
+                last_validated_at: None,
+                last_refreshed_at: None,
+                user: None,
+                installations: vec![],
+                app_installable: false,
+            }
+        }
+
+        #[tokio::test]
+        async fn refresh_if_expiring_noop_when_not_near_expiry() {
+            let store = MockStore::default();
+            let adapter = Arc::new(FakeAdapter::new());
+            let svc = ExternalAuthService::with_adapter(store, adapter.clone());
+
+            let provider = refreshable_provider();
+            // Expires well beyond the 5-minute proactive window.
+            let original = link(time::Duration::hours(2));
+
+            let out = svc
+                .refresh_if_expiring(&provider, Uuid::new_v4(), &original)
+                .await;
+
+            assert!(out.is_ok(), "refresh_if_expiring must succeed");
+            let returned = out.unwrap_or_else(|_| original.clone());
+            assert_eq!(returned, original, "token should be returned unchanged");
+            assert_eq!(
+                adapter.refresh_calls.load(Ordering::SeqCst),
+                0,
+                "no provider call should be made when token is not near expiry",
+            );
+        }
+
+        #[tokio::test]
+        async fn refresh_if_expiring_refreshes_when_near_expiry() {
+            let store = MockStore::default();
+            let adapter = Arc::new(FakeAdapter::new());
+            let svc = ExternalAuthService::with_adapter(store, adapter.clone());
+
+            let provider = refreshable_provider();
+            // 1 minute until expiry — inside the 5-minute proactive window.
+            let original = link(time::Duration::seconds(60));
+            let user_id = Uuid::new_v4();
+
+            let new_expiry = OffsetDateTime::now_utc()
+                .checked_add(time::Duration::hours(1))
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            adapter.set_refresh(Ok(ExternalAuthTokenSet {
+                access_token: "new-access".to_owned(),
+                refresh_token: "new-refresh".to_owned(),
+                token_type: "bearer".to_owned(),
+                scopes: vec![],
+                expires_at: new_expiry,
+            }));
+
+            let out = svc.refresh_if_expiring(&provider, user_id, &original).await;
+
+            assert!(out.is_ok(), "refresh_if_expiring must succeed");
+            let returned = out.unwrap_or_else(|_| original.clone());
+            assert_eq!(returned.access_token, "new-access");
+            assert_eq!(returned.refresh_token, "new-refresh");
+            assert_eq!(
+                adapter.refresh_calls.load(Ordering::SeqCst),
+                1,
+                "provider refresh endpoint must be hit exactly once",
+            );
+            // Record should be persisted to the store.
+            let persisted = svc
+                .store
+                .find_external_auth_link(user_id, "github")
+                .await
+                .unwrap_or(None);
+            assert!(persisted.is_some(), "refreshed link must be persisted");
+            let persisted = persisted.unwrap_or_else(|| original.clone());
+            assert_eq!(persisted.access_token, "new-access");
+        }
+
+        #[tokio::test]
+        async fn refresh_if_expiring_returns_original_on_failure() {
+            let store = MockStore::default();
+            let adapter = Arc::new(FakeAdapter::new());
+            let svc = ExternalAuthService::with_adapter(store, adapter.clone());
+
+            let provider = refreshable_provider();
+            let original = link(time::Duration::seconds(60));
+
+            adapter.set_refresh(Err(ExternalAuthServiceError::Internal("boom".to_owned())));
+
+            let out = svc
+                .refresh_if_expiring(&provider, Uuid::new_v4(), &original)
+                .await;
+
+            assert!(
+                out.is_ok(),
+                "refresh failure must not propagate — callers keep using the old token",
+            );
+            let returned = out.unwrap_or_else(|_| original.clone());
+            assert_eq!(
+                returned, original,
+                "on failure the original token is returned unchanged",
+            );
+            assert_eq!(
+                adapter.refresh_calls.load(Ordering::SeqCst),
+                1,
+                "refresh endpoint should have been attempted once",
+            );
+        }
+
+        #[tokio::test]
+        async fn validate_url_caches_successful_probe() {
+            let store = MockStore::default();
+            let adapter = Arc::new(FakeAdapter::new());
+            let svc = ExternalAuthService::with_adapter(store, adapter.clone());
+
+            let provider = refreshable_provider();
+            let current = link(time::Duration::hours(1));
+
+            adapter.set_validate(Ok(ExternalAuthValidation {
+                authenticated: true,
+                validate_error: String::new(),
+                user: None,
+                installations: vec![],
+                app_installable: false,
+            }));
+
+            let first = svc.validate_url(&provider, &current).await;
+            assert!(first.is_ok());
+            assert!(first.unwrap_or(false));
+
+            // A second call within the TTL should be served from the cache
+            // without hitting the adapter again.
+            let second = svc.validate_url(&provider, &current).await;
+            assert!(second.is_ok());
+            assert!(second.unwrap_or(false));
+
+            assert_eq!(
+                adapter.validate_calls.load(Ordering::SeqCst),
+                1,
+                "cache must suppress the second probe",
+            );
+        }
+
+        #[tokio::test]
+        async fn validate_url_returns_true_when_no_url_configured() {
+            let store = MockStore::default();
+            let adapter = Arc::new(FakeAdapter::new());
+            let svc = ExternalAuthService::with_adapter(store, adapter.clone());
+
+            let mut provider = refreshable_provider();
+            provider.validate_url.clear();
+            let current = link(time::Duration::hours(1));
+
+            let result = svc.validate_url(&provider, &current).await;
+            assert!(result.is_ok());
+            assert!(result.unwrap_or(false));
+            assert_eq!(
+                adapter.validate_calls.load(Ordering::SeqCst),
+                0,
+                "no probe must be issued when the provider lacks a validate_url",
+            );
+        }
     }
 }
