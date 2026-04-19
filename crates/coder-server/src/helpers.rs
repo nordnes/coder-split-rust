@@ -244,6 +244,7 @@ pub(crate) async fn record_audit(
             actor_user_id: actor.map(|user| user.id),
             target_id,
             summary: summary.into(),
+            diff: None,
         })
         .await;
 }

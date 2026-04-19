@@ -212,6 +212,7 @@ mod tests {
             actor_user_id: Some(Uuid::new_v4()),
             target_id: None,
             summary: format!("test: {}", action.as_str()),
+            diff: None,
         }
     }
 

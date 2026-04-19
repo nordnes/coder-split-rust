@@ -4,6 +4,7 @@ members = [
     "apps/coderd",
     "crates/coder-agent-rpc",
     "crates/coder-audit",
+    "crates/coder-audit-derive",
     "crates/coder-auth",
     "crates/coder-connectivity",
     "crates/coder-core",
@@ -85,6 +86,9 @@ p256 = { version = "0.13", default-features = false, features = ["arithmetic", "
 web-push = "0.11"
 lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "tokio1", "tokio1-rustls", "ring", "webpki-roots", "builder", "pool", "hostname"] }
 yamux = "0.13"
+syn = { version = "2.0", features = ["full"] }
+quote = "1.0"
+proc-macro2 = "1.0"
 criterion = { version = "0.5", features = ["html_reports"] }
 tar = { version = "0.4", default-features = false }
 flate2 = { version = "1.0", default-features = false, features = ["rust_backend"] }

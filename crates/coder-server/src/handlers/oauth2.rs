@@ -1545,6 +1545,7 @@ pub(crate) async fn post_oauth2_revoke(
                 summary: format!(
                     "revoked oauth2 provider app token ({hint}, prefix={prefix_hex}, client_id={client_id})"
                 ),
+                diff: None,
             })
             .await;
     }
