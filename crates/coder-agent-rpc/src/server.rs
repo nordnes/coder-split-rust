@@ -194,6 +194,36 @@ async fn dispatch<H: AgentRpcHandler + ?Sized>(
             let resp = handler.batch_update_app_health(req).await?;
             encode(&resp)
         }
+        "/coder.agent.v2.Agent/UpdateStats" => {
+            let req = decode::<agent::UpdateStatsRequest>(body)?;
+            let resp = handler.update_stats(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/UpdateLifecycle" => {
+            let req = decode::<agent::UpdateLifecycleRequest>(body)?;
+            let resp = handler.update_lifecycle(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/BatchCreateLogs" => {
+            let req = decode::<agent::BatchCreateLogsRequest>(body)?;
+            let resp = handler.batch_create_logs(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/BatchUpdateMetadata" => {
+            let req = decode::<agent::BatchUpdateMetadataRequest>(body)?;
+            let resp = handler.batch_update_metadata(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/ScriptCompleted" => {
+            let req = decode::<agent::WorkspaceAgentScriptCompletedRequest>(body)?;
+            let resp = handler.script_completed(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/GetServiceBanner" => {
+            let req = decode::<agent::GetServiceBannerRequest>(body)?;
+            let resp = handler.get_service_banner(req).await?;
+            encode(&resp)
+        }
         other => Err(RpcError::Unimplemented(other.to_string())),
     }
 }
@@ -304,6 +334,84 @@ mod tests {
         )
         .await?;
         let _ = agent::BatchUpdateAppHealthResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_update_stats() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/UpdateStats",
+            &agent::UpdateStatsRequest { stats: None }.encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::UpdateStatsResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_update_lifecycle_echoes_payload() -> DrpcResult<()> {
+        let req = agent::UpdateLifecycleRequest {
+            lifecycle: Some(agent::Lifecycle {
+                state: agent::lifecycle::State::Ready as i32,
+                changed_at: None,
+            }),
+        };
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/UpdateLifecycle",
+            &req.encode_to_vec(),
+        )
+        .await?;
+        let resp = agent::Lifecycle::decode(&body[..])?;
+        assert_eq!(resp.state, agent::lifecycle::State::Ready as i32);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_batch_create_logs() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/BatchCreateLogs",
+            &agent::BatchCreateLogsRequest {
+                log_source_id: vec![],
+                logs: vec![],
+            }
+            .encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::BatchCreateLogsResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_batch_update_metadata() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/BatchUpdateMetadata",
+            &agent::BatchUpdateMetadataRequest { metadata: vec![] }.encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::BatchUpdateMetadataResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_script_completed() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/ScriptCompleted",
+            &agent::WorkspaceAgentScriptCompletedRequest { timing: None }.encode_to_vec(),
+        )
+        .await?;
+        let _ = agent::WorkspaceAgentScriptCompletedResponse::decode(&body[..])?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn roundtrip_get_service_banner() -> DrpcResult<()> {
+        let body = roundtrip(
+            "/coder.agent.v2.Agent/GetServiceBanner",
+            &agent::GetServiceBannerRequest {}.encode_to_vec(),
+        )
+        .await?;
+        let resp = agent::ServiceBanner::decode(&body[..])?;
+        assert!(!resp.enabled);
         Ok(())
     }
 

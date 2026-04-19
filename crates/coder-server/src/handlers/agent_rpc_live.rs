@@ -22,8 +22,22 @@ use coder_agent_rpc::proto::agent_v2 as agent;
 use coder_agent_rpc::proto::tailnet_v2 as tailnet;
 use coder_core::AppStore;
 use coder_core::config::DerpRegionConfig;
+use coder_core::pubsub::PubSub;
+use time::OffsetDateTime;
 use url::Url;
 use uuid::Uuid;
+
+/// Default agent stats reporting interval. Mirrors
+/// `coder/cli/server.go` → `--agent-stats-refresh-interval` default of 30s.
+const DEFAULT_AGENT_STATS_REFRESH_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(30);
+
+/// Metadata key size caps from `coder/coderd/agentapi/metadata.go`.
+/// Values here must mirror the Go constants so that clients see the same
+/// truncation / rejection behaviour.
+const MAX_ALL_METADATA_KEYS_LEN: usize = 6144;
+const MAX_METADATA_VALUE_LEN: usize = 2048;
+const MAX_METADATA_ERROR_LEN: usize = MAX_METADATA_VALUE_LEN;
 
 /// Deployment-level configuration forwarded to the `GetManifest` reply.
 ///
@@ -64,6 +78,10 @@ pub(crate) struct LiveAgentHandler {
     pub(crate) store: Arc<dyn AppStore>,
     pub(crate) api_version: String,
     pub(crate) deployment: ManifestDeploymentConfig,
+    /// Pubsub handle for publishing workspace/agent events from mutating
+    /// RPCs (lifecycle, metadata, logs). Optional — unit tests and older
+    /// call sites may omit it.
+    pub(crate) pubsub: Option<Arc<dyn PubSub>>,
 }
 
 impl LiveAgentHandler {
@@ -78,7 +96,14 @@ impl LiveAgentHandler {
             store,
             api_version,
             deployment,
+            pubsub: None,
         }
+    }
+
+    /// Attaches a pubsub handle so mutating RPCs can publish change events.
+    pub(crate) fn with_pubsub(mut self, pubsub: Arc<dyn PubSub>) -> Self {
+        self.pubsub = Some(pubsub);
+        self
     }
 }
 
@@ -553,6 +578,423 @@ impl AgentRpcHandler for LiveAgentHandler {
         }
 
         Ok(agent::BatchUpdateAppHealthResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/stats.go::UpdateStats`.
+    ///
+    /// Stats are persisted to `workspace_agent_stats` via
+    /// [`AppStore::insert_workspace_agent_stat`]. An empty request body (no
+    /// `stats` payload) simply returns the refresh interval, matching the
+    /// "report interval poll" behaviour of the Go handler.
+    async fn update_stats(
+        &self,
+        req: agent::UpdateStatsRequest,
+    ) -> Result<agent::UpdateStatsResponse, RpcError> {
+        let response = agent::UpdateStatsResponse {
+            report_interval: Some(prost_types::Duration {
+                seconds: DEFAULT_AGENT_STATS_REFRESH_INTERVAL.as_secs() as i64,
+                nanos: 0,
+            }),
+        };
+
+        let Some(stats) = req.stats else {
+            // Empty body — agent is just asking for the reporting interval.
+            return Ok(response);
+        };
+
+        // Resolve owning workspace so we can populate user/workspace/template.
+        let workspace = self
+            .store
+            .find_workspace_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find workspace: {e}")))?;
+        let (user_id, workspace_id, template_id) = match workspace.as_ref() {
+            Some(w) => (Some(w.owner_id), Some(w.id), Some(w.template_id)),
+            None => (None, None, None),
+        };
+
+        let connections_by_proto = serde_json::to_value(&stats.connections_by_proto)
+            .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
+
+        let input = coder_core::WorkspaceAgentStatInput {
+            id: Uuid::new_v4(),
+            created_at: OffsetDateTime::now_utc(),
+            user_id,
+            workspace_id,
+            template_id,
+            agent_id: self.agent_id,
+            connections_by_proto,
+            connection_count: stats.connection_count,
+            rx_packets: stats.rx_packets,
+            rx_bytes: stats.rx_bytes,
+            tx_packets: stats.tx_packets,
+            tx_bytes: stats.tx_bytes,
+            session_count_vscode: stats.session_count_vscode,
+            session_count_jetbrains: stats.session_count_jetbrains,
+            session_count_reconnecting_pty: stats.session_count_reconnecting_pty,
+            session_count_ssh: stats.session_count_ssh,
+            connection_median_latency_ms: stats.connection_median_latency_ms,
+            usage: false,
+        };
+
+        self.store
+            .insert_workspace_agent_stat(&input)
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert agent stats: {e}")))?;
+
+        Ok(response)
+    }
+
+    /// Ports `coder/coderd/agentapi/lifecycle.go::UpdateLifecycle`.
+    ///
+    /// Persists the agent's lifecycle state, deriving `started_at`/`ready_at`
+    /// from the reported transition, then publishes an
+    /// `AgentLifecycleUpdate` pubsub event when a handle is attached.
+    async fn update_lifecycle(
+        &self,
+        req: agent::UpdateLifecycleRequest,
+    ) -> Result<agent::Lifecycle, RpcError> {
+        let lifecycle = req
+            .lifecycle
+            .ok_or_else(|| RpcError::InvalidArgument("lifecycle is required".into()))?;
+
+        let state_str = match agent::lifecycle::State::try_from(lifecycle.state) {
+            Ok(agent::lifecycle::State::Created) => "created",
+            Ok(agent::lifecycle::State::Starting) => "starting",
+            Ok(agent::lifecycle::State::StartTimeout) => "start_timeout",
+            Ok(agent::lifecycle::State::StartError) => "start_error",
+            Ok(agent::lifecycle::State::Ready) => "ready",
+            Ok(agent::lifecycle::State::ShuttingDown) => "shutting_down",
+            Ok(agent::lifecycle::State::ShutdownTimeout) => "shutdown_timeout",
+            Ok(agent::lifecycle::State::ShutdownError) => "shutdown_error",
+            Ok(agent::lifecycle::State::Off) => "off",
+            Ok(agent::lifecycle::State::Unspecified) | Err(_) => {
+                return Err(RpcError::InvalidArgument(format!(
+                    "unknown lifecycle state {}",
+                    lifecycle.state
+                )));
+            }
+        };
+
+        // Derive started_at / ready_at transitions, mirroring the Go handler
+        // at coder/coderd/agentapi/lifecycle.go L95-L108.
+        let now = OffsetDateTime::now_utc();
+        let changed_at = lifecycle
+            .changed_at
+            .as_ref()
+            .and_then(proto_timestamp_to_time)
+            .unwrap_or(now);
+
+        let (started_at, ready_at) = match state_str {
+            "starting" => (Some(changed_at), None),
+            "ready" | "start_timeout" | "start_error" => (Some(changed_at), Some(changed_at)),
+            _ => (None, None),
+        };
+
+        self.store
+            .update_workspace_agent_lifecycle_state(self.agent_id, state_str, started_at, ready_at)
+            .await
+            .map_err(|e| RpcError::Internal(format!("update lifecycle: {e}")))?;
+
+        if let Some(pubsub) = self.pubsub.as_ref() {
+            let channel = coder_core::pubsub::workspace_agent_channel(self.agent_id);
+            let _ = pubsub.publish(&channel, b"lifecycle_update").await;
+        }
+
+        Ok(agent::Lifecycle {
+            state: lifecycle.state,
+            changed_at: Some(prost_types::Timestamp {
+                seconds: changed_at.unix_timestamp(),
+                nanos: changed_at.nanosecond() as i32,
+            }),
+        })
+    }
+
+    /// Ports `coder/coderd/agentapi/logs.go::BatchCreateLogs`.
+    ///
+    /// The handler reuses the same `insert_workspace_agent_logs` store call
+    /// as the HTTP `PATCH /workspaceagents/me/logs` endpoint and publishes
+    /// new log entries onto the per-agent log channel.
+    async fn batch_create_logs(
+        &self,
+        req: agent::BatchCreateLogsRequest,
+    ) -> Result<agent::BatchCreateLogsResponse, RpcError> {
+        if req.logs.is_empty() {
+            return Ok(agent::BatchCreateLogsResponse::default());
+        }
+
+        let agent_row = self
+            .store
+            .find_workspace_agent_by_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find agent: {e}")))?
+            .ok_or_else(|| RpcError::Internal("workspace agent not found".into()))?;
+        if agent_row.logs_overflowed {
+            return Ok(agent::BatchCreateLogsResponse {
+                log_limit_exceeded: true,
+            });
+        }
+
+        let log_source_id = Uuid::from_slice(&req.log_source_id)
+            .map_err(|e| RpcError::InvalidArgument(format!("parse log source id: {e}")))?;
+
+        let now = OffsetDateTime::now_utc();
+        let entries: Vec<coder_core::InsertAgentLogInput> = req
+            .logs
+            .into_iter()
+            .map(|entry| coder_core::InsertAgentLogInput {
+                created_at: entry
+                    .created_at
+                    .as_ref()
+                    .and_then(proto_timestamp_to_time)
+                    .unwrap_or(now),
+                output: entry.output,
+                // Default unknown levels to "info" to match the Go handler's
+                // tolerant behaviour for older clients.
+                level: match agent::log::Level::try_from(entry.level) {
+                    Ok(agent::log::Level::Trace) => "trace".to_owned(),
+                    Ok(agent::log::Level::Debug) => "debug".to_owned(),
+                    Ok(agent::log::Level::Warn) => "warn".to_owned(),
+                    Ok(agent::log::Level::Error) => "error".to_owned(),
+                    _ => "info".to_owned(),
+                },
+            })
+            .collect();
+
+        let inserted = self
+            .store
+            .insert_workspace_agent_logs(self.agent_id, log_source_id, &entries)
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert agent logs: {e}")))?;
+
+        if let Some(pubsub) = self.pubsub.as_ref() {
+            let channel = coder_core::pubsub::workspace_agent_logs_channel(self.agent_id);
+            for row in &inserted {
+                let api_log = coder_core::api::WorkspaceAgentLog {
+                    id: row.id,
+                    created_at: row.created_at,
+                    output: row.output.clone(),
+                    level: db_log_level_to_api(&row.level),
+                    source_id: row.log_source_id,
+                };
+                let payload = serde_json::to_vec(&api_log).unwrap_or_default();
+                let _ = pubsub.publish(&channel, &payload).await;
+            }
+        }
+
+        Ok(agent::BatchCreateLogsResponse {
+            log_limit_exceeded: false,
+        })
+    }
+
+    /// Ports `coder/coderd/agentapi/metadata.go::BatchUpdateMetadata`.
+    ///
+    /// Performs the same key-length cap and value/error truncation as the
+    /// Go handler, then upserts via
+    /// [`AppStore::upsert_workspace_agent_metadata`] and publishes a
+    /// metadata-change event.
+    async fn batch_update_metadata(
+        &self,
+        req: agent::BatchUpdateMetadataRequest,
+    ) -> Result<agent::BatchUpdateMetadataResponse, RpcError> {
+        let collected_at = OffsetDateTime::now_utc();
+        let mut all_keys_len = 0usize;
+        let mut entries: Vec<coder_core::UpsertAgentMetadataEntry> =
+            Vec::with_capacity(req.metadata.len());
+        let mut overflow = false;
+        for md in req.metadata {
+            all_keys_len = all_keys_len.saturating_add(md.key.len());
+            if all_keys_len > MAX_ALL_METADATA_KEYS_LEN {
+                overflow = true;
+                break;
+            }
+            let (value, mut error) = match md.result {
+                Some(r) => (r.value, r.error),
+                None => (String::new(), String::new()),
+            };
+
+            // Overwrite `error` if the value or error payload is oversized,
+            // mirroring the Go handler.
+            let value = if value.len() > MAX_METADATA_VALUE_LEN {
+                error = format!(
+                    "value of {} bytes exceeded {} bytes",
+                    value.len(),
+                    MAX_METADATA_VALUE_LEN
+                );
+                value.chars().take(MAX_METADATA_VALUE_LEN).collect()
+            } else {
+                value
+            };
+            let error = if error.len() > MAX_METADATA_ERROR_LEN {
+                format!(
+                    "error of {} bytes exceeded {} bytes",
+                    error.len(),
+                    MAX_METADATA_ERROR_LEN
+                )
+            } else {
+                error
+            };
+
+            entries.push(coder_core::UpsertAgentMetadataEntry {
+                key: md.key,
+                value,
+                error,
+                // Ignore the agent-provided collected_at to avoid clock skew,
+                // per the Go handler.
+                collected_at,
+            });
+        }
+
+        if !entries.is_empty() {
+            self.store
+                .upsert_workspace_agent_metadata(self.agent_id, &entries)
+                .await
+                .map_err(|e| RpcError::Internal(format!("upsert metadata: {e}")))?;
+
+            if let Some(pubsub) = self.pubsub.as_ref() {
+                let channel = coder_core::pubsub::workspace_agent_metadata_channel(self.agent_id);
+                let _ = pubsub.publish(&channel, b"metadata_update").await;
+            }
+        }
+
+        if overflow {
+            return Err(RpcError::InvalidArgument(format!(
+                "metadata keys of {} bytes exceeded {} bytes",
+                all_keys_len, MAX_ALL_METADATA_KEYS_LEN
+            )));
+        }
+
+        Ok(agent::BatchUpdateMetadataResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/scripts.go::ScriptCompleted`.
+    async fn script_completed(
+        &self,
+        req: agent::WorkspaceAgentScriptCompletedRequest,
+    ) -> Result<agent::WorkspaceAgentScriptCompletedResponse, RpcError> {
+        let timing = req
+            .timing
+            .ok_or_else(|| RpcError::InvalidArgument("script timing is required".into()))?;
+
+        let script_id = Uuid::from_slice(&timing.script_id)
+            .map_err(|e| RpcError::InvalidArgument(format!("script id from bytes: {e}")))?;
+
+        let start = timing
+            .start
+            .as_ref()
+            .and_then(proto_timestamp_to_time)
+            .ok_or_else(|| {
+                RpcError::InvalidArgument("script start time is required and cannot be zero".into())
+            })?;
+        let end = timing
+            .end
+            .as_ref()
+            .and_then(proto_timestamp_to_time)
+            .ok_or_else(|| {
+                RpcError::InvalidArgument("script end time is required and cannot be zero".into())
+            })?;
+        if start > end {
+            return Err(RpcError::InvalidArgument(
+                "script start time cannot be after end time".into(),
+            ));
+        }
+
+        let stage = match agent::timing::Stage::try_from(timing.stage) {
+            Ok(agent::timing::Stage::Start) => "start",
+            Ok(agent::timing::Stage::Stop) => "stop",
+            Ok(agent::timing::Stage::Cron) => "cron",
+            Err(_) => {
+                return Err(RpcError::InvalidArgument(format!(
+                    "unknown timing stage {}",
+                    timing.stage
+                )));
+            }
+        };
+        let status = match agent::timing::Status::try_from(timing.status) {
+            Ok(agent::timing::Status::Ok) => "ok",
+            Ok(agent::timing::Status::ExitFailure) => "exit_failure",
+            Ok(agent::timing::Status::TimedOut) => "timed_out",
+            Ok(agent::timing::Status::PipesLeftOpen) => "pipes_left_open",
+            Err(_) => {
+                return Err(RpcError::InvalidArgument(format!(
+                    "unknown timing status {}",
+                    timing.status
+                )));
+            }
+        };
+
+        self.store
+            .insert_workspace_agent_script_timing(&coder_core::InsertAgentScriptTimingInput {
+                script_id,
+                started_at: start,
+                ended_at: end,
+                exit_code: timing.exit_code,
+                stage: stage.to_owned(),
+                status: status.to_owned(),
+            })
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert script timing: {e}")))?;
+
+        Ok(agent::WorkspaceAgentScriptCompletedResponse::default())
+    }
+
+    /// Ports the deprecated `coder/coderd/agentapi/announcement_banners.go::
+    /// GetServiceBanner` legacy RPC. Reads from the same appearance config as
+    /// [`get_announcement_banners`](#method.get_announcement_banners) and
+    /// returns the `ServiceBanner` from the appearance config — falling back
+    /// to the first announcement banner when the dedicated service banner
+    /// is empty, which matches the Go helper `agentsdk.ProtoFromServiceBanner`.
+    async fn get_service_banner(
+        &self,
+        _req: agent::GetServiceBannerRequest,
+    ) -> Result<agent::ServiceBanner, RpcError> {
+        let cfg = self
+            .store
+            .appearance_config()
+            .await
+            .map_err(|e| RpcError::Internal(format!("fetch appearance: {e}")))?;
+
+        if cfg.service_banner.enabled
+            || !cfg.service_banner.message.is_empty()
+            || !cfg.service_banner.background_color.is_empty()
+        {
+            return Ok(agent::ServiceBanner {
+                enabled: cfg.service_banner.enabled,
+                message: cfg.service_banner.message,
+                background_color: cfg.service_banner.background_color,
+            });
+        }
+        if let Some(first) = cfg.announcement_banners.first() {
+            return Ok(agent::ServiceBanner {
+                enabled: first.enabled,
+                message: first.message.clone(),
+                background_color: first.background_color.clone(),
+            });
+        }
+        Ok(agent::ServiceBanner::default())
+    }
+}
+
+/// Converts a `google.protobuf.Timestamp` to an `OffsetDateTime`. Returns
+/// `None` when the proto value is zero (Go treats this as "unset") or when
+/// the value cannot be represented.
+fn proto_timestamp_to_time(ts: &prost_types::Timestamp) -> Option<OffsetDateTime> {
+    if ts.seconds == 0 && ts.nanos == 0 {
+        return None;
+    }
+    let nanos_total = i128::from(ts.seconds) * 1_000_000_000 + i128::from(ts.nanos);
+    OffsetDateTime::from_unix_timestamp_nanos(nanos_total).ok()
+}
+
+/// Maps a DB `log_level` enum string to the API `LogLevel`. Mirrors the
+/// small enum translator already used by the HTTP logs handler.
+fn db_log_level_to_api(level: &str) -> coder_core::api::LogLevel {
+    match level {
+        "trace" => coder_core::api::LogLevel::Trace,
+        "debug" => coder_core::api::LogLevel::Debug,
+        "warn" => coder_core::api::LogLevel::Warn,
+        "error" => coder_core::api::LogLevel::Error,
+        _ => coder_core::api::LogLevel::Info,
     }
 }
 

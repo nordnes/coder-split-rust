@@ -4046,6 +4046,14 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         icon: &str,
     ) -> Result<WorkspaceAgentLogSourceRow, StorageError>;
 
+    /// Inserts a workspace agent script timing row. Mirrors the Go
+    /// `InsertWorkspaceAgentScriptTimings` query in
+    /// `coder/coderd/database/queries/workspaceagents.sql`.
+    async fn insert_workspace_agent_script_timing(
+        &self,
+        input: &InsertAgentScriptTimingInput,
+    ) -> Result<(), StorageError>;
+
     /// Finds a workspace by agent ID (looks up resource → build → workspace).
     async fn find_workspace_by_agent_id(
         &self,
@@ -5474,6 +5482,25 @@ pub struct UpsertAgentMetadataEntry {
     pub error: String,
     /// Collected-at timestamp.
     pub collected_at: OffsetDateTime,
+}
+
+/// Input for inserting a workspace agent script timing row. Mirrors the
+/// Go `InsertWorkspaceAgentScriptTimings` query parameters in
+/// `coder/coderd/database/queries/workspaceagents.sql`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertAgentScriptTimingInput {
+    /// Script identifier.
+    pub script_id: Uuid,
+    /// Start time.
+    pub started_at: OffsetDateTime,
+    /// End time.
+    pub ended_at: OffsetDateTime,
+    /// Process exit code.
+    pub exit_code: i32,
+    /// Timing stage: `start`, `stop`, `cron`.
+    pub stage: String,
+    /// Timing status: `ok`, `exit_failure`, `timed_out`, `pipes_left_open`.
+    pub status: String,
 }
 
 /// Input for inserting a workspace app status.

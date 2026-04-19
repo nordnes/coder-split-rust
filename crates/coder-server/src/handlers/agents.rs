@@ -1975,9 +1975,18 @@ pub(crate) async fn get_workspace_agent_rpc(
                 .into_response());
         }
         let store_for_drpc = store.clone();
+        let pubsub_for_drpc = pubsub.clone();
         let deployment = crate::handlers::agent_rpc_live::build_manifest_deployment_config(&state);
         return Ok(ws.on_upgrade(move |socket| async move {
-            handle_agent_drpc_socket(socket, agent_id, store_for_drpc, ver, deployment).await;
+            handle_agent_drpc_socket(
+                socket,
+                agent_id,
+                store_for_drpc,
+                ver,
+                deployment,
+                pubsub_for_drpc,
+            )
+            .await;
         }));
     }
 
@@ -2008,16 +2017,20 @@ async fn handle_agent_drpc_socket(
     store: Arc<dyn AppStore>,
     api_version: String,
     deployment: crate::handlers::agent_rpc_live::ManifestDeploymentConfig,
+    pubsub: Arc<dyn coder_core::pubsub::PubSub>,
 ) {
     use futures_util::{SinkExt, StreamExt};
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-    let handler = Arc::new(crate::handlers::agent_rpc_live::LiveAgentHandler::new(
-        agent_id,
-        store,
-        api_version,
-        deployment,
-    ));
+    let handler = Arc::new(
+        crate::handlers::agent_rpc_live::LiveAgentHandler::new(
+            agent_id,
+            store,
+            api_version,
+            deployment,
+        )
+        .with_pubsub(pubsub),
+    );
 
     // Ample buffer: DRPC payloads are small (<64 KiB) but we want to
     // avoid blocking the WebSocket pump on slow yamux consumers.
