@@ -360,6 +360,12 @@ pub struct AppState {
     /// synchronous update path and still exercise `last_used_at`
     /// behaviour correctly.
     pub usage_tracker: Option<Arc<crate::usage_tracker::UsageTracker>>,
+    /// Reconnecting-PTY session store: keeps a scrollback ring buffer per
+    /// `reconnect_id` so WebSocket drops do not kill the user's shell.
+    /// Go reference: `coder/coderd/workspaceagents.go`
+    /// (`workspaceAgentReconnectingPTY`). See
+    /// `docs/backend-gap-analysis-2026-04.md` §B.4 / W2.4.
+    pub reconnecting_pty: Arc<crate::reconnecting_pty::ReconnectingPtyStore>,
 }
 
 impl AppState {
@@ -432,6 +438,7 @@ impl AppState {
             update_checker: None,
             webpusher,
             usage_tracker: None,
+            reconnecting_pty: Arc::new(crate::reconnecting_pty::ReconnectingPtyStore::new()),
         })
     }
 
@@ -4279,6 +4286,21 @@ pub(crate) mod tests {
                 connection_logs: Vec::new(),
                 count: 0,
             })
+        }
+
+        async fn delete_old_connection_logs(
+            &self,
+            _older_than: OffsetDateTime,
+            _limit: i64,
+        ) -> Result<u64, StorageError> {
+            Ok(0)
+        }
+
+        async fn try_acquire_advisory_lock(
+            &self,
+            _lock_id: i64,
+        ) -> Result<Option<Box<dyn coder_core::AdvisoryLock>>, StorageError> {
+            Ok(None)
         }
 
         async fn health_settings(&self) -> Result<HealthSettings, StorageError> {

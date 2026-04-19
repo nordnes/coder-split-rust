@@ -45,6 +45,7 @@ pub(crate) mod instance_identity;
 pub mod metrics;
 pub(crate) mod middleware;
 pub mod rate_limit;
+pub mod reconnecting_pty;
 pub mod replica_manager;
 pub mod update_check;
 pub mod usage_tracker;
