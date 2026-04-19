@@ -875,6 +875,30 @@ pub struct OAuth2ProviderAppRecord {
     /// `None` for apps that were not dynamically registered or for apps
     /// created before the migration that adds this column.
     pub registration_access_token: Option<Vec<u8>>,
+    /// Whether this app is trusted enough to skip the user-facing consent
+    /// screen (W4.38). First-party clients are implicit-approval; third-party
+    /// clients (e.g., those created via dynamic registration) must be
+    /// approved by the end user on first authorize.
+    pub first_party: bool,
+}
+
+/// Pending consent record tying a consent POST to the authorize params the
+/// user agreed to. Persisted by `insert_oauth2_pending_consent` and consumed
+/// by `take_oauth2_pending_consent`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OAuth2PendingConsent {
+    /// App identifier.
+    pub app_id: Uuid,
+    /// End-user identifier.
+    pub user_id: Uuid,
+    /// OAuth2 `state` parameter (verbatim).
+    pub state: String,
+    /// RFC 8707 resource indicator (verbatim).
+    pub resource: String,
+    /// PKCE code challenge (verbatim).
+    pub code_challenge: String,
+    /// PKCE code challenge method (verbatim).
+    pub code_challenge_method: String,
 }
 
 /// Input for creating an OAuth2 provider app.
@@ -890,6 +914,13 @@ pub struct CreateOAuth2ProviderAppInput {
     ///
     /// `None` for dynamically registered clients (RFC 7591).
     pub created_by: Option<Uuid>,
+    /// Whether this app is first-party (auto-approve on authorize).
+    ///
+    /// `true` for apps registered through the authenticated admin API (the
+    /// existing behaviour before the consent screen was added). `false` for
+    /// apps created via RFC 7591 dynamic registration, which must go through
+    /// the user consent flow on first authorize.
+    pub first_party: bool,
 }
 
 /// Input for updating an OAuth2 provider app.

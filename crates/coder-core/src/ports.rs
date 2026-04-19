@@ -35,13 +35,14 @@ use crate::identity::{
     CreateOAuth2ProviderAppInput, CreateOAuth2ProviderAppTokenInput, CreateOrganizationInput,
     CreateOrganizationStoreError, CreateUserInput, CreateUserStoreError, CustomRoleRecord,
     FirstUserRecord, GroupMemberRecord, GroupRecord, InsertOrganizationMemberError,
-    NotificationMessageRecord, OAuth2ProviderAppCodeRecord, OAuth2ProviderAppRecord,
-    OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord, OrgResourceCounts,
-    OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord,
-    TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput, UpdateOrganizationInput,
-    UpdateOrganizationStoreError, UpsertCustomRoleInput, UpsertUserLinkInput, UserAppearanceRecord,
-    UserConfigRecord, UserDeletedRecord, UserLinkRecord, UserListFilter, UserPreferenceRecord,
-    UserRecord, UserStatus, UserStatusChangeRecord, WorkspaceSharingMode,
+    NotificationMessageRecord, OAuth2PendingConsent, OAuth2ProviderAppCodeRecord,
+    OAuth2ProviderAppRecord, OAuth2ProviderAppSecretRecord, OAuth2ProviderAppTokenRecord,
+    OrgResourceCounts, OrganizationMemberListFilter, OrganizationMemberRecord, OrganizationRecord,
+    PasswordUserRecord, TokenConfigRecord, UpdateGroupInput, UpdateOAuth2ProviderAppInput,
+    UpdateOrganizationInput, UpdateOrganizationStoreError, UpsertCustomRoleInput,
+    UpsertUserLinkInput, UserAppearanceRecord, UserConfigRecord, UserDeletedRecord, UserLinkRecord,
+    UserListFilter, UserPreferenceRecord, UserRecord, UserStatus, UserStatusChangeRecord,
+    WorkspaceSharingMode,
 };
 use crate::provisioner::{
     AcquireProvisionerJobInput, CancelProvisionerJobInput, CompleteProvisionerJobInput,
@@ -2141,6 +2142,45 @@ pub trait IdentityStore: Send + Sync {
         app_id: Uuid,
         hash: &[u8],
     ) -> Result<(), StorageError>;
+
+    /// Returns whether the given user has approved the given OAuth2 app
+    /// (consent screen, W4.38). `true` means the authorize flow can skip the
+    /// consent prompt for this pairing.
+    async fn has_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError>;
+
+    /// Records that `user_id` has approved `app_id` with the given scope
+    /// string. Idempotent — a repeat approval updates the existing row.
+    async fn insert_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        scope: &str,
+    ) -> Result<(), StorageError>;
+
+    /// Stores a pending consent nonce tying a consent POST to the authorize
+    /// parameters the user agreed to (W4.38). Returns the generated nonce.
+    async fn insert_oauth2_pending_consent(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        state: &str,
+        resource: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StorageError>;
+
+    /// Consumes a pending consent by nonce. Returns the stored consent data
+    /// if the nonce exists and has not expired; returns `None` otherwise.
+    /// The row is deleted from the store on successful consumption.
+    async fn take_oauth2_pending_consent(
+        &self,
+        nonce: Uuid,
+    ) -> Result<Option<OAuth2PendingConsent>, StorageError>;
 
     /// Lists secrets for an OAuth2 provider app.
     async fn list_oauth2_provider_app_secrets(
@@ -4661,6 +4701,45 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         hash: &[u8],
     ) -> Result<(), StorageError>;
 
+    /// Returns whether the given user has approved the given OAuth2 app
+    /// (consent screen, W4.38). `true` means the authorize flow can skip the
+    /// consent prompt for this pairing.
+    async fn has_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError>;
+
+    /// Records that `user_id` has approved `app_id` with the given scope
+    /// string. Idempotent — a repeat approval updates the existing row.
+    async fn insert_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        scope: &str,
+    ) -> Result<(), StorageError>;
+
+    /// Stores a pending consent nonce tying a consent POST to the authorize
+    /// parameters the user agreed to (W4.38). Returns the generated nonce.
+    async fn insert_oauth2_pending_consent(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        state: &str,
+        resource: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StorageError>;
+
+    /// Consumes a pending consent by nonce. Returns the stored consent data
+    /// if the nonce exists and has not expired; returns `None` otherwise.
+    /// The row is deleted from the store on successful consumption.
+    async fn take_oauth2_pending_consent(
+        &self,
+        nonce: Uuid,
+    ) -> Result<Option<OAuth2PendingConsent>, StorageError>;
+
     /// Lists secrets for an OAuth2 provider app.
     async fn list_oauth2_provider_app_secrets(
         &self,
@@ -6376,6 +6455,53 @@ where
         AppStore::update_oauth2_provider_app_registration_token(self, app_id, hash).await
     }
 
+    async fn has_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        AppStore::has_oauth2_provider_app_user_approval(self, app_id, user_id).await
+    }
+
+    async fn insert_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        scope: &str,
+    ) -> Result<(), StorageError> {
+        AppStore::insert_oauth2_provider_app_user_approval(self, app_id, user_id, scope).await
+    }
+
+    async fn insert_oauth2_pending_consent(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        state: &str,
+        resource: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StorageError> {
+        AppStore::insert_oauth2_pending_consent(
+            self,
+            app_id,
+            user_id,
+            state,
+            resource,
+            code_challenge,
+            code_challenge_method,
+            expires_at,
+        )
+        .await
+    }
+
+    async fn take_oauth2_pending_consent(
+        &self,
+        nonce: Uuid,
+    ) -> Result<Option<OAuth2PendingConsent>, StorageError> {
+        AppStore::take_oauth2_pending_consent(self, nonce).await
+    }
+
     async fn list_oauth2_provider_app_secrets(
         &self,
         app_id: Uuid,
@@ -7015,6 +7141,57 @@ where
         (**self)
             .update_oauth2_provider_app_registration_token(app_id, hash)
             .await
+    }
+
+    async fn has_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        (**self)
+            .has_oauth2_provider_app_user_approval(app_id, user_id)
+            .await
+    }
+
+    async fn insert_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        scope: &str,
+    ) -> Result<(), StorageError> {
+        (**self)
+            .insert_oauth2_provider_app_user_approval(app_id, user_id, scope)
+            .await
+    }
+
+    async fn insert_oauth2_pending_consent(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        state: &str,
+        resource: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StorageError> {
+        (**self)
+            .insert_oauth2_pending_consent(
+                app_id,
+                user_id,
+                state,
+                resource,
+                code_challenge,
+                code_challenge_method,
+                expires_at,
+            )
+            .await
+    }
+
+    async fn take_oauth2_pending_consent(
+        &self,
+        nonce: Uuid,
+    ) -> Result<Option<OAuth2PendingConsent>, StorageError> {
+        (**self).take_oauth2_pending_consent(nonce).await
     }
 
     async fn list_oauth2_provider_app_secrets(

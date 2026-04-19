@@ -7438,7 +7438,7 @@ impl AppStore for PostgresStore {
         &self,
     ) -> Result<Vec<OAuth2ProviderAppRecord>, StorageError> {
         let rows = sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
-            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token
+            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token, first_party
              FROM oauth2_provider_apps
              ORDER BY (name, id) ASC",
         )
@@ -7455,14 +7455,15 @@ impl AppStore for PostgresStore {
         input: &CreateOAuth2ProviderAppInput,
     ) -> Result<OAuth2ProviderAppRecord, StorageError> {
         let row = sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
-            "INSERT INTO oauth2_provider_apps (name, icon, callback_url, created_by)
-             VALUES ($1, $2, $3, $4)
-             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token",
+            "INSERT INTO oauth2_provider_apps (name, icon, callback_url, created_by, first_party)
+             VALUES ($1, $2, $3, $4, $5)
+             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token, first_party",
         )
         .bind(&input.name)
         .bind(&input.icon)
         .bind(&input.callback_url)
         .bind(input.created_by)
+        .bind(input.first_party)
         .fetch_one(&self.pool)
         .await
         .map_err(storage_error)?;
@@ -7476,7 +7477,7 @@ impl AppStore for PostgresStore {
         app_id: Uuid,
     ) -> Result<Option<OAuth2ProviderAppRecord>, StorageError> {
         sqlx::query_as::<_, StoredOAuth2ProviderAppRow>(
-            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token
+            "SELECT id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token, first_party
              FROM oauth2_provider_apps WHERE id = $1",
         )
         .bind(app_id)
@@ -7499,7 +7500,7 @@ impl AppStore for PostgresStore {
                 callback_url = $4,
                 redirect_uris = $5
              WHERE id = $1
-             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token",
+             RETURNING id, created_at, updated_at, name, icon, callback_url, redirect_uris, created_by, registration_access_token, first_party",
         )
         .bind(input.id)
         .bind(&input.name)
@@ -7535,6 +7536,113 @@ impl AppStore for PostgresStore {
             .await
             .map_err(storage_error)?;
         Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn has_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+    ) -> Result<bool, StorageError> {
+        let row: Option<(Uuid,)> = sqlx::query_as(
+            "SELECT app_id FROM oauth2_provider_app_user_approvals
+             WHERE app_id = $1 AND user_id = $2
+             LIMIT 1",
+        )
+        .bind(app_id)
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(row.is_some())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_oauth2_provider_app_user_approval(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        scope: &str,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "INSERT INTO oauth2_provider_app_user_approvals (app_id, user_id, scope)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (app_id, user_id) DO UPDATE
+             SET scope = EXCLUDED.scope, approved_at = NOW()",
+        )
+        .bind(app_id)
+        .bind(user_id)
+        .bind(scope)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_oauth2_pending_consent(
+        &self,
+        app_id: Uuid,
+        user_id: Uuid,
+        state: &str,
+        resource: &str,
+        code_challenge: &str,
+        code_challenge_method: &str,
+        expires_at: OffsetDateTime,
+    ) -> Result<Uuid, StorageError> {
+        let nonce = Uuid::new_v4();
+        sqlx::query(
+            "INSERT INTO oauth2_provider_app_pending_consents
+                (nonce, app_id, user_id, state, resource,
+                 code_challenge, code_challenge_method, expires_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+        )
+        .bind(nonce)
+        .bind(app_id)
+        .bind(user_id)
+        .bind(state)
+        .bind(resource)
+        .bind(code_challenge)
+        .bind(code_challenge_method)
+        .bind(expires_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(nonce)
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn take_oauth2_pending_consent(
+        &self,
+        nonce: Uuid,
+    ) -> Result<Option<OAuth2PendingConsent>, StorageError> {
+        let row: Option<(Uuid, Uuid, String, String, String, String, OffsetDateTime)> =
+            sqlx::query_as(
+                "DELETE FROM oauth2_provider_app_pending_consents
+                 WHERE nonce = $1
+                 RETURNING app_id, user_id, state, resource,
+                     code_challenge, code_challenge_method, expires_at",
+            )
+            .bind(nonce)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(storage_error)?;
+
+        match row {
+            Some((app_id, user_id, state, resource, challenge, method, expires_at))
+                if expires_at > OffsetDateTime::now_utc() =>
+            {
+                Ok(Some(OAuth2PendingConsent {
+                    app_id,
+                    user_id,
+                    state,
+                    resource,
+                    code_challenge: challenge,
+                    code_challenge_method: method,
+                }))
+            }
+            _ => Ok(None),
+        }
     }
 
     // ----- OAuth2 Provider App Secrets -----

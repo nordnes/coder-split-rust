@@ -1380,6 +1380,10 @@ pub fn build_router(
             "/oauth2/authorize",
             get(get_oauth2_authorize).post(post_oauth2_authorize),
         )
+        .route(
+            "/oauth2/authorize/consent",
+            post(post_oauth2_authorize_consent),
+        )
         .route("/oauth2/tokens", post(post_oauth2_token).delete(delete_oauth2_tokens))
         // route_layer runs *after* routing so MatchedPath is populated.
         .route_layer(middleware::from_fn(prometheus_middleware));
@@ -1970,6 +1974,10 @@ pub(crate) mod tests {
             Mutex<HashMap<Uuid, coder_core::identity::OAuth2ProviderAppSecretRecord>>,
         oauth2_app_codes: Mutex<HashMap<Uuid, coder_core::identity::OAuth2ProviderAppCodeRecord>>,
         oauth2_app_tokens: Mutex<HashMap<Uuid, coder_core::identity::OAuth2ProviderAppTokenRecord>>,
+        // W4.38: consent screen approvals and short-lived pending consents.
+        oauth2_user_approvals: Mutex<std::collections::HashSet<(Uuid, Uuid)>>,
+        oauth2_pending_consents:
+            Mutex<HashMap<Uuid, (coder_core::identity::OAuth2PendingConsent, OffsetDateTime)>>,
         // Agent-related fields
         workspace_agents: Mutex<HashMap<Uuid, WorkspaceAgentRow>>,
         workspace_apps: Mutex<HashMap<Uuid, WorkspaceAppRow>>,
@@ -2083,6 +2091,8 @@ pub(crate) mod tests {
                 oauth2_app_secrets: Mutex::new(HashMap::new()),
                 oauth2_app_codes: Mutex::new(HashMap::new()),
                 oauth2_app_tokens: Mutex::new(HashMap::new()),
+                oauth2_user_approvals: Mutex::new(std::collections::HashSet::new()),
+                oauth2_pending_consents: Mutex::new(HashMap::new()),
                 workspace_agents: Mutex::new(HashMap::new()),
                 workspace_apps: Mutex::new(HashMap::new()),
                 workspace_app_statuses: Mutex::new(Vec::new()),
@@ -7686,6 +7696,7 @@ pub(crate) mod tests {
                 redirect_uris: Vec::new(),
                 created_by: input.created_by,
                 registration_access_token: None,
+                first_party: input.first_party,
             };
             self.oauth2_apps
                 .lock()
@@ -7772,6 +7783,74 @@ pub(crate) mod tests {
                 app.registration_access_token = Some(hash.to_vec());
             }
             Ok(())
+        }
+
+        async fn has_oauth2_provider_app_user_approval(
+            &self,
+            app_id: Uuid,
+            user_id: Uuid,
+        ) -> Result<bool, StorageError> {
+            let approvals = self
+                .oauth2_user_approvals
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(approvals.contains(&(app_id, user_id)))
+        }
+
+        async fn insert_oauth2_provider_app_user_approval(
+            &self,
+            app_id: Uuid,
+            user_id: Uuid,
+            _scope: &str,
+        ) -> Result<(), StorageError> {
+            let mut approvals = self
+                .oauth2_user_approvals
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            approvals.insert((app_id, user_id));
+            Ok(())
+        }
+
+        async fn insert_oauth2_pending_consent(
+            &self,
+            app_id: Uuid,
+            user_id: Uuid,
+            state: &str,
+            resource: &str,
+            code_challenge: &str,
+            code_challenge_method: &str,
+            expires_at: OffsetDateTime,
+        ) -> Result<Uuid, StorageError> {
+            let nonce = Uuid::new_v4();
+            let record = coder_core::identity::OAuth2PendingConsent {
+                app_id,
+                user_id,
+                state: state.to_owned(),
+                resource: resource.to_owned(),
+                code_challenge: code_challenge.to_owned(),
+                code_challenge_method: code_challenge_method.to_owned(),
+            };
+            self.oauth2_pending_consents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(nonce, (record, expires_at));
+            Ok(nonce)
+        }
+
+        async fn take_oauth2_pending_consent(
+            &self,
+            nonce: Uuid,
+        ) -> Result<Option<coder_core::identity::OAuth2PendingConsent>, StorageError> {
+            let mut pending = self
+                .oauth2_pending_consents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            match pending.remove(&nonce) {
+                Some((record, expires_at)) if expires_at > OffsetDateTime::now_utc() => {
+                    Ok(Some(record))
+                }
+                _ => Ok(None),
+            }
         }
 
         async fn list_oauth2_provider_app_secrets(
@@ -24228,6 +24307,7 @@ pub(crate) mod tests {
             icon: "https://example.com/icon.png".to_owned(),
             callback_url: "https://example.com/callback".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&input).await?;
         assert_eq!(app.name, "Test App");
@@ -24297,6 +24377,7 @@ pub(crate) mod tests {
             icon: String::new(),
             callback_url: "https://example.com/cb".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&app_input).await?;
 
@@ -24383,6 +24464,7 @@ pub(crate) mod tests {
             icon: String::new(),
             callback_url: "https://example.com/cb".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&app_input).await?;
 
@@ -24466,6 +24548,7 @@ pub(crate) mod tests {
             icon: String::new(),
             callback_url: "https://example.com/cb".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&app_input).await?;
         let expires = OffsetDateTime::now_utc() + time::Duration::hours(1);
@@ -24520,6 +24603,7 @@ pub(crate) mod tests {
             icon: String::new(),
             callback_url: "https://example.com/cb".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&app_input).await?;
         let secret = store
@@ -24613,6 +24697,7 @@ pub(crate) mod tests {
             icon: String::new(),
             callback_url: "https://example.com/cb".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&app_input).await?;
         let secret = store
@@ -24706,6 +24791,7 @@ pub(crate) mod tests {
             icon: String::new(),
             callback_url: "https://example.com/cb".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&app_input).await?;
         let secret = store
@@ -24757,6 +24843,7 @@ pub(crate) mod tests {
             icon: String::new(),
             callback_url: "https://example.com/cb".to_owned(),
             created_by: Some(user_id),
+            first_party: true,
         };
         let app = store.create_oauth2_provider_app(&app_input).await?;
         let secret = store
@@ -25381,6 +25468,7 @@ pub(crate) mod tests {
                 icon: String::new(),
                 callback_url: "https://example.com/cb".to_owned(),
                 created_by: Some(user.id),
+                first_party: true,
             })
             .await?;
 
@@ -25621,6 +25709,7 @@ pub(crate) mod tests {
                 icon: String::new(),
                 callback_url: "https://example.com/other".to_owned(),
                 created_by: Some(fixture.user_id),
+                first_party: true,
             })
             .await?;
 
@@ -42229,6 +42318,232 @@ pub(crate) mod tests {
             body.get("message").and_then(Value::as_str),
             Some("Users cannot set custom quiet hours schedule due to deployment configuration.")
         );
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // W4.38: OAuth2 consent screen + W4.39: RFC 7592 token rotation.
+    // -----------------------------------------------------------------------
+
+    /// Register a third-party OAuth2 app through the RFC 7591 dynamic-
+    /// registration endpoint. Returns `(client_id, client_secret, registration_access_token)`.
+    async fn register_third_party_app(
+        app: &axum::Router,
+    ) -> Result<(String, String, String), Box<dyn Error>> {
+        let response = call(
+            app.clone(),
+            json_request(
+                Method::POST,
+                "/oauth2/register",
+                &json!({
+                    "redirect_uris": ["https://example.com/callback"],
+                    "client_name": format!("tp-{}", Uuid::new_v4())
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let body = response_json(response).await?;
+        let client_id = body
+            .get("client_id")
+            .and_then(Value::as_str)
+            .ok_or("missing client_id")?
+            .to_owned();
+        let client_secret = body
+            .get("client_secret")
+            .and_then(Value::as_str)
+            .ok_or("missing client_secret")?
+            .to_owned();
+        let reg_token = body
+            .get("registration_access_token")
+            .and_then(Value::as_str)
+            .ok_or("missing registration_access_token")?
+            .to_owned();
+        Ok((client_id, client_secret, reg_token))
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_consent_page_renders_for_third_party() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let (client_id, _secret, _reg) = register_third_party_app(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/oauth2/authorize?response_type=code&client_id={client_id}&state=s"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let ctype = response
+            .headers()
+            .get("content-type")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("");
+        assert!(ctype.starts_with("text/html"), "expected HTML, got {ctype}");
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let html = std::str::from_utf8(&body)?;
+        assert!(
+            html.contains("Authorize"),
+            "page should contain 'Authorize'"
+        );
+        assert!(
+            html.contains("name=\"nonce\""),
+            "page should include consent nonce"
+        );
+        assert!(
+            html.contains("/oauth2/authorize/consent"),
+            "page should POST to consent endpoint"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_first_party_skips_consent() -> Result<(), Box<dyn Error>> {
+        // First-party apps (admin-created) must auto-approve, preserving
+        // the pre-consent behaviour tested elsewhere in this file.
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let (client_id, _secret, _refresh) = run_token_flow(&app, &session_token).await?;
+
+        // Call authorize again — should redirect (not render consent) since
+        // the app was created via the admin API and is first-party.
+        let response = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/oauth2/authorize?response_type=code&client_id={client_id}&state=s"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::TEMPORARY_REDIRECT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_authorize_consent_post_approves_and_redirects() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let session_token = create_and_login(&app).await?;
+        let (client_id, _secret, _reg) = register_third_party_app(&app).await?;
+
+        // GET authorize → render HTML with a nonce.
+        let response = call(
+            app.clone(),
+            authenticated_request(
+                Method::GET,
+                &format!("/oauth2/authorize?response_type=code&client_id={client_id}&state=xyz"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX).await?;
+        let html = std::str::from_utf8(&body)?.to_owned();
+
+        // Extract the nonce via a simple substring search.
+        let marker = "name=\"nonce\" value=\"";
+        let start = html.find(marker).ok_or("nonce not in page")? + marker.len();
+        let rest = &html[start..];
+        let end = rest.find('"').ok_or("nonce end not found")?;
+        let nonce = &rest[..end];
+
+        // POST consent with `decision=approve` and the nonce.
+        let consent_body = format!("nonce={nonce}&decision=approve");
+        let consent_response = call(
+            app.clone(),
+            Request::builder()
+                .method(Method::POST)
+                .uri("/oauth2/authorize/consent")
+                .header("coder-session-token", session_token.clone())
+                .header(CONTENT_TYPE, "application/x-www-form-urlencoded")
+                .body(Body::from(consent_body))?,
+        )
+        .await?;
+        assert_eq!(consent_response.status(), StatusCode::SEE_OTHER);
+        let location = consent_response
+            .headers()
+            .get("location")
+            .and_then(|v| v.to_str().ok())
+            .ok_or("no location")?;
+        assert!(
+            location.contains("code="),
+            "location missing code: {location}"
+        );
+
+        // Second authorize call should now skip the consent page because the
+        // approval was recorded.
+        let second = call(
+            app,
+            authenticated_request(
+                Method::GET,
+                &format!("/oauth2/authorize?response_type=code&client_id={client_id}&state=xyz"),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(second.status(), StatusCode::TEMPORARY_REDIRECT);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn oauth2_rfc7592_put_rotates_registration_access_token() -> Result<(), Box<dyn Error>> {
+        let app = build_router(test_state(true)?, None);
+        let (client_id, _secret, initial_token) = register_third_party_app(&app).await?;
+
+        // PUT to the client configuration endpoint with the initial token.
+        let put_response = call(
+            app.clone(),
+            Request::builder()
+                .method(Method::PUT)
+                .uri(format!("/oauth2/clients/{client_id}"))
+                .header("authorization", format!("Bearer {initial_token}"))
+                .header(CONTENT_TYPE, "application/json")
+                .body(Body::from(serde_json::to_vec(&json!({
+                    "redirect_uris": ["https://example.com/callback"],
+                    "client_name": "Updated Name"
+                }))?))?,
+        )
+        .await?;
+        assert_eq!(put_response.status(), StatusCode::OK);
+        let put_body = response_json(put_response).await?;
+        let new_token = put_body
+            .get("registration_access_token")
+            .and_then(Value::as_str)
+            .ok_or("missing new registration_access_token")?
+            .to_owned();
+        assert_ne!(
+            new_token, initial_token,
+            "PUT must rotate the registration access token"
+        );
+        assert!(!new_token.is_empty(), "new token must be non-empty");
+
+        // Old token must now fail authentication.
+        let old_get = call(
+            app.clone(),
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/oauth2/clients/{client_id}"))
+                .header("authorization", format!("Bearer {initial_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+        assert_eq!(old_get.status(), StatusCode::UNAUTHORIZED);
+
+        // New token must succeed.
+        let new_get = call(
+            app,
+            Request::builder()
+                .method(Method::GET)
+                .uri(format!("/oauth2/clients/{client_id}"))
+                .header("authorization", format!("Bearer {new_token}"))
+                .body(Body::empty())?,
+        )
+        .await?;
+        assert_eq!(new_get.status(), StatusCode::OK);
         Ok(())
     }
 }

@@ -2482,6 +2482,38 @@ where
         callback_url: &str,
         created_by: Option<Uuid>,
     ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, OAuth2ProviderError> {
+        // Apps created through the authenticated admin API are first-party by
+        // default, preserving the pre-consent-screen behaviour where these
+        // apps auto-approve on authorize. Third-party apps (RFC 7591 dynamic
+        // registration) must use `create_app_dynamic`, which flips the flag
+        // so the consent screen is shown on first authorize.
+        self.create_app_with_first_party(name, icon, callback_url, created_by, true)
+            .await
+    }
+
+    /// Create a third-party OAuth2 app — consent-required on first authorize.
+    ///
+    /// Used by RFC 7591 dynamic client registration. The caller has no user
+    /// session, so this is the only code path that currently creates
+    /// non-first-party apps.
+    pub async fn create_app_dynamic(
+        &self,
+        name: &str,
+        icon: &str,
+        callback_url: &str,
+    ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, OAuth2ProviderError> {
+        self.create_app_with_first_party(name, icon, callback_url, None, false)
+            .await
+    }
+
+    async fn create_app_with_first_party(
+        &self,
+        name: &str,
+        icon: &str,
+        callback_url: &str,
+        created_by: Option<Uuid>,
+        first_party: bool,
+    ) -> Result<coder_core::identity::OAuth2ProviderAppRecord, OAuth2ProviderError> {
         if name.trim().is_empty() {
             return Err(OAuth2ProviderError::bad_request("App name is required."));
         }
@@ -2496,6 +2528,7 @@ where
             icon: icon.to_owned(),
             callback_url: callback_url.trim().to_owned(),
             created_by,
+            first_party,
         };
         let app = self.store.create_oauth2_provider_app(&input).await?;
         Ok(app)
