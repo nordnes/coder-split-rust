@@ -1665,6 +1665,96 @@ fn push_validation(
     }
 }
 
+/// Ensures the built-in system roles (currently the per-organization
+/// `organization-member` role) exist in the `custom_roles` table and carry
+/// up-to-date permission definitions.
+///
+/// Called once from `apps/coderd/src/main.rs` at startup, before the HTTP
+/// server binds. Idempotent — safe to run on every boot. Mirrors Go's
+/// `rolestore.ReconcileSystemRoles` call at
+/// [coder/coderd/coderd.go:584](coder/coderd/coderd.go) and the implementation at
+/// [coder/coderd/rbac/rolestore/rolestore.go:171](coder/coderd/rbac/rolestore/rolestore.go).
+///
+/// Multi-replica safety: acquires the shared
+/// `advisory_lock_ids::RECONCILE_SYSTEM_ROLES` advisory lock via the
+/// supplied `AppStore`. If another replica is mid-reconcile, we skip this
+/// boot rather than block — the system role state converges on the next
+/// boot regardless.
+///
+/// # Errors
+///
+/// Returns [`StorageError`] if listing organizations or upserting the
+/// role fails. Advisory lock contention is treated as success because the
+/// peer replica is performing the work.
+pub async fn reconcile_system_roles(store: &dyn coder_core::AppStore) -> Result<(), StorageError> {
+    use coder_core::ports::advisory_lock_ids;
+
+    let Some(guard) = store
+        .try_acquire_advisory_lock(advisory_lock_ids::RECONCILE_SYSTEM_ROLES)
+        .await?
+    else {
+        // Another replica is reconciling; that's fine — the outcome is
+        // identical regardless of which replica performs the writes.
+        return Ok(());
+    };
+
+    let result = reconcile_system_roles_locked(store).await;
+    // Always release the lock, even on error, so a subsequent boot can
+    // proceed.
+    let release_result = guard.release().await;
+    match (result, release_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(e), _) => Err(e),
+        (Ok(()), Err(e)) => Err(e),
+    }
+}
+
+async fn reconcile_system_roles_locked(
+    store: &dyn coder_core::AppStore,
+) -> Result<(), StorageError> {
+    let orgs = store.list_organizations(Vec::new()).await?;
+    for org in orgs {
+        let role = coder_rbac::role_org_member(org.id);
+        let site_perms = permissions_to_json(&role.site);
+        let (org_perms, member_perms) = role
+            .by_org_id
+            .get(&org.id.to_string())
+            .map(|p| (permissions_to_json(&p.org), permissions_to_json(&p.member)))
+            .unwrap_or_else(|| ("[]".to_owned(), "[]".to_owned()));
+
+        store
+            .upsert_custom_role(&UpsertCustomRoleInput {
+                name: role.name.clone(),
+                display_name: role.display_name.clone(),
+                organization_id: Some(org.id),
+                site_permissions: site_perms,
+                org_permissions: org_perms,
+                user_permissions: member_perms,
+            })
+            .await?;
+    }
+    Ok(())
+}
+
+/// Serialises a slice of RBAC permissions into the JSON shape the
+/// `custom_roles` table expects. The wire format matches the
+/// `CustomRolePermissions` array used by the Go backend so the two
+/// remain interoperable.
+fn permissions_to_json(perms: &[coder_rbac::Permission]) -> String {
+    let api_perms: Vec<coder_core::Permission> = perms
+        .iter()
+        .map(|p| coder_core::Permission {
+            resource_type: p.resource_type.as_str().to_owned(),
+            action: p
+                .action
+                .map(|a| a.as_str().to_owned())
+                .unwrap_or_else(|| "*".to_owned()),
+            negate: p.negate,
+        })
+        .collect();
+    serde_json::to_string(&api_perms).unwrap_or_else(|_| "[]".to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

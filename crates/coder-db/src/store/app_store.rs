@@ -2140,6 +2140,39 @@ impl AppStore for PostgresStore {
     }
 
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_old_connection_logs(
+        &self,
+        older_than: OffsetDateTime,
+        limit: i64,
+    ) -> Result<u64, StorageError> {
+        // Mirrors Go's `DeleteOldConnectionLogs` query at
+        // `coder/coderd/database/queries/connectionlogs.sql`. The
+        // `connection_logs` table is gated behind an enterprise migration
+        // that has not landed in `coder-db/migrations/`, so treat
+        // `undefined_table` (SQLSTATE 42P01) as a no-op — the pruning
+        // worker must not crash-loop on deployments without the table.
+        let sql = "WITH old_logs AS (
+                       SELECT id FROM connection_logs
+                       WHERE connect_time < $1
+                       ORDER BY connect_time ASC
+                       LIMIT $2
+                   )
+                   DELETE FROM connection_logs
+                   USING old_logs
+                   WHERE connection_logs.id = old_logs.id";
+        match sqlx::query(sql)
+            .bind(older_than)
+            .bind(limit)
+            .execute(&self.pool)
+            .await
+        {
+            Ok(result) => Ok(result.rows_affected()),
+            Err(sqlx::Error::Database(db)) if db.code().as_deref() == Some("42P01") => Ok(0),
+            Err(error) => Err(storage_error(error)),
+        }
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn find_users_by_ids(&self, ids: &[Uuid]) -> Result<Vec<UserRecord>, StorageError> {
         if ids.is_empty() {
             return Ok(Vec::new());
@@ -10434,6 +10467,32 @@ impl AppStore for PostgresStore {
             starts_at: inserted.starts_at,
             deletes_at: inserted.deletes_at,
         })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn try_acquire_advisory_lock(
+        &self,
+        lock_id: i64,
+    ) -> Result<Option<Box<dyn coder_core::AdvisoryLock>>, StorageError> {
+        // Session-scoped advisory lock: acquire and release must share the
+        // same connection, so hold a dedicated `PoolConnection` for the
+        // lifetime of the guard. Mirrors Go's
+        // `tx.TryAcquireLock(ctx, LockIDCryptoKeyRotation)` semantics but
+        // uses `pg_try_advisory_lock` so concurrent replicas skip rather
+        // than block.
+        let mut conn = self.pool.acquire().await.map_err(storage_error)?;
+        let acquired: bool = sqlx::query_scalar("SELECT pg_try_advisory_lock($1)")
+            .bind(lock_id)
+            .fetch_one(&mut *conn)
+            .await
+            .map_err(storage_error)?;
+        if !acquired {
+            return Ok(None);
+        }
+        Ok(Some(Box::new(super::PostgresAdvisoryLockGuard {
+            conn: Some(conn),
+            lock_id,
+        })))
     }
 
     // ----- DERP mesh -----

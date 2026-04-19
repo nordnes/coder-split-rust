@@ -165,7 +165,7 @@ pub use password::{
     validate_email, validate_password, validate_real_name, validate_username, verify_password,
 };
 pub use ports::{
-    AppStore, AuditLogListFilter, AuthStore, ChatFileRecord, ChatMessageRecord,
+    AdvisoryLock, AppStore, AuditLogListFilter, AuthStore, ChatFileRecord, ChatMessageRecord,
     ChatModelConfigRecord, ChatProviderRecord, ChatQueuedMessageRecord, ChatRecord,
     CoderdReplicaRow, ConnectionLogListFilter, CreateWorkspaceBuildInput, CreateWorkspaceInput,
     CreateWorkspaceProxyInput, CryptoKeyRow, DeploymentMetadata, DeploymentStore,

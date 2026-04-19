@@ -883,6 +883,23 @@ async fn run() -> Result<(), MainError> {
     let store_pool = store.pool();
     let store: Arc<dyn AppStore> = Arc::new(store);
 
+    // Ensure built-in system roles exist and reflect the current RBAC
+    // policy before the HTTP server binds. Mirrors Go's
+    // `rolestore.ReconcileSystemRoles` call at coder/coderd/coderd.go:584.
+    // Idempotent: safe to run on every boot, and advisory-lock-guarded so
+    // concurrent replicas do not step on each other.
+    if let Err(error) = coder_identity::reconcile_system_roles(store.as_ref()).await {
+        // Failing reconcile is not fatal — a peer replica may have
+        // succeeded on a previous boot and the handler-side RBAC checks
+        // remain enforced regardless. Log loudly so the operator notices.
+        warn!(%error, "system role reconciliation failed at startup");
+    } else {
+        info!(
+            target: "coder_identity::reconcile_system_roles",
+            "reconciled built-in system roles"
+        );
+    }
+
     let pubsub: Arc<dyn PubSub> = Arc::new(
         PostgresPubSub::new(store_pool.clone())
             .await
@@ -969,6 +986,40 @@ async fn run() -> Result<(), MainError> {
         stale_job_reaper_cancel.clone(),
     );
 
+    // Start the connection-log pruner: deletes `connection_logs` rows
+    // older than the retention window (default 30 days) every hour.
+    // Mirrors Go's `coderd/connectionlog/` pruner. Safe on deployments
+    // without the table — the store layer treats missing tables as a
+    // no-op.
+    let connection_log_pruner_cancel = CancellationToken::new();
+    let connection_log_pruner = coder_server::connection_log_pruner::ConnectionLogPruner::start(
+        store.clone(),
+        coder_server::connection_log_pruner::ConnectionLogPrunerOptions::default(),
+        connection_log_pruner_cancel.clone(),
+    );
+
+    // Start the batched usage-tracker flusher so
+    // `POST /workspaces/{id}/usage` handlers collapse to one DB write per
+    // flush interval instead of one per request. Mirrors Go's
+    // `coderd/workspacestats/tracker.go::NewTracker`.
+    let usage_tracker_cancel = CancellationToken::new();
+    let (usage_tracker, usage_tracker_handle) = coder_server::usage_tracker::UsageTracker::start(
+        store.clone(),
+        coder_server::usage_tracker::UsageTrackerOptions::default(),
+        usage_tracker_cancel.clone(),
+    );
+
+    // Start the dbRollup worker (scaffold): ticks on the same cadence as
+    // Go's `dbrollup.DefaultInterval` (5 minutes) under the shared
+    // advisory lock. The upsert SQL is a no-op pending the port of Go's
+    // `UpsertTemplateUsageStats` CTE — see the module docstring.
+    let db_rollup_cancel = CancellationToken::new();
+    let db_rollup_worker = coder_server::db_rollup::DbRollupWorker::start(
+        store.clone(),
+        coder_server::db_rollup::DbRollupOptions::default(),
+        db_rollup_cancel.clone(),
+    );
+
     // Start the replica manager: registers this coderd instance in the
     // `replicas` table on startup, refreshes the row every
     // `replica_update_interval_secs`, and unregisters it on graceful
@@ -1035,7 +1086,8 @@ async fn run() -> Result<(), MainError> {
         std::sync::Arc::new(coder_license::EntitlementSet::new()),
         webpusher,
     )
-    .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?;
+    .map_err(|error| MainError::Config(format!("build shared HTTP services: {error}")))?
+    .with_usage_tracker(usage_tracker.clone());
 
     // Optionally spin up the GitHub release update checker. Matches
     // `vals.UpdateCheck` in `coder/cli/server.go`: when disabled we skip
@@ -1170,6 +1222,30 @@ async fn run() -> Result<(), MainError> {
     //     pool is closed.
     coordinator.register("app_healthcheck_prober", async move {
         app_healthcheck_handle.shutdown().await;
+    });
+
+    // 4g. Cancel the connection-log pruner and await completion so its
+    //     final DELETE lands before the pool is closed.
+    coordinator.register("connection_log_pruner", async move {
+        connection_log_pruner_cancel.cancel();
+        connection_log_pruner.join().await;
+    });
+
+    // 4h. Cancel the usage-tracker flusher. The tracker performs a final
+    //     flush of any buffered workspace pings before exiting so no
+    //     `last_used_at` updates are silently dropped.
+    coordinator.register("usage_tracker", async move {
+        usage_tracker_cancel.cancel();
+        if let Err(e) = usage_tracker_handle.await {
+            warn!(error = %e, "usage tracker task panicked during shutdown");
+        }
+    });
+
+    // 4i. Cancel the dbRollup worker and await completion so the advisory
+    //     lock is released cleanly.
+    coordinator.register("db_rollup", async move {
+        db_rollup_cancel.cancel();
+        db_rollup_worker.join().await;
     });
 
     // 5. Cancel the autobuild lifecycle executor and wait for in-flight

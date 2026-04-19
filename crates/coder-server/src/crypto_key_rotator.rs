@@ -17,11 +17,11 @@ use std::time::Duration;
 
 use async_trait::async_trait;
 use coder_core::enums::CryptoKeyFeature;
-use coder_core::ports::{AppStore, CryptoKeyRow, StorageError};
+use coder_core::ports::{AdvisoryLock, AppStore, CryptoKeyRow, StorageError, advisory_lock_ids};
 use time::OffsetDateTime;
 use tokio::task::JoinHandle;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, error, warn};
+use tracing::{debug, error, info, warn};
 
 /// Default interval between rotation sweeps in production.
 ///
@@ -112,6 +112,13 @@ pub trait CryptoKeyStore: Send + Sync {
         old_deletes_at: OffsetDateTime,
         new_row: CryptoKeyRow,
     ) -> Result<CryptoKeyRow, StorageError>;
+    /// Tries to acquire the shared Postgres advisory lock that serialises
+    /// rotation sweeps across replicas. Returns `Some` guard when the lock
+    /// is held by **this** session, and `None` when another replica holds
+    /// it. Mirrors Go's `tx.TryAcquireLock(LockIDCryptoKeyRotation)`.
+    async fn try_acquire_rotation_lock(
+        &self,
+    ) -> Result<Option<Box<dyn AdvisoryLock>>, StorageError>;
 }
 
 /// Adapter: any `dyn AppStore` trait object implements [`CryptoKeyStore`] by
@@ -165,6 +172,11 @@ impl CryptoKeyStore for dyn AppStore + '_ {
             new_row,
         )
         .await
+    }
+    async fn try_acquire_rotation_lock(
+        &self,
+    ) -> Result<Option<Box<dyn AdvisoryLock>>, StorageError> {
+        AppStore::try_acquire_advisory_lock(self, advisory_lock_ids::CRYPTO_KEY_ROTATION).await
     }
 }
 
@@ -253,10 +265,43 @@ impl CryptoKeyRotator {
 
 /// The inner sweep, parameterised over any [`CryptoKeyStore`]. Handles:
 ///
-/// 1. Deleting keys whose `deletes_at` has elapsed.
-/// 2. Rotating keys that are within one hour of expiry.
-/// 3. Ensuring each managed feature has at least one active key.
+/// 1. Acquiring the multi-replica Postgres advisory lock so concurrent
+///    rotators skip rather than double-rotate.
+/// 2. Deleting keys whose `deletes_at` has elapsed.
+/// 3. Rotating keys that are within one hour of expiry.
+/// 4. Ensuring each managed feature has at least one active key.
 async fn rotate_once<S: CryptoKeyStore + ?Sized>(
+    store: &S,
+    options: &RotatorOptions,
+    now: OffsetDateTime,
+) -> Result<(), StorageError> {
+    // Acquire the shared advisory lock before touching any rows. If
+    // another replica is mid-sweep, skip this tick entirely — its writes
+    // will be visible on the next tick. Mirrors Go's
+    // `InTx { AcquireLock(...); rotateKeys(...) }` wrapper, but uses
+    // `pg_try_advisory_lock` so we skip rather than queue behind peers.
+    let Some(guard) = store.try_acquire_rotation_lock().await? else {
+        info!(
+            target: "coder_server::crypto_key_rotator",
+            "another replica holds the rotation lock; skipping sweep"
+        );
+        return Ok(());
+    };
+
+    let result = rotate_once_locked(store, options, now).await;
+
+    // Always release the lock, even on error, so the next tick (or
+    // another replica) can proceed. Surface the release error only if
+    // the sweep itself succeeded; otherwise prioritise the sweep error.
+    let release_result = guard.release().await;
+    match (result, release_result) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(sweep_err), _) => Err(sweep_err),
+        (Ok(()), Err(release_err)) => Err(release_err),
+    }
+}
+
+async fn rotate_once_locked<S: CryptoKeyStore + ?Sized>(
     store: &S,
     options: &RotatorOptions,
     now: OffsetDateTime,
@@ -535,6 +580,26 @@ mod tests {
             guard.push(new_row.clone());
             Ok(new_row)
         }
+        async fn try_acquire_rotation_lock(
+            &self,
+        ) -> Result<Option<Box<dyn AdvisoryLock>>, StorageError> {
+            // Default mock: every caller thinks it owns the lock. Tests
+            // that want multi-replica contention build `SharedLockStore`
+            // below.
+            Ok(Some(Box::new(TestLockGuard)))
+        }
+    }
+
+    /// Advisory-lock guard used by the in-memory test doubles. `release`
+    /// is a no-op because the mutex-based lock state, if any, lives in
+    /// [`SharedLockState`] rather than on the guard itself.
+    struct TestLockGuard;
+
+    #[async_trait]
+    impl AdvisoryLock for TestLockGuard {
+        async fn release(self: Box<Self>) -> Result<(), StorageError> {
+            Ok(())
+        }
     }
 
     /// Test double whose `rotate_transactional` always fails, so we can assert
@@ -624,6 +689,11 @@ mod tests {
             // Mimic a rolled-back Postgres transaction: neither write lands,
             // so the seed state is untouched.
             Err(StorageError::unavailable("injected rotate failure"))
+        }
+        async fn try_acquire_rotation_lock(
+            &self,
+        ) -> Result<Option<Box<dyn AdvisoryLock>>, StorageError> {
+            Ok(Some(Box::new(TestLockGuard)))
         }
     }
 
@@ -908,6 +978,239 @@ mod tests {
         assert!(
             sequences.contains(&43),
             "new key must increment past the future-dated sequence (42 → 43); got {sequences:?}"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Contention test: two rotators, one shared advisory-lock catalogue.
+    // -----------------------------------------------------------------------
+
+    /// Advisory-lock catalogue shared across multiple [`SharedLockStore`]
+    /// instances. Mimics the single Postgres-level lock that sits outside
+    /// of the rotator process: only one holder at a time.
+    #[derive(Default)]
+    struct SharedLockState {
+        held: Mutex<bool>,
+    }
+
+    /// Store double that seeds key state independently per replica but
+    /// consults a shared [`SharedLockState`] on each rotation sweep. This
+    /// models the production invariant where two coderd replicas contend
+    /// for `pg_try_advisory_lock(CRYPTO_KEY_ROTATION)`: only one obtains
+    /// the lock, so only one performs work per tick.
+    struct SharedLockStore {
+        inner: Mutex<Vec<CryptoKeyRow>>,
+        lock_state: Arc<SharedLockState>,
+    }
+
+    impl SharedLockStore {
+        fn new(seed: Vec<CryptoKeyRow>, lock_state: Arc<SharedLockState>) -> Arc<Self> {
+            Arc::new(Self {
+                inner: Mutex::new(seed),
+                lock_state,
+            })
+        }
+
+        fn snapshot(&self) -> Vec<CryptoKeyRow> {
+            self.inner.lock().expect("lock poisoned").clone()
+        }
+    }
+
+    /// Guard that releases a [`SharedLockState`] when `release` is called —
+    /// mirroring a `pg_advisory_unlock` call in production.
+    struct SharedLockGuard {
+        state: Arc<SharedLockState>,
+    }
+
+    #[async_trait]
+    impl AdvisoryLock for SharedLockGuard {
+        async fn release(self: Box<Self>) -> Result<(), StorageError> {
+            let mut held = self.state.held.lock().expect("lock poisoned");
+            *held = false;
+            Ok(())
+        }
+    }
+
+    #[async_trait]
+    impl CryptoKeyStore for SharedLockStore {
+        async fn list_all(&self) -> Result<Vec<CryptoKeyRow>, StorageError> {
+            Ok(self.inner.lock().expect("lock poisoned").clone())
+        }
+        async fn list_by_feature(
+            &self,
+            feature: CryptoKeyFeature,
+        ) -> Result<Vec<CryptoKeyRow>, StorageError> {
+            let now = OffsetDateTime::now_utc();
+            Ok(self
+                .inner
+                .lock()
+                .expect("lock poisoned")
+                .iter()
+                .filter(|k| {
+                    k.feature == feature
+                        && k.starts_at <= now
+                        && k.deletes_at.is_none_or(|d| d > now)
+                })
+                .cloned()
+                .collect())
+        }
+        async fn insert(&self, row: CryptoKeyRow) -> Result<CryptoKeyRow, StorageError> {
+            self.inner.lock().expect("lock poisoned").push(row.clone());
+            Ok(row)
+        }
+        async fn update_deletes_at(
+            &self,
+            feature: CryptoKeyFeature,
+            sequence: i32,
+            deletes_at: Option<OffsetDateTime>,
+        ) -> Result<bool, StorageError> {
+            let mut guard = self.inner.lock().expect("lock poisoned");
+            for k in guard.iter_mut() {
+                if k.feature == feature && k.sequence == sequence {
+                    k.deletes_at = deletes_at;
+                    return Ok(true);
+                }
+            }
+            Ok(false)
+        }
+        async fn delete(
+            &self,
+            feature: CryptoKeyFeature,
+            sequence: i32,
+        ) -> Result<bool, StorageError> {
+            let mut guard = self.inner.lock().expect("lock poisoned");
+            let before = guard.len();
+            guard.retain(|k| !(k.feature == feature && k.sequence == sequence));
+            Ok(guard.len() != before)
+        }
+        async fn max_sequence_for_feature(
+            &self,
+            feature: CryptoKeyFeature,
+        ) -> Result<i32, StorageError> {
+            Ok(self
+                .inner
+                .lock()
+                .expect("lock poisoned")
+                .iter()
+                .filter(|k| k.feature == feature)
+                .map(|k| k.sequence)
+                .max()
+                .unwrap_or(0))
+        }
+        async fn rotate_transactional(
+            &self,
+            old_feature: CryptoKeyFeature,
+            old_sequence: i32,
+            old_deletes_at: OffsetDateTime,
+            new_row: CryptoKeyRow,
+        ) -> Result<CryptoKeyRow, StorageError> {
+            let mut guard = self.inner.lock().expect("lock poisoned");
+            if guard
+                .iter()
+                .any(|k| k.feature == new_row.feature && k.sequence == new_row.sequence)
+            {
+                return Err(StorageError::invalid_data(format!(
+                    "duplicate crypto key sequence {} for feature {:?}",
+                    new_row.sequence, new_row.feature
+                )));
+            }
+            let Some(idx) = guard
+                .iter()
+                .position(|k| k.feature == old_feature && k.sequence == old_sequence)
+            else {
+                return Err(StorageError::invalid_data(format!(
+                    "crypto key {old_feature:?}#{old_sequence} vanished mid-rotation"
+                )));
+            };
+            guard[idx].deletes_at = Some(old_deletes_at);
+            guard.push(new_row.clone());
+            Ok(new_row)
+        }
+        async fn try_acquire_rotation_lock(
+            &self,
+        ) -> Result<Option<Box<dyn AdvisoryLock>>, StorageError> {
+            let mut held = self.lock_state.held.lock().expect("lock poisoned");
+            if *held {
+                return Ok(None);
+            }
+            *held = true;
+            Ok(Some(Box::new(SharedLockGuard {
+                state: self.lock_state.clone(),
+            })))
+        }
+    }
+
+    #[tokio::test]
+    async fn only_one_rotator_wins_the_advisory_lock_per_tick() {
+        // Two replicas each hold their own `SharedLockStore` but consult a
+        // shared `SharedLockState`, modelling the single Postgres-level
+        // `pg_try_advisory_lock(CRYPTO_KEY_ROTATION)`. If both rotators
+        // ignored the lock, both would rotate the expired key and produce
+        // two successor rows per replica. With the lock in place exactly
+        // one replica rotates per tick.
+        let now = OffsetDateTime::now_utc();
+        let options = RotatorOptions {
+            interval: Duration::from_secs(60),
+            key_duration: Duration::from_secs(24 * 60 * 60),
+        };
+        let expired = || CryptoKeyRow {
+            feature: CryptoKeyFeature::WorkspaceAppsToken,
+            sequence: 7,
+            secret: vec![0xAA; 64],
+            starts_at: now - time::Duration::hours(25),
+            deletes_at: None,
+        };
+
+        let lock_state = Arc::new(SharedLockState::default());
+        let store_a = SharedLockStore::new(vec![expired()], lock_state.clone());
+        let store_b = SharedLockStore::new(vec![expired()], lock_state.clone());
+
+        // Drive both rotators concurrently. `tokio::join!` polls them in
+        // the same task; because `lock_state.held` is a sync Mutex, the
+        // outcome is deterministic: whoever wins the mutex first gets to
+        // rotate, and the loser returns `Ok(None)` without writing.
+        let (res_a, res_b) = tokio::join!(
+            rotate_once(store_a.as_ref(), &options, now),
+            rotate_once(store_b.as_ref(), &options, now),
+        );
+        res_a.expect("rotator A sweep should not error");
+        res_b.expect("rotator B sweep should not error");
+
+        // After the tick the shared lock must be released so the next
+        // tick can proceed.
+        assert!(
+            !*lock_state.held.lock().expect("lock poisoned"),
+            "advisory lock must be released after the sweep"
+        );
+
+        let tokens_a: Vec<_> = store_a
+            .snapshot()
+            .into_iter()
+            .filter(|k| k.feature == CryptoKeyFeature::WorkspaceAppsToken)
+            .collect();
+        let tokens_b: Vec<_> = store_b
+            .snapshot()
+            .into_iter()
+            .filter(|k| k.feature == CryptoKeyFeature::WorkspaceAppsToken)
+            .collect();
+
+        // Exactly one replica should have rotated: two rows (retired + new)
+        // for the winner, one row (still unrotated) for the loser.
+        let rotated = [&tokens_a, &tokens_b]
+            .into_iter()
+            .filter(|ts| ts.len() == 2)
+            .count();
+        let untouched = [&tokens_a, &tokens_b]
+            .into_iter()
+            .filter(|ts| ts.len() == 1)
+            .count();
+        assert_eq!(
+            rotated, 1,
+            "exactly one replica should rotate per tick; got rotated={rotated}, untouched={untouched}, a={tokens_a:?}, b={tokens_b:?}"
+        );
+        assert_eq!(
+            untouched, 1,
+            "the losing replica must leave its state untouched"
         );
     }
 }

@@ -978,6 +978,45 @@ pub struct CryptoKeyRow {
     pub deletes_at: Option<OffsetDateTime>,
 }
 
+/// Well-known Postgres advisory-lock IDs. Mirrors the `iota`-numbered
+/// constants in [`coder/coderd/database/lock.go`](coder/coderd/database/lock.go).
+/// Values must never be reused or re-ordered because multiple replicas (Go
+/// and Rust) may share the same catalog at runtime.
+pub mod advisory_lock_ids {
+    /// Deployment-setup once-per-boot lock.
+    pub const DEPLOYMENT_SETUP: i64 = 1;
+    /// Enterprise deployment-setup once-per-boot lock.
+    pub const ENTERPRISE_DEPLOYMENT_SETUP: i64 = 2;
+    /// Held while the dbRollup worker upserts insights aggregates.
+    pub const DB_ROLLUP: i64 = 3;
+    /// Held by the dbPurge worker.
+    pub const DB_PURGE: i64 = 4;
+    /// Held while generating notification report digests.
+    pub const NOTIFICATIONS_REPORT_GENERATOR: i64 = 5;
+    /// Held by the crypto-key rotator to prevent multi-replica double-rotation.
+    pub const CRYPTO_KEY_ROTATION: i64 = 6;
+    /// Held while reconciling prebuilds.
+    pub const RECONCILE_PREBUILDS: i64 = 7;
+    /// Held while reconciling built-in system roles at startup.
+    pub const RECONCILE_SYSTEM_ROLES: i64 = 8;
+    /// Held during boundary-usage stats aggregation.
+    pub const BOUNDARY_USAGE_STATS: i64 = 9;
+}
+
+/// Handle to a Postgres session-scoped advisory lock acquired by
+/// [`AppStore::try_acquire_advisory_lock`]. The backing connection is owned
+/// by the guard; the lock is released by calling [`AdvisoryLock::release`].
+/// Dropping the guard closes the connection, which implicitly releases the
+/// lock as well, but explicit [`release`](AdvisoryLock::release) is preferred
+/// so errors from `pg_advisory_unlock` are surfaced.
+#[async_trait]
+pub trait AdvisoryLock: Send + Sync {
+    /// Releases the advisory lock and returns the underlying connection to
+    /// the pool. Callers should prefer this over letting the guard drop so
+    /// any PostgreSQL-side release error is propagated.
+    async fn release(self: Box<Self>) -> Result<(), StorageError>;
+}
+
 /// Upsert payload for one provisioner daemon health record.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProvisionerDaemonHealthInput {
@@ -2308,6 +2347,19 @@ pub trait OperationalStore: Send + Sync {
         filter: ConnectionLogListFilter,
     ) -> Result<ConnectionLogResponse, StorageError>;
 
+    /// Deletes connection-log rows older than `older_than`, up to `limit`
+    /// rows per invocation. Mirrors Go's `DeleteOldConnectionLogs` query
+    /// at `coder/coderd/database/queries/connectionlogs.sql`.
+    ///
+    /// Returns the number of rows removed. Implementations may treat a
+    /// missing `connection_logs` table as a no-op (returns `0`) because the
+    /// table is currently gated behind an enterprise migration.
+    async fn delete_old_connection_logs(
+        &self,
+        older_than: OffsetDateTime,
+        limit: i64,
+    ) -> Result<u64, StorageError>;
+
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
         &self,
@@ -3308,6 +3360,19 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         &self,
         filter: ConnectionLogListFilter,
     ) -> Result<ConnectionLogResponse, StorageError>;
+
+    /// Deletes connection-log rows older than `older_than`, up to `limit`
+    /// rows per invocation. Mirrors Go's `DeleteOldConnectionLogs` query
+    /// at `coder/coderd/database/queries/connectionlogs.sql`.
+    ///
+    /// Returns the number of rows removed. Implementations may treat a
+    /// missing `connection_logs` table as a no-op (returns `0`) because the
+    /// table is currently gated behind an enterprise migration.
+    async fn delete_old_connection_logs(
+        &self,
+        older_than: OffsetDateTime,
+        limit: i64,
+    ) -> Result<u64, StorageError>;
 
     /// Inserts multiple workspace build parameters in a single multi-row INSERT.
     async fn batch_insert_workspace_build_parameters(
@@ -4950,6 +5015,20 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         old_deletes_at: OffsetDateTime,
         new_row: CryptoKeyRow,
     ) -> Result<CryptoKeyRow, StorageError>;
+
+    /// Attempts to acquire a session-scoped Postgres advisory lock using
+    /// `pg_try_advisory_lock(lock_id)`. Returns `Some(guard)` if the lock was
+    /// acquired, `None` if another session already holds it. Mirrors Go's
+    /// `tx.TryAcquireLock` against the shared lock catalogue in
+    /// [`coder/coderd/database/lock.go`](coder/coderd/database/lock.go).
+    ///
+    /// The returned guard owns a dedicated Postgres connection. Callers must
+    /// call [`AdvisoryLock::release`] when done; dropping the guard without
+    /// releasing leaks the lock until the connection is closed.
+    async fn try_acquire_advisory_lock(
+        &self,
+        lock_id: i64,
+    ) -> Result<Option<Box<dyn AdvisoryLock>>, StorageError>;
 
     // ----- DERP mesh -----
 
@@ -7292,6 +7371,14 @@ where
         AppStore::list_connection_logs(self, filter).await
     }
 
+    async fn delete_old_connection_logs(
+        &self,
+        older_than: OffsetDateTime,
+        limit: i64,
+    ) -> Result<u64, StorageError> {
+        AppStore::delete_old_connection_logs(self, older_than, limit).await
+    }
+
     async fn batch_insert_workspace_build_parameters(
         &self,
         params: Vec<WorkspaceBuildParameterRecord>,
@@ -7559,6 +7646,14 @@ where
         filter: ConnectionLogListFilter,
     ) -> Result<ConnectionLogResponse, StorageError> {
         (**self).list_connection_logs(filter).await
+    }
+
+    async fn delete_old_connection_logs(
+        &self,
+        older_than: OffsetDateTime,
+        limit: i64,
+    ) -> Result<u64, StorageError> {
+        (**self).delete_old_connection_logs(older_than, limit).await
     }
 
     async fn batch_insert_workspace_build_parameters(

@@ -352,6 +352,13 @@ pub struct AppState {
     /// available at startup. The client is constructed once and reused for
     /// all push sends (no per-request client creation).
     pub webpusher: Option<Arc<coder_notifications::Webpusher>>,
+    /// Optional batched usage-tracker flusher. When present, the
+    /// `POST /workspaces/{id}/usage` handler enqueues rather than writes
+    /// through to the store. Absent in tests that construct AppState
+    /// directly without a tracker; those tests fall back to the
+    /// synchronous update path and still exercise `last_used_at`
+    /// behaviour correctly.
+    pub usage_tracker: Option<Arc<crate::usage_tracker::UsageTracker>>,
 }
 
 impl AppState {
@@ -423,7 +430,19 @@ impl AppState {
             instance_identity_verifier,
             update_checker: None,
             webpusher,
+            usage_tracker: None,
         })
+    }
+
+    /// Attaches a batched [`crate::usage_tracker::UsageTracker`] to this
+    /// state. The background flushing task is expected to already be
+    /// running (via [`crate::usage_tracker::UsageTracker::start`]).
+    /// Returns the mutated state so call sites can use builder-style
+    /// chaining at startup.
+    #[must_use]
+    pub fn with_usage_tracker(mut self, tracker: Arc<crate::usage_tracker::UsageTracker>) -> Self {
+        self.usage_tracker = Some(tracker);
+        self
     }
 
     /// Attaches an [`UpdateChecker`] to this state. The background poll loop
