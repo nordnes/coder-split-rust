@@ -18377,6 +18377,27 @@ pub(crate) mod tests {
             agent_id,
             store_dyn,
             "2.0".to_owned(),
+            crate::handlers::agent_rpc_live::ManifestDeploymentConfig {
+                access_url: Url::parse("http://127.0.0.1:3000").unwrap_or_else(|_| unreachable!()),
+                app_hostname: String::new(),
+                git_auth_config_count: 0,
+                derp_force_websockets: false,
+                derp_regions: Vec::new(),
+            },
+        )
+    }
+
+    fn live_handler_with_deployment(
+        store: Arc<FakeStore>,
+        agent_id: Uuid,
+        deployment: crate::handlers::agent_rpc_live::ManifestDeploymentConfig,
+    ) -> crate::handlers::agent_rpc_live::LiveAgentHandler {
+        let store_dyn: Arc<dyn AppStore> = store;
+        crate::handlers::agent_rpc_live::LiveAgentHandler::new(
+            agent_id,
+            store_dyn,
+            "2.0".to_owned(),
+            deployment,
         )
     }
 
@@ -18400,6 +18421,78 @@ pub(crate) mod tests {
         assert_eq!(manifest.workspace_name, "test-workspace");
         assert!(manifest.apps.is_empty());
         assert!(manifest.scripts.is_empty());
+        Ok(())
+    }
+
+    /// Exercises the deployment-level fields filled in during Wave 1 #8:
+    /// `git_auth_configs`, `vs_code_port_proxy_uri`, `derp_force_websockets`,
+    /// and `derp_map`. All four must land non-default when a real
+    /// [`ManifestDeploymentConfig`] is supplied.
+    #[tokio::test]
+    async fn live_handler_get_manifest_fills_deployment_fields() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+        use coder_core::config::{DerpNodeConfig, DerpRegionConfig};
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+
+        let deployment = crate::handlers::agent_rpc_live::ManifestDeploymentConfig {
+            access_url: Url::parse("https://coder.example.com")?,
+            app_hostname: "*.apps.example.com".to_owned(),
+            git_auth_config_count: 3,
+            derp_force_websockets: true,
+            derp_regions: vec![DerpRegionConfig {
+                id: 7,
+                name: "EU Central".to_owned(),
+                nodes: vec![DerpNodeConfig {
+                    name: "eu1".to_owned(),
+                    url: Url::parse("https://derp-eu1.example.com:4443")?,
+                }],
+            }],
+        };
+        let handler = live_handler_with_deployment(store.clone(), agent_id, deployment);
+
+        let manifest = handler
+            .get_manifest(agent::GetManifestRequest {})
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        // 1. git_auth_configs — forwarded as-is from the deployment snapshot.
+        assert_eq!(manifest.git_auth_configs, 3);
+
+        // 2. vs_code_port_proxy_uri — must combine access URL scheme with
+        //    the app host wildcard filled in by workspace/agent/owner.
+        //    `setup_agent_test_state` creates a workspace named
+        //    "test-workspace" with agent "test-agent" owned by no-name user
+        //    (unknown → empty owner).
+        assert!(
+            manifest
+                .vs_code_port_proxy_uri
+                .starts_with("https://{{port}}--test-agent--test-workspace--"),
+            "unexpected uri: {}",
+            manifest.vs_code_port_proxy_uri
+        );
+        assert!(
+            manifest
+                .vs_code_port_proxy_uri
+                .ends_with(".apps.example.com"),
+            "unexpected uri: {}",
+            manifest.vs_code_port_proxy_uri
+        );
+
+        // 3. derp_force_websockets — must forward the deployment flag.
+        assert!(manifest.derp_force_websockets);
+
+        // 4. derp_map — must carry the configured region and node.
+        let derp_map = manifest.derp_map.ok_or("expected derp_map")?;
+        assert_eq!(derp_map.regions.len(), 1);
+        let region = derp_map.regions.get(&7).ok_or("region 7 missing")?;
+        assert_eq!(region.region_name, "EU Central");
+        assert_eq!(region.nodes.len(), 1);
+        assert_eq!(region.nodes[0].name, "eu1");
+        assert_eq!(region.nodes[0].host_name, "derp-eu1.example.com");
+        assert_eq!(region.nodes[0].derp_port, 4443);
         Ok(())
     }
 
@@ -25082,6 +25175,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
         Ok((state, store, audit_sink))
     }
@@ -38448,6 +38542,7 @@ pub(crate) mod tests {
             None,
             coder_telemetry::TelemetryReporter::disabled(Uuid::nil()),
             std::sync::Arc::new(coder_license::EntitlementSet::new()),
+            None,
         )?;
         let app = build_router(state, None);
         let session_token = create_and_login(&app).await?;
