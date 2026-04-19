@@ -615,6 +615,16 @@ fn merge_tags(target: &mut HashMap<String, String>, extra: &HashMap<String, Stri
     }
 }
 
+/// Wildcard sentinel for daemon tag values. A daemon tag with this
+/// value matches any non-empty value on the corresponding job tag.
+///
+/// This is a Rust-side extension over Go's strict-subset matcher
+/// (`provisioner_tagset_contains`, see migration `000275_check_tags.up.sql`).
+/// The SQL matcher used during Postgres `AcquireProvisionerJob` does not
+/// yet honor wildcards; they are observed only in the in-memory matcher
+/// used by unit tests and by helpers that rank candidate daemons.
+pub const TAG_WILDCARD: &str = "*";
+
 /// Returns `true` when a daemon advertising `daemon_tags` is allowed to
 /// acquire a job tagged with `job_tags`.
 ///
@@ -624,15 +634,56 @@ fn merge_tags(target: &mut HashMap<String, String>, extra: &HashMap<String, Stri
 ///   to be equal — i.e. only untagged daemons accept untagged jobs.
 /// - Otherwise `job_tags` must be a subset of `daemon_tags` (every job tag
 ///   key/value is present in the daemon's tag set).
+///
+/// Additionally, a daemon tag with the value [`TAG_WILDCARD`] (`"*"`)
+/// matches any value on the same key in `job_tags`. This extension is
+/// additive: when the daemon does not use wildcards the behavior remains
+/// identical to Go's strict-subset matcher.
 #[must_use]
 pub fn provisioner_tagset_matches(
     daemon_tags: &HashMap<String, String>,
     job_tags: &HashMap<String, String>,
 ) -> bool {
     if is_untagged_org_scope(job_tags) {
+        // For an untagged org job only an exactly-equal (untagged) daemon
+        // qualifies. Wildcards do not relax this; it mirrors the Go
+        // SQL short-circuit in `provisioner_tagset_contains`.
         return daemon_tags == job_tags;
     }
-    job_tags.iter().all(|(k, v)| daemon_tags.get(k) == Some(v))
+    job_tags.iter().all(|(k, v)| match daemon_tags.get(k) {
+        Some(dv) if dv == TAG_WILDCARD => true,
+        Some(dv) => dv == v,
+        None => false,
+    })
+}
+
+/// Preference ordering for two daemons that both match a job. Lower is
+/// more preferred (i.e. an acquirer should try `Organization` before
+/// `User`).
+///
+/// Mirrors the Go acquirer semantics where an organization-scoped daemon
+/// is considered first when multiple daemons share the job's provisioner
+/// types and tag set. Ports the precedence implied by
+/// `coder/coderd/provisionerdserver/acquirer.go` and the SQL query that
+/// orders candidate jobs by prebuild/initiator preference.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DaemonScopePreference {
+    /// Organization-scoped daemon — considered first.
+    Organization,
+    /// User-scoped daemon — considered second.
+    User,
+    /// Daemon whose `scope` tag is missing or unknown.
+    Unknown,
+}
+
+/// Classifies a daemon's scope for preference ordering.
+#[must_use]
+pub fn daemon_scope_preference(daemon_tags: &HashMap<String, String>) -> DaemonScopePreference {
+    match daemon_tags.get(TAG_SCOPE).map(String::as_str) {
+        Some(SCOPE_ORGANIZATION) => DaemonScopePreference::Organization,
+        Some(SCOPE_USER) => DaemonScopePreference::User,
+        _ => DaemonScopePreference::Unknown,
+    }
 }
 
 /// True when `tags` is exactly the "untagged" org-scoped set
@@ -764,5 +815,50 @@ mod tag_tests {
         let daemon = map([("scope", "organization"), ("owner", ""), ("env", "prod")]);
         let job = map([("scope", "user"), ("owner", "aaa"), ("env", "prod")]);
         assert!(!provisioner_tagset_matches(&daemon, &job));
+    }
+
+    #[test]
+    fn provisioner_tagset_matches_wildcard_any_value() {
+        let daemon = map([("scope", "organization"), ("owner", ""), ("env", "*")]);
+        let job = map([("scope", "organization"), ("owner", ""), ("env", "prod")]);
+        assert!(provisioner_tagset_matches(&daemon, &job));
+
+        let job_alt = map([("scope", "organization"), ("owner", ""), ("env", "stage")]);
+        assert!(provisioner_tagset_matches(&daemon, &job_alt));
+    }
+
+    #[test]
+    fn provisioner_tagset_matches_wildcard_miss_on_missing_key() {
+        let daemon = map([("scope", "organization"), ("owner", ""), ("env", "*")]);
+        let job = map([
+            ("scope", "organization"),
+            ("owner", ""),
+            ("env", "prod"),
+            ("dc", "chi"),
+        ]);
+        assert!(!provisioner_tagset_matches(&daemon, &job));
+    }
+
+    #[test]
+    fn provisioner_tagset_wildcard_does_not_match_untagged_job() {
+        // Even a "match-everything" daemon cannot match an untagged
+        // org-scoped job because untagged jobs require exact equality.
+        let daemon = map([("scope", "organization"), ("owner", ""), ("env", "*")]);
+        let job = map([("scope", "organization"), ("owner", "")]);
+        assert!(!provisioner_tagset_matches(&daemon, &job));
+    }
+
+    #[test]
+    fn daemon_scope_preference_orders_org_before_user() {
+        let org = map([("scope", "organization"), ("owner", "")]);
+        let user = map([("scope", "user"), ("owner", "aaa")]);
+        let unknown = map([("scope", "weird"), ("owner", "")]);
+        assert!(daemon_scope_preference(&org) < daemon_scope_preference(&user));
+        assert!(daemon_scope_preference(&user) < daemon_scope_preference(&unknown));
+        assert_eq!(
+            daemon_scope_preference(&org),
+            DaemonScopePreference::Organization
+        );
+        assert_eq!(daemon_scope_preference(&user), DaemonScopePreference::User);
     }
 }
