@@ -28,6 +28,12 @@
 //!   `update_template_acl`, `insert_template_version`
 //!   — via [`TemplateMutator`]
 //!
+//! User mutations (Wave 3):
+//! * `create_user`, `update_user_profile`, `update_user_status`,
+//!   `update_user_roles`, `soft_delete_user` — via [`UserMutator`]
+//! * `replace_user_password` — via [`UserPasswordMutator`] (lives on
+//!   [`AuthStore`] in `coder-core`, not [`IdentityStore`])
+//!
 //! Each lister trait is a narrow subset of the corresponding `coder-core`
 //! super-trait, so real stores (e.g. `PostgresStore`) satisfy them via
 //! the blanket `impl<T: WorkspaceStore + ?Sized> WorkspaceLister for T`
@@ -57,11 +63,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use coder_core::{
-    AuditLogListFilter, AuditLogResponse, CreateTemplateInput, CreateTemplateStoreError,
-    CreateTemplateVersionInput, CreateWorkspaceBuildInput, CreateWorkspaceInput, IdentityStore,
-    OperationalStore, StorageError, TemplateListFilter, TemplateRecord, TemplateStore,
-    TemplateVersionRecord, UpdateTemplateACLInput, UpdateTemplateMetaInput, UserListFilter,
-    UserRecord, WorkspaceBuildRecord, WorkspaceListFilter, WorkspaceRecord, WorkspaceStore,
+    AuditLogListFilter, AuditLogResponse, AuthStore, CreateTemplateInput, CreateTemplateStoreError,
+    CreateTemplateVersionInput, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
+    CreateWorkspaceInput, IdentityStore, OperationalStore, StorageError, TemplateListFilter,
+    TemplateRecord, TemplateStore, TemplateVersionRecord, UpdateTemplateACLInput,
+    UpdateTemplateMetaInput, UserListFilter, UserRecord, UserStatus, WorkspaceBuildRecord,
+    WorkspaceListFilter, WorkspaceRecord, WorkspaceStore,
 };
 use coder_rbac::{Action, Actor, Authorizer, Object, ResourceType};
 use thiserror::Error;
@@ -82,6 +89,11 @@ pub enum DbAuthzError {
     /// variants; the `Storage` variant flattens into [`Self::Storage`].
     #[error(transparent)]
     TemplateCreate(CreateTemplateStoreError),
+    /// User creation failed for a non-storage reason (e.g. duplicate
+    /// email/username). Maps from `CreateUserStoreError`'s domain-specific
+    /// variants; the `Storage` variant flattens into [`Self::Storage`].
+    #[error(transparent)]
+    UserCreate(CreateUserStoreError),
 }
 
 impl From<CreateTemplateStoreError> for DbAuthzError {
@@ -89,6 +101,15 @@ impl From<CreateTemplateStoreError> for DbAuthzError {
         match err {
             CreateTemplateStoreError::Storage(e) => Self::Storage(e),
             other => Self::TemplateCreate(other),
+        }
+    }
+}
+
+impl From<CreateUserStoreError> for DbAuthzError {
+    fn from(err: CreateUserStoreError) -> Self {
+        match err {
+            CreateUserStoreError::Storage(e) => Self::Storage(e),
+            other => Self::UserCreate(other),
         }
     }
 }
@@ -378,6 +399,115 @@ where
         input: CreateTemplateVersionInput,
     ) -> Result<TemplateVersionRecord, StorageError> {
         TemplateStore::insert_template_version(self, input).await
+    }
+}
+
+/// Narrow subset of [`IdentityStore`] exposing the write-side user
+/// methods the Wave 3 slice wraps. Keeping this trait small lets test
+/// fakes implement just the mutators they need, without a full
+/// [`IdentityStore`] impl.
+#[async_trait]
+pub trait UserMutator: Send + Sync {
+    /// Inserts a new user row (and initial org memberships).
+    async fn create_user(&self, input: CreateUserInput)
+    -> Result<UserRecord, CreateUserStoreError>;
+
+    /// Updates a user's basic profile fields (username, name).
+    async fn update_user_profile(
+        &self,
+        user_id: Uuid,
+        username: &str,
+        name: &str,
+    ) -> Result<Option<UserRecord>, StorageError>;
+
+    /// Updates a user's status (active, suspended, dormant).
+    async fn update_user_status(
+        &self,
+        user_id: Uuid,
+        status: UserStatus,
+    ) -> Result<Option<UserRecord>, StorageError>;
+
+    /// Replaces the site-wide roles for a user.
+    async fn update_user_roles(
+        &self,
+        user_id: Uuid,
+        roles: Vec<String>,
+    ) -> Result<Option<UserRecord>, StorageError>;
+
+    /// Soft-deletes the user (revokes sessions + API keys).
+    async fn soft_delete_user(&self, user_id: Uuid) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+impl<T> UserMutator for T
+where
+    T: IdentityStore + ?Sized,
+{
+    async fn create_user(
+        &self,
+        input: CreateUserInput,
+    ) -> Result<UserRecord, CreateUserStoreError> {
+        IdentityStore::create_user(self, input).await
+    }
+
+    async fn update_user_profile(
+        &self,
+        user_id: Uuid,
+        username: &str,
+        name: &str,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        IdentityStore::update_user_profile(self, user_id, username, name).await
+    }
+
+    async fn update_user_status(
+        &self,
+        user_id: Uuid,
+        status: UserStatus,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        IdentityStore::update_user_status(self, user_id, status).await
+    }
+
+    async fn update_user_roles(
+        &self,
+        user_id: Uuid,
+        roles: Vec<String>,
+    ) -> Result<Option<UserRecord>, StorageError> {
+        IdentityStore::update_user_roles(self, user_id, roles).await
+    }
+
+    async fn soft_delete_user(&self, user_id: Uuid) -> Result<bool, StorageError> {
+        IdentityStore::soft_delete_user(self, user_id).await
+    }
+}
+
+/// Narrow subset of [`AuthStore`] exposing just the password-replacement
+/// call. Password replacement is modelled on `AuthStore` in `coder-core`
+/// (it revokes sessions + API keys), but conceptually it is a user
+/// mutation, so the wrap still authorizes against `ResourceType::User`.
+#[async_trait]
+pub trait UserPasswordMutator: Send + Sync {
+    /// Replaces a user's password hash and revokes active sessions/keys.
+    async fn replace_user_password(
+        &self,
+        user_id: Uuid,
+        password_hash: &str,
+        clear_one_time_passcode: bool,
+    ) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+impl<T> UserPasswordMutator for T
+where
+    T: AuthStore + ?Sized,
+{
+    async fn replace_user_password(
+        &self,
+        user_id: Uuid,
+        password_hash: &str,
+        clear_one_time_passcode: bool,
+    ) -> Result<bool, StorageError> {
+        AuthStore::replace_user_password(self, user_id, password_hash, clear_one_time_passcode)
+            .await
     }
 }
 
@@ -772,9 +902,129 @@ where
     }
 }
 
+// ---------------------------------------------------------------------------
+// User mutator wraps (Wave 3). Each authorizes the matching CRUD action
+// against `ResourceType::User` before delegating. `create_user` uses a
+// bare resource-type `Create` check (no existing target id); the rest
+// scope the object by user id so per-object permissions apply. Mirrors
+// Go's `dbauthz.InsertUser` / `UpdateUserProfile` / `UpdateUserStatus` /
+// `UpdateUserRoles` / `UpdateUserDeletedByID` /
+// `UpdateUserHashedPassword` precheck behaviour.
+// ---------------------------------------------------------------------------
+
+impl<S> Authorized<S>
+where
+    S: UserMutator + ?Sized,
+{
+    /// Authorized version of `IdentityStore::create_user`. Mirrors Go's
+    /// `InsertUser` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not create
+    /// users, [`DbAuthzError::UserCreate`] for domain-specific create
+    /// failures (e.g. duplicate email), or [`DbAuthzError::Storage`]
+    /// for storage failures.
+    pub async fn create_user(&self, input: CreateUserInput) -> Result<UserRecord, DbAuthzError> {
+        let object = Object::new(ResourceType::User);
+        self.authorize_action(Action::Create, &object)?;
+        Ok(self.inner.create_user(input).await?)
+    }
+
+    /// Authorized version of `IdentityStore::update_user_profile`.
+    /// Mirrors Go's `UpdateUserProfile` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not update
+    /// this user, or propagates storage errors from the inner store.
+    pub async fn update_user_profile(
+        &self,
+        user_id: Uuid,
+        username: &str,
+        name: &str,
+    ) -> Result<Option<UserRecord>, DbAuthzError> {
+        let object = Object::new(ResourceType::User).with_id(user_id);
+        self.authorize_action(Action::Update, &object)?;
+        Ok(self
+            .inner
+            .update_user_profile(user_id, username, name)
+            .await?)
+    }
+
+    /// Authorized version of `IdentityStore::update_user_status`.
+    /// Mirrors Go's `UpdateUserStatus` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not update
+    /// this user, or propagates storage errors from the inner store.
+    pub async fn update_user_status(
+        &self,
+        user_id: Uuid,
+        status: UserStatus,
+    ) -> Result<Option<UserRecord>, DbAuthzError> {
+        let object = Object::new(ResourceType::User).with_id(user_id);
+        self.authorize_action(Action::Update, &object)?;
+        Ok(self.inner.update_user_status(user_id, status).await?)
+    }
+
+    /// Authorized version of `IdentityStore::update_user_roles`.
+    /// Mirrors Go's `UpdateUserRoles` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not update
+    /// this user, or propagates storage errors from the inner store.
+    pub async fn update_user_roles(
+        &self,
+        user_id: Uuid,
+        roles: Vec<String>,
+    ) -> Result<Option<UserRecord>, DbAuthzError> {
+        let object = Object::new(ResourceType::User).with_id(user_id);
+        self.authorize_action(Action::Update, &object)?;
+        Ok(self.inner.update_user_roles(user_id, roles).await?)
+    }
+
+    /// Authorized version of `IdentityStore::soft_delete_user`. Mirrors
+    /// Go's `UpdateUserDeletedByID` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not delete
+    /// this user, or propagates storage errors from the inner store.
+    pub async fn soft_delete_user(&self, user_id: Uuid) -> Result<bool, DbAuthzError> {
+        let object = Object::new(ResourceType::User).with_id(user_id);
+        self.authorize_action(Action::Delete, &object)?;
+        Ok(self.inner.soft_delete_user(user_id).await?)
+    }
+}
+
+impl<S> Authorized<S>
+where
+    S: UserPasswordMutator + ?Sized,
+{
+    /// Authorized version of `AuthStore::replace_user_password`. Mirrors
+    /// Go's `UpdateUserHashedPassword` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not update
+    /// this user, or propagates storage errors from the inner store.
+    pub async fn replace_user_password(
+        &self,
+        user_id: Uuid,
+        password_hash: &str,
+        clear_one_time_passcode: bool,
+    ) -> Result<bool, DbAuthzError> {
+        let object = Object::new(ResourceType::User).with_id(user_id);
+        self.authorize_action(Action::Update, &object)?;
+        Ok(self
+            .inner
+            .replace_user_password(user_id, password_hash, clear_one_time_passcode)
+            .await?)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::collections::HashMap;
+
+    use coder_core::LoginType;
 
     use super::*;
 
@@ -1357,6 +1607,200 @@ mod tests {
 
         let allowed = Authorized::new(store, owner_actor())
             .insert_template_version(sample_create_version_input())
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // UserMutator / UserPasswordMutator wrap tests (Wave 3).
+    // -----------------------------------------------------------------------
+
+    fn sample_user_record() -> UserRecord {
+        UserRecord {
+            id: Uuid::nil(),
+            email: "user@example.com".to_owned(),
+            username: "user".to_owned(),
+            name: "User".to_owned(),
+            avatar_url: String::new(),
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            last_seen_at: None,
+            organization_ids: Vec::new(),
+            roles: Vec::new(),
+            login_type: LoginType::Password,
+            status: UserStatus::Active,
+            deleted: false,
+            is_system: false,
+        }
+    }
+
+    fn sample_create_user_input() -> CreateUserInput {
+        CreateUserInput {
+            email: "user@example.com".to_owned(),
+            username: "user".to_owned(),
+            name: "User".to_owned(),
+            password_hash: None,
+            login_type: LoginType::Password,
+            status: UserStatus::Active,
+            organization_ids: Vec::new(),
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeUserMutator;
+
+    #[async_trait]
+    impl UserMutator for FakeUserMutator {
+        async fn create_user(
+            &self,
+            _input: CreateUserInput,
+        ) -> Result<UserRecord, CreateUserStoreError> {
+            Ok(sample_user_record())
+        }
+
+        async fn update_user_profile(
+            &self,
+            _user_id: Uuid,
+            _username: &str,
+            _name: &str,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            Ok(Some(sample_user_record()))
+        }
+
+        async fn update_user_status(
+            &self,
+            _user_id: Uuid,
+            _status: UserStatus,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            Ok(Some(sample_user_record()))
+        }
+
+        async fn update_user_roles(
+            &self,
+            _user_id: Uuid,
+            _roles: Vec<String>,
+        ) -> Result<Option<UserRecord>, StorageError> {
+            Ok(Some(sample_user_record()))
+        }
+
+        async fn soft_delete_user(&self, _user_id: Uuid) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeUserPasswordMutator;
+
+    #[async_trait]
+    impl UserPasswordMutator for FakeUserPasswordMutator {
+        async fn replace_user_password(
+            &self,
+            _user_id: Uuid,
+            _password_hash: &str,
+            _clear_one_time_passcode: bool,
+        ) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn create_user_authorizes_then_delegates() {
+        let store = Arc::new(FakeUserMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .create_user(sample_create_user_input())
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .create_user(sample_create_user_input())
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn update_user_profile_authorizes_then_delegates() {
+        let store = Arc::new(FakeUserMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .update_user_profile(Uuid::nil(), "new-username", "New Name")
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .update_user_profile(Uuid::nil(), "new-username", "New Name")
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn update_user_status_authorizes_then_delegates() {
+        let store = Arc::new(FakeUserMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .update_user_status(Uuid::nil(), UserStatus::Suspended)
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .update_user_status(Uuid::nil(), UserStatus::Suspended)
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn update_user_roles_authorizes_then_delegates() {
+        let store = Arc::new(FakeUserMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .update_user_roles(Uuid::nil(), vec!["owner".to_owned()])
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .update_user_roles(Uuid::nil(), vec!["owner".to_owned()])
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn soft_delete_user_authorizes_then_delegates() {
+        let store = Arc::new(FakeUserMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .soft_delete_user(Uuid::nil())
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .soft_delete_user(Uuid::nil())
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn replace_user_password_authorizes_then_delegates() {
+        let store = Arc::new(FakeUserPasswordMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .replace_user_password(Uuid::nil(), "hash", false)
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .replace_user_password(Uuid::nil(), "hash", false)
             .await;
         assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
     }
