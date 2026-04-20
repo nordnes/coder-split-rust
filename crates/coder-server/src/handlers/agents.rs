@@ -989,6 +989,21 @@ pub(crate) async fn get_workspace_agent_logs(
     Ok((StatusCode::OK, Json(logs)).into_response())
 }
 
+/// HTTP header carrying a signed reconnecting-PTY capability token.
+///
+/// Mirrors the `Coder-Signed-Token` convention from the Go workspace-app
+/// proxy, which presents a signed token to the control plane to prove it is
+/// authorised to open a PTY websocket on behalf of a user. Absent the
+/// header, the endpoint falls back to the normal session-cookie path.
+pub(crate) const RECONNECTING_PTY_SIGNED_TOKEN_HEADER: &str = "coder-signed-token";
+
+/// Query parameter variant of [`RECONNECTING_PTY_SIGNED_TOKEN_HEADER`], so
+/// browser websocket callers (which cannot easily set custom headers) can
+/// still present a signed token on the upgrade request. Surfaced here as
+/// documentation — the actual string is consumed by serde's `rename`.
+#[allow(dead_code)]
+pub(crate) const RECONNECTING_PTY_SIGNED_TOKEN_QUERY: &str = "coder_signed_token";
+
 /// Query string for the reconnecting-PTY WebSocket endpoint.
 ///
 /// The `reconnect_id` keys the server-side session store. A client that
@@ -999,6 +1014,11 @@ pub(crate) async fn get_workspace_agent_logs(
 #[derive(Debug, Deserialize)]
 pub(crate) struct ReconnectingPtyQuery {
     pub(crate) reconnect_id: Option<Uuid>,
+    /// Optional signed capability token, base64url-encoded. When present,
+    /// the server verifies it against the deployment's app signing key and
+    /// skips the session-cookie auth path.
+    #[serde(default, rename = "coder_signed_token")]
+    pub(crate) signed_token: Option<String>,
 }
 
 /// GET /api/v2/workspaceagents/{agent}/pty — WebSocket terminal.
@@ -1008,6 +1028,12 @@ pub(crate) struct ReconnectingPtyQuery {
 /// reconnect the buffer is replayed to the new socket before live output
 /// resumes. If the agent side drops, a short grace window keeps
 /// scrollback readable; outside the grace window attach returns 404/close.
+///
+/// Authentication is either:
+/// * a valid `Coder-Signed-Token` (header or `coder_signed_token` query
+///   parameter) that binds the target workspace and agent, minted by an
+///   authorised workspace-app proxy; or
+/// * the normal session cookie/header path.
 pub(crate) async fn get_workspace_agent_pty(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -1015,13 +1041,50 @@ pub(crate) async fn get_workspace_agent_pty(
     Query(query): Query<ReconnectingPtyQuery>,
     ws: WebSocketUpgrade,
 ) -> Result<Response, AppError> {
-    let Some(_context) = authenticate_request(&state, &headers).await? else {
-        return Ok(unauthorized_response("Missing or invalid session token."));
-    };
-
     let Some(_row) = state.store.find_workspace_agent_by_id(agent_id).await? else {
         return Ok(resource_not_found_response());
     };
+
+    // Signed-token path: if a `Coder-Signed-Token` header or the
+    // `coder_signed_token` query parameter is present, verify it and skip
+    // session-cookie auth. This matches the Go reference's signed-token
+    // provider wired through the workspace-app proxy.
+    let signed_token = headers
+        .get(RECONNECTING_PTY_SIGNED_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_owned)
+        .or_else(|| query.signed_token.clone());
+    if let Some(token) = signed_token {
+        // The signed token must be bound to the caller's workspace. We
+        // look up the workspace via the agent to avoid trusting client
+        // input.
+        let Some(workspace) = state.store.find_workspace_by_agent_id(agent_id).await? else {
+            return Ok(resource_not_found_response());
+        };
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        if let Err(err) = coder_auth::reconnecting_pty::verify_signed_token(
+            &state.app_signing_key,
+            &token,
+            workspace.id,
+            agent_id,
+            now,
+        ) {
+            tracing::debug!(
+                agent_id = %agent_id,
+                workspace_id = %workspace.id,
+                error = %err,
+                "rejected reconnecting-PTY signed token",
+            );
+            return Ok(unauthorized_response(
+                "Invalid reconnecting-PTY signed token.",
+            ));
+        }
+    } else {
+        // Fallback: existing session-cookie / header auth.
+        let Some(_context) = authenticate_request(&state, &headers).await? else {
+            return Ok(unauthorized_response("Missing or invalid session token."));
+        };
+    }
 
     let Some(reconnect_id) = query.reconnect_id else {
         return Ok((
@@ -3181,6 +3244,73 @@ mod tests {
             return Err(format!("expected binary message from PTY output, got: {msg:?}").into());
         }
 
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn pty_handler_accepts_valid_signed_token() -> TestResult {
+        let (state, store) = test_state_with_store(true)?;
+        let agent_id = seed_agent(&store)?;
+
+        // Register a fake agent connection so the PTY handler has something
+        // to talk to once the upgrade is accepted.
+        let conn: Arc<dyn AgentConnection> = Arc::new(FakeAgentConnection {
+            id: agent_id,
+            connected_at: OffsetDateTime::now_utc(),
+        });
+        state.agent_provider.register_agent(agent_id, conn).await;
+
+        // Resolve the workspace id the way the handler does, so the token
+        // binding lines up with the stored chain.
+        let workspace = state
+            .store
+            .find_workspace_by_agent_id(agent_id)
+            .await?
+            .ok_or("workspace not found for seeded agent")?;
+        let signer =
+            coder_auth::reconnecting_pty::ReconnectingPtyTokenSigner::new(&state.app_signing_key);
+        let exp = OffsetDateTime::now_utc().unix_timestamp() + 60;
+        let token = signer.sign(workspace.id, agent_id, exp);
+
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app).await?;
+        // Deliberately pass the token via the query parameter path and use a
+        // reconnect_id so this upgrade exercises the PTY session store.
+        let reconnect_id = Uuid::new_v4();
+        let url = format!(
+            "{}api/v2/workspaceagents/{agent_id}/pty?reconnect_id={reconnect_id}&coder_signed_token={token}",
+            {
+                let mut u = base_url.clone();
+                u.set_scheme("ws").ok();
+                u
+            }
+        );
+
+        // No session token header — the signed token is the sole credential.
+        let parsed = url::Url::parse(&url)?;
+        let host = match parsed.port() {
+            Some(port) => format!("{}:{port}", parsed.host_str().unwrap_or("127.0.0.1")),
+            None => parsed.host_str().unwrap_or("127.0.0.1").to_owned(),
+        };
+        let request = http::Request::builder()
+            .uri(&url)
+            .header("Host", &host)
+            .header("Connection", "Upgrade")
+            .header("Upgrade", "websocket")
+            .header("Sec-WebSocket-Version", "13")
+            .header(
+                "Sec-WebSocket-Key",
+                tungstenite::handshake::client::generate_key(),
+            )
+            .body(())?;
+        let (mut ws, resp) = tokio_tungstenite::connect_async(request).await?;
+        assert_eq!(
+            resp.status().as_u16(),
+            101,
+            "expected 101 Switching Protocols on signed-token upgrade, got {}",
+            resp.status()
+        );
         ws.close(None).await?;
         Ok(())
     }
