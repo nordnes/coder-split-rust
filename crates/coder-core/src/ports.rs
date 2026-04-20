@@ -4133,6 +4133,30 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         slug: &str,
     ) -> Result<Option<WorkspaceAppRow>, StorageError>;
 
+    /// Deletes a workspace sub-agent by id. Mirrors
+    /// `DeleteWorkspaceSubAgentByID` in
+    /// `coder/coderd/database/queries/workspaceagents.sql`.
+    ///
+    /// Default implementation returns `Ok(())` — callers rely on this to
+    /// support in-memory test stores that have no sub-agent projection yet.
+    async fn delete_workspace_sub_agent(&self, _sub_agent_id: Uuid) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Lists workspace agents whose `parent_id` equals the supplied id.
+    /// Mirrors `GetWorkspaceAgentsByParentID` in
+    /// `coder/coderd/database/queries/workspaceagents.sql`.
+    ///
+    /// Default implementation returns an empty list — production stores
+    /// override this to query the real table once the sub-agent projection
+    /// lands.
+    async fn list_workspace_agents_by_parent_id(
+        &self,
+        _parent_agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     // -----------------------------------------------------------------------
     // Workspace domain methods
     // -----------------------------------------------------------------------

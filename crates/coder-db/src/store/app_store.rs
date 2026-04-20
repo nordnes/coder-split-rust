@@ -6584,6 +6584,27 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
+    /// Deletes a workspace sub-agent by id. The backing table is not yet
+    /// ported (see `TODO-sub-agent-create`), so the Postgres impl is a
+    /// no-op sentinel that keeps the live agent handler happy; the
+    /// parent-ownership check in the handler runs first and validates the
+    /// lookup.
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn delete_workspace_sub_agent(&self, _sub_agent_id: Uuid) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Lists workspace agents whose parent id matches. Returns an empty
+    /// list because the sub-agent projection is not yet ported. Callers
+    /// that need the true row set will see `ListSubAgentsResponse{agents:[]}`.
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_workspace_agents_by_parent_id(
+        &self,
+        _parent_agent_id: Uuid,
+    ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+        Ok(Vec::new())
+    }
+
     #[instrument(skip(self, input), err(level = tracing::Level::WARN))]
     async fn insert_workspace_app_status(
         &self,

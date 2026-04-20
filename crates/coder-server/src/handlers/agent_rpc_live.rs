@@ -973,6 +973,260 @@ impl AgentRpcHandler for LiveAgentHandler {
         }
         Ok(agent::ServiceBanner::default())
     }
+
+    /// Ports `coder/coderd/agentapi/connectionlog.go::ReportConnection`.
+    ///
+    /// The `connection_logs` table is not yet ported to Rust. We log the
+    /// event at `info` with the decoded action/type names (Devin AI review
+    /// feedback on PR #251 — prefer enum names over raw i32) and return OK.
+    /// Nil / unparseable connection IDs are still rejected per the Go handler.
+    async fn report_connection(&self, req: agent::ReportConnectionRequest) -> Result<(), RpcError> {
+        let connection = req
+            .connection
+            .ok_or_else(|| RpcError::InvalidArgument("connection is required".into()))?;
+        let connection_id = Uuid::from_slice(&connection.id)
+            .map_err(|e| RpcError::InvalidArgument(format!("connection id from bytes: {e}")))?;
+        if connection_id.is_nil() {
+            return Err(RpcError::InvalidArgument(
+                "connection ID cannot be nil".into(),
+            ));
+        }
+        // The enums live on the nested `Connection` message. `as_str_name()`
+        // (prost-generated) gives us stable PROTO field names to log instead
+        // of raw i32 values.
+        let action = agent::connection::Action::try_from(connection.action)
+            .ok()
+            .map(|a| a.as_str_name())
+            .unwrap_or("UNKNOWN");
+        let conn_type = agent::connection::Type::try_from(connection.r#type)
+            .ok()
+            .map(|t| t.as_str_name())
+            .unwrap_or("UNKNOWN");
+        tracing::info!(
+            agent_id = %self.agent_id,
+            connection_id = %connection_id,
+            action = action,
+            r#type = conn_type,
+            ip = %connection.ip,
+            status_code = connection.status_code,
+            "agent report_connection (persistence deferred — connection_logs table not yet ported)",
+        );
+        Ok(())
+    }
+
+    /// Ports `coder/coderd/agentapi/resources_monitoring.go::
+    /// GetResourcesMonitoringConfiguration`.
+    ///
+    /// The persisted `workspace_agent_*_resource_monitors` tables are not
+    /// yet ported, so we return Go's static defaults:
+    /// - `num_datapoints = 20`, `collection_interval_seconds = 10`
+    /// - `memory = None`, `volumes = []` (monitors unconfigured).
+    async fn get_resources_monitoring_configuration(
+        &self,
+        _req: agent::GetResourcesMonitoringConfigurationRequest,
+    ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        Ok(agent::GetResourcesMonitoringConfigurationResponse {
+            config: Some(
+                agent::get_resources_monitoring_configuration_response::Config {
+                    num_datapoints: 20,
+                    collection_interval_seconds: 10,
+                },
+            ),
+            memory: None,
+            volumes: Vec::new(),
+        })
+    }
+
+    /// Ports `coder/coderd/agentapi/resources_monitoring.go::
+    /// PushResourcesMonitoringUsage`.
+    ///
+    /// The `workspace_agent_*_resource_monitors` tables aren't ported, so we
+    /// just log the batch size and return OK. Matches the Go handler when
+    /// no monitors are configured (it performs a no-op through
+    /// `monitorMemory` / `monitorVolumes`).
+    async fn push_resources_monitoring_usage(
+        &self,
+        req: agent::PushResourcesMonitoringUsageRequest,
+    ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
+        tracing::info!(
+            agent_id = %self.agent_id,
+            datapoints = req.datapoints.len(),
+            "agent push_resources_monitoring_usage (persistence deferred)",
+        );
+        Ok(agent::PushResourcesMonitoringUsageResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/subagent.go::CreateSubAgent`.
+    ///
+    /// TODO-sub-agent-create: the `insert_workspace_agent` AppStore method
+    /// is not yet present, so we return `Unimplemented` rather than silently
+    /// succeeding. The router still advertises the RPC so clients can tell
+    /// the difference between "not yet supported" and "unknown endpoint".
+    async fn create_sub_agent(
+        &self,
+        _req: agent::CreateSubAgentRequest,
+    ) -> Result<agent::CreateSubAgentResponse, RpcError> {
+        Err(RpcError::Unimplemented(
+            "CreateSubAgent (sub-agent persistence not yet ported)".into(),
+        ))
+    }
+
+    /// Ports `coder/coderd/agentapi/subagent.go::DeleteSubAgent`.
+    ///
+    /// Looks up the sub-agent and rejects with `InvalidArgument` if its
+    /// `parent_id` does not match `self.agent_id`. This safeguard (flagged
+    /// in the Devin AI review of closed PR #251) prevents an agent from
+    /// deleting a sub-agent that belongs to a different parent within the
+    /// same workspace.
+    async fn delete_sub_agent(
+        &self,
+        req: agent::DeleteSubAgentRequest,
+    ) -> Result<agent::DeleteSubAgentResponse, RpcError> {
+        let sub_agent_id = Uuid::from_slice(&req.id)
+            .map_err(|e| RpcError::InvalidArgument(format!("sub agent id from bytes: {e}")))?;
+        if sub_agent_id.is_nil() {
+            return Err(RpcError::InvalidArgument(
+                "sub agent ID cannot be nil".into(),
+            ));
+        }
+
+        // Parent-ownership check: look up the candidate sub-agent and
+        // confirm its parent_id equals this handler's agent_id. If the row
+        // is absent, fall through to `delete_workspace_sub_agent` (the
+        // current store implementation is a safe no-op).
+        if let Some(row) = self
+            .store
+            .find_workspace_agent_by_id(sub_agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find sub agent: {e}")))?
+        {
+            match row.parent_id {
+                Some(p) if p == self.agent_id => {}
+                _ => {
+                    return Err(RpcError::InvalidArgument(
+                        "subagent does not belong to this parent agent".into(),
+                    ));
+                }
+            }
+        }
+
+        self.store
+            .delete_workspace_sub_agent(sub_agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("delete sub agent: {e}")))?;
+        Ok(agent::DeleteSubAgentResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/subagent.go::ListSubAgents`.
+    ///
+    /// Calls `list_workspace_agents_by_parent_id` — the default in-memory
+    /// implementation returns an empty list until the sub-agent projection
+    /// lands.
+    async fn list_sub_agents(
+        &self,
+        _req: agent::ListSubAgentsRequest,
+    ) -> Result<agent::ListSubAgentsResponse, RpcError> {
+        let rows = self
+            .store
+            .list_workspace_agents_by_parent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("list sub agents: {e}")))?;
+        let agents = rows
+            .into_iter()
+            .map(|r| agent::SubAgent {
+                name: r.name,
+                id: r.id.as_bytes().to_vec(),
+                auth_token: r.auth_token.as_bytes().to_vec(),
+            })
+            .collect();
+        Ok(agent::ListSubAgentsResponse { agents })
+    }
+
+    /// Ports `coder/coderd/agentapi/boundary_logs.go::ReportBoundaryLogs`.
+    ///
+    /// The `boundary_logs` / boundary usage tracking tables are not yet
+    /// ported — log the batch size and return OK.
+    async fn report_boundary_logs(
+        &self,
+        req: agent::ReportBoundaryLogsRequest,
+    ) -> Result<agent::ReportBoundaryLogsResponse, RpcError> {
+        tracing::info!(
+            agent_id = %self.agent_id,
+            logs = req.logs.len(),
+            "agent report_boundary_logs (persistence deferred)",
+        );
+        Ok(agent::ReportBoundaryLogsResponse::default())
+    }
+
+    /// Ports `coder/coderd/agentapi/apps.go::UpdateAppStatus`.
+    ///
+    /// Enforces the Go handler's 160-character message cap (Devin AI review
+    /// on closed PR #251 flagged that the error wording had to match the
+    /// inequality the code enforces — the check is `> 160`, so the message
+    /// must read "must be at most 160 characters"), validates the state
+    /// enum, resolves the target app by `(agent_id, slug)`, and persists
+    /// via [`AppStore::insert_workspace_app_status`]. AI-task notifications
+    /// + activity bump are deferred.
+    async fn update_app_status(
+        &self,
+        req: agent::UpdateAppStatusRequest,
+    ) -> Result<agent::UpdateAppStatusResponse, RpcError> {
+        if req.message.chars().count() > 160 {
+            return Err(RpcError::InvalidArgument(
+                "Message must be at most 160 characters.".into(),
+            ));
+        }
+
+        let state_str = match agent::update_app_status_request::AppStatusState::try_from(req.state)
+        {
+            Ok(agent::update_app_status_request::AppStatusState::Working) => "working",
+            Ok(agent::update_app_status_request::AppStatusState::Idle) => "idle",
+            Ok(agent::update_app_status_request::AppStatusState::Complete) => "complete",
+            Ok(agent::update_app_status_request::AppStatusState::Failure) => "failure",
+            Err(_) => {
+                return Err(RpcError::InvalidArgument(format!(
+                    "invalid state: {}",
+                    req.state
+                )));
+            }
+        };
+
+        let app = self
+            .store
+            .find_workspace_app_by_agent_and_slug(self.agent_id, &req.slug)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find workspace app: {e}")))?
+            .ok_or_else(|| {
+                RpcError::InvalidArgument(format!("no app found with slug {:?}", req.slug))
+            })?;
+
+        let workspace = self
+            .store
+            .find_workspace_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("find workspace: {e}")))?
+            .ok_or_else(|| RpcError::Internal("workspace not found for agent".into()))?;
+
+        let uri = if req.uri.is_empty() {
+            None
+        } else {
+            Some(req.uri)
+        };
+
+        self.store
+            .insert_workspace_app_status(&coder_core::InsertWorkspaceAppStatusInput {
+                agent_id: self.agent_id,
+                app_id: app.id,
+                workspace_id: workspace.id,
+                state: state_str.to_owned(),
+                message: req.message,
+                uri,
+            })
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert workspace app status: {e}")))?;
+
+        Ok(agent::UpdateAppStatusResponse::default())
+    }
 }
 
 /// Converts a `google.protobuf.Timestamp` to an `OffsetDateTime`. Returns
