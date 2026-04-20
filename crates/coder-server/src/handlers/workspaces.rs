@@ -1,13 +1,23 @@
 //! Workspace CRUD, builds, ACL, port shares, and related handlers.
 //!
-//! TODO-audit-diff-expand: ~4 of the 16 workspace mutation sites now emit a
+//! TODO-audit-diff-expand: 7 of the 16 workspace mutation sites now emit a
 //! structured per-field [`coder_audit::AuditDiff`] alongside the summary
 //! string — `patch_workspace` (rename), `put_workspace_autostart`,
-//! `put_workspace_ttl`, and `put_workspace_autoupdates`. The remaining
-//! workspace mutation sites (delete-build, favorite/unfavorite, dormant/
-//! activate, extend-deadline, port-share, ACL patch, build cancel, and
-//! build start/stop/delete transitions) still pass `diff: None`. Extending
-//! them is tracked as a follow-up to gap-doc §B.10.1.
+//! `put_workspace_ttl`, `put_workspace_autoupdates`,
+//! `put_workspace_favorite`, `delete_workspace_favorite`, and
+//! `put_workspace_dormant`.
+//!
+//! The remaining mutation sites — `put_workspace_extend`,
+//! `post_workspace_port_share`, `delete_workspace_port_share`,
+//! `patch_workspace_acl`, `delete_workspace_acl`,
+//! `patch_cancel_workspace_build`, and the build start/stop/delete
+//! transitions inside `post_workspace_build` — mutate state that does not
+//! live on [`WorkspaceRecord`] (build deadlines, port-share rows, ACL rows,
+//! provisioner-job state, async build transitions). They still pass
+//! `diff: None`; marked `TODO-audit-diff-schema-expand` below. Expanding
+//! coverage requires enlarging [`AuditWorkspaceView`] (or introducing
+//! resource-specific audit views), tracked as follow-up to gap-doc
+//! §B.10.1.
 
 use super::templates::resolve_organization;
 use super::users::clamp_pagination_limit;
@@ -539,6 +549,13 @@ pub(crate) async fn post_workspace_build(
 
     // Audit the build transition.  Mirrors Go `workspacebuilds.go` which
     // emits a background audit entry once the build is queued.
+    //
+    // TODO-audit-diff-schema-expand: build transitions (`start`/`stop`/
+    // `delete`) are async — the workspace record's user-visible fields
+    // don't change synchronously, so a `before`/`after` [`AuditWorkspaceView`]
+    // diff would be empty. A meaningful structured diff for this site
+    // requires a dedicated workspace-build audit view (recording the
+    // transition, template version, deadline, initiator).
     let (action, verb) = match transition.as_str() {
         "start" => (AuditAction::Start, "started"),
         "stop" => (AuditAction::Stop, "stopped"),
@@ -759,6 +776,8 @@ pub(crate) async fn put_workspace_dormant(
         None
     };
 
+    let before_view = AuditWorkspaceView::from_record(&workspace);
+
     let Some(updated) = state
         .store
         .update_workspace_dormant_at(workspace_id, dormant_at, Some(context.user.id))
@@ -767,20 +786,29 @@ pub(crate) async fn put_workspace_dormant(
         return Ok(resource_not_found_response());
     };
 
+    let after_view = AuditWorkspaceView::from_record(&updated);
+    let diff = {
+        use coder_audit::Auditable as _;
+        before_view.audit_diff(&after_view)
+    };
+    let audit_diff = if diff.is_empty() { None } else { Some(diff) };
+
     let verb = if dormant {
         "marked workspace"
     } else {
         "reactivated workspace"
     };
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::Workspace,
-        Some(&context.user),
-        Some(workspace_id.to_string()),
-        format!("{verb} {} dormancy", updated.name),
-    )
-    .await;
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::Workspace,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(workspace_id.to_string()),
+            summary: format!("{verb} {} dormancy", updated.name),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok((StatusCode::OK, Json(workspace_to_json(&updated))).into_response())
 }
@@ -869,6 +897,11 @@ pub(crate) async fn put_workspace_extend(
         )
         .await?;
 
+    // TODO-audit-diff-schema-expand: `deadline` lives on the workspace build
+    // row, not on [`WorkspaceRecord`], so we cannot synthesise a structured
+    // diff against [`AuditWorkspaceView`] yet. Follow-up: introduce a
+    // build-scoped audit view (or widen the workspace view) so this site
+    // can report `deadline: old -> new` in the structured diff.
     record_audit(
         &state,
         AuditAction::Write,
@@ -997,20 +1030,32 @@ pub(crate) async fn put_workspace_favorite(
         ));
     }
 
+    let before_view = AuditWorkspaceView::from_record(&workspace);
+
     state
         .store
         .favorite_workspace(workspace_id, context.user.id, true)
         .await?;
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::Workspace,
-        Some(&context.user),
-        Some(workspace_id.to_string()),
-        format!("favorited workspace {}", workspace.name),
-    )
-    .await;
+    let mut after_view = before_view.clone();
+    after_view.favorite = true;
+    let diff = {
+        use coder_audit::Auditable as _;
+        before_view.audit_diff(&after_view)
+    };
+    let audit_diff = if diff.is_empty() { None } else { Some(diff) };
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::Workspace,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(workspace_id.to_string()),
+            summary: format!("favorited workspace {}", workspace.name),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1051,20 +1096,32 @@ pub(crate) async fn delete_workspace_favorite(
         ));
     }
 
+    let before_view = AuditWorkspaceView::from_record(&workspace);
+
     state
         .store
         .favorite_workspace(workspace_id, context.user.id, false)
         .await?;
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::Workspace,
-        Some(&context.user),
-        Some(workspace_id.to_string()),
-        format!("unfavorited workspace {}", workspace.name),
-    )
-    .await;
+    let mut after_view = before_view.clone();
+    after_view.favorite = false;
+    let diff = {
+        use coder_audit::Auditable as _;
+        before_view.audit_diff(&after_view)
+    };
+    let audit_diff = if diff.is_empty() { None } else { Some(diff) };
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::Workspace,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(workspace_id.to_string()),
+            summary: format!("unfavorited workspace {}", workspace.name),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -1173,6 +1230,10 @@ pub(crate) async fn post_workspace_port_share(
         })
         .await?;
 
+    // TODO-audit-diff-schema-expand: port-share rows live in
+    // `workspace_agent_port_shares` — they are not captured by
+    // [`AuditWorkspaceView`]. Rendering a structured diff requires adding a
+    // serialised set of shares (or introducing a port-share audit view).
     record_audit(
         &state,
         AuditAction::Write,
@@ -1251,6 +1312,9 @@ pub(crate) async fn delete_workspace_port_share(
         .delete_workspace_port_share(workspace_id, agent_name, port)
         .await?;
 
+    // TODO-audit-diff-schema-expand: see `post_workspace_port_share` —
+    // port-share deletions similarly need a schema-expand before we can
+    // report the removed row in a structured diff.
     record_audit(
         &state,
         AuditAction::Write,
@@ -1390,6 +1454,10 @@ pub(crate) async fn patch_workspace_acl(
         .update_workspace_acl(workspace_id, &input)
         .await?;
 
+    // TODO-audit-diff-schema-expand: workspace ACL rows live outside
+    // [`WorkspaceRecord`] (in `workspace_user_acl`/`workspace_group_acl`).
+    // A structured diff would require serialising the full ACL set into
+    // the audit view (or a dedicated ACL-audit type).
     record_audit(
         &state,
         AuditAction::Write,
@@ -1441,6 +1509,9 @@ pub(crate) async fn delete_workspace_acl(
 
     state.store.delete_workspace_acl(workspace_id).await?;
 
+    // TODO-audit-diff-schema-expand: see `patch_workspace_acl` — ACL
+    // deletion similarly needs a schema-expand to report which entries
+    // were removed in a structured diff.
     record_audit(
         &state,
         AuditAction::Delete,
@@ -1848,6 +1919,11 @@ pub(crate) async fn patch_cancel_workspace_build(
             .into_response());
     }
 
+    // TODO-audit-diff-schema-expand: build-cancel mutates the provisioner
+    // job state (`canceled_at`/`completed_at`) on the workspace-build row,
+    // not [`WorkspaceRecord`]. A structured diff needs either a build-audit
+    // view or an extension to the workspace view exposing latest-build
+    // status.
     record_audit(
         &state,
         AuditAction::Write,
