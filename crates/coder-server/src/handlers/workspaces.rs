@@ -1,11 +1,13 @@
 //! Workspace CRUD, builds, ACL, port shares, and related handlers.
 //!
-//! TODO-audit-diff-expand: only `patch_workspace` currently emits a
-//! structured per-field [`coder_audit::AuditDiff`] alongside its summary
-//! string. The remaining ~15 workspace mutation sites (favorite/unfavorite,
-//! autostart/TTL/schedule updates, dormant/activate, ACL changes, build
-//! start/stop/delete, etc.) still pass `diff: None`. Extending them is
-//! tracked as a follow-up to gap-doc §B.10.1.
+//! TODO-audit-diff-expand: ~4 of the 16 workspace mutation sites now emit a
+//! structured per-field [`coder_audit::AuditDiff`] alongside the summary
+//! string — `patch_workspace` (rename), `put_workspace_autostart`,
+//! `put_workspace_ttl`, and `put_workspace_autoupdates`. The remaining
+//! workspace mutation sites (delete-build, favorite/unfavorite, dormant/
+//! activate, extend-deadline, port-share, ACL patch, build cancel, and
+//! build start/stop/delete transitions) still pass `diff: None`. Extending
+//! them is tracked as a follow-up to gap-doc §B.10.1.
 
 use super::templates::resolve_organization;
 use super::users::clamp_pagination_limit;
@@ -602,20 +604,32 @@ pub(crate) async fn put_workspace_autostart(
         .and_then(|v| v.as_str())
         .map(String::from);
 
+    let before_view = AuditWorkspaceView::from_record(&workspace);
+
     state
         .store
         .update_workspace_autostart(workspace_id, schedule.as_deref())
         .await?;
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::Workspace,
-        Some(&context.user),
-        Some(workspace_id.to_string()),
-        format!("updated workspace {} autostart schedule", workspace.name),
-    )
-    .await;
+    let mut after_view = before_view.clone();
+    after_view.autostart_schedule = schedule.clone();
+    let diff = {
+        use coder_audit::Auditable as _;
+        before_view.audit_diff(&after_view)
+    };
+    let audit_diff = if diff.is_empty() { None } else { Some(diff) };
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::Workspace,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(workspace_id.to_string()),
+            summary: format!("updated workspace {} autostart schedule", workspace.name),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -664,20 +678,32 @@ pub(crate) async fn put_workspace_ttl(
     let ttl_ms = body.get("ttl_ms").and_then(|v| v.as_i64());
     let ttl_ns = ttl_ms.map(|ms| ms * 1_000_000);
 
+    let before_view = AuditWorkspaceView::from_record(&workspace);
+
     state
         .store
         .update_workspace_ttl(workspace_id, ttl_ns)
         .await?;
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::Workspace,
-        Some(&context.user),
-        Some(workspace_id.to_string()),
-        format!("updated workspace {} TTL", workspace.name),
-    )
-    .await;
+    let mut after_view = before_view.clone();
+    after_view.ttl_ns = ttl_ns;
+    let diff = {
+        use coder_audit::Auditable as _;
+        before_view.audit_diff(&after_view)
+    };
+    let audit_diff = if diff.is_empty() { None } else { Some(diff) };
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::Workspace,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(workspace_id.to_string()),
+            summary: format!("updated workspace {} TTL", workspace.name),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -902,23 +928,35 @@ pub(crate) async fn put_workspace_autoupdates(
         .and_then(|v| v.as_str())
         .unwrap_or("never");
 
+    let before_view = AuditWorkspaceView::from_record(&workspace);
+
     state
         .store
         .update_workspace_automatic_updates(workspace_id, automatic_updates)
         .await?;
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::Workspace,
-        Some(&context.user),
-        Some(workspace_id.to_string()),
-        format!(
-            "updated workspace {} auto-update policy to {}",
-            workspace.name, automatic_updates
-        ),
-    )
-    .await;
+    let mut after_view = before_view.clone();
+    after_view.automatic_updates = automatic_updates.to_owned();
+    let diff = {
+        use coder_audit::Auditable as _;
+        before_view.audit_diff(&after_view)
+    };
+    let audit_diff = if diff.is_empty() { None } else { Some(diff) };
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::Workspace,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(workspace_id.to_string()),
+            summary: format!(
+                "updated workspace {} auto-update policy to {}",
+                workspace.name, automatic_updates
+            ),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
