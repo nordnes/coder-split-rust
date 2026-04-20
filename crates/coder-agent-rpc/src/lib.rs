@@ -30,6 +30,9 @@ pub mod wire;
 pub mod yamux_server;
 
 pub use error::{DrpcError, DrpcResult};
-pub use handlers::{AgentRpcHandler, RpcError, StubHandler};
-pub use server::serve_drpc_stream;
-pub use yamux_server::serve_yamux;
+pub use handlers::{
+    AgentRpcHandler, BidiResponseSink, BidiStreamHandler, InvokeMetadata, ResponseStream,
+    RpcContext, RpcError, ServerStreamHandler, StubHandler,
+};
+pub use server::{StreamRegistry, serve_drpc_stream, serve_drpc_stream_with_streams};
+pub use yamux_server::{serve_yamux, serve_yamux_with_streams};

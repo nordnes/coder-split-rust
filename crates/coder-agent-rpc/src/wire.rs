@@ -34,11 +34,12 @@ use crate::error::{DrpcError, DrpcResult};
 /// The size of the fixed portion of a packet kind on the wire.
 pub const MAX_VARINT_LEN: usize = 10;
 
-/// Upper bound on the total bytes a single reassembled packet may hold. The
-/// Go implementation caps individual frames at ~1 MiB in practice; we accept
-/// larger totals to tolerate streaming workloads (e.g. tailnet updates) but
-/// still want a guard against memory exhaustion.
-pub const MAX_PACKET_SIZE: usize = 256 * 1024 * 1024;
+/// Upper bound on the total bytes a single reassembled packet may hold.
+/// Mirrors Go's `drpcsdk.MaxMessageSize` (`4 << 20`) from
+/// `coder/codersdk/drpcsdk/transport.go`: every DRPC message — whether
+/// delivered as one frame or several — must fit inside this cap. Exceeding
+/// it is a protocol error on both sides.
+pub const MAX_PACKET_SIZE: usize = 4 * 1024 * 1024;
 
 /// A DRPC packet kind. Mirrors `drpcwire.Kind` in the Go implementation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +155,11 @@ impl PacketReassembler {
     /// * On a `done=true` frame that completes a buffered partial: returns
     ///   the concatenated packet.
     ///
+    /// Cancellation: a [`Kind::Cancel`] frame on a stream with a buffered
+    /// partial drops that partial before yielding the cancel packet itself,
+    /// matching the Go reference where a cancel aborts any in-progress
+    /// receive.
+    ///
     /// Errors if a subsequent frame's `kind` disagrees with the buffered
     /// partial, or if the reassembled total would exceed [`MAX_PACKET_SIZE`].
     pub fn push(&mut self, frame: Frame) -> DrpcResult<Option<Packet>> {
@@ -163,6 +169,16 @@ impl PacketReassembler {
             data,
             done,
         } = frame;
+
+        // A Cancel/Close/Error frame aborts any in-progress reassembly on
+        // the same stream — the partial payload becomes meaningless once
+        // the peer declares the stream over. This matches Go's
+        // `drpcstream.Stream.terminate` path which clears its receive
+        // buffer before surfacing the control packet upstream.
+        if matches!(kind, Kind::Cancel | Kind::Close | Kind::Error) {
+            self.pending.remove(&id.stream);
+            return Ok(Some(Packet { kind, id, data }));
+        }
 
         if let Some(mut partial) = self.pending.remove(&id.stream) {
             if partial.kind != kind {
@@ -192,6 +208,11 @@ impl PacketReassembler {
                 Ok(None)
             }
         } else if done {
+            if data.len() > MAX_PACKET_SIZE {
+                return Err(DrpcError::Protocol(format!(
+                    "single-frame drpc packet exceeds {MAX_PACKET_SIZE} bytes"
+                )));
+            }
             Ok(Some(Packet { kind, id, data }))
         } else {
             if data.len() > MAX_PACKET_SIZE {
@@ -203,6 +224,13 @@ impl PacketReassembler {
                 .insert(id.stream, PartialPacket { kind, id, data });
             Ok(None)
         }
+    }
+
+    /// Returns true if this reassembler has a partial buffered for
+    /// `stream_id`. Exposed for observability and tests.
+    #[must_use]
+    pub fn has_partial(&self, stream_id: u64) -> bool {
+        self.pending.contains_key(&stream_id)
     }
 
     /// Drops any partial frames associated with `stream_id`, for when a
@@ -230,12 +258,12 @@ pub async fn read_frame<R: AsyncRead + Unpin>(r: &mut R) -> DrpcResult<Frame> {
     let message = read_varint(r).await?;
     let length = read_varint(r).await?;
 
-    // Be conservative about oversized frames to avoid unbounded allocation
-    // from a hostile or malformed client.
-    const MAX_FRAME_LEN: u64 = 32 * 1024 * 1024;
-    if length > MAX_FRAME_LEN {
+    // A single frame carries at most one packet's worth of payload. The
+    // reassembler enforces the same cap across the joined payload, so a
+    // peer cannot dodge it by splitting into many frames.
+    if length > MAX_PACKET_SIZE as u64 {
         return Err(DrpcError::Protocol(format!(
-            "drpc frame length {length} exceeds {MAX_FRAME_LEN}"
+            "drpc frame length {length} exceeds {MAX_PACKET_SIZE}"
         )));
     }
     let mut data = vec![0u8; length as usize];
@@ -505,6 +533,8 @@ mod tests {
 
     #[tokio::test]
     async fn reassembler_rejects_mixed_kinds() {
+        // Message-kind partial cannot be continued by a different non-terminal
+        // kind (e.g. an InvokeMetadata frame on the same stream).
         let mut reasm = PacketReassembler::new();
         let id = PacketId {
             stream: 1,
@@ -517,9 +547,145 @@ mod tests {
             done: false,
         });
         let result = reasm.push(Frame {
-            kind: Kind::Error,
+            kind: Kind::InvokeMetadata,
             id,
             data: b"bad".to_vec(),
+            done: true,
+        });
+        assert!(matches!(result, Err(DrpcError::Protocol(_))));
+    }
+
+    #[tokio::test]
+    async fn reassembler_drops_partial_on_cancel() -> DrpcResult<()> {
+        // A Cancel frame on an in-progress stream must drop the buffered
+        // partial and surface the cancel packet itself — any further
+        // pretense that the partial was recoverable would leak memory and
+        // confuse handlers. Matches Go drpcstream.terminate().
+        let mut reasm = PacketReassembler::new();
+        let id = PacketId {
+            stream: 7,
+            message: 1,
+        };
+        // Buffer 1 MiB of a future message.
+        let big = vec![0xAA; 1024 * 1024];
+        assert!(
+            reasm
+                .push(Frame {
+                    kind: Kind::Message,
+                    id,
+                    data: big,
+                    done: false,
+                })?
+                .is_none()
+        );
+        assert!(reasm.has_partial(id.stream));
+
+        let cancel = reasm
+            .push(Frame {
+                kind: Kind::Cancel,
+                id,
+                data: Vec::new(),
+                done: true,
+            })?
+            .ok_or_else(|| DrpcError::Protocol("cancel must yield a packet".into()))?;
+        assert_eq!(cancel.kind, Kind::Cancel);
+        assert!(!reasm.has_partial(id.stream), "partial must be dropped");
+
+        // Re-starting a fresh packet on the same stream after cancel must
+        // work without carrying bytes over from the abandoned partial.
+        let fresh = reasm
+            .push(Frame {
+                kind: Kind::Message,
+                id,
+                data: b"fresh".to_vec(),
+                done: true,
+            })?
+            .ok_or_else(|| DrpcError::Protocol("expected fresh packet".into()))?;
+        assert_eq!(fresh.data, b"fresh");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reassembler_joins_1_mib_split_across_four_frames() -> DrpcResult<()> {
+        // One 1 MiB payload split into four 256 KiB chunks must
+        // reassemble bit-for-bit identical to the original.
+        let mut reasm = PacketReassembler::new();
+        let id = PacketId {
+            stream: 11,
+            message: 1,
+        };
+        let total: Vec<u8> = (0..(1024 * 1024)).map(|i| (i & 0xff) as u8).collect();
+        let chunks: Vec<&[u8]> = total.chunks(256 * 1024).collect();
+        for (i, chunk) in chunks.iter().enumerate() {
+            let done = i == chunks.len() - 1;
+            let result = reasm.push(Frame {
+                kind: Kind::Message,
+                id,
+                data: chunk.to_vec(),
+                done,
+            })?;
+            if done {
+                let packet = result
+                    .ok_or_else(|| DrpcError::Protocol("final frame yields packet".into()))?;
+                assert_eq!(packet.data.len(), total.len());
+                assert_eq!(packet.data, total);
+            } else {
+                assert!(result.is_none(), "partial frames must not yield");
+            }
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn reassembler_rejects_payload_beyond_4_mib() {
+        // Exactly MAX_PACKET_SIZE is allowed; one byte more is a protocol
+        // error. We prove this by pushing two frames whose combined size is
+        // MAX_PACKET_SIZE + 1.
+        let mut reasm = PacketReassembler::new();
+        let id = PacketId {
+            stream: 3,
+            message: 1,
+        };
+        // First frame: exactly MAX_PACKET_SIZE bytes (the largest partial
+        // that the reassembler will buffer without rejecting up front).
+        let first = vec![0u8; MAX_PACKET_SIZE];
+        let Ok(None) = reasm.push(Frame {
+            kind: Kind::Message,
+            id,
+            data: first,
+            done: false,
+        }) else {
+            unreachable!("initial MAX_PACKET_SIZE frame must be buffered");
+        };
+        // Second frame: a single extra byte, which would push the
+        // reassembled total to MAX_PACKET_SIZE + 1 and must be rejected.
+        let extra = reasm.push(Frame {
+            kind: Kind::Message,
+            id,
+            data: vec![0u8; 1],
+            done: true,
+        });
+        assert!(
+            matches!(extra, Err(DrpcError::Protocol(_))),
+            "overflow by 1 byte must be a protocol error, got {extra:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn reassembler_rejects_single_frame_beyond_4_mib() {
+        // A solo `done=true` frame whose payload exceeds the cap is also
+        // rejected — an attacker can't dodge the cap by skipping the
+        // multi-frame path.
+        let mut reasm = PacketReassembler::new();
+        let id = PacketId {
+            stream: 4,
+            message: 1,
+        };
+        let too_big = vec![0u8; MAX_PACKET_SIZE + 1];
+        let result = reasm.push(Frame {
+            kind: Kind::Message,
+            id,
+            data: too_big,
             done: true,
         });
         assert!(matches!(result, Err(DrpcError::Protocol(_))));

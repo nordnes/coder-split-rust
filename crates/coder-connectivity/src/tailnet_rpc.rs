@@ -817,6 +817,33 @@ impl BidiStreamHandler for CoordinateHandler {
     }
 }
 
+/// Builds a [`coder_agent_rpc::StreamRegistry`] with every streaming
+/// tailnet RPC wired in: `StreamDERPMaps` + `WorkspaceUpdates` as
+/// server-streams and `Coordinate` as a bidi-stream. This is the
+/// entry-point callers use to plug the tailnet service onto a DRPC
+/// transport via
+/// [`coder_agent_rpc::serve_drpc_stream_with_streams`] /
+/// [`coder_agent_rpc::serve_yamux_with_streams`].
+///
+/// Unary RPCs on the tailnet service (`PostTelemetry`,
+/// `RefreshResumeToken`) are *not* registered here: the DRPC transport
+/// falls through to the unary `AgentRpcHandler` path for those, which
+/// the caller wires separately.
+#[must_use]
+pub fn tailnet_stream_registry(service: Arc<TailnetRpcService>) -> coder_agent_rpc::StreamRegistry {
+    let mut registry = coder_agent_rpc::StreamRegistry::new();
+    registry.register_server_stream(
+        STREAM_DERP_MAPS_METHOD,
+        Arc::new(StreamDerpMapsHandler::new(service.clone())),
+    );
+    registry.register_server_stream(
+        WORKSPACE_UPDATES_METHOD,
+        Arc::new(WorkspaceUpdatesHandler::new(service.clone())),
+    );
+    registry.register_bidi(COORDINATE_METHOD, Arc::new(CoordinateHandler::new(service)));
+    registry
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1135,5 +1162,111 @@ mod tests {
             unreachable!("expected InvalidArgument");
         };
         assert!(msg.contains("key"));
+    }
+
+    /// End-to-end: [`TailnetRpcService::stream_derp_maps`] wired through the
+    /// new DRPC streaming dispatcher
+    /// ([`coder_agent_rpc::serve_drpc_stream_with_streams`]). Proves the
+    /// server-stream path carries a real tailnet snapshot from the service
+    /// to a client over the wire.
+    #[tokio::test]
+    async fn stream_derp_maps_through_drpc_dispatcher() {
+        use coder_agent_rpc::handlers::StubHandler;
+        use coder_agent_rpc::wire::{self as wire_mod, Kind, Packet, PacketId};
+        use tokio::io::duplex;
+
+        let (tx, _rx) = telemetry_channel();
+        // Install a DERP map provider that yields one concrete snapshot.
+        let mut derp_map = tailnet::DerpMap::default();
+        derp_map.regions.insert(
+            7,
+            tailnet::derp_map::Region {
+                region_id: 7,
+                region_code: "test".into(),
+                region_name: "Test Region".into(),
+                ..Default::default()
+            },
+        );
+        let snapshot = derp_map.clone();
+        let service = Arc::new(
+            TailnetRpcService::with_stub_key(tx)
+                .with_derp_map_provider(Arc::new(move || Some(snapshot.clone()))),
+        );
+
+        // Wire the service into the DRPC streaming registry.
+        let registry = Arc::new(tailnet_stream_registry(service));
+
+        let (mut client, server) = duplex(128 * 1024);
+        let server_task = tokio::spawn({
+            let registry = registry.clone();
+            async move {
+                coder_agent_rpc::serve_drpc_stream_with_streams(
+                    server,
+                    Arc::new(StubHandler),
+                    registry,
+                )
+                .await
+            }
+        });
+
+        // Client: open stream with Invoke("...StreamDERPMaps") + empty Message.
+        let stream_id = 3u64;
+        let Ok(()) = wire_mod::write_packet(
+            &mut client,
+            &Packet {
+                kind: Kind::Invoke,
+                id: PacketId {
+                    stream: stream_id,
+                    message: 1,
+                },
+                data: STREAM_DERP_MAPS_METHOD.as_bytes().to_vec(),
+            },
+        )
+        .await
+        else {
+            unreachable!("write Invoke");
+        };
+        let Ok(()) = wire_mod::write_packet(
+            &mut client,
+            &Packet {
+                kind: Kind::Message,
+                id: PacketId {
+                    stream: stream_id,
+                    message: 2,
+                },
+                data: tailnet::StreamDerpMapsRequest {}.encode_to_vec(),
+            },
+        )
+        .await
+        else {
+            unreachable!("write Message");
+        };
+
+        // Expect exactly one Message carrying the encoded DerpMap, then Close.
+        let Ok(msg) = wire_mod::read_packet(&mut client).await else {
+            unreachable!("read Message");
+        };
+        assert_eq!(msg.kind, Kind::Message);
+        assert_eq!(msg.id.stream, stream_id);
+        assert_eq!(msg.id.message, 1);
+
+        let Ok(decoded) = tailnet::DerpMap::decode(msg.data.as_slice()) else {
+            unreachable!("decode DerpMap");
+        };
+        assert_eq!(decoded.regions.len(), 1);
+        let Some(region) = decoded.regions.get(&7) else {
+            unreachable!("region 7 present");
+        };
+        assert_eq!(region.region_code, "test");
+
+        let Ok(close) = wire_mod::read_packet(&mut client).await else {
+            unreachable!("read Close");
+        };
+        assert_eq!(close.kind, Kind::Close);
+        assert_eq!(close.id.stream, stream_id);
+        assert_eq!(close.id.message, 2);
+
+        drop(client);
+        let _ = server_task.await;
     }
 }
