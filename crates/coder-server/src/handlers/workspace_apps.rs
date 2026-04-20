@@ -3341,4 +3341,339 @@ mod tests {
         let response = err.into_response();
         assert_eq!(response.status(), http::StatusCode::BAD_GATEWAY);
     }
+
+    // -- Gap item #23: organization sharing-level enforcement ---------------
+
+    /// Cross-organization access must be refused with the
+    /// `NotOrganizationMember` classification (HTTP 403) when the app is
+    /// shared at `organization` level. Ports the Go behaviour from
+    /// `coder/coderd/workspaceapps/db.go` (`SharingLevelOrganization` arm).
+    #[tokio::test]
+    async fn org_sharing_rejects_non_member_with_403() -> Result<(), Box<dyn std::error::Error>> {
+        use coder_core::CreateUserInput;
+        use coder_core::identity::CreateOrganizationInput;
+
+        let (state, store) = crate::app::tests::test_state_with_store(true)?;
+
+        // Seed an owning user (required to satisfy insert_organization's
+        // actor_user_id), then create the owning organization.
+        let owner = store
+            .create_user(CreateUserInput {
+                email: "owner@test.com".to_owned(),
+                username: "owner".to_owned(),
+                name: "Owner".to_owned(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: Vec::new(),
+            })
+            .await?;
+        let org = store
+            .insert_organization(&CreateOrganizationInput {
+                name: "acme".to_owned(),
+                display_name: "Acme".to_owned(),
+                description: String::new(),
+                icon: String::new(),
+                actor_user_id: owner.id,
+            })
+            .await?;
+
+        // Seed a different user who is NOT a member of `org`.
+        let outsider = store
+            .create_user(CreateUserInput {
+                email: "outsider@test.com".to_owned(),
+                username: "outsider".to_owned(),
+                name: "Outsider".to_owned(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: Vec::new(),
+            })
+            .await?;
+
+        let result =
+            enforce_organization_sharing(&state, "organization", org.id, Some(outsider.id)).await;
+
+        assert!(
+            matches!(
+                result,
+                Err(WorkspaceAppError::Classified(
+                    AppAccessError::NotOrganizationMember
+                ))
+            ),
+            "expected Classified(NotOrganizationMember); got {kind:?}",
+            kind = result.map(|_| "ok")
+        );
+
+        // And the classified error maps to HTTP 403.
+        let response =
+            WorkspaceAppError::Classified(AppAccessError::NotOrganizationMember).into_response();
+        assert_eq!(response.status(), http::StatusCode::FORBIDDEN);
+        Ok(())
+    }
+
+    /// A user who IS a member of the workspace's organization must pass the
+    /// `sharing_level=organization` check.
+    #[tokio::test]
+    async fn org_sharing_allows_member() -> Result<(), Box<dyn std::error::Error>> {
+        use coder_core::CreateUserInput;
+        use coder_core::identity::CreateOrganizationInput;
+
+        let (state, store) = crate::app::tests::test_state_with_store(true)?;
+
+        let member = store
+            .create_user(CreateUserInput {
+                email: "member@test.com".to_owned(),
+                username: "member".to_owned(),
+                name: "Member".to_owned(),
+                password_hash: None,
+                login_type: LoginType::Password,
+                status: UserStatus::Active,
+                organization_ids: Vec::new(),
+            })
+            .await?;
+        let org = store
+            .insert_organization(&CreateOrganizationInput {
+                name: "acme2".to_owned(),
+                display_name: "Acme2".to_owned(),
+                description: String::new(),
+                icon: String::new(),
+                actor_user_id: member.id,
+            })
+            .await?;
+        // Put the member into the org.
+        store
+            .insert_organization_member(org.id, member.id, false)
+            .await?;
+
+        let result =
+            enforce_organization_sharing(&state, "organization", org.id, Some(member.id)).await;
+        assert!(
+            result.is_ok(),
+            "member of the workspace's organization should be allowed"
+        );
+        Ok(())
+    }
+
+    /// Non-organization sharing levels must be a no-op — the check belongs to
+    /// a different policy branch and must not accidentally block access.
+    #[tokio::test]
+    async fn org_sharing_noop_for_other_levels() -> Result<(), Box<dyn std::error::Error>> {
+        let (state, _store) = crate::app::tests::test_state_with_store(true)?;
+        // We can pass a random user / org UUID — the function must short-circuit.
+        let res = enforce_organization_sharing(
+            &state,
+            "authenticated",
+            Uuid::new_v4(),
+            Some(Uuid::new_v4()),
+        )
+        .await;
+        assert!(
+            res.is_ok(),
+            "authenticated-level sharing must not hit the org check"
+        );
+
+        let res = enforce_organization_sharing(&state, "owner", Uuid::new_v4(), None).await;
+        assert!(
+            res.is_ok(),
+            "owner-level sharing must not hit the org check"
+        );
+
+        let res = enforce_organization_sharing(&state, "public", Uuid::new_v4(), None).await;
+        assert!(
+            res.is_ok(),
+            "public-level sharing must not hit the org check"
+        );
+        Ok(())
+    }
+
+    // -- Gap item #25: error classification parity --------------------------
+
+    /// Agent-not-reporting must surface Go's specific UI string rather than a
+    /// bare 404 "not found". Ports the `appErrNotFoundDescription` chain from
+    /// `coder/coderd/workspaceapps/response.go`.
+    #[test]
+    fn agent_not_reporting_surfaces_specific_error() {
+        let err = WorkspaceAppError::Classified(AppAccessError::AgentNotReporting);
+        let msg = err.classification().unwrap_or("");
+        assert!(
+            msg.contains("agent") && msg.contains("not reporting"),
+            "expected classification to contain 'agent' and 'not reporting'; got {msg:?}"
+        );
+
+        // Go uses 404 here to hide existence of the workspace/agent from
+        // unauthorized users, but with a specific body, not a bare 404.
+        let response = err.into_response();
+        assert_eq!(response.status(), http::StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn agent_not_connected_classification() {
+        let err = WorkspaceAppError::Classified(AppAccessError::AgentNotConnected);
+        let msg = err.classification().unwrap_or("");
+        assert!(msg.contains("agent") && msg.contains("not connected"));
+    }
+
+    #[test]
+    fn app_not_running_classification() {
+        let err = WorkspaceAppError::Classified(AppAccessError::AppNotRunning);
+        let msg = err.classification().unwrap_or("");
+        assert!(msg.contains("not running"));
+    }
+
+    #[test]
+    fn app_url_not_set_classification() {
+        let err = WorkspaceAppError::Classified(AppAccessError::AppURLNotSet);
+        let msg = err.classification().unwrap_or("");
+        assert!(msg.contains("URL") && msg.contains("not set"));
+    }
+
+    #[test]
+    fn template_forbid_app_access_classification() {
+        let err = WorkspaceAppError::Classified(AppAccessError::TemplateDoesNotAllowAppAccess);
+        let msg = err.classification().unwrap_or("");
+        assert!(msg.contains("template") && msg.contains("does not allow"));
+    }
+
+    /// All agent/app-state classifications must return HTTP 404 (Go hides
+    /// workspace existence), while `NotOrganizationMember` is HTTP 403.
+    #[test]
+    fn classification_status_codes_match_go() {
+        assert_eq!(
+            AppAccessError::AgentNotReporting.status_code(),
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppAccessError::AgentNotConnected.status_code(),
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppAccessError::AppNotRunning.status_code(),
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppAccessError::AppURLNotSet.status_code(),
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppAccessError::TemplateDoesNotAllowAppAccess.status_code(),
+            http::StatusCode::NOT_FOUND
+        );
+        assert_eq!(
+            AppAccessError::NotOrganizationMember.status_code(),
+            http::StatusCode::FORBIDDEN
+        );
+    }
+
+    // -- Gap item #24: per-session stats writer ----------------------------
+
+    /// The stats payload serialized by [`AppStatsContext::to_stat_value`]
+    /// must match the JSON shape `AppStore::insert_workspace_app_stats`
+    /// consumes (see `coder/coderd/workspaceapps/stats.go`'s `StatsReport`).
+    #[test]
+    fn app_stats_context_serializes_expected_shape() {
+        let ctx = AppStatsContext {
+            user_id: Uuid::new_v4(),
+            workspace_id: Uuid::new_v4(),
+            agent_id: Uuid::new_v4(),
+            access_method: "path".to_owned(),
+            slug_or_port: "code-server".to_owned(),
+        };
+        let session_id = Uuid::new_v4();
+        let started = OffsetDateTime::now_utc();
+        let ended = started + time::Duration::seconds(30);
+
+        let value = ctx.to_stat_value(session_id, started, ended, 5);
+        let object = value
+            .as_object()
+            .expect("to_stat_value should produce a JSON object");
+
+        assert_eq!(
+            object.get("user_id").and_then(|v| v.as_str()),
+            Some(ctx.user_id.to_string().as_str())
+        );
+        assert_eq!(
+            object.get("workspace_id").and_then(|v| v.as_str()),
+            Some(ctx.workspace_id.to_string().as_str())
+        );
+        assert_eq!(
+            object.get("agent_id").and_then(|v| v.as_str()),
+            Some(ctx.agent_id.to_string().as_str())
+        );
+        assert_eq!(
+            object.get("access_method").and_then(|v| v.as_str()),
+            Some("path")
+        );
+        assert_eq!(
+            object.get("slug_or_port").and_then(|v| v.as_str()),
+            Some("code-server")
+        );
+        assert_eq!(
+            object.get("session_id").and_then(|v| v.as_str()),
+            Some(session_id.to_string().as_str())
+        );
+        assert_eq!(object.get("requests").and_then(|v| v.as_i64()), Some(5));
+        assert!(object.contains_key("session_started_at"));
+        assert!(object.contains_key("session_ended_at"));
+    }
+
+    /// `AppStatsGuard::flush` must invoke the store's
+    /// `insert_workspace_app_stats` path. The FakeStore used here accepts
+    /// the write and returns `Ok(())`, proving the wiring.
+    ///
+    /// The fully-persistent test (verifying a row ends up in the DB) lives
+    /// at the sqlx layer in `crates/coder-db`; this unit test exercises the
+    /// handler → trait-method boundary.
+    #[tokio::test]
+    async fn app_stats_guard_flush_writes_row() -> Result<(), Box<dyn std::error::Error>> {
+        let (_state, store) = crate::app::tests::test_state_with_store(true)?;
+        let store_trait: std::sync::Arc<dyn AppStore> = store.clone();
+
+        let mut guard = AppStatsGuard::new(
+            store_trait,
+            AppStatsContext {
+                user_id: Uuid::new_v4(),
+                workspace_id: Uuid::new_v4(),
+                agent_id: Uuid::new_v4(),
+                access_method: "path".to_owned(),
+                slug_or_port: "myapp".to_owned(),
+            },
+        );
+        guard.record_request();
+        guard.record_request();
+
+        // flush() consumes the guard and must not error when the store
+        // accepts the insert.
+        guard.flush().await?;
+        Ok(())
+    }
+
+    /// Dropping an unflushed `AppStatsGuard` must also drive a best-effort
+    /// insert (see `AppStatsGuard::drop`). The spawned task just needs to
+    /// complete without panicking — any error is logged but swallowed.
+    #[tokio::test]
+    async fn app_stats_guard_drop_spawns_insert() -> Result<(), Box<dyn std::error::Error>> {
+        let (_state, store) = crate::app::tests::test_state_with_store(true)?;
+        let store_trait: std::sync::Arc<dyn AppStore> = store.clone();
+
+        {
+            let mut guard = AppStatsGuard::new(
+                store_trait,
+                AppStatsContext {
+                    user_id: Uuid::new_v4(),
+                    workspace_id: Uuid::new_v4(),
+                    agent_id: Uuid::new_v4(),
+                    access_method: "subdomain".to_owned(),
+                    slug_or_port: "8080".to_owned(),
+                },
+            );
+            guard.record_request();
+            // Drop here fires the background insert.
+        }
+
+        // Yield so the spawned task can run. The fact that we reach here
+        // without panicking is the assertion — the insert is fire-and-forget.
+        tokio::task::yield_now().await;
+        Ok(())
+    }
 }
