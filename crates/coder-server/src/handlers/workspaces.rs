@@ -1,8 +1,82 @@
 //! Workspace CRUD, builds, ACL, port shares, and related handlers.
+//!
+//! TODO-audit-diff-expand: only `patch_workspace` currently emits a
+//! structured per-field [`coder_audit::AuditDiff`] alongside its summary
+//! string. The remaining ~15 workspace mutation sites (favorite/unfavorite,
+//! autostart/TTL/schedule updates, dormant/activate, ACL changes, build
+//! start/stop/delete, etc.) still pass `diff: None`. Extending them is
+//! tracked as a follow-up to gap-doc §B.10.1.
 
 use super::templates::resolve_organization;
 use super::users::clamp_pagination_limit;
 use super::*;
+use coder_core::ports::WorkspaceRecord;
+
+/// Minimal auditable view of a workspace, used by [`patch_workspace`] to
+/// demonstrate the structured-diff path for the workspace domain. Mirrors
+/// the per-field policies from Go's `audit/table.go` at a reduced-surface
+/// level (full roll-out deferred). Fields that are user-visible settings
+/// operators can rename/retune are marked `track`; auto-maintained
+/// timestamps and internal identifiers are `ignore`.
+#[derive(Debug, Clone, serde::Serialize, coder_audit::Auditable)]
+struct AuditWorkspaceView {
+    #[audit(ignore)]
+    id: Uuid,
+    #[audit(ignore)]
+    created_at: OffsetDateTime,
+    #[audit(ignore)]
+    updated_at: OffsetDateTime,
+    #[audit(ignore)]
+    last_used_at: OffsetDateTime,
+    #[audit(ignore)]
+    deleted: bool,
+
+    #[audit(track)]
+    organization_id: Uuid,
+    #[audit(track)]
+    owner_id: Uuid,
+    #[audit(track)]
+    template_id: Uuid,
+    #[audit(track)]
+    name: String,
+    #[audit(track)]
+    autostart_schedule: Option<String>,
+    #[audit(track)]
+    ttl_ns: Option<i64>,
+    #[audit(track)]
+    dormant_at: Option<OffsetDateTime>,
+    #[audit(track)]
+    deleting_at: Option<OffsetDateTime>,
+    #[audit(track)]
+    automatic_updates: String,
+    #[audit(track)]
+    favorite: bool,
+    #[audit(track)]
+    next_start_at: Option<OffsetDateTime>,
+}
+
+impl AuditWorkspaceView {
+    fn from_record(record: &WorkspaceRecord) -> Self {
+        Self {
+            id: record.id,
+            created_at: record.created_at,
+            updated_at: record.updated_at,
+            last_used_at: record.last_used_at,
+            deleted: record.deleted,
+            organization_id: record.organization_id,
+            owner_id: record.owner_id,
+            template_id: record.template_id,
+            name: record.name.clone(),
+            autostart_schedule: record.autostart_schedule.clone(),
+            ttl_ns: record.ttl_ns,
+            dormant_at: record.dormant_at,
+            deleting_at: record.deleting_at,
+            automatic_updates: record.automatic_updates.clone(),
+            favorite: record.favorite,
+            next_start_at: record.next_start_at,
+        }
+    }
+}
 
 /// Compute provisioner tags for a workspace build by copying the template
 /// version's prior job tags and then normalizing via
@@ -250,6 +324,10 @@ pub(crate) async fn patch_workspace(
     }
 
     if let Some(name) = body.get("name").and_then(|v| v.as_str()) {
+        // Capture a best-effort "before" view for the structured diff before
+        // mutating. If the view cannot be materialised for any reason the
+        // summary still carries the canonical record.
+        let before_view = AuditWorkspaceView::from_record(&workspace);
         let Some(updated) = state
             .store
             .update_workspace_name(workspace_id, name, Some(context.user.id))
@@ -257,15 +335,23 @@ pub(crate) async fn patch_workspace(
         else {
             return Ok(resource_not_found_response());
         };
-        record_audit(
-            &state,
-            AuditAction::Write,
-            ResourceKind::Workspace,
-            Some(&context.user),
-            Some(workspace_id.to_string()),
-            format!("renamed workspace {} to {}", workspace.name, updated.name),
-        )
-        .await;
+        let after_view = AuditWorkspaceView::from_record(&updated);
+        let diff = {
+            use coder_audit::Auditable as _;
+            before_view.audit_diff(&after_view)
+        };
+        let audit_diff = if diff.is_empty() { None } else { Some(diff) };
+        state
+            .audit
+            .record(AuditEvent {
+                action: AuditAction::Write,
+                resource: ResourceKind::Workspace,
+                actor_user_id: Some(context.user.id),
+                target_id: Some(workspace_id.to_string()),
+                summary: format!("renamed workspace {} to {}", workspace.name, updated.name),
+                diff: audit_diff,
+            })
+            .await;
         return Ok((StatusCode::OK, Json(workspace_to_json(&updated))).into_response());
     }
 

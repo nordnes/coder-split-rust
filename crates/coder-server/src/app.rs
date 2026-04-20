@@ -29063,6 +29063,61 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// Workspace rename should also populate the structured per-field
+    /// [`coder_audit::AuditDiff`] via the `AuditWorkspaceView` wrapper and
+    /// `#[derive(Auditable)]`. Mirrors the User profile demo from PR #238
+    /// and exercises the first of the 16 workspace-handler audit sites to
+    /// opt into structured diffs.
+    #[tokio::test]
+    async fn workspace_rename_audit_event_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let old_name = ws.name.clone();
+        let new_name = "renamed-diff-workspace";
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PATCH,
+                &format!("/api/v2/workspaces/{}", ws.id),
+                &session_token,
+                &json!({ "name": new_name }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for workspace rename")?;
+
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("rename audit event should carry a structured diff")?;
+        let name_change = diff
+            .changes
+            .get("name")
+            .ok_or("diff should contain a `name` change entry")?;
+        assert_eq!(
+            name_change.old,
+            serde_json::json!(old_name),
+            "diff old-value should match the workspace's prior name"
+        );
+        assert_eq!(
+            name_change.new,
+            serde_json::json!(new_name),
+            "diff new-value should match the requested rename"
+        );
+        assert!(!name_change.secret, "`name` must not be marked as secret");
+        Ok(())
+    }
+
     #[tokio::test]
     async fn workspace_favorite_emits_audit_event() -> Result<(), Box<dyn Error>> {
         let (state, store, audit) = test_state_with_memory_audit()?;
