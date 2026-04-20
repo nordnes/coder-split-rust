@@ -2606,4 +2606,18 @@ impl AppStore for BenchStore {
     ) -> Result<i64, StorageError> {
         Err(StorageError::unavailable("bench stub"))
     }
+
+    async fn list_template_presets_with_prebuilds(
+        &self,
+    ) -> Result<Vec<coder_core::TemplatePresetWithPrebuild>, StorageError> {
+        // Benchmarks don't exercise the prebuild reconciler; return an
+        // empty snapshot so the reconciler no-ops.
+        Ok(Vec::new())
+    }
+
+    async fn list_running_prebuilt_workspaces(
+        &self,
+    ) -> Result<Vec<coder_core::RunningPrebuiltWorkspace>, StorageError> {
+        Ok(Vec::new())
+    }
 }

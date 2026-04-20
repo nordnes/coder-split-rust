@@ -10282,6 +10282,21 @@ pub(crate) mod tests {
             }
             Ok(total)
         }
+
+        async fn list_template_presets_with_prebuilds(
+            &self,
+        ) -> Result<Vec<coder_core::TemplatePresetWithPrebuild>, StorageError> {
+            // Empty snapshot keeps the prebuild reconciler as a safe
+            // no-op in tests — matches production behaviour until a
+            // future FakeStore gains preset-config support.
+            Ok(Vec::new())
+        }
+
+        async fn list_running_prebuilt_workspaces(
+            &self,
+        ) -> Result<Vec<coder_core::RunningPrebuiltWorkspace>, StorageError> {
+            Ok(Vec::new())
+        }
     }
 
     fn test_config() -> Result<ServerConfig, url::ParseError> {
@@ -43482,6 +43497,22 @@ mod store_method_tests {
         let links_empty = state.store.list_external_auth_links(Uuid::new_v4()).await?;
         assert!(links_empty.is_empty());
 
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
+    // FakeStore: prebuild reconciler queries return empty snapshots
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn list_template_presets_with_prebuilds_returns_empty_by_default()
+    -> Result<(), Box<dyn Error>> {
+        let state = test_state(true)?;
+        let presets = state.store.list_template_presets_with_prebuilds().await?;
+        assert!(presets.is_empty(), "FakeStore has no preset configuration");
+
+        let running = state.store.list_running_prebuilt_workspaces().await?;
+        assert!(running.is_empty(), "FakeStore has no prebuilt workspaces");
         Ok(())
     }
 }
