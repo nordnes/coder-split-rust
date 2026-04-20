@@ -136,3 +136,99 @@ async fn serve_branding_asset(
     )
         .into_response())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::{Method, Request, Response};
+    use coder_core::api::AppearanceConfig;
+    use tower::ServiceExt;
+
+    async fn call(
+        app: axum::Router,
+        request: Request<Body>,
+    ) -> Result<Response<Body>, Box<dyn std::error::Error>> {
+        let response = match app.oneshot(request).await {
+            Ok(response) => response,
+            Err(never) => match never {},
+        };
+        Ok(response)
+    }
+
+    fn branding_router(state: AppState) -> axum::Router {
+        axum::Router::new()
+            .route(
+                "/api/v2/appearance/logo",
+                axum::routing::get(get_appearance_logo),
+            )
+            .route(
+                "/api/v2/appearance/favicon",
+                axum::routing::get(get_appearance_favicon),
+            )
+            .with_state(state)
+    }
+
+    fn get(uri: &str) -> Result<Request<Body>, http::Error> {
+        Request::builder()
+            .method(Method::GET)
+            .uri(uri)
+            .body(Body::empty())
+    }
+
+    #[tokio::test]
+    async fn appearance_logo_redirects_to_configured_url() -> Result<(), Box<dyn std::error::Error>>
+    {
+        let (state, store) = crate::app::tests::test_state_with_store(true)?;
+        // Seed a logo URL via the public upsert path (mirrors PUT /appearance).
+        let cfg = AppearanceConfig {
+            logo_url: "https://example.com/logo.svg".to_owned(),
+            ..AppearanceConfig::default()
+        };
+        let _ = store.upsert_appearance_config(&cfg).await?;
+
+        let app = branding_router(state);
+        let response = call(app, get("/api/v2/appearance/logo")?).await?;
+        assert_eq!(response.status(), StatusCode::FOUND);
+        let location = response
+            .headers()
+            .get(LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .ok_or("missing Location header")?;
+        assert_eq!(location, "https://example.com/logo.svg");
+        let cache_control = response
+            .headers()
+            .get(axum::http::header::CACHE_CONTROL)
+            .and_then(|v| v.to_str().ok())
+            .ok_or("missing Cache-Control header")?;
+        assert!(cache_control.contains("public"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn appearance_logo_returns_404_when_unset() -> Result<(), Box<dyn std::error::Error>> {
+        let (state, _store) = crate::app::tests::test_state_with_store(true)?;
+        let app = branding_router(state);
+        let response = call(app, get("/api/v2/appearance/logo")?).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn appearance_favicon_returns_404_until_config_field_exists()
+    -> Result<(), Box<dyn std::error::Error>> {
+        // `AppearanceConfig` does not expose a favicon URL today, so the
+        // endpoint must return 404 regardless of what's in the config.
+        let (state, store) = crate::app::tests::test_state_with_store(true)?;
+        let cfg = AppearanceConfig {
+            logo_url: "https://example.com/logo.svg".to_owned(),
+            ..AppearanceConfig::default()
+        };
+        let _ = store.upsert_appearance_config(&cfg).await?;
+
+        let app = branding_router(state);
+        let response = call(app, get("/api/v2/appearance/favicon")?).await?;
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        Ok(())
+    }
+}
