@@ -1,25 +1,25 @@
 //! Provisionerd DRPC service — infrastructure slice.
 //!
-//! Ports the minimal machinery needed to dispatch one DRPC RPC
-//! (`CommitQuota`) over the wire framing already implemented in
-//! [`coder_agent_rpc`]. Follow-up batches will extend
-//! [`ProvisionerdDrpcService`] with the remaining RPCs declared in
-//! `provisionerd/proto/provisionerd.proto`:
+//! Ports the minimal machinery needed to dispatch provisionerd DRPC RPCs
+//! (currently `CommitQuota` and `AcquireJob`) over the wire framing
+//! already implemented in [`coder_agent_rpc`]. Follow-up batches will
+//! extend [`ProvisionerdDrpcService`] with the remaining RPCs declared
+//! in `provisionerd/proto/provisionerd.proto`:
 //!
-//! * `AcquireJob` (deprecated) / `AcquireJobWithCancel`
+//! * `AcquireJobWithCancel` (bidi-streaming cousin of `AcquireJob`)
 //! * `UpdateJob`, `FailJob`, `CompleteJob`
 //! * `UploadFile`, `DownloadFile`
 //!
 //! Until those land, [`ProvisionerdDrpcService::dispatch`] returns
-//! [`RpcError::Unimplemented`] for any method path other than
-//! `/provisionerd.ProvisionerDaemon/CommitQuota`, matching the DRPC
-//! `Unimplemented` sentinel (code 12).
+//! [`RpcError::Unimplemented`] for any method path other than the two
+//! ported here, matching the DRPC `Unimplemented` sentinel (code 12).
 
 use std::sync::Arc;
 
 use coder_agent_rpc::RpcError;
-use coder_core::ProvisionerStore;
+use coder_core::{AcquireProvisionerJobInput, ProvisionerStore, ProvisionerType};
 use prost::Message as _;
+use time::OffsetDateTime;
 use tracing::instrument;
 use uuid::Uuid;
 
@@ -32,6 +32,13 @@ use crate::proto::provisionerd as pd;
 /// drpc-serve` can all reference the same string and stay in sync with
 /// the upstream `.proto` declaration.
 pub const COMMIT_QUOTA_METHOD: &str = "/provisionerd.ProvisionerDaemon/CommitQuota";
+
+/// DRPC method path for the (deprecated) `AcquireJob` RPC.
+///
+/// Upstream Go clients still use this RPC for back-compatibility; the
+/// streaming `AcquireJobWithCancel` flavour will arrive in a separate
+/// batch once the DRPC stream plumbing is in place.
+pub const ACQUIRE_JOB_METHOD: &str = "/provisionerd.ProvisionerDaemon/AcquireJob";
 
 /// DRPC service wrapping a [`ProvisionerStore`] to serve provisionerd RPCs.
 ///
@@ -99,6 +106,68 @@ impl ProvisionerdDrpcService {
         })
     }
 
+    /// Serves the (deprecated) unary `AcquireJob` RPC.
+    ///
+    /// Mirrors the Go OSS behaviour in
+    /// `coderd/provisionerdserver/provisionerdserver.go::AcquireJob`:
+    /// block briefly on the acquirer until a pending job matching the
+    /// daemon's capabilities is lockable, then return the acquired job.
+    /// If no job is available, return an empty [`pd::AcquiredJob`] —
+    /// upstream Go daemons interpret that as "poll again".
+    ///
+    /// This port keeps the minimum viable slice: it invokes the existing
+    /// [`ProvisionerStore::acquire_provisioner_job`] with an empty tag
+    /// set and echoes the raw job-row fields back on the wire. The
+    /// richer payload (WorkspaceBuild / TemplateImport / TemplateDryRun
+    /// oneof, template source archive, rich parameter resolution,
+    /// external-auth providers, etc.) is tracked as
+    /// `TODO-provisionerd-acquirejob-full-payload` and will land once
+    /// the per-job-type expansion is ported. Until then, daemons
+    /// receiving the empty envelope will re-poll, which is safe — the
+    /// row stays locked by the database's `FOR UPDATE SKIP LOCKED`
+    /// semantics and the daemon will retry with the same worker id.
+    #[instrument(skip(self, _req), err)]
+    pub async fn acquire_job(&self, _req: pd::Empty) -> Result<pd::AcquiredJob, RpcError> {
+        // In the Go port these come from the authenticated daemon
+        // handle; the DRPC transport wiring still needs to thread those
+        // through. For this first slice we ask the store for any job
+        // matching an empty tagset — the Postgres `tags <@ $5::JSONB`
+        // check requires job tags ⊆ daemon tags, so empty-on-both-sides
+        // only matches untagged jobs. Richer tag propagation is
+        // tracked with the same TODO marker as the full payload.
+        let input = AcquireProvisionerJobInput {
+            worker_id: Uuid::nil(),
+            started_at: OffsetDateTime::now_utc(),
+            organization_id: Uuid::nil(),
+            types: vec![ProvisionerType::Terraform, ProvisionerType::Echo],
+            provisioner_tags: serde_json::json!({}),
+        };
+
+        let job_opt = self
+            .store
+            .acquire_provisioner_job(input)
+            .await
+            .map_err(|e| RpcError::Internal(format!("acquire job: {e}")))?;
+
+        let Some(job) = job_opt else {
+            // No eligible job — upstream contract is to return an
+            // empty AcquiredJob so the daemon re-polls.
+            return Ok(pd::AcquiredJob::default());
+        };
+
+        // Minimal payload. `TODO-provisionerd-acquirejob-full-payload`:
+        // populate the `oneof type` (WorkspaceBuild/TemplateImport/
+        // TemplateDryRun), `template_source_archive`, and initiator
+        // user metadata.
+        Ok(pd::AcquiredJob {
+            job_id: job.id.to_string(),
+            created_at: job.created_at.unix_timestamp(),
+            provisioner: job.provisioner.as_str().to_owned(),
+            user_name: String::new(),
+            trace_metadata: std::collections::HashMap::new(),
+        })
+    }
+
     /// Routes an incoming DRPC method + encoded request body to the
     /// appropriate handler, returning the encoded response.
     ///
@@ -111,6 +180,15 @@ impl ProvisionerdDrpcService {
                 let req = pd::CommitQuotaRequest::decode(body)
                     .map_err(|e| RpcError::InvalidArgument(format!("decode: {e}")))?;
                 let resp = self.commit_quota(req).await?;
+                let mut buf = Vec::with_capacity(resp.encoded_len());
+                resp.encode(&mut buf)
+                    .map_err(|e| RpcError::Internal(format!("encode: {e}")))?;
+                Ok(buf)
+            }
+            ACQUIRE_JOB_METHOD => {
+                let req = pd::Empty::decode(body)
+                    .map_err(|e| RpcError::InvalidArgument(format!("decode: {e}")))?;
+                let resp = self.acquire_job(req).await?;
                 let mut buf = Vec::with_capacity(resp.encoded_len());
                 resp.encode(&mut buf)
                     .map_err(|e| RpcError::Internal(format!("encode: {e}")))?;
@@ -172,7 +250,7 @@ mod tests {
             error_code: String::new(),
             organization_id: Some(Uuid::new_v4()),
             initiator_id: Some(Uuid::new_v4()),
-            provisioner: coder_core::ProvisionerType::Terraform,
+            provisioner: ProvisionerType::Terraform,
             storage_method: coder_core::ProvisionerStorageMethod::File,
             file_id: Some(Uuid::new_v4()),
             job_type: coder_core::ProvisionerJobType::WorkspaceBuild,
@@ -405,8 +483,12 @@ mod tests {
         let store: Arc<dyn ProvisionerStore> = counting;
         let service = ProvisionerdDrpcService::new(store);
 
+        // `UpdateJob` is intentionally a not-yet-ported method path; it
+        // stands in for any unrecognised DRPC method and must bubble up
+        // as `Unimplemented` (code 12) so Go clients can `drpcerr.Is`
+        // the sentinel and back off.
         let err = match service
-            .dispatch("/provisionerd.ProvisionerDaemon/AcquireJob", &[])
+            .dispatch("/provisionerd.ProvisionerDaemon/UpdateJob", &[])
             .await
         {
             Err(err) => err,
@@ -414,9 +496,225 @@ mod tests {
         };
         match err {
             RpcError::Unimplemented(m) => {
-                assert!(m.contains("AcquireJob"));
+                assert!(m.contains("UpdateJob"));
             }
             other => unreachable!("expected Unimplemented, got {other:?}"),
         }
+    }
+
+    /// AcquireJob counting store: records how many times
+    /// `acquire_provisioner_job` was invoked and returns a preconfigured
+    /// optional job. Separate from [`CountingStore`] so the two RPCs
+    /// can be asserted independently without coupling their mocks.
+    struct AcquireCountingStore {
+        job: Option<ProvisionerJobRecord>,
+        calls: AtomicUsize,
+    }
+
+    impl AcquireCountingStore {
+        fn new(job: Option<ProvisionerJobRecord>) -> Self {
+            Self {
+                job,
+                calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn call_count(&self) -> usize {
+            self.calls.load(Ordering::SeqCst)
+        }
+    }
+
+    #[async_trait]
+    impl ProvisionerStore for AcquireCountingStore {
+        async fn acquire_provisioner_job(
+            &self,
+            _input: AcquireProvisionerJobInput,
+        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(self.job.clone())
+        }
+
+        async fn get_provisioner_job_by_id(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ProvisionerJobRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_jobs_by_ids(
+            &self,
+            _ids: &[Uuid],
+        ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job(
+            &self,
+            _input: InsertProvisionerJobInput,
+        ) -> Result<ProvisionerJobRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented"))
+        }
+
+        async fn update_provisioner_job_by_id(
+            &self,
+            _id: Uuid,
+            _updated_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn update_provisioner_job_with_complete_by_id(
+            &self,
+            _input: CompleteProvisionerJobInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn update_provisioner_job_with_cancel_by_id(
+            &self,
+            _input: CancelProvisionerJobInput,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn get_provisioner_jobs_to_be_reaped(
+            &self,
+            _input: GetJobsToBeReapedInput,
+        ) -> Result<Vec<ProvisionerJobRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job_logs(
+            &self,
+            _input: InsertProvisionerJobLogsInput,
+        ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_provisioner_logs_after_id(
+            &self,
+            _job_id: Uuid,
+            _after_id: i64,
+        ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn insert_provisioner_job_timings(
+            &self,
+            _input: InsertProvisionerJobTimingsInput,
+        ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_provisioner_job_timings_by_job_id(
+            &self,
+            _job_id: Uuid,
+        ) -> Result<Vec<ProvisionerJobTimingRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn upsert_provisioner_daemon(
+            &self,
+            _input: UpsertProvisionerDaemonInput,
+        ) -> Result<ProvisionerDaemonRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented"))
+        }
+
+        async fn update_provisioner_daemon_last_seen_at(
+            &self,
+            _id: Uuid,
+            _last_seen_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn get_provisioner_daemons_by_organization(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerDaemonRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_old_provisioner_daemons(&self) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn insert_provisioner_key(
+            &self,
+            _input: InsertProvisionerKeyInput,
+        ) -> Result<ProvisionerKeyRecord, StorageError> {
+            Err(StorageError::unavailable("not implemented"))
+        }
+
+        async fn get_provisioner_key_by_id(
+            &self,
+            _id: Uuid,
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_key_by_hashed_secret(
+            &self,
+            _hashed_secret: &[u8],
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn get_provisioner_key_by_name(
+            &self,
+            _organization_id: Uuid,
+            _name: &str,
+        ) -> Result<Option<ProvisionerKeyRecord>, StorageError> {
+            Ok(None)
+        }
+
+        async fn list_provisioner_keys_by_organization(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_provisioner_keys_by_organization_exclude_reserved(
+            &self,
+            _organization_id: Uuid,
+        ) -> Result<Vec<ProvisionerKeyRecord>, StorageError> {
+            Ok(Vec::new())
+        }
+
+        async fn delete_provisioner_key(&self, _id: Uuid) -> Result<bool, StorageError> {
+            Ok(false)
+        }
+    }
+
+    /// Unary round-trip test for the `AcquireJob` RPC: the dispatcher
+    /// decodes a protobuf-encoded `Empty`, invokes `acquire_job` (which
+    /// calls the store exactly once), and returns a wire-encoded
+    /// `AcquiredJob` carrying the queued job's id.
+    #[tokio::test]
+    async fn drpc_service_acquire_job_round_trip() {
+        let job = running_job();
+        let job_id = job.id;
+        let counting = Arc::new(AcquireCountingStore::new(Some(job)));
+        let store: Arc<dyn ProvisionerStore> = counting.clone();
+        let service = ProvisionerdDrpcService::new(store);
+
+        let body = pd::Empty::default().encode_to_vec();
+        let bytes = match service.dispatch(ACQUIRE_JOB_METHOD, &body).await {
+            Ok(bytes) => bytes,
+            Err(err) => unreachable!("dispatch failed: {err}"),
+        };
+        let resp = match pd::AcquiredJob::decode(&bytes[..]) {
+            Ok(resp) => resp,
+            Err(err) => unreachable!("decode failed: {err}"),
+        };
+
+        assert_eq!(resp.job_id, job_id.to_string());
+        assert_eq!(resp.provisioner, "terraform");
+        assert_eq!(
+            counting.call_count(),
+            1,
+            "acquire_job must call acquire_provisioner_job exactly once"
+        );
     }
 }
