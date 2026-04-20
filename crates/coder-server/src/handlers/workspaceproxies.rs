@@ -293,6 +293,16 @@ pub(crate) async fn create_workspace_proxy(
         })
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Create,
+        ResourceKind::WorkspaceProxy,
+        Some(&context.user),
+        Some(row.id.to_string()),
+        format!("created workspace proxy {}", row.name),
+    )
+    .await;
+
     Ok((
         StatusCode::CREATED,
         Json(UpdateWorkspaceProxyResponse {
@@ -427,6 +437,16 @@ pub(crate) async fn patch_workspace_proxy(
         })
         .await?;
 
+    record_audit(
+        &state,
+        AuditAction::Write,
+        ResourceKind::WorkspaceProxy,
+        Some(&context.user),
+        Some(row.id.to_string()),
+        format!("updated workspace proxy {}", row.name),
+    )
+    .await;
+
     Ok((
         StatusCode::OK,
         Json(UpdateWorkspaceProxyResponse {
@@ -472,6 +492,16 @@ pub(crate) async fn delete_workspace_proxy(
     };
 
     state.store.soft_delete_workspace_proxy(existing.id).await?;
+
+    record_audit(
+        &state,
+        AuditAction::Delete,
+        ResourceKind::WorkspaceProxy,
+        Some(&context.user),
+        Some(existing.id.to_string()),
+        format!("deleted workspace proxy {}", existing.name),
+    )
+    .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
