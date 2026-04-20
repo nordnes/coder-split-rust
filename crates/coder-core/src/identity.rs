@@ -374,6 +374,13 @@ pub struct OrganizationMemberRecord {
     pub email: String,
     /// Site-wide roles attached to the user.
     pub global_roles: Vec<SlimRoleRecord>,
+    /// Whether this membership is controlled by the identity provider.
+    ///
+    /// When `true`, the membership was created by an IDP sync pass and may
+    /// be removed by a subsequent sync if the IDP no longer asserts it.
+    /// When `false`, the membership was created manually (via the API /
+    /// admin UI / bootstrap) and must be preserved across IDP syncs.
+    pub is_idp_controlled: bool,
 }
 
 /// API key record exposed through user token routes.

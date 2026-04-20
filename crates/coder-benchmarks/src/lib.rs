@@ -437,6 +437,7 @@ impl AppStore for BenchStore {
         &self,
         _organization_id: Uuid,
         _user_id: Uuid,
+        _is_idp_controlled: bool,
     ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError> {
         Err(InsertOrganizationMemberError::Storage(
             StorageError::unavailable("bench stub"),

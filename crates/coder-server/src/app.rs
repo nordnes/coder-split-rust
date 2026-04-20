@@ -2931,6 +2931,7 @@ pub(crate) mod tests {
                 avatar_url: String::new(),
                 email: user.email,
                 global_roles: vec![role],
+                is_idp_controlled: false,
             };
 
             organizations.insert(organization_id, organization);
@@ -3219,6 +3220,7 @@ pub(crate) mod tests {
                         avatar_url: String::new(),
                         email: input.email.clone(),
                         global_roles: Vec::new(),
+                        is_idp_controlled: false,
                     },
                 );
             }
@@ -3859,6 +3861,7 @@ pub(crate) mod tests {
             &self,
             organization_id: Uuid,
             user_id: Uuid,
+            is_idp_controlled: bool,
         ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError> {
             let user = self
                 .users
@@ -3890,6 +3893,7 @@ pub(crate) mod tests {
                 avatar_url: user.avatar_url.clone(),
                 email: user.email.clone(),
                 global_roles: user.roles.clone(),
+                is_idp_controlled,
             };
             members.insert((organization_id, user_id), member.clone());
             drop(members);
