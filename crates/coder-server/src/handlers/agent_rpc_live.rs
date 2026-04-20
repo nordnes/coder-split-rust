@@ -973,6 +973,83 @@ impl AgentRpcHandler for LiveAgentHandler {
         }
         Ok(agent::ServiceBanner::default())
     }
+
+    /// Ports `coder/coderd/agentapi/resources_monitoring.go::
+    /// GetResourcesMonitoringConfiguration`.
+    ///
+    /// Returns the agent's configured memory + volume monitors. Fallback
+    /// behaviour when no monitors exist matches the Go `resourcesmonitor`
+    /// package default (`NumDatapoints = 20`, `CollectionInterval = 10s`).
+    async fn get_resources_monitoring_configuration(
+        &self,
+        _req: agent::GetResourcesMonitoringConfigurationRequest,
+    ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        let memory = self
+            .store
+            .list_memory_resource_monitors_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("fetch memory monitor: {e}")))?;
+        let volumes = self
+            .store
+            .list_volume_resource_monitors_by_agent_id(self.agent_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("fetch volume monitors: {e}")))?;
+
+        use agent::get_resources_monitoring_configuration_response::{
+            Config, Memory as MemoryCfg, Volume as VolumeCfg,
+        };
+        Ok(agent::GetResourcesMonitoringConfigurationResponse {
+            config: Some(Config {
+                num_datapoints: 20,
+                collection_interval_seconds: 10,
+            }),
+            memory: memory.map(|m| MemoryCfg { enabled: m.enabled }),
+            volumes: volumes
+                .into_iter()
+                .map(|v| VolumeCfg {
+                    enabled: v.enabled,
+                    path: v.path,
+                })
+                .collect(),
+        })
+    }
+
+    /// Ports `coder/coderd/agentapi/resources_monitoring.go::
+    /// PushResourcesMonitoringUsage`. For each datapoint in the request,
+    /// persist the memory and per-volume usage via the store. The Go
+    /// reference also drives state transition + debounce + notifications;
+    /// those are deferred to a follow-up — for now we persist usage so the
+    /// data is durable, matching the §B.1 tail follow-up to PR #260.
+    async fn push_resources_monitoring_usage(
+        &self,
+        req: agent::PushResourcesMonitoringUsageRequest,
+    ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
+        for datapoint in &req.datapoints {
+            let collected_at = datapoint
+                .collected_at
+                .as_ref()
+                .and_then(proto_timestamp_to_time)
+                .unwrap_or_else(OffsetDateTime::now_utc);
+            if let Some(mem) = datapoint.memory.as_ref() {
+                self.store
+                    .insert_memory_resource_monitor_usage(self.agent_id, mem.used, collected_at)
+                    .await
+                    .map_err(|e| RpcError::Internal(format!("insert memory usage: {e}")))?;
+            }
+            for volume in &datapoint.volumes {
+                self.store
+                    .insert_volume_resource_monitor_usage(
+                        self.agent_id,
+                        &volume.volume,
+                        volume.used,
+                        collected_at,
+                    )
+                    .await
+                    .map_err(|e| RpcError::Internal(format!("insert volume usage: {e}")))?;
+            }
+        }
+        Ok(agent::PushResourcesMonitoringUsageResponse::default())
+    }
 }
 
 /// Converts a `google.protobuf.Timestamp` to an `OffsetDateTime`. Returns

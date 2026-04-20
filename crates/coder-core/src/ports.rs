@@ -5236,6 +5236,101 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         owner_id: Uuid,
         organization_id: Uuid,
     ) -> Result<i64, StorageError>;
+
+    // ── workspace_agent_resource_monitors ──
+    // Mirrors `coder/coderd/database/queries/workspaceagentresourcemonitors.sql`
+    // and the `workspace_agent_{memory,volume}_resource_monitors` tables.
+
+    /// Returns the agent's configured memory resource monitor (if any).
+    ///
+    /// Mirrors `FetchMemoryResourceMonitorsByAgentID`.
+    async fn list_memory_resource_monitors_by_agent_id(
+        &self,
+        _agent_id: Uuid,
+    ) -> Result<Option<MemoryResourceMonitor>, StorageError> {
+        Ok(None)
+    }
+
+    /// Returns the agent's configured volume resource monitors.
+    ///
+    /// Mirrors `FetchVolumesResourceMonitorsByAgentID`.
+    async fn list_volume_resource_monitors_by_agent_id(
+        &self,
+        _agent_id: Uuid,
+    ) -> Result<Vec<VolumeResourceMonitor>, StorageError> {
+        Ok(Vec::new())
+    }
+
+    /// Persists a memory usage datapoint for the given agent.
+    ///
+    /// Used by `PushResourcesMonitoringUsage`.
+    async fn insert_memory_resource_monitor_usage(
+        &self,
+        _agent_id: Uuid,
+        _usage_bytes: i64,
+        _collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
+    /// Persists a volume usage datapoint for the given agent and path.
+    ///
+    /// Used by `PushResourcesMonitoringUsage`.
+    async fn insert_volume_resource_monitor_usage(
+        &self,
+        _agent_id: Uuid,
+        _path: &str,
+        _usage_bytes: i64,
+        _collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+}
+
+// ── workspace_agent_resource_monitors ──
+// Mirrors the two tables created in
+// `coder/coderd/database/migrations/000289_agent_resource_monitors.up.sql`
+// and extended in `000294_workspace_monitors_state.up.sql`.
+
+/// Stored row of `workspace_agent_memory_resource_monitors`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MemoryResourceMonitor {
+    /// Agent identifier (primary key).
+    pub agent_id: Uuid,
+    /// Whether the monitor is enabled.
+    pub enabled: bool,
+    /// Usage percentage threshold at which to alert (0–100).
+    pub threshold: i32,
+    /// When the monitor was created.
+    pub created_at: OffsetDateTime,
+    /// Last time the monitor's state was updated.
+    pub updated_at: OffsetDateTime,
+    /// Monitor state. One of `OK` / `NOK` (matches the
+    /// `workspace_agent_monitor_state` enum).
+    pub state: String,
+    /// Timestamp until which alerts are debounced.
+    pub debounced_until: OffsetDateTime,
+}
+
+/// Stored row of `workspace_agent_volume_resource_monitors`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VolumeResourceMonitor {
+    /// Agent identifier (part of composite primary key).
+    pub agent_id: Uuid,
+    /// Mount path being monitored (part of composite primary key).
+    pub path: String,
+    /// Whether the monitor is enabled.
+    pub enabled: bool,
+    /// Usage percentage threshold at which to alert (0–100).
+    pub threshold: i32,
+    /// When the monitor was created.
+    pub created_at: OffsetDateTime,
+    /// Last time the monitor's state was updated.
+    pub updated_at: OffsetDateTime,
+    /// Monitor state. One of `OK` / `NOK`.
+    pub state: String,
+    /// Timestamp until which alerts are debounced.
+    pub debounced_until: OffsetDateTime,
 }
 
 /// Stored webpush subscription record.

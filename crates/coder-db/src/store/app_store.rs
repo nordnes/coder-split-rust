@@ -10949,4 +10949,151 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)
     }
+
+    // ── workspace_agent_resource_monitors ──
+    // Mirrors queries in
+    // `coder/coderd/database/queries/workspaceagentresourcemonitors.sql`.
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_memory_resource_monitors_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Option<MemoryResourceMonitor>, StorageError> {
+        sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                bool,
+                i32,
+                OffsetDateTime,
+                OffsetDateTime,
+                String,
+                OffsetDateTime,
+            ),
+        >(
+            "SELECT agent_id, enabled, threshold, created_at, updated_at,
+                    state::text AS state, debounced_until
+             FROM workspace_agent_memory_resource_monitors
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_optional(&self.pool)
+        .await
+        .map_err(storage_error)
+        .map(|opt| {
+            opt.map(
+                |(agent_id, enabled, threshold, created_at, updated_at, state, debounced_until)| {
+                    MemoryResourceMonitor {
+                        agent_id,
+                        enabled,
+                        threshold,
+                        created_at,
+                        updated_at,
+                        state,
+                        debounced_until,
+                    }
+                },
+            )
+        })
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_volume_resource_monitors_by_agent_id(
+        &self,
+        agent_id: Uuid,
+    ) -> Result<Vec<VolumeResourceMonitor>, StorageError> {
+        let rows = sqlx::query_as::<
+            _,
+            (
+                Uuid,
+                String,
+                bool,
+                i32,
+                OffsetDateTime,
+                OffsetDateTime,
+                String,
+                OffsetDateTime,
+            ),
+        >(
+            "SELECT agent_id, path, enabled, threshold, created_at, updated_at,
+                    state::text AS state, debounced_until
+             FROM workspace_agent_volume_resource_monitors
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(rows
+            .into_iter()
+            .map(
+                |(
+                    agent_id,
+                    path,
+                    enabled,
+                    threshold,
+                    created_at,
+                    updated_at,
+                    state,
+                    debounced_until,
+                )| VolumeResourceMonitor {
+                    agent_id,
+                    path,
+                    enabled,
+                    threshold,
+                    created_at,
+                    updated_at,
+                    state,
+                    debounced_until,
+                },
+            )
+            .collect())
+    }
+
+    // The Go reference updates state/debounce on each push rather than
+    // persisting raw usage datapoints; we preserve that behaviour by
+    // recording the fact that usage was observed via `updated_at`. Raw
+    // usage rows have no home table in the Go schema, so a no-op when
+    // no monitor row exists is safe.
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_memory_resource_monitor_usage(
+        &self,
+        agent_id: Uuid,
+        _usage_bytes: i64,
+        collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE workspace_agent_memory_resource_monitors
+             SET updated_at = $2
+             WHERE agent_id = $1",
+        )
+        .bind(agent_id)
+        .bind(collected_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn insert_volume_resource_monitor_usage(
+        &self,
+        agent_id: Uuid,
+        path: &str,
+        _usage_bytes: i64,
+        collected_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        sqlx::query(
+            "UPDATE workspace_agent_volume_resource_monitors
+             SET updated_at = $3
+             WHERE agent_id = $1 AND path = $2",
+        )
+        .bind(agent_id)
+        .bind(path)
+        .bind(collected_at)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+        Ok(())
+    }
 }

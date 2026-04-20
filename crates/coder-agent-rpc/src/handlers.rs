@@ -105,6 +105,24 @@ pub trait AgentRpcHandler: Send + Sync {
     ) -> Result<agent::ServiceBanner, RpcError> {
         Err(RpcError::Unimplemented("GetServiceBanner".into()))
     }
+
+    async fn get_resources_monitoring_configuration(
+        &self,
+        _req: agent::GetResourcesMonitoringConfigurationRequest,
+    ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        Err(RpcError::Unimplemented(
+            "GetResourcesMonitoringConfiguration".into(),
+        ))
+    }
+
+    async fn push_resources_monitoring_usage(
+        &self,
+        _req: agent::PushResourcesMonitoringUsageRequest,
+    ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
+        Err(RpcError::Unimplemented(
+            "PushResourcesMonitoringUsage".into(),
+        ))
+    }
 }
 
 /// Opaque per-invocation metadata lifted off any `InvokeMetadata` frames
@@ -280,5 +298,19 @@ impl AgentRpcHandler for StubHandler {
         _req: agent::GetServiceBannerRequest,
     ) -> Result<agent::ServiceBanner, RpcError> {
         Ok(agent::ServiceBanner::default())
+    }
+
+    async fn get_resources_monitoring_configuration(
+        &self,
+        _req: agent::GetResourcesMonitoringConfigurationRequest,
+    ) -> Result<agent::GetResourcesMonitoringConfigurationResponse, RpcError> {
+        Ok(agent::GetResourcesMonitoringConfigurationResponse::default())
+    }
+
+    async fn push_resources_monitoring_usage(
+        &self,
+        _req: agent::PushResourcesMonitoringUsageRequest,
+    ) -> Result<agent::PushResourcesMonitoringUsageResponse, RpcError> {
+        Ok(agent::PushResourcesMonitoringUsageResponse::default())
     }
 }

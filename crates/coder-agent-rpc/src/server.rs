@@ -224,6 +224,16 @@ async fn dispatch<H: AgentRpcHandler + ?Sized>(
             let resp = handler.get_service_banner(req).await?;
             encode(&resp)
         }
+        "/coder.agent.v2.Agent/GetResourcesMonitoringConfiguration" => {
+            let req = decode::<agent::GetResourcesMonitoringConfigurationRequest>(body)?;
+            let resp = handler.get_resources_monitoring_configuration(req).await?;
+            encode(&resp)
+        }
+        "/coder.agent.v2.Agent/PushResourcesMonitoringUsage" => {
+            let req = decode::<agent::PushResourcesMonitoringUsageRequest>(body)?;
+            let resp = handler.push_resources_monitoring_usage(req).await?;
+            encode(&resp)
+        }
         other => Err(RpcError::Unimplemented(other.to_string())),
     }
 }

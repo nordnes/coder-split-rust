@@ -2049,6 +2049,13 @@ pub(crate) mod tests {
         vapid_keys: Mutex<Option<coder_core::api::VapidKeyPair>>,
         // IDP sync settings (deployment-level)
         organization_idp_sync_settings: Mutex<coder_core::api::OrganizationSyncSettings>,
+        // ── workspace_agent_resource_monitors ──
+        memory_resource_monitors: Mutex<HashMap<Uuid, coder_core::MemoryResourceMonitor>>,
+        volume_resource_monitors: Mutex<HashMap<(Uuid, String), coder_core::VolumeResourceMonitor>>,
+        /// (agent_id, usage_bytes, collected_at) — inserted memory usage datapoints.
+        memory_resource_monitor_usages: Mutex<Vec<(Uuid, i64, OffsetDateTime)>>,
+        /// (agent_id, path, usage_bytes, collected_at) — inserted volume usage datapoints.
+        volume_resource_monitor_usages: Mutex<Vec<(Uuid, String, i64, OffsetDateTime)>>,
     }
 
     impl FakeStore {
@@ -2154,6 +2161,10 @@ pub(crate) mod tests {
                 organization_idp_sync_settings: Mutex::new(
                     coder_core::api::OrganizationSyncSettings::default(),
                 ),
+                memory_resource_monitors: Mutex::new(HashMap::new()),
+                volume_resource_monitors: Mutex::new(HashMap::new()),
+                memory_resource_monitor_usages: Mutex::new(Vec::new()),
+                volume_resource_monitor_usages: Mutex::new(Vec::new()),
             }
         }
 
@@ -2181,6 +2192,52 @@ pub(crate) mod tests {
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .insert(agent.id, agent);
             Ok(())
+        }
+
+        /// Seeds a memory resource monitor for testing.
+        pub(crate) fn insert_memory_resource_monitor(
+            &self,
+            monitor: coder_core::MemoryResourceMonitor,
+        ) -> Result<(), StorageError> {
+            self.memory_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(monitor.agent_id, monitor);
+            Ok(())
+        }
+
+        /// Seeds a volume resource monitor for testing.
+        pub(crate) fn insert_volume_resource_monitor(
+            &self,
+            monitor: coder_core::VolumeResourceMonitor,
+        ) -> Result<(), StorageError> {
+            self.volume_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert((monitor.agent_id, monitor.path.clone()), monitor);
+            Ok(())
+        }
+
+        /// Returns a snapshot of the recorded memory usage datapoints.
+        pub(crate) fn memory_resource_monitor_usages(
+            &self,
+        ) -> Result<Vec<(Uuid, i64, OffsetDateTime)>, StorageError> {
+            Ok(self
+                .memory_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .clone())
+        }
+
+        /// Returns a snapshot of the recorded volume usage datapoints.
+        pub(crate) fn volume_resource_monitor_usages(
+            &self,
+        ) -> Result<Vec<(Uuid, String, i64, OffsetDateTime)>, StorageError> {
+            Ok(self
+                .volume_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .clone())
         }
 
         /// Inserts a workspace app into the fake store for testing.
@@ -10281,6 +10338,61 @@ pub(crate) mod tests {
                 }
             }
             Ok(total)
+        }
+
+        // ── workspace_agent_resource_monitors ──
+
+        async fn list_memory_resource_monitors_by_agent_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Option<coder_core::MemoryResourceMonitor>, StorageError> {
+            Ok(self
+                .memory_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .get(&agent_id)
+                .cloned())
+        }
+
+        async fn list_volume_resource_monitors_by_agent_id(
+            &self,
+            agent_id: Uuid,
+        ) -> Result<Vec<coder_core::VolumeResourceMonitor>, StorageError> {
+            Ok(self
+                .volume_resource_monitors
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .values()
+                .filter(|m| m.agent_id == agent_id)
+                .cloned()
+                .collect())
+        }
+
+        async fn insert_memory_resource_monitor_usage(
+            &self,
+            agent_id: Uuid,
+            usage_bytes: i64,
+            collected_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            self.memory_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push((agent_id, usage_bytes, collected_at));
+            Ok(())
+        }
+
+        async fn insert_volume_resource_monitor_usage(
+            &self,
+            agent_id: Uuid,
+            path: &str,
+            usage_bytes: i64,
+            collected_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            self.volume_resource_monitor_usages
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .push((agent_id, path.to_owned(), usage_bytes, collected_at));
+            Ok(())
         }
     }
 
@@ -19014,6 +19126,152 @@ pub(crate) mod tests {
             Ok(_) => return Err("expected InvalidArgument, got Ok".into()),
         };
         assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    // ── workspace_agent_resource_monitors tests ──
+
+    #[tokio::test]
+    async fn insert_memory_resource_monitor_usage_persists_in_fake_store()
+    -> Result<(), Box<dyn Error>> {
+        let store = Arc::new(FakeStore::new(true));
+        let agent_id = Uuid::new_v4();
+        let collected_at = OffsetDateTime::from_unix_timestamp(1_700_000_000)
+            .map_err(|e| StorageError::invalid_data(e.to_string()))?;
+
+        AppStore::insert_memory_resource_monitor_usage(
+            store.as_ref(),
+            agent_id,
+            2048,
+            collected_at,
+        )
+        .await?;
+
+        let recorded = store.memory_resource_monitor_usages()?;
+        assert_eq!(recorded.len(), 1);
+        assert_eq!(recorded[0].0, agent_id);
+        assert_eq!(recorded[0].1, 2048);
+        assert_eq!(recorded[0].2, collected_at);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_resources_monitoring_configuration_returns_configured_monitors()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let now = OffsetDateTime::now_utc();
+        store.insert_memory_resource_monitor(coder_core::MemoryResourceMonitor {
+            agent_id,
+            enabled: true,
+            threshold: 80,
+            created_at: now,
+            updated_at: now,
+            state: "OK".to_owned(),
+            debounced_until: now,
+        })?;
+        store.insert_volume_resource_monitor(coder_core::VolumeResourceMonitor {
+            agent_id,
+            path: "/tmp".to_owned(),
+            enabled: true,
+            threshold: 90,
+            created_at: now,
+            updated_at: now,
+            state: "OK".to_owned(),
+            debounced_until: now,
+        })?;
+
+        let handler = live_handler_for_store(store, agent_id);
+        let response = handler
+            .get_resources_monitoring_configuration(
+                agent::GetResourcesMonitoringConfigurationRequest {},
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let cfg = response.config.ok_or("missing config")?;
+        assert_eq!(cfg.num_datapoints, 20);
+        assert_eq!(cfg.collection_interval_seconds, 10);
+        let memory = response.memory.ok_or("missing memory monitor")?;
+        assert!(memory.enabled);
+        assert_eq!(response.volumes.len(), 1);
+        assert_eq!(response.volumes[0].path, "/tmp");
+        assert!(response.volumes[0].enabled);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn get_resources_monitoring_configuration_returns_defaults_when_empty()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let response = handler
+            .get_resources_monitoring_configuration(
+                agent::GetResourcesMonitoringConfigurationRequest {},
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let cfg = response.config.ok_or("missing config")?;
+        assert_eq!(cfg.num_datapoints, 20);
+        assert_eq!(cfg.collection_interval_seconds, 10);
+        assert!(response.memory.is_none());
+        assert!(response.volumes.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn push_resources_monitoring_usage_persists_via_store() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        let memory_usage = agent::push_resources_monitoring_usage_request::datapoint::MemoryUsage {
+            used: 1024,
+            total: 4096,
+        };
+        let volume_usage = agent::push_resources_monitoring_usage_request::datapoint::VolumeUsage {
+            volume: "/mnt/data".to_owned(),
+            used: 500,
+            total: 1000,
+        };
+        let datapoint = agent::push_resources_monitoring_usage_request::Datapoint {
+            collected_at: Some(prost_types::Timestamp {
+                seconds: 1_700_000_000,
+                nanos: 0,
+            }),
+            memory: Some(memory_usage),
+            volumes: vec![volume_usage],
+        };
+
+        handler
+            .push_resources_monitoring_usage(agent::PushResourcesMonitoringUsageRequest {
+                datapoints: vec![datapoint],
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let mem_usages = store.memory_resource_monitor_usages()?;
+        assert_eq!(mem_usages.len(), 1);
+        assert_eq!(mem_usages[0].0, agent_id);
+        assert_eq!(mem_usages[0].1, 1024);
+
+        let vol_usages = store.volume_resource_monitor_usages()?;
+        assert_eq!(vol_usages.len(), 1);
+        assert_eq!(vol_usages[0].0, agent_id);
+        assert_eq!(vol_usages[0].1, "/mnt/data");
+        assert_eq!(vol_usages[0].2, 500);
         Ok(())
     }
 
