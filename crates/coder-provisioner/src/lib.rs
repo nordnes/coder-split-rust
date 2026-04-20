@@ -17,7 +17,9 @@ pub mod drpc_service;
 pub mod proto;
 pub mod server;
 
-pub use drpc_service::{ACQUIRE_JOB_METHOD, COMMIT_QUOTA_METHOD, ProvisionerdDrpcService};
+pub use drpc_service::{
+    ACQUIRE_JOB_METHOD, COMMIT_QUOTA_METHOD, ProvisionerdDrpcService, UPDATE_JOB_METHOD,
+};
 
 use std::sync::Arc;
 

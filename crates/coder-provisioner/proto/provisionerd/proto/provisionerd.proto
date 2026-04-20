@@ -2,10 +2,10 @@ syntax = "proto3";
 
 // Stripped vendoring of the upstream `provisionerd/proto/provisionerd.proto`.
 // Only the messages and RPCs required by the currently-ported RPCs
-// (CommitQuota, AcquireJob) are retained; the rest (UpdateJob, FailJob,
-// CompleteJob, UploadFile, DownloadFile) will be added in follow-up
-// batches along with the corresponding `provisionersdk/proto` imports
-// they require.
+// (CommitQuota, AcquireJob, UpdateJob) are retained; the rest (FailJob,
+// CompleteJob, UploadFile, DownloadFile, AcquireJobWithCancel) will be
+// added in follow-up batches along with the corresponding
+// `provisionersdk/proto` imports they require.
 //
 // The package name and message field numbers must match upstream so the
 // on-the-wire encoding remains compatible with Go provisioner daemons.
@@ -48,4 +48,81 @@ message AcquiredJob {
   // trace_metadata is currently used for tracing information only. It
   // allows jobs to be tied to the request that created them.
   map<string, string> trace_metadata = 9;
+}
+
+// ── UpdateJob ─────────────────────────────────────────────────
+//
+// Minimal subset of the provisionersdk types required by UpdateJob. The
+// full `provisionersdk/proto/provisioner.proto` schema is much larger,
+// but UpdateJob's request only touches Log / TemplateVariable /
+// VariableValue / LogLevel / LogSource. Keeping the field numbers in
+// sync with upstream is load-bearing — Go provisioner daemons encode
+// using those numbers and the server must decode compatibly.
+
+// LogLevel mirrors `provisioner.LogLevel`.
+enum LogLevel {
+  TRACE = 0;
+  DEBUG = 1;
+  INFO = 2;
+  WARN = 3;
+  ERROR = 4;
+}
+
+// LogSource mirrors the top-level `provisionerd.LogSource` enum.
+enum LogSource {
+  PROVISIONER_DAEMON = 0;
+  PROVISIONER = 1;
+}
+
+// Log is the subset of `provisionerd.Log` used by UpdateJob.
+message Log {
+  LogSource source = 1;
+  LogLevel level = 2;
+  int64 created_at = 3;
+  string stage = 4;
+  string output = 5;
+}
+
+// TemplateVariable mirrors `provisioner.TemplateVariable`.
+message TemplateVariable {
+  string name = 1;
+  string description = 2;
+  string type = 3;
+  string default_value = 4;
+  bool required = 5;
+  bool sensitive = 6;
+}
+
+// VariableValue mirrors `provisioner.VariableValue`.
+message VariableValue {
+  string name = 1;
+  string value = 2;
+  bool sensitive = 3;
+}
+
+// UpdateJobRequest is sent periodically as a heartbeat with job updates.
+//
+// Field numbers and `reserved 3` match upstream
+// `provisionerd/proto/provisionerd.proto::UpdateJobRequest` so Go
+// provisioner daemons can talk to this Rust server unchanged.
+message UpdateJobRequest {
+  reserved 3;
+
+  string job_id = 1;
+  repeated Log logs = 2;
+  repeated TemplateVariable template_variables = 4;
+  repeated VariableValue user_variable_values = 5;
+  bytes readme = 6;
+  map<string, string> workspace_tags = 7;
+}
+
+// UpdateJobResponse returns the job's cancellation state and any
+// resolved variable values.
+//
+// `reserved 2` matches upstream.
+message UpdateJobResponse {
+  reserved 2;
+
+  bool canceled = 1;
+  repeated VariableValue variable_values = 3;
 }
