@@ -411,6 +411,9 @@ pub struct TemplateListFilter {
     pub search: Option<String>,
     /// Include deleted templates.
     pub deleted: bool,
+    /// RBAC partial-eval SQL filter. See
+    /// [`coder_core::ports::RbacAuthzFilter`].
+    pub authz_filter: Option<crate::ports::RbacAuthzFilter>,
 }
 
 /// Template version list filter.

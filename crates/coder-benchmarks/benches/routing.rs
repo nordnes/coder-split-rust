@@ -109,6 +109,7 @@ fn bench_app_state() -> AppState {
         vapid_sub: String::new(),
         trial_signup_url: String::new(),
         frontend: coder_core::config::FrontendConfig { enabled: false },
+        rbac_sql_filter_enabled: true,
     };
 
     AppState::new(

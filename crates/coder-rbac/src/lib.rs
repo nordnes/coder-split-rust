@@ -20,6 +20,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 
+pub mod regosql;
 pub mod system_actors;
 
 use std::collections::HashMap;

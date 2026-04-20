@@ -1,5 +1,59 @@
 use super::*;
 
+/// Rewrites RBAC partial-eval placeholder tokens into concrete `$k` bind
+/// slots. Returns the clause and the number of slots consumed. When the
+/// filter is `None` or `"TRUE"`, returns `"TRUE"` and zero slots so the
+/// caller may append `AND (TRUE)` as a no-op.
+#[inline]
+fn rbac_authz_clause(
+    authz: &Option<coder_core::RbacAuthzFilter>,
+    start_index: usize,
+) -> (String, usize) {
+    match authz {
+        Some(f) if !f.is_allow_all() => coder_rbac::regosql::rebind(f, start_index),
+        _ => ("TRUE".to_owned(), 0),
+    }
+}
+
+/// Binds the RBAC authz filter's parameters to a `query_scalar`-style query.
+/// Binds `uuid_params` first, then `uuid_array_params`.
+#[inline]
+fn bind_rbac_authz_params<'q>(
+    mut q: sqlx::query::QueryScalar<'q, Postgres, i64, sqlx::postgres::PgArguments>,
+    authz: &'q Option<coder_core::RbacAuthzFilter>,
+) -> sqlx::query::QueryScalar<'q, Postgres, i64, sqlx::postgres::PgArguments> {
+    if let Some(f) = authz.as_ref() {
+        if !f.is_allow_all() {
+            for id in &f.uuid_params {
+                q = q.bind(*id);
+            }
+            for arr in &f.uuid_array_params {
+                q = q.bind(arr.clone());
+            }
+        }
+    }
+    q
+}
+
+/// Same as [`bind_rbac_authz_params`] but for a `query_as`-style query.
+#[inline]
+fn bind_rbac_authz_params_as<'q, T>(
+    mut q: sqlx::query::QueryAs<'q, Postgres, T, sqlx::postgres::PgArguments>,
+    authz: &'q Option<coder_core::RbacAuthzFilter>,
+) -> sqlx::query::QueryAs<'q, Postgres, T, sqlx::postgres::PgArguments> {
+    if let Some(f) = authz.as_ref() {
+        if !f.is_allow_all() {
+            for id in &f.uuid_params {
+                q = q.bind(*id);
+            }
+            for arr in &f.uuid_array_params {
+                q = q.bind(arr.clone());
+            }
+        }
+    }
+    q
+}
+
 #[async_trait]
 impl AppStore for PostgresStore {
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
@@ -1931,22 +1985,35 @@ impl AppStore for PostgresStore {
     ) -> Result<AuditLogResponse, StorageError> {
         let search = filter.search.trim().to_owned();
         let search_pattern = format!("%{search}%");
-        let count = sqlx::query_scalar::<_, i64>(
+        // RBAC partial-eval SQL filter pushdown (W4.43 / §B.11.4).
+        if let Some(f) = filter.authz_filter.as_ref() {
+            if f.is_deny_all() {
+                return Ok(AuditLogResponse {
+                    audit_logs: Vec::new(),
+                    count: 0,
+                });
+            }
+        }
+        let (count_authz_clause, _) = rbac_authz_clause(&filter.authz_filter, 3);
+        let count_sql = format!(
             "SELECT COUNT(*)
              FROM audit_logs al
+             LEFT JOIN organizations o ON o.id = al.organization_id
              LEFT JOIN users u ON u.id = al.user_id
-             WHERE $1 = ''
+             WHERE ($1 = ''
                 OR al.description ILIKE $2
                 OR al.resource_target ILIKE $2
-                OR COALESCE(u.username, '') ILIKE $2",
-        )
-        .bind(&search)
-        .bind(&search_pattern)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(storage_error)?;
+                OR COALESCE(u.username, '') ILIKE $2)
+               AND ({count_authz_clause})"
+        );
+        let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(&search)
+            .bind(&search_pattern);
+        count_q = bind_rbac_authz_params(count_q, &filter.authz_filter);
+        let count = count_q.fetch_one(&self.pool).await.map_err(storage_error)?;
 
-        let rows = sqlx::query_as::<_, StoredAuditLogRow>(
+        let (rows_authz_clause, _) = rbac_authz_clause(&filter.authz_filter, 5);
+        let rows_sql = format!(
             "SELECT
                 al.id,
                 al.request_id,
@@ -1975,21 +2042,22 @@ impl AppStore for PostgresStore {
              FROM audit_logs al
              LEFT JOIN organizations o ON o.id = al.organization_id
              LEFT JOIN users u ON u.id = al.user_id
-             WHERE $1 = ''
+             WHERE ($1 = ''
                 OR al.description ILIKE $2
                 OR al.resource_target ILIKE $2
-                OR COALESCE(u.username, '') ILIKE $2
+                OR COALESCE(u.username, '') ILIKE $2)
+               AND ({rows_authz_clause})
              ORDER BY al.time DESC
              LIMIT $3
-             OFFSET $4",
-        )
-        .bind(&search)
-        .bind(&search_pattern)
-        .bind(i64::from(filter.limit))
-        .bind(i64::from(filter.offset))
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_error)?;
+             OFFSET $4"
+        );
+        let mut rows_q = sqlx::query_as::<_, StoredAuditLogRow>(&rows_sql)
+            .bind(&search)
+            .bind(&search_pattern)
+            .bind(i64::from(filter.limit))
+            .bind(i64::from(filter.offset));
+        rows_q = bind_rbac_authz_params_as(rows_q, &filter.authz_filter);
+        let rows = rows_q.fetch_all(&self.pool).await.map_err(storage_error)?;
 
         Ok(AuditLogResponse {
             audit_logs: rows
@@ -6582,7 +6650,18 @@ impl AppStore for PostgresStore {
         let dormant = filter.dormant;
         let template_ids: Vec<Uuid> = filter.template_ids.clone();
 
-        let total = sqlx::query_scalar::<_, i64>(
+        // RBAC partial-eval SQL filter pushdown (W4.43 / §B.11.4).
+        // Short-circuit on deny; append clause on deny-partial; skip on
+        // allow-all / None (falls back to legacy in-memory post-filter).
+        if let Some(f) = filter.authz_filter.as_ref() {
+            if f.is_deny_all() {
+                return Ok((Vec::new(), 0));
+            }
+        }
+        // Rebind placeholder tokens starting at slot 8 (the COUNT query uses $1..$7).
+        let (count_authz_clause, _count_authz_binds) =
+            rbac_authz_clause(&filter.authz_filter, 8);
+        let count_sql = format!(
             "SELECT COUNT(*)
              FROM workspaces w
              LEFT JOIN users u ON u.id = w.owner_id
@@ -6594,21 +6673,26 @@ impl AppStore for PostgresStore {
                AND ($4::text IS NULL OR t.name = $4)
                AND ($5::uuid IS NULL OR w.organization_id = $5)
                AND ($6::bool IS NULL OR ($6 = true AND w.dormant_at IS NOT NULL) OR ($6 = false AND w.dormant_at IS NULL))
-               AND (cardinality($7::uuid[]) = 0 OR w.template_id = ANY($7))",
-        )
-        .bind(filter.owner_id)
-        .bind(owner_username.as_deref())
-        .bind(search.as_deref())
-        .bind(template_name.as_deref())
-        .bind(filter.organization_id)
-        .bind(dormant)
-        .bind(&template_ids)
-        .fetch_one(&self.pool)
-        .await
-        .map_err(storage_error)?;
+               AND (cardinality($7::uuid[]) = 0 OR w.template_id = ANY($7))
+               AND ({count_authz_clause})"
+        );
+        let mut count_q = sqlx::query_scalar::<_, i64>(&count_sql)
+            .bind(filter.owner_id)
+            .bind(owner_username.as_deref())
+            .bind(search.as_deref())
+            .bind(template_name.as_deref())
+            .bind(filter.organization_id)
+            .bind(dormant)
+            .bind(&template_ids);
+        count_q = bind_rbac_authz_params(count_q, &filter.authz_filter);
+        let total = count_q.fetch_one(&self.pool).await.map_err(storage_error)?;
 
         let viewer_id = filter.viewer_id;
-        let rows = sqlx::query_as::<_, StoredWorkspaceRow>(
+        // Rebind the rows query: $1..$7 data, $8 limit, $9 offset, $10 viewer_id,
+        // so authz placeholders start at $11.
+        let (rows_authz_clause, _rows_authz_binds) =
+            rbac_authz_clause(&filter.authz_filter, 11);
+        let rows_sql = format!(
             "SELECT
                 w.id,
                 w.created_at,
@@ -6638,22 +6722,23 @@ impl AppStore for PostgresStore {
                AND ($5::uuid IS NULL OR w.organization_id = $5)
                AND ($6::bool IS NULL OR ($6 = true AND w.dormant_at IS NOT NULL) OR ($6 = false AND w.dormant_at IS NULL))
                AND (cardinality($7::uuid[]) = 0 OR w.template_id = ANY($7))
+               AND ({rows_authz_clause})
              ORDER BY w.last_used_at DESC
-             LIMIT $8 OFFSET $9",
-        )
-        .bind(filter.owner_id)
-        .bind(owner_username.as_deref())
-        .bind(search.as_deref())
-        .bind(template_name.as_deref())
-        .bind(filter.organization_id)
-        .bind(dormant)
-        .bind(&template_ids)
-        .bind(i64::from(filter.limit.min(1000)))
-        .bind(i64::from(filter.offset))
-        .bind(viewer_id)
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_error)?;
+             LIMIT $8 OFFSET $9"
+        );
+        let mut rows_q = sqlx::query_as::<_, StoredWorkspaceRow>(&rows_sql)
+            .bind(filter.owner_id)
+            .bind(owner_username.as_deref())
+            .bind(search.as_deref())
+            .bind(template_name.as_deref())
+            .bind(filter.organization_id)
+            .bind(dormant)
+            .bind(&template_ids)
+            .bind(i64::from(filter.limit.min(1000)))
+            .bind(i64::from(filter.offset))
+            .bind(viewer_id);
+        rows_q = bind_rbac_authz_params_as(rows_q, &filter.authz_filter);
+        let rows = rows_q.fetch_all(&self.pool).await.map_err(storage_error)?;
 
         let workspaces: Vec<WorkspaceRecord> =
             rows.into_iter().map(workspace_record_from_row).collect();
@@ -8607,7 +8692,14 @@ impl AppStore for PostgresStore {
     ) -> Result<Vec<TemplateRecord>, StorageError> {
         // Escape LIKE metacharacters so user input is treated literally.
         let escaped_search = filter.search.as_deref().map(escape_like);
-        let rows = sqlx::query_as::<_, StoredTemplateRow>(
+        // RBAC partial-eval SQL filter pushdown (W4.43 / §B.11.4).
+        if let Some(f) = filter.authz_filter.as_ref() {
+            if f.is_deny_all() {
+                return Ok(Vec::new());
+            }
+        }
+        let (authz_clause, _) = rbac_authz_clause(&filter.authz_filter, 5);
+        let sql = format!(
             r#"
             SELECT t.id, t.created_at, t.updated_at, t.organization_id, t.deleted,
                    t.name, t.provisioner::text AS provisioner, t.active_version_id,
@@ -8635,16 +8727,17 @@ impl AppStore for PostgresStore {
               AND ($2::text IS NULL OR t.name = $2)
               AND ($3::bool OR t.deleted = false)
               AND ($4::text IS NULL OR t.name ILIKE '%' || $4 || '%' OR t.display_name ILIKE '%' || $4 || '%')
+              AND ({authz_clause})
             ORDER BY t.name ASC
-            "#,
-        )
-        .bind(filter.organization_id)
-        .bind(filter.exact_name.as_deref())
-        .bind(filter.deleted)
-        .bind(escaped_search.as_deref())
-        .fetch_all(&self.pool)
-        .await
-        .map_err(storage_error)?;
+            "#
+        );
+        let mut q = sqlx::query_as::<_, StoredTemplateRow>(&sql)
+            .bind(filter.organization_id)
+            .bind(filter.exact_name.as_deref())
+            .bind(filter.deleted)
+            .bind(escaped_search.as_deref());
+        q = bind_rbac_authz_params_as(q, &filter.authz_filter);
+        let rows = q.fetch_all(&self.pool).await.map_err(storage_error)?;
         Ok(rows.into_iter().map(template_record_from_row).collect())
     }
 

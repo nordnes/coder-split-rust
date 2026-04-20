@@ -1430,6 +1430,7 @@ mod tests {
             vapid_sub: String::new(),
             trial_signup_url: String::new(),
             frontend: coder_core::config::FrontendConfig { enabled: false },
+            rbac_sql_filter_enabled: true,
         }
     }
 

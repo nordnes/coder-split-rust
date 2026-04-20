@@ -44,6 +44,24 @@ pub(crate) async fn list_audit_logs(
             search: query.q,
             limit: clamp_pagination_limit(query.limit.unwrap_or(50)),
             offset: query.offset.unwrap_or_default(),
+            // RBAC partial-eval SQL filter (CODER_RBAC_SQL_FILTER). When the
+            // flag is off, pushdown is skipped and the legacy post-filter
+            // path (already handled above via the explicit `authorize` check)
+            // continues to gate access.
+            authz_filter: if state.config.rbac_sql_filter_enabled {
+                Some(
+                    coder_rbac::regosql::SqlFilterBuilder::new(
+                        &context.actor,
+                        coder_rbac::ResourceType::AuditLog,
+                        coder_rbac::Action::Read,
+                    )
+                    .with_org_column("al.organization_id")
+                    .with_id_column("al.id")
+                    .build(),
+                )
+            } else {
+                None
+            },
         })
         .await?;
 
