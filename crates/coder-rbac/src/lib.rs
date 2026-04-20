@@ -700,6 +700,13 @@ impl Scope {
         Self::single_permission_scope("workspace:start", ResourceType::Workspace, Action::Start)
     }
 
+    /// Low-level scope allowing `Workspace:stop` only. Mirrors Go's
+    /// `coder:workspace:stop` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_workspace_stop() -> Self {
+        Self::single_permission_scope("workspace:stop", ResourceType::Workspace, Action::Stop)
+    }
+
     /// Low-level scope allowing `Template:read` only. Mirrors Go's
     /// `coder:template:read`.
     #[must_use]
@@ -789,6 +796,13 @@ impl Scope {
         Self::single_permission_scope("task:update", ResourceType::Task, Action::Update)
     }
 
+    /// Low-level scope allowing `Task:delete` only. Mirrors Go's
+    /// `coder:task:delete` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_task_delete() -> Self {
+        Self::single_permission_scope("task:delete", ResourceType::Task, Action::Delete)
+    }
+
     /// Low-level scope allowing `Organization:read` only. Mirrors Go's
     /// `coder:organization:read` from `scopes_constants_gen.go`.
     #[must_use]
@@ -808,6 +822,17 @@ impl Scope {
             "organization:update",
             ResourceType::Organization,
             Action::Update,
+        )
+    }
+
+    /// Low-level scope allowing `Organization:delete` only. Mirrors Go's
+    /// `coder:organization:delete` from `scopes_constants_gen.go`.
+    #[must_use]
+    pub fn scope_organization_delete() -> Self {
+        Self::single_permission_scope(
+            "organization:delete",
+            ResourceType::Organization,
+            Action::Delete,
         )
     }
 
@@ -1740,6 +1765,7 @@ impl Authorizer {
                 Some("no_user_data") => Scope::scope_no_user_data(),
                 Some("workspace:read") => Scope::scope_workspace_read(),
                 Some("workspace:start") => Scope::scope_workspace_start(),
+                Some("workspace:stop") => Scope::scope_workspace_stop(),
                 Some("workspace:update") => Scope::scope_workspace_write(),
                 Some("workspace:delete") => Scope::scope_workspace_delete(),
                 Some("template:read") => Scope::scope_template_read(),
@@ -1754,8 +1780,10 @@ impl Authorizer {
                 Some("user_secret:delete") => Scope::scope_user_secret_delete(),
                 Some("task:read") => Scope::scope_task_read(),
                 Some("task:update") => Scope::scope_task_write(),
+                Some("task:delete") => Scope::scope_task_delete(),
                 Some("organization:read") => Scope::scope_organization_read(),
                 Some("organization:update") => Scope::scope_organization_write(),
+                Some("organization:delete") => Scope::scope_organization_delete(),
                 Some("deployment_config:read") => Scope::scope_deployment_config_read(),
                 Some("audit_log:read") => Scope::scope_audit_log_read(),
                 _ => Scope::scope_all(),
@@ -3254,5 +3282,92 @@ mod tests {
         assert!(authorizer.authorize(&actor, Action::Update, &tpl).is_ok());
         // Delete not allowed by scope (even though owner role allows it).
         assert!(authorizer.authorize(&actor, Action::Delete, &tpl).is_err());
+    }
+
+    #[test]
+    fn scope_workspace_stop_includes_stop_excludes_start() {
+        let scope = Scope::scope_workspace_stop();
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Stop,
+            &ws,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Start,
+            &ws,
+        ));
+    }
+
+    #[test]
+    fn scope_task_delete_includes_delete_excludes_read() {
+        let scope = Scope::scope_task_delete();
+        let task = Object::new(ResourceType::Task);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &task,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Read,
+            &task,
+        ));
+    }
+
+    #[test]
+    fn scope_organization_delete_includes_delete_excludes_update() {
+        let scope = Scope::scope_organization_delete();
+        let org = Object::new(ResourceType::Organization);
+        assert!(Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Delete,
+            &org,
+        ));
+        assert!(!Authorizer::check_permissions_in_role(
+            &scope.role,
+            &test_actor(&[]),
+            Action::Update,
+            &org,
+        ));
+    }
+
+    #[test]
+    fn actor_named_scope_workspace_stop_allows_stop_blocks_delete() {
+        // Regression for the named-scope lookup for new low-level scopes:
+        // "workspace:stop" should resolve via the string→scope matcher and
+        // narrow an otherwise-privileged actor to Stop only.
+        let authorizer = Authorizer::new();
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.scope = Some("workspace:stop".to_owned());
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(authorizer.authorize(&actor, Action::Stop, &ws).is_ok());
+        assert!(authorizer.authorize(&actor, Action::Delete, &ws).is_err());
+    }
+
+    #[test]
+    fn actor_named_scope_task_delete_allows_delete_blocks_update() {
+        let authorizer = Authorizer::new();
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.scope = Some("task:delete".to_owned());
+        let task = Object::new(ResourceType::Task);
+        assert!(authorizer.authorize(&actor, Action::Delete, &task).is_ok());
+        assert!(authorizer.authorize(&actor, Action::Update, &task).is_err());
+    }
+
+    #[test]
+    fn actor_named_scope_organization_delete_allows_delete_blocks_update() {
+        let authorizer = Authorizer::new();
+        let mut actor = test_actor(&[ROLE_OWNER]);
+        actor.scope = Some("organization:delete".to_owned());
+        let org = Object::new(ResourceType::Organization);
+        assert!(authorizer.authorize(&actor, Action::Delete, &org).is_ok());
+        assert!(authorizer.authorize(&actor, Action::Update, &org).is_err());
     }
 }
