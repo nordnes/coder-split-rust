@@ -3,9 +3,9 @@
 //! The `.proto` source is a stripped vendoring of
 //! `coder/provisionerd/proto/provisionerd.proto` that contains only the
 //! messages required for the currently-ported RPCs (`CommitQuota`,
-//! `AcquireJob`, `UpdateJob`, `FailJob`). Additional RPCs will extend
-//! this file and the vendored proto as they are ported; see
-//! `docs/backend-gap-analysis-2026-04.md` §B.6.
+//! `AcquireJob`, `UpdateJob`, `FailJob`, `CompleteJob`). Additional
+//! RPCs will extend this file and the vendored proto as they are
+//! ported; see `docs/backend-gap-analysis-2026-04.md` §B.6.
 //!
 //! The vendored copy keeps the crate buildable without relying on the
 //! `coder/` submodule being present at compile time.
