@@ -1192,6 +1192,7 @@ pub fn build_router(
 
                 // ----- License & Entitlements routes -----
                 .route("/licenses", get(list_licenses).post(post_license))
+                .route("/licenses/trial", post(post_license_trial))
                 .route("/licenses/{id}", delete(delete_license_handler))
                 .route("/licenses/refresh-entitlements", post(post_refresh_entitlements))
                 .route("/entitlements", get(get_entitlements))
