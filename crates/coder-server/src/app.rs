@@ -29133,6 +29133,130 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// `put_workspace_autostart` should emit a structured diff capturing the
+    /// change to `autostart_schedule`. Part of the Wave 1 audit-diff rollout
+    /// expanding structured diffs beyond the rename site.
+    #[tokio::test]
+    async fn workspace_autostart_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let new_schedule = "CRON_TZ=UTC 30 9 * * 1-5";
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/autostart", ws.id),
+                &session_token,
+                &json!({ "schedule": new_schedule }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for autostart update")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("autostart audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("autostart_schedule")
+            .ok_or("diff should contain an `autostart_schedule` change entry")?;
+        assert_eq!(change.new, serde_json::json!(new_schedule));
+        assert!(!change.secret);
+        Ok(())
+    }
+
+    /// `put_workspace_ttl` should emit a structured diff capturing the
+    /// change to `ttl_ns`.
+    #[tokio::test]
+    async fn workspace_ttl_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let ttl_ms: i64 = 3_600_000; // 1 hour
+        let expected_ttl_ns = ttl_ms * 1_000_000;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/ttl", ws.id),
+                &session_token,
+                &json!({ "ttl_ms": ttl_ms }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for TTL update")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("ttl audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("ttl_ns")
+            .ok_or("diff should contain a `ttl_ns` change entry")?;
+        assert_eq!(change.new, serde_json::json!(expected_ttl_ns));
+        assert!(!change.secret);
+        Ok(())
+    }
+
+    /// `put_workspace_autoupdates` should emit a structured diff capturing
+    /// the change to `automatic_updates`.
+    #[tokio::test]
+    async fn workspace_autoupdates_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/autoupdates", ws.id),
+                &session_token,
+                &json!({ "automatic_updates": "always" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for autoupdates update")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("autoupdates audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("automatic_updates")
+            .ok_or("diff should contain an `automatic_updates` change entry")?;
+        assert_eq!(change.new, serde_json::json!("always"));
+        assert!(!change.secret);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn workspace_favorite_emits_audit_event() -> Result<(), Box<dyn Error>> {
         let (state, store, audit) = test_state_with_memory_audit()?;
@@ -29472,6 +29596,249 @@ pub(crate) mod tests {
         let event = audit_event_for(&events, AuditAction::Delete, &new_user_id)
             .ok_or("expected a Delete audit event for user delete")?;
         assert_eq!(event.resource, ResourceKind::User);
+        Ok(())
+    }
+
+    // -------------------------------------------------------------------
+    // Audit-diff rollout — user sites (gap-doc §B.10.1).
+    //
+    // These cover the 4 user mutation sites now emitting structured
+    // `AuditDiff` payloads via the `AuditUserView` wrapper: profile
+    // rename, password change (secret-marked), status change, and
+    // delete (before-only).
+    // -------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn user_profile_rename_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/me/profile",
+                &session_token,
+                &UpdateUserProfileRequest {
+                    username: "owner-renamed".to_owned(),
+                    name: "Owner Renamed".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = response_json(response).await?;
+        let user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id on updated profile")?
+            .to_owned();
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &user_id)
+            .ok_or("expected a Write audit event for user profile update")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("profile audit event should carry a structured diff")?;
+        let username_change = diff
+            .changes
+            .get("username")
+            .ok_or("diff should contain a `username` change entry")?;
+        assert_eq!(username_change.new, serde_json::json!("owner-renamed"));
+        assert!(!username_change.secret);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_password_change_audit_marks_secret() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        // Create a member to password-change (avoids first-user complexity).
+        let _create = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "pwd-diff@example.com".to_owned(),
+                    username: "pwd-diff".to_owned(),
+                    name: "Pwd Diff".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+
+        let change_resp = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                "/api/v2/users/pwd-diff/password",
+                &session_token,
+                &UpdateUserPasswordRequest {
+                    old_password: String::new(),
+                    password: "NewPassword123".to_owned(),
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(change_resp.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let password_event = events
+            .iter()
+            .find(|e| {
+                e.action == AuditAction::Write
+                    && e.resource == ResourceKind::User
+                    && e.summary.contains("password")
+            })
+            .ok_or("expected a Write audit event for password change")?;
+        let diff = password_event
+            .diff
+            .as_ref()
+            .ok_or("password audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("hashed_password")
+            .ok_or("diff should contain a `hashed_password` change entry")?;
+        assert!(
+            change.secret,
+            "`hashed_password` diff entry must be flagged secret"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_status_change_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "status-diff@example.com".to_owned(),
+                    username: "status-diff".to_owned(),
+                    name: "Status Diff".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let new_user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id on created user")?
+            .to_owned();
+
+        let suspend_resp = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                "/api/v2/users/status-diff/status/suspend",
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(suspend_resp.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let status_event = events
+            .iter()
+            .find(|e| {
+                e.action == AuditAction::Write
+                    && e.resource == ResourceKind::User
+                    && e.target_id.as_deref() == Some(new_user_id.as_str())
+                    && e.summary.contains("status")
+            })
+            .ok_or("expected a Write audit event for user status change")?;
+        let diff = status_event
+            .diff
+            .as_ref()
+            .ok_or("status audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("status")
+            .ok_or("diff should contain a `status` change entry")?;
+        assert_eq!(change.old, serde_json::json!("active"));
+        assert_eq!(change.new, serde_json::json!("suspended"));
+        assert!(!change.secret);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn user_delete_audit_before_only_diff() -> Result<(), Box<dyn Error>> {
+        let (state, _store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let organization_id = first_organization_id(&app, &session_token).await?;
+
+        let create_resp = call(
+            app.clone(),
+            authenticated_json_request(
+                Method::POST,
+                "/api/v2/users",
+                &session_token,
+                &CreateUserRequestWithOrgs {
+                    email: "del-diff@example.com".to_owned(),
+                    username: "del-diff".to_owned(),
+                    name: "Del Diff".to_owned(),
+                    password: "Password123".to_owned(),
+                    login_type: Some(LoginType::Password),
+                    user_status: Some(UserStatus::Active),
+                    organization_ids: vec![organization_id],
+                },
+            )?,
+        )
+        .await?;
+        assert_eq!(create_resp.status(), StatusCode::CREATED);
+        let body = response_json(create_resp).await?;
+        let new_user_id = body
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("missing id on created user")?
+            .to_owned();
+
+        let del_resp = call(
+            app,
+            authenticated_request(Method::DELETE, "/api/v2/users/del-diff", &session_token)?,
+        )
+        .await?;
+        assert_eq!(del_resp.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 2, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Delete, &new_user_id)
+            .ok_or("expected a Delete audit event for user delete")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("delete audit event should carry a before-only diff")?;
+        // Username transitions from its prior value to the empty "after" view.
+        let username_change = diff
+            .changes
+            .get("username")
+            .ok_or("delete diff should contain a `username` change entry")?;
+        assert_eq!(username_change.old, serde_json::json!("del-diff"));
+        assert_eq!(username_change.new, serde_json::json!(""));
         Ok(())
     }
 

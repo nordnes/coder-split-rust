@@ -328,9 +328,15 @@ pub(crate) async fn get_user_autofill_parameters(
     Ok(Json(Vec::<UserParameter>::new()).into_response())
 }
 
-/// Minimal auditable view of a user, used by `put_user_profile` to demonstrate
-/// the structured-diff path. Mirrors the per-field policies from Go's
-/// `audit/table.go` at a reduced-surface level (full roll-out deferred).
+/// Minimal auditable view of a user, used by user mutation handlers to emit
+/// structured field-level diffs alongside the human-readable audit summary.
+/// Mirrors the per-field policies from Go's `audit/table.go` at a
+/// reduced-surface level (full-field parity deferred).
+///
+/// `hashed_password` is carried as `#[audit(secret)]` so the diff entry is
+/// flagged to downstream viewers for redaction, without leaking the old/new
+/// password hashes when rendered. It is populated by `put_user_password`
+/// via a pre/post-change snapshot.
 #[derive(Debug, Clone, serde::Serialize, coder_audit::Auditable)]
 struct AuditUserView {
     #[audit(track)]
@@ -341,6 +347,10 @@ struct AuditUserView {
     username: String,
     #[audit(track)]
     name: String,
+    #[audit(track)]
+    status: String,
+    #[audit(secret)]
+    hashed_password: String,
     #[audit(ignore)]
     last_seen_at: Option<OffsetDateTime>,
 }
@@ -352,7 +362,27 @@ impl AuditUserView {
             email: record.email.clone(),
             username: record.username.clone(),
             name: record.name.clone(),
+            status: record.status.as_str().to_owned(),
+            // `UserRecord` does not carry the password hash (the identity
+            // port keeps it out of the response struct). The dedicated
+            // password handler supplies a before/after `hashed_password`
+            // marker so the diff records a secret-flagged change.
+            hashed_password: String::new(),
             last_seen_at: record.last_seen_at,
+        }
+    }
+
+    /// Returns an empty before-view suitable for use as the "new" side of a
+    /// delete audit entry (the user no longer exists after the mutation).
+    fn empty_like(other: &Self) -> Self {
+        Self {
+            id: other.id,
+            email: String::new(),
+            username: String::new(),
+            name: String::new(),
+            status: String::new(),
+            hashed_password: String::new(),
+            last_seen_at: None,
         }
     }
 }
@@ -395,9 +425,10 @@ pub(crate) async fn put_user_profile(
     };
 
     let after_view = AuditUserView::from_record(&updated_user);
-    let audit_diff = before_view.map(|before| {
+    let audit_diff = before_view.and_then(|before| {
         use coder_audit::Auditable as _;
-        before.audit_diff(&after_view)
+        let diff = before.audit_diff(&after_view);
+        if diff.is_empty() { None } else { Some(diff) }
     });
 
     state
@@ -456,6 +487,16 @@ pub(crate) async fn put_user_status(
         ));
     }
 
+    // Capture a best-effort "before" snapshot so the audit event can carry a
+    // structured status change alongside the summary.
+    let before_view = state
+        .identity
+        .get_user(&context.actor, &context.user, &user)
+        .await
+        .ok()
+        .as_ref()
+        .map(AuditUserView::from_record);
+
     let updated_user = match state
         .identity
         .update_user_status(&context.actor, &context.user, &user, status)
@@ -465,15 +506,24 @@ pub(crate) async fn put_user_status(
         Err(error) => return handle_identity_error(error),
     };
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::User,
-        Some(&context.user),
-        Some(updated_user.id.to_string()),
-        "updated user status",
-    )
-    .await;
+    let after_view = AuditUserView::from_record(&updated_user);
+    let audit_diff = before_view.and_then(|before| {
+        use coder_audit::Auditable as _;
+        let diff = before.audit_diff(&after_view);
+        if diff.is_empty() { None } else { Some(diff) }
+    });
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::User,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(updated_user.id.to_string()),
+            summary: "updated user status".to_owned(),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok((StatusCode::OK, Json(UserResponse::from(updated_user))).into_response())
 }
@@ -633,6 +683,20 @@ pub(crate) async fn put_user_password(
         Ok(request) => request,
         Err(error) => return Ok(invalid_json_response(error)),
     };
+    // Capture a best-effort "before" snapshot of the user so the resulting
+    // audit event carries a structured diff for the secret-flagged
+    // `hashed_password` field. Password values themselves are not hashed
+    // before this point; we simply mark the field as having changed, and
+    // the `#[audit(secret)]` attribute causes downstream viewers to redact
+    // the synthetic marker.
+    let before_view = state
+        .identity
+        .get_user(&context.actor, &context.user, &user)
+        .await
+        .ok()
+        .as_ref()
+        .map(AuditUserView::from_record);
+
     let target_user_id = match state
         .auth
         .update_user_password(&context.actor, &context.user, &user, &request)
@@ -642,15 +706,30 @@ pub(crate) async fn put_user_password(
         Err(error) => return handle_auth_error(error),
     };
 
-    record_audit(
-        &state,
-        AuditAction::Write,
-        ResourceKind::User,
-        Some(&context.user),
-        Some(target_user_id.to_string()),
-        "updated user password",
-    )
-    .await;
+    let audit_diff = before_view.and_then(|mut before| {
+        use coder_audit::Auditable as _;
+        // Synthesise a post-change view that differs only in the secret
+        // `hashed_password` marker so the diff includes a secret-flagged
+        // entry without leaking values (the real hash lives in the auth
+        // layer and is not exposed through `UserRecord`).
+        let mut after = before.clone();
+        before.hashed_password = "***before***".to_owned();
+        after.hashed_password = "***after***".to_owned();
+        let diff = before.audit_diff(&after);
+        if diff.is_empty() { None } else { Some(diff) }
+    });
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Write,
+            resource: ResourceKind::User,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(target_user_id.to_string()),
+            summary: "updated user password".to_owned(),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok(StatusCode::NO_CONTENT.into_response())
 }
@@ -853,6 +932,19 @@ pub(crate) async fn delete_user(
         ));
     }
 
+    // Capture a best-effort "before" snapshot prior to deletion so the audit
+    // event records the full set of user fields that disappeared. The
+    // "after" side is an empty view of the same shape, matching Go's
+    // delete-diff convention where every tracked field transitions from
+    // its prior value to the zero value.
+    let before_view = state
+        .identity
+        .get_user(&context.actor, &context.user, &user)
+        .await
+        .ok()
+        .as_ref()
+        .map(AuditUserView::from_record);
+
     let target_user = match state
         .identity
         .delete_user(&context.actor, &context.user, &user)
@@ -862,15 +954,24 @@ pub(crate) async fn delete_user(
         Err(error) => return handle_identity_error(error),
     };
 
-    record_audit(
-        &state,
-        AuditAction::Delete,
-        ResourceKind::User,
-        Some(&context.user),
-        Some(target_user.id.to_string()),
-        "deleted user",
-    )
-    .await;
+    let audit_diff = before_view.and_then(|before| {
+        use coder_audit::Auditable as _;
+        let after = AuditUserView::empty_like(&before);
+        let diff = before.audit_diff(&after);
+        if diff.is_empty() { None } else { Some(diff) }
+    });
+
+    state
+        .audit
+        .record(AuditEvent {
+            action: AuditAction::Delete,
+            resource: ResourceKind::User,
+            actor_user_id: Some(context.user.id),
+            target_id: Some(target_user.id.to_string()),
+            summary: "deleted user".to_owned(),
+            diff: audit_diff,
+        })
+        .await;
 
     Ok((
         StatusCode::OK,
