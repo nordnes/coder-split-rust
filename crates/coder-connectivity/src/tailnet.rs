@@ -6,7 +6,7 @@
 //! [`DerpTrafficTracker`] for per-client DERP relay traffic statistics.
 
 use std::collections::{HashMap, HashSet};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 
 use serde::{Deserialize, Serialize};
 use time::OffsetDateTime;
@@ -225,6 +225,19 @@ pub trait TailnetCoordinator: Send + Sync {
     /// that an old (overwritten) session does not accidentally remove a
     /// newer session's state.
     fn close_coordination(&self, peer_id: Uuid, session_id: Uuid);
+
+    /// Registers a logical multi-agent client and returns a [`MultiAgentConn`]
+    /// handle that can subscribe/unsubscribe to many agents over a single
+    /// response stream. Mirrors Go's `ServeMultiAgentClient` entry point used
+    /// by workspace-proxy and pg-coord integrations.
+    ///
+    /// The default implementation returns `None`; concrete coordinators that
+    /// support the multi-agent path must override it. This keeps the method
+    /// object-safe on `dyn TailnetCoordinator` while avoiding a hard dep on
+    /// the concrete coordinator type in handler code.
+    fn serve_multi_agent_client_dyn(&self, _id: Uuid) -> Option<MultiAgentConn> {
+        None
+    }
 }
 
 /// The kind of peer connected to the coordinator.
@@ -392,6 +405,10 @@ pub struct InMemoryCoordinator {
     inner: Mutex<CoordinatorInner>,
     derp_map_tx: watch::Sender<DERPMap>,
     derp_map_rx: watch::Receiver<DERPMap>,
+    /// Weak self-reference used by [`TailnetCoordinator::serve_multi_agent_client_dyn`]
+    /// to build a [`MultiAgentConn`] without requiring callers to hold an
+    /// `Arc<InMemoryCoordinator>` — they typically hold `Arc<dyn TailnetCoordinator>`.
+    self_ref: Weak<Self>,
 }
 
 impl InMemoryCoordinator {
@@ -399,7 +416,7 @@ impl InMemoryCoordinator {
     #[must_use]
     pub fn new(initial_derp_map: DERPMap) -> Arc<Self> {
         let (tx, rx) = watch::channel(initial_derp_map);
-        Arc::new(Self {
+        Arc::new_cyclic(|weak| Self {
             inner: Mutex::new(CoordinatorInner {
                 peers: HashMap::new(),
                 tunnels: TunnelStore::new(),
@@ -407,6 +424,7 @@ impl InMemoryCoordinator {
             }),
             derp_map_tx: tx,
             derp_map_rx: rx,
+            self_ref: weak.clone(),
         })
     }
 
@@ -939,6 +957,11 @@ impl TailnetCoordinator for InMemoryCoordinator {
             // those clients unsubscribe or close.
             inner.subscriptions.remove(&peer_id);
         }
+    }
+
+    fn serve_multi_agent_client_dyn(&self, id: Uuid) -> Option<MultiAgentConn> {
+        let this = self.self_ref.upgrade()?;
+        Some(this.serve_multi_agent_client(id))
     }
 }
 
