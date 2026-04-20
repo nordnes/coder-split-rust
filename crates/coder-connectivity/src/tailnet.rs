@@ -372,6 +372,11 @@ struct CoordinatorPeer {
 struct CoordinatorInner {
     peers: HashMap<Uuid, CoordinatorPeer>,
     tunnels: TunnelStore,
+    /// Multi-agent client subscriptions: client peer ID -> set of agent peer
+    /// IDs the client is currently subscribed to.  Populated via
+    /// [`MultiAgentConn::subscribe`].  Used to fan out agent node updates to
+    /// all subscribed clients (see [`InMemoryCoordinator::process_request`]).
+    subscriptions: HashMap<Uuid, HashSet<Uuid>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -398,6 +403,7 @@ impl InMemoryCoordinator {
             inner: Mutex::new(CoordinatorInner {
                 peers: HashMap::new(),
                 tunnels: TunnelStore::new(),
+                subscriptions: HashMap::new(),
             }),
             derp_map_tx: tx,
             derp_map_rx: rx,
@@ -577,6 +583,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
         if let Ok(mut inner) = self.inner.lock() {
             inner.peers.remove(&peer_id);
             inner.tunnels.remove_all(peer_id);
+            inner.subscriptions.remove(&peer_id);
         }
     }
 
@@ -678,6 +685,38 @@ impl TailnetCoordinator for InMemoryCoordinator {
                 if let Some(tp) = inner.peers.get(&tp_id) {
                     Self::send_to_peer(
                         tp,
+                        CoordinateResponse {
+                            peer_updates: vec![PeerUpdateMsg {
+                                id: peer_id,
+                                kind: PeerUpdateKind::Node,
+                                node: Some(node.clone()),
+                            }],
+                            error: None,
+                        },
+                    );
+                }
+            }
+
+            // Fan out to multi-agent clients subscribed to this peer (treating
+            // it as an "agent").  This is the multi-peer coordinator path:
+            // subscriptions are independent of tunnels so that one client
+            // stream can address many agents without bidirectional tunnel
+            // setup.
+            let subscribers: Vec<Uuid> = inner
+                .subscriptions
+                .iter()
+                .filter_map(|(client_id, agents)| {
+                    if agents.contains(&peer_id) {
+                        Some(*client_id)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for sub_id in subscribers {
+                if let Some(sub) = inner.peers.get(&sub_id) {
+                    Self::send_to_peer(
+                        sub,
                         CoordinateResponse {
                             peer_updates: vec![PeerUpdateMsg {
                                 id: peer_id,
@@ -819,6 +858,7 @@ impl TailnetCoordinator for InMemoryCoordinator {
             }
             inner.tunnels.remove_all(peer_id);
             inner.peers.remove(&peer_id);
+            inner.subscriptions.remove(&peer_id);
             // Peer is gone — skip any remaining fields (e.g. ready_for_handshake).
             return Ok(());
         }
@@ -892,6 +932,173 @@ impl TailnetCoordinator for InMemoryCoordinator {
             }
             inner.tunnels.remove_all(peer_id);
             inner.peers.remove(&peer_id);
+            // Clean up any multi-agent subscription state owned by this peer.
+            // If the peer was acting as a multi-agent client, drop its
+            // subscription set.  Agents subscribed-to do not need cleanup
+            // here — they remain in other clients' subscription sets until
+            // those clients unsubscribe or close.
+            inner.subscriptions.remove(&peer_id);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// MultiAgentConn — multi-peer coordinator client abstraction
+// ---------------------------------------------------------------------------
+
+/// Handle returned by [`InMemoryCoordinator::serve_multi_agent_client`] for a
+/// single logical client stream that can address many agents.
+///
+/// Mirrors the Go `MultiAgentConn` / `ServeMultiAgentClient` abstraction used
+/// by workspace-proxy and pg-coord integrations: each inbound tailnet client
+/// gets a unique peer ID and can [`subscribe`](Self::subscribe) to multiple
+/// agent peer IDs, receiving their node updates on a single response channel.
+///
+/// The multi-agent path is additive — it does not modify the single-peer
+/// `Coordinate` DRPC wire handled via [`TailnetCoordinator::coordinate`].
+/// Handlers may migrate to `MultiAgentConn` in a later milestone.
+pub struct MultiAgentConn {
+    /// The coordinator this handle is bound to.
+    coordinator: Arc<InMemoryCoordinator>,
+    /// Unique client peer identifier assigned to this multi-agent connection.
+    client_id: Uuid,
+    /// Session identifier for overwrite/close safety.
+    session_id: Uuid,
+    /// Receiver for coordination responses.  `Option` so that [`Self::close`]
+    /// can drop the receiver eagerly without consuming the handle.
+    response_rx: Option<mpsc::UnboundedReceiver<CoordinateResponse>>,
+}
+
+impl MultiAgentConn {
+    /// Returns the client peer ID assigned by the coordinator.
+    #[must_use]
+    pub fn id(&self) -> Uuid {
+        self.client_id
+    }
+
+    /// Returns the coordinator session identifier.
+    #[must_use]
+    pub fn session_id(&self) -> Uuid {
+        self.session_id
+    }
+
+    /// Subscribes this client to node updates for the specified agent peer.
+    ///
+    /// If the agent already has a known node, the current node info is
+    /// pushed to the client immediately.  Subsequent node updates from the
+    /// agent (via [`TailnetCoordinator::process_request`] with `update_self`)
+    /// will also be delivered.
+    pub fn subscribe(&self, agent_id: Uuid) {
+        if let Ok(mut inner) = self.coordinator.inner.lock() {
+            // Record the subscription.
+            inner
+                .subscriptions
+                .entry(self.client_id)
+                .or_default()
+                .insert(agent_id);
+
+            // If the agent already has a node, push it to the client now.
+            let agent_node = inner.peers.get(&agent_id).and_then(|p| p.node.clone());
+            if let Some(node) = agent_node {
+                if let Some(client) = inner.peers.get(&self.client_id) {
+                    InMemoryCoordinator::send_to_peer(
+                        client,
+                        CoordinateResponse {
+                            peer_updates: vec![PeerUpdateMsg {
+                                id: agent_id,
+                                kind: PeerUpdateKind::Node,
+                                node: Some(node),
+                            }],
+                            error: None,
+                        },
+                    );
+                }
+            }
+        }
+    }
+
+    /// Removes a subscription to the specified agent.  No error is returned
+    /// if the client was not subscribed to that agent.
+    pub fn unsubscribe(&self, agent_id: Uuid) {
+        if let Ok(mut inner) = self.coordinator.inner.lock() {
+            if let Some(agents) = inner.subscriptions.get_mut(&self.client_id) {
+                agents.remove(&agent_id);
+                if agents.is_empty() {
+                    inner.subscriptions.remove(&self.client_id);
+                }
+            }
+        }
+    }
+
+    /// Publishes the client's own node info.  The node is stored on the
+    /// client peer record and forwarded to any tunnel peers (existing
+    /// single-peer semantics) so that agents coordinating with this client
+    /// see the update.
+    pub fn update_self(&self, node: NodeInfo) {
+        let _ = self.coordinator.process_request(
+            self.client_id,
+            CoordinateRequest {
+                update_self: Some(node),
+                ..Default::default()
+            },
+        );
+    }
+
+    /// Receives the next coordination response, awaiting if none is pending.
+    ///
+    /// Returns `None` once the underlying channel is closed (e.g. after
+    /// [`Self::close`] or coordinator shutdown).
+    pub async fn next_update(&mut self) -> Option<CoordinateResponse> {
+        match self.response_rx.as_mut() {
+            Some(rx) => rx.recv().await,
+            None => None,
+        }
+    }
+
+    /// Attempts to receive a pending update without awaiting.  Returns
+    /// `None` if no message is ready or the channel is closed.
+    pub fn try_next_update(&mut self) -> Option<CoordinateResponse> {
+        self.response_rx.as_mut().and_then(|rx| rx.try_recv().ok())
+    }
+
+    /// Deregisters the client from the coordinator, clearing all of its
+    /// subscriptions and tunnel state, and notifying any tunnel peers that
+    /// this client was lost.
+    pub fn close(&mut self) {
+        // Drop the receiver side first so in-flight sends from the
+        // coordinator are ignored cleanly.
+        self.response_rx.take();
+        self.coordinator
+            .close_coordination(self.client_id, self.session_id);
+    }
+}
+
+impl Drop for MultiAgentConn {
+    fn drop(&mut self) {
+        // Ensure coordinator state is released even if the caller forgets
+        // to call `close()` explicitly.
+        if self.response_rx.is_some() {
+            self.close();
+        }
+    }
+}
+
+impl InMemoryCoordinator {
+    /// Registers a logical multi-agent client peer and returns a
+    /// [`MultiAgentConn`] handle that can subscribe/unsubscribe to many
+    /// agents and receive their node updates on a single stream.
+    ///
+    /// Mirrors the Go `ServeMultiAgentClient` entry point.  The `id` is the
+    /// client peer identifier — if a peer with the same ID is already
+    /// registered, the existing session is overwritten (matching the
+    /// single-peer semantics of [`Self::coordinate`]).
+    pub fn serve_multi_agent_client(self: &Arc<Self>, id: Uuid) -> MultiAgentConn {
+        let handle = self.coordinate(id, format!("multi-agent-{id}"), PeerKind::Client);
+        MultiAgentConn {
+            coordinator: Arc::clone(self),
+            client_id: id,
+            session_id: handle.session_id,
+            response_rx: Some(handle.response_rx),
         }
     }
 }
@@ -1688,4 +1895,237 @@ mod tests {
     // sending `CoordinateRequest` messages, and verifying `CoordinateResponse`
     // framing) are deferred — they require a running Axum server with an
     // upgrade-capable HTTP client, which is outside the scope of this crate.
+
+    // ------------------------------------------------------------------
+    // MultiAgentConn tests (Go `ServeMultiAgentClient` parity, W1.4).
+    // ------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn multi_agent_client_subscribes_and_unsubscribes() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let client_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+
+        // Register an agent with a known node.
+        let _agent_handle = coordinator.coordinate(agent_id, "agent".to_string(), PeerKind::Agent);
+        coordinator
+            .process_request(
+                agent_id,
+                CoordinateRequest {
+                    update_self: Some(NodeInfo {
+                        id: 7,
+                        preferred_derp: 2,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Open the multi-agent client connection and subscribe to the agent.
+        let mut ma = coordinator.serve_multi_agent_client(client_id);
+        ma.subscribe(agent_id);
+
+        // Subscribe pushes the agent's currently-known node immediately.
+        let resp = ma.next_update().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates.len(), 1);
+        assert_eq!(resp.peer_updates[0].id, agent_id);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Node);
+        let node = resp.peer_updates[0].node.clone().unwrap_or_default();
+        assert_eq!(node.id, 7);
+
+        // After a subsequent agent update, the client should be notified.
+        coordinator
+            .process_request(
+                agent_id,
+                CoordinateRequest {
+                    update_self: Some(NodeInfo {
+                        id: 8,
+                        preferred_derp: 3,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .ok();
+        let resp = ma.next_update().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates[0].node.clone().unwrap_or_default().id, 8);
+
+        // After unsubscribe, further updates must not reach the client.
+        ma.unsubscribe(agent_id);
+        coordinator
+            .process_request(
+                agent_id,
+                CoordinateRequest {
+                    update_self: Some(NodeInfo {
+                        id: 9,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .ok();
+        assert!(ma.try_next_update().is_none());
+    }
+
+    #[tokio::test]
+    async fn multi_agent_fanout_delivers_to_subscribed_clients_only() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let agent_id = Uuid::new_v4();
+        let client_a_id = Uuid::new_v4();
+        let client_b_id = Uuid::new_v4();
+
+        let _agent_handle = coordinator.coordinate(agent_id, "agent".to_string(), PeerKind::Agent);
+
+        let mut client_a = coordinator.serve_multi_agent_client(client_a_id);
+        let mut client_b = coordinator.serve_multi_agent_client(client_b_id);
+
+        // Only client A subscribes.
+        client_a.subscribe(agent_id);
+
+        // Agent publishes its node.
+        coordinator
+            .process_request(
+                agent_id,
+                CoordinateRequest {
+                    update_self: Some(NodeInfo {
+                        id: 42,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Client A receives the node; client B does not.
+        let resp_a = client_a.next_update().await.unwrap_or_default();
+        assert_eq!(resp_a.peer_updates.len(), 1);
+        assert_eq!(resp_a.peer_updates[0].id, agent_id);
+        assert_eq!(
+            resp_a.peer_updates[0].node.clone().unwrap_or_default().id,
+            42
+        );
+        assert!(client_b.try_next_update().is_none());
+    }
+
+    #[tokio::test]
+    async fn multi_agent_close_removes_client() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let client_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+
+        let _agent_handle = coordinator.coordinate(agent_id, "agent".to_string(), PeerKind::Agent);
+
+        let mut ma = coordinator.serve_multi_agent_client(client_id);
+        ma.subscribe(agent_id);
+
+        // Before close: the client peer and subscription are registered.
+        {
+            let inner = coordinator.inner.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(inner.peers.contains_key(&client_id));
+            assert!(inner.subscriptions.contains_key(&client_id));
+        }
+
+        ma.close();
+
+        // After close: client peer is gone, subscription is cleared.
+        let inner = coordinator.inner.lock().unwrap_or_else(|e| e.into_inner());
+        assert!(!inner.peers.contains_key(&client_id));
+        assert!(!inner.subscriptions.contains_key(&client_id));
+    }
+
+    #[tokio::test]
+    async fn multi_agent_self_update_stored() {
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let client_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+
+        let mut agent_handle =
+            coordinator.coordinate(agent_id, "agent".to_string(), PeerKind::Agent);
+
+        let ma = coordinator.serve_multi_agent_client(client_id);
+
+        // Agent opens a tunnel back to the multi-agent client peer.
+        coordinator
+            .process_request(
+                agent_id,
+                CoordinateRequest {
+                    add_tunnel: Some(client_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Client publishes its own node via the multi-agent conn.
+        ma.update_self(NodeInfo {
+            id: 123,
+            preferred_derp: 4,
+            ..Default::default()
+        });
+
+        // Agent receives the client's node through the tunnel path.
+        let resp = agent_handle.response_rx.recv().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates.len(), 1);
+        assert_eq!(resp.peer_updates[0].id, client_id);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Node);
+        assert_eq!(
+            resp.peer_updates[0].node.clone().unwrap_or_default().id,
+            123
+        );
+
+        // The coordinator state records the client's node.
+        let inner = coordinator.inner.lock().unwrap_or_else(|e| e.into_inner());
+        let stored = inner
+            .peers
+            .get(&client_id)
+            .and_then(|p| p.node.clone())
+            .unwrap_or_default();
+        assert_eq!(stored.id, 123);
+        assert_eq!(stored.preferred_derp, 4);
+    }
+
+    #[tokio::test]
+    async fn multi_agent_does_not_break_existing_coordinate() {
+        // Existing single-peer Coordinate DRPC path (PR #257) must still
+        // work when the multi-agent abstraction is present on the same
+        // coordinator instance.
+        let coordinator = InMemoryCoordinator::new(DERPMap::default());
+        let agent_id = Uuid::new_v4();
+        let client_id = Uuid::new_v4();
+
+        let _agent_handle = coordinator.coordinate(agent_id, "agent".to_string(), PeerKind::Agent);
+        let mut client_handle =
+            coordinator.coordinate(client_id, "client".to_string(), PeerKind::Client);
+
+        // Client opens a classic tunnel to the agent.
+        coordinator
+            .process_request(
+                client_id,
+                CoordinateRequest {
+                    add_tunnel: Some(agent_id),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        // Agent publishes a node; the classic Coordinate path must deliver.
+        coordinator
+            .process_request(
+                agent_id,
+                CoordinateRequest {
+                    update_self: Some(NodeInfo {
+                        id: 55,
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            )
+            .ok();
+
+        let resp = client_handle.response_rx.recv().await.unwrap_or_default();
+        assert_eq!(resp.peer_updates.len(), 1);
+        assert_eq!(resp.peer_updates[0].id, agent_id);
+        assert_eq!(resp.peer_updates[0].kind, PeerUpdateKind::Node);
+        assert_eq!(resp.peer_updates[0].node.clone().unwrap_or_default().id, 55);
+    }
 }
