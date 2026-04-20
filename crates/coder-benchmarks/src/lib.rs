@@ -1422,6 +1422,15 @@ impl AppStore for BenchStore {
         Err(StorageError::unavailable("bench stub"))
     }
 
+    // ── workspace_agent_boundary_logs ──
+    async fn insert_workspace_agent_boundary_logs(
+        &self,
+        _agent_id: Uuid,
+        _logs: &[coder_core::InsertBoundaryLogInput],
+    ) -> Result<(), StorageError> {
+        Ok(())
+    }
+
     async fn insert_workspace_agent_script_timing(
         &self,
         _input: &coder_core::InsertAgentScriptTimingInput,

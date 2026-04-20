@@ -2004,6 +2004,10 @@ pub(crate) mod tests {
         workspace_agent_log_sources: Mutex<HashMap<Uuid, WorkspaceAgentLogSourceRow>>,
         workspace_agent_logs: Mutex<Vec<WorkspaceAgentLogRow>>,
         workspace_agent_log_next_id: Mutex<i64>,
+        // ── workspace_agent_boundary_logs ──
+        pub(crate) workspace_agent_boundary_logs:
+            Mutex<Vec<coder_core::WorkspaceAgentBoundaryLogRow>>,
+        workspace_agent_boundary_log_next_id: Mutex<i64>,
         workspace_agent_scripts: Mutex<Vec<WorkspaceAgentScriptRow>>,
         workspace_agent_metadata: Mutex<Vec<WorkspaceAgentMetadataRow>>,
         workspace_agent_devcontainers: Mutex<Vec<coder_core::WorkspaceAgentDevcontainerRow>>,
@@ -2119,6 +2123,8 @@ pub(crate) mod tests {
                 workspace_agent_log_sources: Mutex::new(HashMap::new()),
                 workspace_agent_logs: Mutex::new(Vec::new()),
                 workspace_agent_log_next_id: Mutex::new(1),
+                workspace_agent_boundary_logs: Mutex::new(Vec::new()),
+                workspace_agent_boundary_log_next_id: Mutex::new(1),
                 workspace_agent_scripts: Mutex::new(Vec::new()),
                 workspace_agent_metadata: Mutex::new(Vec::new()),
                 workspace_agent_devcontainers: Mutex::new(Vec::new()),
@@ -7180,6 +7186,40 @@ pub(crate) mod tests {
                 result.push(row);
             }
             Ok(result)
+        }
+
+        // ── workspace_agent_boundary_logs ──
+        async fn insert_workspace_agent_boundary_logs(
+            &self,
+            agent_id: Uuid,
+            logs: &[coder_core::InsertBoundaryLogInput],
+        ) -> Result<(), StorageError> {
+            if logs.is_empty() {
+                return Ok(());
+            }
+            let mut stored = self
+                .workspace_agent_boundary_logs
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let mut next_id = self
+                .workspace_agent_boundary_log_next_id
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            let now = OffsetDateTime::now_utc();
+            for entry in logs {
+                stored.push(coder_core::WorkspaceAgentBoundaryLogRow {
+                    id: *next_id,
+                    agent_id,
+                    event_time: entry.event_time,
+                    allowed: entry.allowed,
+                    http_method: entry.http_method.clone(),
+                    http_url: entry.http_url.clone(),
+                    matched_rule: entry.matched_rule.clone(),
+                    created_at: now,
+                });
+                *next_id += 1;
+            }
+            Ok(())
         }
 
         async fn insert_workspace_agent_script_timing(
@@ -43846,6 +43886,62 @@ pub(crate) mod tests {
         )
         .await?;
         assert_eq!(new_get.status(), StatusCode::OK);
+        Ok(())
+    }
+
+    // ── workspace_agent_boundary_logs ──
+    #[tokio::test]
+    async fn insert_workspace_agent_boundary_logs_persists_in_fake_store()
+    -> Result<(), Box<dyn Error>> {
+        let store = FakeStore::new(true);
+        let agent_id = Uuid::new_v4();
+
+        let now = OffsetDateTime::now_utc();
+        let inputs = vec![
+            coder_core::InsertBoundaryLogInput {
+                event_time: now,
+                allowed: true,
+                http_method: Some("GET".to_owned()),
+                http_url: Some("https://example.com/a".to_owned()),
+                matched_rule: Some("allow-example".to_owned()),
+            },
+            coder_core::InsertBoundaryLogInput {
+                event_time: now,
+                allowed: false,
+                http_method: Some("POST".to_owned()),
+                http_url: Some("https://denied.example.com/b".to_owned()),
+                matched_rule: None,
+            },
+        ];
+
+        store
+            .insert_workspace_agent_boundary_logs(agent_id, &inputs)
+            .await?;
+
+        {
+            let stored = store
+                .workspace_agent_boundary_logs
+                .lock()
+                .map_err(|e| format!("lock: {e}"))?;
+            assert_eq!(stored.len(), 2);
+            assert_eq!(stored[0].agent_id, agent_id);
+            assert!(stored[0].allowed);
+            assert_eq!(stored[0].http_method.as_deref(), Some("GET"));
+            assert_eq!(stored[0].matched_rule.as_deref(), Some("allow-example"));
+            assert!(!stored[1].allowed);
+            assert_eq!(stored[1].matched_rule, None);
+        }
+
+        // Empty batch is a no-op.
+        store
+            .insert_workspace_agent_boundary_logs(agent_id, &[])
+            .await?;
+        let stored = store
+            .workspace_agent_boundary_logs
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?;
+        assert_eq!(stored.len(), 2, "empty batch must not add rows");
+
         Ok(())
     }
 }

@@ -1144,17 +1144,63 @@ impl AgentRpcHandler for LiveAgentHandler {
 
     /// Ports `coder/coderd/agentapi/boundary_logs.go::ReportBoundaryLogs`.
     ///
-    /// The `boundary_logs` / boundary usage tracking tables are not yet
-    /// ported — log the batch size and return OK.
+    /// Converts each proto `BoundaryLog` into an [`InsertBoundaryLogInput`]
+    /// and batch-persists via
+    /// [`AppStore::insert_workspace_agent_boundary_logs`]. Boundary usage
+    /// tracking (workspace/owner allowed/denied counters) remains a
+    /// follow-up — see §B.1 tail of the parity matrix.
     async fn report_boundary_logs(
         &self,
         req: agent::ReportBoundaryLogsRequest,
     ) -> Result<agent::ReportBoundaryLogsResponse, RpcError> {
-        tracing::info!(
+        if req.logs.is_empty() {
+            return Ok(agent::ReportBoundaryLogsResponse::default());
+        }
+
+        let now = OffsetDateTime::now_utc();
+        let mut inputs: Vec<coder_core::InsertBoundaryLogInput> =
+            Vec::with_capacity(req.logs.len());
+
+        for log in &req.logs {
+            let event_time = log
+                .time
+                .as_ref()
+                .and_then(proto_timestamp_to_time)
+                .unwrap_or(now);
+
+            let (http_method, http_url, matched_rule) = match &log.resource {
+                Some(agent::boundary_log::Resource::HttpRequest(http)) => (
+                    Some(http.method.clone()),
+                    Some(http.url.clone()),
+                    if log.allowed && !http.matched_rule.is_empty() {
+                        Some(http.matched_rule.clone())
+                    } else {
+                        None
+                    },
+                ),
+                None => (None, None, None),
+            };
+
+            inputs.push(coder_core::InsertBoundaryLogInput {
+                event_time,
+                allowed: log.allowed,
+                http_method,
+                http_url,
+                matched_rule,
+            });
+        }
+
+        self.store
+            .insert_workspace_agent_boundary_logs(self.agent_id, &inputs)
+            .await
+            .map_err(|e| RpcError::Internal(format!("insert boundary logs: {e}")))?;
+
+        tracing::debug!(
             agent_id = %self.agent_id,
-            logs = req.logs.len(),
-            "agent report_boundary_logs (persistence deferred)",
+            logs = inputs.len(),
+            "agent report_boundary_logs persisted",
         );
+
         Ok(agent::ReportBoundaryLogsResponse::default())
     }
 
@@ -1367,6 +1413,96 @@ mod tests {
             .ok_or(url::ParseError::EmptyHost)?;
         assert!(node.force_http);
         assert_eq!(node.derp_port, 8080);
+        Ok(())
+    }
+
+    // ── workspace_agent_boundary_logs ──
+    fn test_handler()
+    -> Result<(LiveAgentHandler, Arc<crate::app::tests::FakeStore>), Box<dyn std::error::Error>>
+    {
+        let (_state, store) = crate::app::tests::test_state_with_store(true)?;
+        let store_trait: Arc<dyn AppStore> = store.clone();
+        let handler = LiveAgentHandler::new(
+            Uuid::new_v4(),
+            store_trait,
+            "2.0".to_owned(),
+            ManifestDeploymentConfig {
+                access_url: Url::parse("https://coder.example.com")?,
+                app_hostname: String::new(),
+                git_auth_config_count: 0,
+                derp_force_websockets: false,
+                derp_regions: Vec::new(),
+            },
+        );
+        Ok((handler, store))
+    }
+
+    #[tokio::test]
+    async fn report_boundary_logs_handler_persists_via_store()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (handler, store) = test_handler().map_err(|e| format!("test_handler: {e}"))?;
+
+        let req = agent::ReportBoundaryLogsRequest {
+            logs: vec![
+                agent::BoundaryLog {
+                    allowed: true,
+                    time: Some(prost_types::Timestamp {
+                        seconds: 1_700_000_000,
+                        nanos: 0,
+                    }),
+                    resource: Some(agent::boundary_log::Resource::HttpRequest(
+                        agent::boundary_log::HttpRequest {
+                            method: "GET".to_owned(),
+                            url: "https://npmjs.com/pkg".to_owned(),
+                            matched_rule: "allow-npm".to_owned(),
+                        },
+                    )),
+                },
+                agent::BoundaryLog {
+                    allowed: false,
+                    time: None,
+                    resource: Some(agent::boundary_log::Resource::HttpRequest(
+                        agent::boundary_log::HttpRequest {
+                            method: "POST".to_owned(),
+                            url: "https://denied.example.com/x".to_owned(),
+                            // Matched_rule omitted for denies.
+                            matched_rule: String::new(),
+                        },
+                    )),
+                },
+            ],
+        };
+
+        let _resp = handler.report_boundary_logs(req).await?;
+
+        let stored = store
+            .workspace_agent_boundary_logs
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?;
+        assert_eq!(stored.len(), 2);
+        assert_eq!(stored[0].agent_id, handler.agent_id);
+        assert!(stored[0].allowed);
+        assert_eq!(stored[0].http_method.as_deref(), Some("GET"));
+        assert_eq!(stored[0].http_url.as_deref(), Some("https://npmjs.com/pkg"));
+        assert_eq!(stored[0].matched_rule.as_deref(), Some("allow-npm"));
+        assert!(!stored[1].allowed);
+        // Denied entries drop empty matched_rule.
+        assert_eq!(stored[1].matched_rule, None);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn report_boundary_logs_handler_empty_batch_is_ok()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let (handler, store) = test_handler().map_err(|e| format!("test_handler: {e}"))?;
+        let _resp = handler
+            .report_boundary_logs(agent::ReportBoundaryLogsRequest { logs: vec![] })
+            .await?;
+        let stored = store
+            .workspace_agent_boundary_logs
+            .lock()
+            .map_err(|e| format!("lock: {e}"))?;
+        assert!(stored.is_empty());
         Ok(())
     }
 }

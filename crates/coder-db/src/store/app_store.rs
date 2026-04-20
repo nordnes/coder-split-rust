@@ -6336,6 +6336,54 @@ impl AppStore for PostgresStore {
             .collect())
     }
 
+    // ── workspace_agent_boundary_logs ──
+    #[instrument(skip(self, logs), err(level = tracing::Level::WARN))]
+    async fn insert_workspace_agent_boundary_logs(
+        &self,
+        agent_id: Uuid,
+        logs: &[InsertBoundaryLogInput],
+    ) -> Result<(), StorageError> {
+        if logs.is_empty() {
+            return Ok(());
+        }
+
+        let mut event_times = Vec::with_capacity(logs.len());
+        let mut alloweds = Vec::with_capacity(logs.len());
+        let mut http_methods: Vec<Option<String>> = Vec::with_capacity(logs.len());
+        let mut http_urls: Vec<Option<String>> = Vec::with_capacity(logs.len());
+        let mut matched_rules: Vec<Option<String>> = Vec::with_capacity(logs.len());
+
+        for entry in logs {
+            event_times.push(entry.event_time);
+            alloweds.push(entry.allowed);
+            http_methods.push(entry.http_method.clone());
+            http_urls.push(entry.http_url.clone());
+            matched_rules.push(entry.matched_rule.clone());
+        }
+
+        sqlx::query(
+            "INSERT INTO workspace_agent_boundary_logs
+                 (agent_id, event_time, allowed, http_method, http_url, matched_rule)
+             SELECT $1,
+                    unnest($2::timestamptz[]),
+                    unnest($3::boolean[]),
+                    unnest($4::text[]),
+                    unnest($5::text[]),
+                    unnest($6::text[])",
+        )
+        .bind(agent_id)
+        .bind(&event_times)
+        .bind(&alloweds)
+        .bind(&http_methods)
+        .bind(&http_urls)
+        .bind(&matched_rules)
+        .execute(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(())
+    }
+
     #[instrument(skip(self), err(level = tracing::Level::WARN))]
     async fn list_workspace_agent_metadata(
         &self,

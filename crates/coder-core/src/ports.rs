@@ -4031,6 +4031,20 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         logs: &[InsertAgentLogInput],
     ) -> Result<Vec<WorkspaceAgentLogRow>, StorageError>;
 
+    // ── workspace_agent_boundary_logs ──
+    /// Batch-inserts workspace agent boundary log rows. Mirrors the
+    /// Go `ReportBoundaryLogs` handler in
+    /// `coder/coderd/agentapi/boundary_logs.go`. An empty slice is a
+    /// no-op and must return `Ok(())` without touching the database.
+    async fn insert_workspace_agent_boundary_logs(
+        &self,
+        agent_id: Uuid,
+        logs: &[InsertBoundaryLogInput],
+    ) -> Result<(), StorageError> {
+        let _ = (agent_id, logs);
+        Ok(())
+    }
+
     /// Lists workspace agent metadata for a given agent.
     async fn list_workspace_agent_metadata(
         &self,
@@ -5667,6 +5681,49 @@ pub struct InsertWorkspaceAppStatusInput {
     pub message: String,
     /// URI.
     pub uri: Option<String>,
+}
+
+// ── workspace_agent_boundary_logs ──
+
+/// Input for inserting a workspace agent boundary log row. Mirrors a
+/// single `BoundaryLog` protobuf message from
+/// `coder/agent/proto/agent.proto` — see
+/// `coder/coderd/agentapi/boundary_logs.go::ReportBoundaryLogs`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertBoundaryLogInput {
+    /// Time the log was processed by boundary. Callers should default
+    /// to "now" when the proto `time` field is absent.
+    pub event_time: OffsetDateTime,
+    /// Whether boundary allowed this resource access.
+    pub allowed: bool,
+    /// HTTP method when the reported resource is an HTTP request.
+    pub http_method: Option<String>,
+    /// HTTP URL when the reported resource is an HTTP request.
+    pub http_url: Option<String>,
+    /// Rule that matched this request. Only populated when
+    /// `allowed = true` (boundary denies by default).
+    pub matched_rule: Option<String>,
+}
+
+/// Stored workspace agent boundary log row.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceAgentBoundaryLogRow {
+    /// Stable identifier.
+    pub id: i64,
+    /// Owning agent identifier.
+    pub agent_id: Uuid,
+    /// Time the log was processed by boundary.
+    pub event_time: OffsetDateTime,
+    /// Whether boundary allowed this resource access.
+    pub allowed: bool,
+    /// HTTP method when the reported resource is an HTTP request.
+    pub http_method: Option<String>,
+    /// HTTP URL when the reported resource is an HTTP request.
+    pub http_url: Option<String>,
+    /// Rule that matched this request.
+    pub matched_rule: Option<String>,
+    /// Creation time (server-side insert timestamp).
+    pub created_at: OffsetDateTime,
 }
 
 /// Workspace-domain storage contract.
