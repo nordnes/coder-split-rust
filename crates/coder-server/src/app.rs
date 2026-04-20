@@ -893,6 +893,10 @@ pub fn build_router(
                     "/workspaces/{workspace}/watch-ws",
                     get(get_workspace_watch_ws),
                 )
+                .route(
+                    "/workspaces/{workspace}/support-bundle",
+                    get(get_workspace_support_bundle),
+                )
                 // Workspace build routes
                 .route("/workspacebuilds/{build}", get(get_workspace_build))
                 .route(

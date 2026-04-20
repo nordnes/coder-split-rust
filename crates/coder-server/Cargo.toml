@@ -66,6 +66,7 @@ uuid.workspace = true
 web-push.workspace = true
 tar.workspace = true
 flate2.workspace = true
+zip.workspace = true
 rust-embed.workspace = true
 
 [dev-dependencies]
