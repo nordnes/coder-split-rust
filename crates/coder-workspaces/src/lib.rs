@@ -685,17 +685,18 @@ pub struct AutobuildStats {
 /// limited to `MAX_CONCURRENT_TRANSITIONS` workers to avoid
 /// overloading the database.
 ///
-/// Runs under the `system_restricted` actor context
-/// ([`coder_rbac::system_actors::system_restricted`]). Today only the
-/// `Authorized<S>` list methods in `coder-db/src/dbauthz.rs` consult the
-/// actor; the transition/build calls below carry
-/// `TODO-dbauthz-full-wrap` comments pending the full wrap.
+/// Runs under the `autostart` actor context
+/// ([`coder_rbac::system_actors::autostart`]), matching Go's
+/// `AsAutostart` helper. Today only the `Authorized<S>` list methods in
+/// `coder-db/src/dbauthz.rs` consult the actor; the transition/build
+/// calls below carry `TODO-dbauthz-full-wrap` comments pending the full
+/// wrap.
 pub struct AutobuildExecutor<S> {
     store: S,
     cancel: CancellationToken,
     tick_secs: u64,
     /// System-actor context the executor runs under. See
-    /// [`coder_rbac::system_actors::system_restricted`].
+    /// [`coder_rbac::system_actors::autostart`].
     actor: Actor,
 }
 
@@ -718,7 +719,7 @@ where
             // TODO-dbauthz-full-wrap: route transition/build store calls
             // through `Authorized<S>` once wrapped so this actor is
             // enforced at the store boundary.
-            actor: system_actors::system_restricted(),
+            actor: system_actors::autostart(),
         });
         let handle = Self::spawn_executor_loop(&executor);
         (executor, handle)
@@ -737,7 +738,7 @@ where
             store,
             cancel: cancel.clone(),
             tick_secs,
-            actor: system_actors::system_restricted(),
+            actor: system_actors::autostart(),
         });
         let handle = Self::spawn_executor_loop(&executor);
         (executor, handle)
@@ -3419,17 +3420,18 @@ mod tests {
     }
 
     #[test]
-    fn autobuild_uses_system_restricted_actor() {
+    fn autobuild_uses_autostart_actor() {
         // Regression guard for W0.S4 wiring: the executor's actor factory
-        // must hand back the `system` system actor. We exercise the
-        // factory directly rather than constructing a full executor
-        // (which requires a runtime + mock store).
-        let actor = system_actors::system_restricted();
+        // must hand back the `autostart` system actor, mirroring Go's
+        // `AsAutostart`. We exercise the factory directly rather than
+        // constructing a full executor (which requires a runtime + mock
+        // store).
+        let actor = system_actors::autostart();
         assert!(
             system_actors::is_system(&actor),
-            "system_restricted() must be a system actor",
+            "autostart() must be a system actor",
         );
-        assert_eq!(actor.username, "system");
+        assert_eq!(actor.username, "autostart");
     }
 
     #[test]

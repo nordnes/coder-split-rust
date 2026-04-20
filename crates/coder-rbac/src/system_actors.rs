@@ -34,6 +34,15 @@ pub const ROLE_NOTIFIER: &str = "notifier";
 /// Role name constant for the resource monitor subject, mirroring Go's
 /// `RoleIdentifier{Name: "resourcemonitor"}`.
 pub const ROLE_RESOURCE_MONITOR: &str = "resourcemonitor";
+/// Role name constant for the autostart daemon subject, mirroring Go's
+/// `RoleIdentifier{Name: "autostart"}`.
+pub const ROLE_AUTOSTART: &str = "autostart";
+/// Role name constant for the connection logger subject, mirroring Go's
+/// `RoleIdentifier{Name: "connectionlogger"}`.
+pub const ROLE_CONNECTION_LOGGER: &str = "connectionlogger";
+/// Role name constant for the job reaper subject, mirroring Go's
+/// `RoleIdentifier{Name: "jobreaper"}`.
+pub const ROLE_JOB_REAPER: &str = "jobreaper";
 
 /// Build a [`Role`] with the given site permissions and no user/org-scoped
 /// permissions. Used by the system-actor builders below and by
@@ -220,6 +229,53 @@ fn resource_monitor_permissions() -> Vec<Permission> {
     )]
 }
 
+fn autostart_permissions() -> Vec<Permission> {
+    let mut p: Vec<Permission> = vec![
+        Permission::allow(ResourceType::OrganizationMember, Action::Read),
+        // Required to read terraform files during transitions.
+        Permission::allow(ResourceType::File, Action::Read),
+        Permission::allow(ResourceType::NotificationMessage, Action::Create),
+        Permission::allow(ResourceType::NotificationMessage, Action::Read),
+        Permission::allow_all(ResourceType::System),
+        Permission::allow(ResourceType::User, Action::Read),
+    ];
+    for action in [Action::Read, Action::Update] {
+        p.push(Permission::allow(ResourceType::Task, action));
+    }
+    for action in [Action::Read, Action::Update] {
+        p.push(Permission::allow(ResourceType::Template, action));
+    }
+    for action in [
+        Action::Delete,
+        Action::Read,
+        Action::Update,
+        Action::Start,
+        Action::Stop,
+    ] {
+        p.push(Permission::allow(ResourceType::Workspace, action));
+    }
+    p
+}
+
+fn connection_logger_permissions() -> Vec<Permission> {
+    vec![
+        Permission::allow(ResourceType::ConnectionLog, Action::Update),
+        Permission::allow(ResourceType::ConnectionLog, Action::Read),
+    ]
+}
+
+fn job_reaper_permissions() -> Vec<Permission> {
+    vec![
+        Permission::allow_all(ResourceType::System),
+        Permission::allow(ResourceType::Template, Action::Read),
+        Permission::allow(ResourceType::Template, Action::Update),
+        Permission::allow(ResourceType::Workspace, Action::Read),
+        Permission::allow(ResourceType::Workspace, Action::Update),
+        Permission::allow(ResourceType::ProvisionerJobs, Action::Read),
+        Permission::allow(ResourceType::ProvisionerJobs, Action::Update),
+    ]
+}
+
 // ---------------------------------------------------------------------------
 // Role constructors. Called by `expand_role` in lib.rs when it sees one of
 // the synthetic role names below in an actor's `site_roles`.
@@ -268,6 +324,32 @@ pub fn role_resource_monitor() -> Role {
         ROLE_RESOURCE_MONITOR,
         "Resource Monitor",
         resource_monitor_permissions(),
+    )
+}
+
+/// Autostart daemon `Role`. See [`autostart`].
+#[must_use]
+pub fn role_autostart() -> Role {
+    make_role(ROLE_AUTOSTART, "Autostart Daemon", autostart_permissions())
+}
+
+/// Connection logger `Role`. See [`connection_logger`].
+#[must_use]
+pub fn role_connection_logger() -> Role {
+    make_role(
+        ROLE_CONNECTION_LOGGER,
+        "Connection Logger",
+        connection_logger_permissions(),
+    )
+}
+
+/// Job-reaper daemon `Role`. See [`job_reaper`].
+#[must_use]
+pub fn role_job_reaper() -> Role {
+    make_role(
+        ROLE_JOB_REAPER,
+        "Job Reaper Daemon",
+        job_reaper_permissions(),
     )
 }
 
@@ -371,9 +453,57 @@ pub fn resource_monitor() -> Actor {
     )
 }
 
+/// Actor for the autostart daemon. Mirrors Go's `AsAutostart` helper and
+/// `subjectAutostart` subject in `dbauthz/dbauthz.go`.
+///
+/// Used by the autobuild executor to transition workspaces on a schedule
+/// (autostart / autostop / deadline / dormancy).
+#[must_use]
+pub fn autostart() -> Actor {
+    system_actor(
+        "autostart",
+        ROLE_AUTOSTART,
+        "Autostart Daemon",
+        autostart_permissions(),
+    )
+}
+
+/// Actor for the connection logger. Mirrors Go's `AsConnectionLogger`
+/// helper and `subjectConnectionLogger` subject in `dbauthz/dbauthz.go`.
+///
+/// Used by the connection-log pruner to read and delete stale rows in
+/// the `connection_logs` table. Task-level description calls this the
+/// "auditor" actor because it is the audit-adjacent subject that owns
+/// connection log retention.
+#[must_use]
+pub fn connection_logger() -> Actor {
+    system_actor(
+        "connectionlogger",
+        ROLE_CONNECTION_LOGGER,
+        "Connection Logger",
+        connection_logger_permissions(),
+    )
+}
+
+/// Actor for the job reaper. Mirrors Go's `AsJobReaper` helper and
+/// `subjectJobReaper` subject in `dbauthz/dbauthz.go`.
+///
+/// Used by the background process that reaps stuck provisioner jobs
+/// and workspace builds.
+#[must_use]
+pub fn job_reaper() -> Actor {
+    system_actor(
+        "jobreaper",
+        ROLE_JOB_REAPER,
+        "Job Reaper Daemon",
+        job_reaper_permissions(),
+    )
+}
+
 /// Returns whether the supplied actor carries one of the synthetic
 /// system-subject roles defined in this module (`system`, `keyrotator`,
-/// `provisionerd`, `notifier`, `resourcemonitor`).
+/// `provisionerd`, `notifier`, `resourcemonitor`, `autostart`,
+/// `connectionlogger`, `jobreaper`).
 ///
 /// Used by background-worker unit tests to assert their construction
 /// path wired the correct system actor in place of the default actor.
@@ -387,6 +517,9 @@ pub fn is_system(actor: &Actor) -> bool {
                 | ROLE_PROVISIONERD
                 | ROLE_NOTIFIER
                 | ROLE_RESOURCE_MONITOR
+                | ROLE_AUTOSTART
+                | ROLE_CONNECTION_LOGGER
+                | ROLE_JOB_REAPER
         )
     })
 }
@@ -409,6 +542,14 @@ pub fn owner_of(user_id: Uuid) -> Actor {
         scope: None,
         scope_override: None,
     }
+}
+
+/// Actor for the nil-UUID owner, used by bootstrap and migration code
+/// that must elevate to the full owner role without a specific user
+/// context. Prefer [`owner_of`] when a user id is known.
+#[must_use]
+pub fn owner() -> Actor {
+    owner_of(Uuid::nil())
 }
 
 #[cfg(test)]
@@ -530,8 +671,12 @@ mod tests {
         assert!(is_system(&provisionerd()));
         assert!(is_system(&notifier()));
         assert!(is_system(&resource_monitor()));
+        assert!(is_system(&autostart()));
+        assert!(is_system(&connection_logger()));
+        assert!(is_system(&job_reaper()));
         // owner_of uses ROLE_OWNER, not a synthetic system role.
         assert!(!is_system(&owner_of(Uuid::nil())));
+        assert!(!is_system(&owner()));
     }
 
     #[test]
@@ -542,5 +687,94 @@ mod tests {
         // The actor holds ROLE_OWNER, which grants read on User.
         let user = Object::new(ResourceType::User).with_id(user_id);
         assert!(authorizer.authorize(&actor, Action::Read, &user).is_ok());
+    }
+
+    #[test]
+    fn owner_uses_nil_user_id() {
+        let actor = owner();
+        assert_eq!(actor.user_id, Uuid::nil());
+        assert!(actor.site_roles.iter().any(|r| r == crate::ROLE_OWNER));
+    }
+
+    #[test]
+    fn autostart_can_read_and_update_workspaces() {
+        let authorizer = Authorizer::new();
+        let actor = autostart();
+        let ws = Object::new(ResourceType::Workspace);
+        for action in [
+            Action::Read,
+            Action::Update,
+            Action::Start,
+            Action::Stop,
+            Action::Delete,
+        ] {
+            assert!(
+                authorizer.authorize(&actor, action, &ws).is_ok(),
+                "autostart must be allowed to {action:?} workspaces",
+            );
+        }
+        // Autostart cannot create workspaces — that is a user action.
+        assert!(authorizer.authorize(&actor, Action::Create, &ws).is_err());
+        // Autostart cannot CRUD users.
+        let user = Object::new(ResourceType::User);
+        assert!(authorizer.authorize(&actor, Action::Create, &user).is_err());
+    }
+
+    #[test]
+    fn autostart_can_read_templates_and_files() {
+        let authorizer = Authorizer::new();
+        let actor = autostart();
+        let template = Object::new(ResourceType::Template);
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Read, &template)
+                .is_ok()
+        );
+        assert!(
+            authorizer
+                .authorize(&actor, Action::Update, &template)
+                .is_ok()
+        );
+        let file = Object::new(ResourceType::File);
+        assert!(authorizer.authorize(&actor, Action::Read, &file).is_ok());
+        assert!(authorizer.authorize(&actor, Action::Create, &file).is_err());
+    }
+
+    #[test]
+    fn connection_logger_can_only_manage_connection_logs() {
+        let authorizer = Authorizer::new();
+        let actor = connection_logger();
+        let log = Object::new(ResourceType::ConnectionLog);
+        for action in [Action::Read, Action::Update] {
+            assert!(
+                authorizer.authorize(&actor, action, &log).is_ok(),
+                "connection_logger must be allowed to {action:?} connection logs",
+            );
+        }
+        // Connection-logger cannot create/delete connection log rows through
+        // this scope — only update/read. The pruner deletes via the
+        // `Action::Update`-gated `delete_old_connection_logs` path in the
+        // dbauthz wrap (mirrors Go's connection_logger subject).
+        assert!(authorizer.authorize(&actor, Action::Create, &log).is_err());
+        // And it cannot read users or workspaces.
+        let user = Object::new(ResourceType::User);
+        assert!(authorizer.authorize(&actor, Action::Read, &user).is_err());
+    }
+
+    #[test]
+    fn job_reaper_can_update_jobs_and_workspaces() {
+        let authorizer = Authorizer::new();
+        let actor = job_reaper();
+        let job = Object::new(ResourceType::ProvisionerJobs);
+        assert!(authorizer.authorize(&actor, Action::Read, &job).is_ok());
+        assert!(authorizer.authorize(&actor, Action::Update, &job).is_ok());
+        let ws = Object::new(ResourceType::Workspace);
+        assert!(authorizer.authorize(&actor, Action::Update, &ws).is_ok());
+        // Job reaper cannot start or stop workspaces — it only marks
+        // stuck jobs failed. Mirrors Go's `subjectJobReaper` site map.
+        assert!(authorizer.authorize(&actor, Action::Start, &ws).is_err());
+        // Job reaper cannot read users.
+        let user = Object::new(ResourceType::User);
+        assert!(authorizer.authorize(&actor, Action::Read, &user).is_err());
     }
 }

@@ -33,6 +33,7 @@ use coder_core::AppStore;
 use coder_core::IdentityStore;
 use coder_core::api::{WebpushMessage, WebpushSubscription};
 use coder_core::identity::{NotificationMessageStatus, NotificationMethod};
+use coder_rbac::{Actor, system_actors};
 use futures_util::StreamExt;
 use handlebars::Handlebars;
 use lettre::transport::smtp::authentication::{Credentials, Mechanism};
@@ -203,6 +204,13 @@ impl Default for NotificationConfig {
 ///
 /// Polls the database for pending notification messages and delivers them
 /// using the configured dispatch methods (email, webhook, or inbox).
+///
+/// Runs under the `notifier` actor context
+/// ([`coder_rbac::system_actors::notifier`]), mirroring Go's
+/// `AsNotifier` helper. Today only the list methods in
+/// `coder-db/src/dbauthz.rs` consult the actor; the
+/// `acquire_pending_notification_messages` and bulk-mark calls
+/// below carry `TODO-dbauthz-full-wrap` comments pending the full wrap.
 pub struct NotificationDispatchService<S> {
     store: S,
     config: NotificationConfig,
@@ -211,6 +219,10 @@ pub struct NotificationDispatchService<S> {
     /// Per-message retry-after deadlines used for exponential backoff.
     /// Gates the dispatch-loop hook in [`dispatch_once`].
     retry_after: Mutex<HashMap<Uuid, Instant>>,
+    /// System-actor context the dispatcher runs under. See
+    /// [`coder_rbac::system_actors::notifier`]. Stored for diagnostics
+    /// and for the future `Authorized<S>` wrap of notification mutations.
+    actor: Actor,
 }
 
 impl<S> NotificationDispatchService<S>
@@ -242,6 +254,11 @@ where
             http_client,
             poll_interval_secs,
             retry_after: Mutex::new(HashMap::new()),
+            // TODO-dbauthz-full-wrap: once `Authorized<S>` wraps
+            // notification mutations, route those calls through the
+            // wrapper so this actor is enforced at the store boundary.
+            // Mirrors Go's `AsNotifier`.
+            actor: system_actors::notifier(),
         });
         let handle = Self::spawn_dispatch_loop(&service, cancel);
         Ok((service, handle))
@@ -251,6 +268,12 @@ where
     #[must_use]
     pub fn config(&self) -> &NotificationConfig {
         &self.config
+    }
+
+    /// Returns the system actor this dispatcher runs under.
+    #[must_use]
+    pub fn actor(&self) -> &Actor {
+        &self.actor
     }
 
     async fn dispatch_once(&self) -> Result<u32, coder_core::StorageError> {
@@ -4305,5 +4328,22 @@ mod tests {
         assert_eq!(method_label(NotificationMethod::Email), "smtp");
         assert_eq!(method_label(NotificationMethod::Webhook), "webhook");
         assert_eq!(method_label(NotificationMethod::Inbox), "inbox");
+    }
+
+    // ── 38. Dispatcher carries the notifier system actor ────────
+
+    #[test]
+    fn dispatcher_uses_notifier_actor() {
+        // Regression guard for W0.S4 wiring: the dispatcher actor
+        // factory must hand back the `notifier` system actor,
+        // mirroring Go's `AsNotifier`. We exercise the factory
+        // directly rather than constructing a full service (which
+        // requires a runtime + mock store).
+        let actor = system_actors::notifier();
+        assert!(
+            system_actors::is_system(&actor),
+            "notifier() must be a system actor",
+        );
+        assert_eq!(actor.username, "notifier");
     }
 }

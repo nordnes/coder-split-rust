@@ -946,6 +946,7 @@ dependencies = [
  "async-trait",
  "base64 0.22.1",
  "coder-core",
+ "coder-rbac",
  "futures-util",
  "handlebars",
  "lettre",

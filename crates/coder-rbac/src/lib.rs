@@ -1635,6 +1635,9 @@ pub fn expand_role(name: &str) -> Option<Role> {
         system_actors::ROLE_PROVISIONERD => Some(system_actors::role_provisionerd()),
         system_actors::ROLE_NOTIFIER => Some(system_actors::role_notifier()),
         system_actors::ROLE_RESOURCE_MONITOR => Some(system_actors::role_resource_monitor()),
+        system_actors::ROLE_AUTOSTART => Some(system_actors::role_autostart()),
+        system_actors::ROLE_CONNECTION_LOGGER => Some(system_actors::role_connection_logger()),
+        system_actors::ROLE_JOB_REAPER => Some(system_actors::role_job_reaper()),
         _ => None,
     }
 }
