@@ -2,9 +2,9 @@ syntax = "proto3";
 
 // Stripped vendoring of the upstream `provisionerd/proto/provisionerd.proto`.
 // Only the messages and RPCs required by the currently-ported RPCs
-// (CommitQuota, AcquireJob, UpdateJob, FailJob) are retained; the rest
-// (CompleteJob, UploadFile, DownloadFile, AcquireJobWithCancel) will be
-// added in follow-up batches along with the corresponding
+// (CommitQuota, AcquireJob, UpdateJob, FailJob, CompleteJob) are
+// retained; the rest (UploadFile, DownloadFile, AcquireJobWithCancel)
+// will be added in follow-up batches along with the corresponding
 // `provisionersdk/proto` imports they require.
 //
 // The package name and message field numbers must match upstream so the
@@ -160,4 +160,67 @@ message FailedJob {
     TemplateDryRun template_dry_run = 5;
   }
   string error_code = 6;
+}
+
+// ── CompleteJob ───────────────────────────────────────────────
+//
+// CompletedJob is sent when a provisioner daemon finishes a job. The
+// message retains upstream field numbers and the full top-level oneof
+// envelope so Go daemons stay wire-compatible. Every nested field that
+// requires the provisionersdk types (`provisioner.Resource`,
+// `provisioner.Module`, `provisioner.Timing`, `provisioner.RichParameter`,
+// `provisioner.ExternalAuthProviderResource`, `provisioner.Preset`,
+// `provisioner.ResourceReplacement`, `provisioner.AITask`) is
+// `reserved` so the upstream slot stays available for when those types
+// land in a follow-up batch alongside the per-type completion cleanup
+// (workspace-build state / deadline reset, telemetry report, audit log,
+// workspace-event pubsub, end-of-logs pubsub, notification enqueue).
+// Until then, this first slice only persists the top-level `job_id`
+// and marks the job completed via the existing
+// `update_provisioner_job_with_complete_by_id` store hook — the same
+// hook `FailJob` uses.
+
+message CompletedJob {
+  message WorkspaceBuild {
+    // Reserved upstream field numbers:
+    //  1  bytes state
+    //  2  repeated provisioner.Resource resources
+    //  3  repeated provisioner.Timing timings
+    //  4  repeated provisioner.Module modules
+    //  5  repeated provisioner.ResourceReplacement resource_replacements
+    //  6  repeated provisioner.AITask ai_tasks
+    // All require the provisionersdk types, so the slots are
+    // reserved until those are vendored.
+    reserved 1, 2, 3, 4, 5, 6;
+  }
+  message TemplateImport {
+    // Reserved upstream field numbers:
+    //  1  repeated provisioner.Resource start_resources
+    //  2  repeated provisioner.Resource stop_resources
+    //  3  repeated provisioner.RichParameter rich_parameters
+    //  4  repeated string external_auth_providers_names
+    //  5  repeated provisioner.ExternalAuthProviderResource external_auth_providers
+    //  6  repeated provisioner.Module start_modules
+    //  7  was stop_modules (already reserved upstream; always equal to start_modules)
+    //  8  repeated provisioner.Preset presets
+    //  9  bytes plan
+    // 10  bytes module_files
+    // 11  bytes module_files_hash
+    // 12  bool has_ai_tasks
+    // 13  bool has_external_agents
+    reserved 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13;
+  }
+  message TemplateDryRun {
+    // Reserved upstream field numbers:
+    //  1  repeated provisioner.Resource resources
+    //  2  repeated provisioner.Module modules
+    reserved 1, 2;
+  }
+
+  string job_id = 1;
+  oneof type {
+    WorkspaceBuild workspace_build = 2;
+    TemplateImport template_import = 3;
+    TemplateDryRun template_dry_run = 4;
+  }
 }
