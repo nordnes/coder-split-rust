@@ -17537,7 +17537,18 @@ pub(crate) mod tests {
         >,
         Box<dyn Error>,
     > {
-        let url = ws_url(base, path);
+        // Split an optional `?query` off `path` so `ws_url` can set the
+        // path portion via the `Url` API (which discards existing query)
+        // without losing the query supplied by the caller.
+        let (path_only, query) = match path.split_once('?') {
+            Some((p, q)) => (p, Some(q)),
+            None => (path, None),
+        };
+        let mut url = ws_url(base, path_only);
+        if let Some(q) = query {
+            url.push('?');
+            url.push_str(q);
+        }
         let req = Request::builder()
             .uri(&url)
             .header("Connection", "Upgrade")
@@ -17819,9 +17830,10 @@ pub(crate) mod tests {
         let output_channel = coder_core::pubsub::workspace_agent_pty_output_channel(agent_id);
         let mut input_sub = pubsub.subscribe(&input_channel).await?;
 
+        let reconnect_id = Uuid::new_v4();
         let mut ws = connect_ws_to(
             &base_url,
-            &format!("/api/v2/workspaceagents/{agent_id}/pty"),
+            &format!("/api/v2/workspaceagents/{agent_id}/pty?reconnect_id={reconnect_id}"),
             &token,
         )
         .await?;

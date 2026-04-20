@@ -3118,7 +3118,11 @@ mod tests {
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
         let session_token = create_and_login(&app).await?;
-        let url = ws_url(&base_url, &format!("api/v2/workspaceagents/{agent_id}/pty"));
+        let reconnect_id = Uuid::new_v4();
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/pty?reconnect_id={reconnect_id}"),
+        );
         let request = ws_request(&url, &session_token)?;
         let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
 
@@ -3154,7 +3158,11 @@ mod tests {
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
         let session_token = create_and_login(&app).await?;
-        let url = ws_url(&base_url, &format!("api/v2/workspaceagents/{agent_id}/pty"));
+        let reconnect_id = Uuid::new_v4();
+        let url = ws_url(
+            &base_url,
+            &format!("api/v2/workspaceagents/{agent_id}/pty?reconnect_id={reconnect_id}"),
+        );
         let request = ws_request(&url, &session_token)?;
         let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
 
