@@ -5274,6 +5274,77 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         owner_id: Uuid,
         organization_id: Uuid,
     ) -> Result<i64, StorageError>;
+
+    // -----------------------------------------------------------------------
+    // Prebuild reconciler
+    // -----------------------------------------------------------------------
+
+    /// Lists active template versions × presets that have
+    /// `desired_instances > 0`. Powers the prebuild reconciler's preset
+    /// discovery. Ports Go's `GetTemplatePresetsWithPrebuilds` from
+    /// `coder/coderd/database/queries/prebuilds.sql`.
+    async fn list_template_presets_with_prebuilds(
+        &self,
+    ) -> Result<Vec<TemplatePresetWithPrebuild>, StorageError>;
+
+    /// Lists running prebuilt workspaces (owner = `PREBUILDS_SYSTEM_USER_ID`).
+    /// Keyed by `(template_version_id, preset_id)`. Ports Go's
+    /// `GetRunningPrebuiltWorkspaces` from
+    /// `coder/coderd/database/queries/prebuilds.sql`.
+    async fn list_running_prebuilt_workspaces(
+        &self,
+    ) -> Result<Vec<RunningPrebuiltWorkspace>, StorageError>;
+}
+
+/// One row returned by `GetTemplatePresetsWithPrebuilds` — an active
+/// template-version preset whose `desired_instances` is non-null.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TemplatePresetWithPrebuild {
+    /// Owning template id.
+    pub template_id: Uuid,
+    /// Template version id (presets belong to a specific version).
+    pub template_version_id: Uuid,
+    /// Organization the template belongs to.
+    pub organization_id: Uuid,
+    /// Preset id.
+    pub preset_id: Uuid,
+    /// Preset name (for logs/metrics).
+    pub preset_name: String,
+    /// Desired number of running prebuilt workspaces for this preset.
+    pub desired_instances: i32,
+    /// Whether the preset's template version is the template's active
+    /// version.
+    pub using_active_version: bool,
+    /// Preset `prebuild_status` enum value (e.g. `healthy`, `hard_limited`).
+    pub prebuild_status: String,
+    /// Whether the template is soft-deleted.
+    pub template_deleted: bool,
+    /// Whether the template is deprecated (non-empty `deprecated` string).
+    pub template_deprecated: bool,
+    /// Preset creation timestamp — provided for ordering/observability.
+    pub created_at: OffsetDateTime,
+}
+
+/// One row returned by `GetRunningPrebuiltWorkspaces` — a workspace
+/// owned by the prebuilds system user whose latest build is a
+/// successful `start` transition.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunningPrebuiltWorkspace {
+    /// Workspace id.
+    pub id: Uuid,
+    /// Workspace name.
+    pub name: String,
+    /// Template id the workspace was created from.
+    pub template_id: Uuid,
+    /// Template version id of the latest successful build.
+    pub template_version_id: Uuid,
+    /// Preset id from the most recent `start` build for this workspace,
+    /// if any. `None` when no build ever carried a preset id.
+    pub current_preset_id: Option<Uuid>,
+    /// `true` when every agent of the workspace has `lifecycle_state = 'ready'`.
+    pub ready: bool,
+    /// Workspace creation timestamp — used for oldest-first deletion.
+    pub created_at: OffsetDateTime,
 }
 
 /// Stored webpush subscription record.

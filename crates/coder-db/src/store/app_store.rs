@@ -10976,4 +10976,167 @@ impl AppStore for PostgresStore {
         .await
         .map_err(storage_error)
     }
+
+    // -----------------------------------------------------------------------
+    // Prebuild reconciler
+    // -----------------------------------------------------------------------
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_template_presets_with_prebuilds(
+        &self,
+    ) -> Result<Vec<TemplatePresetWithPrebuild>, StorageError> {
+        // Ported from coder/coderd/database/queries/prebuilds.sql
+        // (`GetTemplatePresetsWithPrebuilds`). We don't support the
+        // optional template_id narg filter yet; the reconciler always
+        // wants every active preset with prebuilds configured.
+        let rows = sqlx::query_as::<_, StoredTemplatePresetWithPrebuildRow>(
+            r#"
+            SELECT
+                t.id                        AS template_id,
+                o.id                        AS organization_id,
+                tv.id                       AS template_version_id,
+                tv.id = t.active_version_id AS using_active_version,
+                tvp.id                      AS preset_id,
+                tvp.name                    AS preset_name,
+                tvp.desired_instances       AS desired_instances,
+                tvp.prebuild_status::text   AS prebuild_status,
+                tvp.created_at              AS created_at,
+                t.deleted                   AS template_deleted,
+                t.deprecated != ''          AS template_deprecated
+            FROM templates t
+                INNER JOIN template_versions tv ON tv.template_id = t.id
+                INNER JOIN template_version_presets tvp ON tvp.template_version_id = tv.id
+                INNER JOIN organizations o ON o.id = t.organization_id
+            WHERE tvp.desired_instances IS NOT NULL
+            ORDER BY tvp.created_at ASC, tvp.id ASC
+            "#,
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| TemplatePresetWithPrebuild {
+                template_id: r.template_id,
+                template_version_id: r.template_version_id,
+                organization_id: r.organization_id,
+                preset_id: r.preset_id,
+                preset_name: r.preset_name,
+                desired_instances: r.desired_instances.unwrap_or(0),
+                using_active_version: r.using_active_version,
+                prebuild_status: r.prebuild_status,
+                template_deleted: r.template_deleted,
+                template_deprecated: r.template_deprecated,
+                created_at: r.created_at,
+            })
+            .collect())
+    }
+
+    #[instrument(skip(self), err(level = tracing::Level::WARN))]
+    async fn list_running_prebuilt_workspaces(
+        &self,
+    ) -> Result<Vec<RunningPrebuiltWorkspace>, StorageError> {
+        // Ported from coder/coderd/database/queries/prebuilds.sql
+        // (`GetRunningPrebuiltWorkspaces`). Uses the
+        // `workspace_latest_builds` view added alongside this query.
+        let rows = sqlx::query_as::<_, StoredRunningPrebuiltWorkspaceRow>(
+            r#"
+            WITH latest_prebuilds AS (
+                SELECT
+                    workspaces.id,
+                    workspaces.name,
+                    workspaces.template_id,
+                    workspace_latest_builds.template_version_id,
+                    workspace_latest_builds.job_id,
+                    workspaces.created_at
+                FROM workspace_latest_builds
+                JOIN workspaces ON workspaces.id = workspace_latest_builds.workspace_id
+                WHERE workspace_latest_builds.transition = 'start'::workspace_transition
+                  AND workspace_latest_builds.job_status = 'succeeded'::provisioner_job_status
+                  AND workspaces.owner_id = $1::uuid
+                  AND NOT workspaces.deleted
+            ),
+            workspace_latest_presets AS (
+                SELECT DISTINCT ON (latest_prebuilds.id)
+                    latest_prebuilds.id AS workspace_id,
+                    workspace_builds.template_version_preset_id AS current_preset_id
+                FROM latest_prebuilds
+                JOIN workspace_builds ON workspace_builds.workspace_id = latest_prebuilds.id
+                WHERE workspace_builds.transition = 'start'::workspace_transition
+                  AND workspace_builds.template_version_preset_id IS NOT NULL
+                ORDER BY latest_prebuilds.id, workspace_builds.build_number DESC
+            ),
+            ready_agents AS (
+                SELECT
+                    latest_prebuilds.job_id,
+                    BOOL_AND(
+                        workspace_agents.lifecycle_state = 'ready'::workspace_agent_lifecycle_state
+                    )::boolean AS ready
+                FROM latest_prebuilds
+                JOIN workspace_resources ON workspace_resources.job_id = latest_prebuilds.job_id
+                JOIN workspace_agents ON workspace_agents.resource_id = workspace_resources.id
+                WHERE workspace_agents.deleted = false
+                  AND workspace_agents.parent_id IS NULL
+                GROUP BY latest_prebuilds.job_id
+            )
+            SELECT
+                latest_prebuilds.id,
+                latest_prebuilds.name,
+                latest_prebuilds.template_id,
+                latest_prebuilds.template_version_id,
+                workspace_latest_presets.current_preset_id,
+                COALESCE(ready_agents.ready, false)::boolean AS ready,
+                latest_prebuilds.created_at
+            FROM latest_prebuilds
+            LEFT JOIN ready_agents ON ready_agents.job_id = latest_prebuilds.job_id
+            LEFT JOIN workspace_latest_presets
+                ON workspace_latest_presets.workspace_id = latest_prebuilds.id
+            ORDER BY latest_prebuilds.id
+            "#,
+        )
+        .bind(coder_core::PREBUILDS_SYSTEM_USER_ID)
+        .fetch_all(&self.pool)
+        .await
+        .map_err(storage_error)?;
+
+        Ok(rows
+            .into_iter()
+            .map(|r| RunningPrebuiltWorkspace {
+                id: r.id,
+                name: r.name,
+                template_id: r.template_id,
+                template_version_id: r.template_version_id,
+                current_preset_id: r.current_preset_id,
+                ready: r.ready,
+                created_at: r.created_at,
+            })
+            .collect())
+    }
+}
+
+#[derive(FromRow)]
+struct StoredTemplatePresetWithPrebuildRow {
+    template_id: Uuid,
+    organization_id: Uuid,
+    template_version_id: Uuid,
+    using_active_version: bool,
+    preset_id: Uuid,
+    preset_name: String,
+    desired_instances: Option<i32>,
+    prebuild_status: String,
+    created_at: OffsetDateTime,
+    template_deleted: bool,
+    template_deprecated: bool,
+}
+
+#[derive(FromRow)]
+struct StoredRunningPrebuiltWorkspaceRow {
+    id: Uuid,
+    name: String,
+    template_id: Uuid,
+    template_version_id: Uuid,
+    current_preset_id: Option<Uuid>,
+    ready: bool,
+    created_at: OffsetDateTime,
 }

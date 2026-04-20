@@ -275,25 +275,60 @@ impl PrebuildActions for AppStorePrebuildActions {
 /// Bridge between [`coder_core::AppStore`] and the reconciler's narrow
 /// [`crate::prebuilds_reconciler::PrebuildReconcilerStore`] trait.
 ///
-/// The SQL side of `list_presets_with_prebuilds` and
-/// `list_prebuilt_workspaces` is pending — the handlers and queries for
-/// `template_version_presets.desired_instances` + filtering workspaces
-/// by `owner_id = PREBUILDS_SYSTEM_USER_ID` are not yet wired into
-/// `AppStore`. Until they land, this adapter returns empty snapshots so
-/// the reconciler runs as a safe no-op in production but is ready to
-/// flip on the moment the queries are ported. Tests exercise the full
-/// builder path through [`AppStorePrebuildActions`] above and through
-/// the `RecordingActions` fake in the reconciler module.
+/// Delegates to `AppStore::list_template_presets_with_prebuilds` and
+/// `AppStore::list_running_prebuilt_workspaces` (Go:
+/// `GetTemplatePresetsWithPrebuilds` and `GetRunningPrebuiltWorkspaces`
+/// in `coder/coderd/database/queries/prebuilds.sql`).
 pub struct AppStoreReconcilerAdapter {
-    _store: Arc<dyn AppStore>,
+    store: Arc<dyn AppStore>,
 }
 
 impl AppStoreReconcilerAdapter {
     /// Wraps the supplied store.
     #[must_use]
     pub fn new(store: Arc<dyn AppStore>) -> Arc<Self> {
-        Arc::new(Self { _store: store })
+        Arc::new(Self { store })
     }
+}
+
+/// Converts a [`coder_core::TemplatePresetWithPrebuild`] row into the
+/// reconciler's narrower shape. Pulled out as a free function so
+/// transformation is unit-testable without mocking the full `AppStore`
+/// trait.
+pub(crate) fn preset_row_to_info(
+    row: coder_core::TemplatePresetWithPrebuild,
+) -> crate::prebuilds_reconciler::PresetPrebuildInfo {
+    crate::prebuilds_reconciler::PresetPrebuildInfo {
+        template_id: row.template_id,
+        template_version_id: row.template_version_id,
+        organization_id: row.organization_id,
+        preset_id: row.preset_id,
+        preset_name: row.preset_name,
+        // Clamp negative values (shouldn't happen — DB has
+        // `desired_instances` as a positive integer — but be
+        // defensive rather than panic).
+        desired_instances: u32::try_from(row.desired_instances.max(0)).unwrap_or(0),
+        using_active_version: row.using_active_version,
+        // `prebuild_status = 'hard_limited'` is set by the hard-limit
+        // query when a preset has too many consecutive failures.
+        // Mirrors Go's `PrebuildStatus.Equals`.
+        is_hard_limited: row.prebuild_status == "hard_limited",
+    }
+}
+
+/// Converts a [`coder_core::RunningPrebuiltWorkspace`] row into the
+/// reconciler's narrower shape. Returns `None` for workspaces that
+/// don't carry a `current_preset_id` — they can't be attributed to any
+/// preset for reconciliation.
+pub(crate) fn running_workspace_row_to_info(
+    row: coder_core::RunningPrebuiltWorkspace,
+) -> Option<crate::prebuilds_reconciler::PrebuiltWorkspace> {
+    row.current_preset_id
+        .map(|preset_id| crate::prebuilds_reconciler::PrebuiltWorkspace {
+            id: row.id,
+            preset_id,
+            created_at: row.created_at,
+        })
 }
 
 #[async_trait::async_trait]
@@ -301,19 +336,25 @@ impl crate::prebuilds_reconciler::PrebuildReconcilerStore for AppStoreReconciler
     async fn list_presets_with_prebuilds(
         &self,
     ) -> Result<Vec<crate::prebuilds_reconciler::PresetPrebuildInfo>, StorageError> {
-        // TODO-prebuild-queries: wire up `GetTemplatePresetsWithPrebuilds`
-        // once the SQL is ported. Go reference:
-        // coder/coderd/database/queries/prebuilds.sql
-        Ok(Vec::new())
+        let rows = self.store.list_template_presets_with_prebuilds().await?;
+        Ok(rows
+            .into_iter()
+            // Skip soft-deleted templates: the reconciler should not
+            // create or churn prebuilds for templates the admin has
+            // retired.
+            .filter(|r| !r.template_deleted)
+            .map(preset_row_to_info)
+            .collect())
     }
 
     async fn list_prebuilt_workspaces(
         &self,
     ) -> Result<Vec<crate::prebuilds_reconciler::PrebuiltWorkspace>, StorageError> {
-        // TODO-prebuild-queries: wire up `GetRunningPrebuiltWorkspaces`
-        // once the SQL is ported. Go reference:
-        // coder/coderd/database/queries/prebuilds.sql
-        Ok(Vec::new())
+        let rows = self.store.list_running_prebuilt_workspaces().await?;
+        Ok(rows
+            .into_iter()
+            .filter_map(running_workspace_row_to_info)
+            .collect())
     }
 }
 
@@ -541,5 +582,84 @@ mod tests {
         assert_eq!(build_row.reason, BUILD_REASON_PREBUILD);
         assert_eq!(build_row.initiator_id, PREBUILDS_SYSTEM_USER_ID);
         assert_eq!(build.transition, "delete");
+    }
+
+    fn sample_row(desired: i32, status: &str) -> coder_core::TemplatePresetWithPrebuild {
+        coder_core::TemplatePresetWithPrebuild {
+            template_id: Uuid::new_v4(),
+            template_version_id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
+            preset_id: Uuid::new_v4(),
+            preset_name: "warm".to_owned(),
+            desired_instances: desired,
+            using_active_version: true,
+            prebuild_status: status.to_owned(),
+            template_deleted: false,
+            template_deprecated: false,
+            created_at: OffsetDateTime::now_utc(),
+        }
+    }
+
+    #[test]
+    fn preset_row_to_info_maps_healthy_status() {
+        let row = sample_row(3, "healthy");
+        let info = preset_row_to_info(row.clone());
+        assert_eq!(info.preset_id, row.preset_id);
+        assert_eq!(info.template_id, row.template_id);
+        assert_eq!(info.template_version_id, row.template_version_id);
+        assert_eq!(info.organization_id, row.organization_id);
+        assert_eq!(info.desired_instances, 3);
+        assert!(info.using_active_version);
+        assert!(!info.is_hard_limited);
+    }
+
+    #[test]
+    fn preset_row_to_info_flags_hard_limited() {
+        let row = sample_row(5, "hard_limited");
+        let info = preset_row_to_info(row);
+        assert!(info.is_hard_limited);
+    }
+
+    #[test]
+    fn preset_row_to_info_clamps_negative_desired_instances() {
+        let row = sample_row(-1, "healthy");
+        let info = preset_row_to_info(row);
+        assert_eq!(info.desired_instances, 0);
+    }
+
+    #[test]
+    fn running_workspace_row_to_info_drops_workspaces_without_preset() {
+        let row = coder_core::RunningPrebuiltWorkspace {
+            id: Uuid::new_v4(),
+            name: "no-preset".to_owned(),
+            template_id: Uuid::new_v4(),
+            template_version_id: Uuid::new_v4(),
+            current_preset_id: None,
+            ready: false,
+            created_at: OffsetDateTime::now_utc(),
+        };
+        assert!(running_workspace_row_to_info(row).is_none());
+    }
+
+    #[test]
+    fn running_workspace_row_to_info_preserves_preset_and_timing() {
+        let preset_id = Uuid::new_v4();
+        let ws_id = Uuid::new_v4();
+        let created_at = OffsetDateTime::now_utc();
+        let row = coder_core::RunningPrebuiltWorkspace {
+            id: ws_id,
+            name: "prebuild-1".to_owned(),
+            template_id: Uuid::new_v4(),
+            template_version_id: Uuid::new_v4(),
+            current_preset_id: Some(preset_id),
+            ready: true,
+            created_at,
+        };
+        let info = running_workspace_row_to_info(row).unwrap_or_else(|| {
+            unreachable!("current_preset_id is set — transformation always returns Some")
+        });
+        assert_eq!(info.id, ws_id);
+        assert_eq!(info.preset_id, preset_id);
+        assert_eq!(info.created_at, created_at);
     }
 }
