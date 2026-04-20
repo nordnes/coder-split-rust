@@ -28,6 +28,8 @@ use uuid::Uuid;
 
 use coder_core::StorageError;
 
+use crate::builder::{PrebuildActions, PrebuildStartInput};
+
 /// Go's `FailureHardLimitDefault` — the maximum number of consecutive
 /// prebuild failures per preset before reconciliation stops creating new
 /// prebuilds for it (deletions remain allowed). Mirrors
@@ -93,6 +95,10 @@ pub struct PresetPrebuildInfo {
     pub template_id: Uuid,
     /// Active template version id (presets always belong to a version).
     pub template_version_id: Uuid,
+    /// Organization the template belongs to. Needed by the
+    /// [`crate::builder::PrebuildBuilder`] when spawning prebuilt
+    /// workspaces.
+    pub organization_id: Uuid,
     /// Preset id.
     pub preset_id: Uuid,
     /// Preset name (for logs/metrics).
@@ -178,15 +184,20 @@ where
     options: PrebuildReconcilerOptions,
     cancel: CancellationToken,
     last_stats: Mutex<Option<ReconcileStats>>,
+    /// Build-action executor. When `None`, the reconciler logs + bumps
+    /// metrics but performs no database writes; useful for tests and
+    /// early-startup situations where the AppStore is not yet wired.
+    actions: Option<Arc<dyn PrebuildActions>>,
 }
 
 impl<S> PrebuildReconciler<S>
 where
     S: PrebuildReconcilerStore,
 {
-    /// Constructs a new reconciler. The caller owns the
-    /// [`CancellationToken`]; cancelling it stops [`Self::spawn`]'s
-    /// background loop gracefully.
+    /// Constructs a new reconciler without a build executor. Actions
+    /// will be logged + metered but not persisted. Prefer
+    /// [`Self::with_actions`] in production where the reconciler must
+    /// actually spawn and delete workspaces.
     pub fn new(
         store: Arc<S>,
         options: PrebuildReconcilerOptions,
@@ -197,6 +208,25 @@ where
             options,
             cancel,
             last_stats: Mutex::new(None),
+            actions: None,
+        }
+    }
+
+    /// Constructs a reconciler wired to a [`PrebuildActions`] executor
+    /// so the tick loop can actually create and delete prebuilt
+    /// workspaces via `AppStore`.
+    pub fn with_actions(
+        store: Arc<S>,
+        options: PrebuildReconcilerOptions,
+        cancel: CancellationToken,
+        actions: Arc<dyn PrebuildActions>,
+    ) -> Self {
+        Self {
+            store,
+            options,
+            cancel,
+            last_stats: Mutex::new(None),
+            actions: Some(actions),
         }
     }
 
@@ -236,8 +266,8 @@ where
     /// 2. Compute per-preset deltas (`desired - actual`).
     /// 3. Apply the global `hard_limit`: suppress creates that would push
     ///    total prebuilds past the limit.
-    /// 4. Execute actions (currently stubbed — see
-    ///    `TODO-prebuild-build-action`).
+    /// 4. Execute actions via [`PrebuildActions`] when wired, otherwise
+    ///    log + emit metrics only.
     /// 5. Emit metrics.
     pub async fn tick(&self) -> Result<ReconcileStats, ReconcileError> {
         let start = std::time::Instant::now();
@@ -258,22 +288,45 @@ where
         let hard_limit = self.options.hard_limit;
         let mut running_total = total_actual_usize;
 
-        for delta in deltas {
+        // Iterate over (preset, delta) pairs so the build executor has
+        // the template / organization / version context it needs.
+        for (preset, delta) in presets.iter().zip(deltas.into_iter()) {
             if !delta.to_delete.is_empty() {
                 let count = u64::try_from(delta.to_delete.len()).unwrap_or(u64::MAX);
                 stats.deletes_requested = stats.deletes_requested.saturating_add(count);
                 for ws_id in &delta.to_delete {
-                    // TODO-prebuild-build-action: plumb through
-                    // `wsbuilder`-backed deletion once the build-creation
-                    // chain is available on this crate. For now we log
-                    // and emit metrics so operators can observe intent.
-                    info!(
-                        preset_id = %delta.preset_id,
-                        workspace_id = %ws_id,
-                        "prebuilds: would delete prebuilt workspace (stub)"
-                    );
                     metrics::counter!(METRIC_PREBUILDS_DELETED_TOTAL).increment(1);
                     running_total = running_total.saturating_sub(1);
+                    match self.actions.as_ref() {
+                        Some(actions) => match actions.delete_prebuild(*ws_id).await {
+                            Ok(build) => {
+                                stats.deletes_executed = stats.deletes_executed.saturating_add(1);
+                                info!(
+                                    preset_id = %delta.preset_id,
+                                    workspace_id = %ws_id,
+                                    build_id = %build.id,
+                                    "prebuilds: delete-build enqueued"
+                                );
+                            }
+                            Err(error) => {
+                                metrics::counter!(METRIC_PREBUILDS_RECONCILE_ERRORS_TOTAL)
+                                    .increment(1);
+                                warn!(
+                                    preset_id = %delta.preset_id,
+                                    workspace_id = %ws_id,
+                                    error = %error,
+                                    "prebuilds: delete-build failed"
+                                );
+                            }
+                        },
+                        None => {
+                            info!(
+                                preset_id = %delta.preset_id,
+                                workspace_id = %ws_id,
+                                "prebuilds: would delete prebuilt workspace (no actions wired)"
+                            );
+                        }
+                    }
                 }
             }
 
@@ -295,17 +348,44 @@ where
                         );
                         continue;
                     }
-                    // TODO-prebuild-build-action: replace with real
-                    // wsbuilder-driven prebuild creation. Must:
-                    //   * insert workspace owned by PREBUILDS_SYSTEM_USER_ID
-                    //   * insert provisioner job with preset_id tagged
-                    //   * insert workspace build (transition=start)
-                    info!(
-                        preset_id = %delta.preset_id,
-                        "prebuilds: would create prebuilt workspace (stub)"
-                    );
                     metrics::counter!(METRIC_PREBUILDS_CREATED_TOTAL).increment(1);
                     running_total = running_total.saturating_add(1);
+                    match self.actions.as_ref() {
+                        Some(actions) => match actions
+                            .create_prebuild(PrebuildStartInput {
+                                organization_id: preset.organization_id,
+                                template_id: preset.template_id,
+                                template_version_id: preset.template_version_id,
+                                preset_id: preset.preset_id,
+                            })
+                            .await
+                        {
+                            Ok(build) => {
+                                stats.creates_executed = stats.creates_executed.saturating_add(1);
+                                info!(
+                                    preset_id = %delta.preset_id,
+                                    workspace_id = %build.workspace_id,
+                                    build_id = %build.id,
+                                    "prebuilds: create-build enqueued"
+                                );
+                            }
+                            Err(error) => {
+                                metrics::counter!(METRIC_PREBUILDS_RECONCILE_ERRORS_TOTAL)
+                                    .increment(1);
+                                warn!(
+                                    preset_id = %delta.preset_id,
+                                    error = %error,
+                                    "prebuilds: create-build failed"
+                                );
+                            }
+                        },
+                        None => {
+                            info!(
+                                preset_id = %delta.preset_id,
+                                "prebuilds: would create prebuilt workspace (no actions wired)"
+                            );
+                        }
+                    }
                 }
             }
         }
@@ -391,6 +471,11 @@ pub fn compute_deltas(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::builder::{
+        BUILD_REASON_PREBUILD, BuilderError, PrebuildActions, PrebuildStartInput,
+    };
+    use coder_core::PREBUILDS_SYSTEM_USER_ID;
+    use coder_core::ports::WorkspaceBuildRecord;
     use std::sync::Mutex as StdMutex;
     use time::macros::datetime;
 
@@ -425,6 +510,7 @@ mod tests {
         PresetPrebuildInfo {
             template_id: Uuid::new_v4(),
             template_version_id: Uuid::new_v4(),
+            organization_id: Uuid::new_v4(),
             preset_id: Uuid::new_v4(),
             preset_name: name.to_owned(),
             desired_instances: desired,
@@ -545,5 +631,132 @@ mod tests {
         assert_eq!(stats.presets_evaluated, 0);
         assert_eq!(stats.creates_requested, 0);
         assert_eq!(stats.deletes_requested, 0);
+    }
+
+    /// In-memory [`PrebuildActions`] impl that records every
+    /// create/delete request so the integration-ish test below can
+    /// assert the reconciler drives the builder as expected.
+    #[derive(Default)]
+    struct RecordingActions {
+        creates: StdMutex<Vec<PrebuildStartInput>>,
+        deletes: StdMutex<Vec<Uuid>>,
+    }
+
+    #[async_trait]
+    impl PrebuildActions for RecordingActions {
+        async fn create_prebuild(
+            &self,
+            input: PrebuildStartInput,
+        ) -> Result<WorkspaceBuildRecord, BuilderError> {
+            if let Ok(mut guard) = self.creates.lock() {
+                guard.push(input.clone());
+            }
+            Ok(WorkspaceBuildRecord {
+                id: Uuid::new_v4(),
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                workspace_id: Uuid::new_v4(),
+                build_number: 1,
+                transition: "start".to_owned(),
+                job_id: Uuid::new_v4(),
+                template_version_id: input.template_version_id,
+                initiator_id: PREBUILDS_SYSTEM_USER_ID,
+                provisioner_state: None,
+                deadline: None,
+                max_deadline: None,
+                reason: BUILD_REASON_PREBUILD.to_owned(),
+                daily_cost: 0,
+            })
+        }
+
+        async fn delete_prebuild(
+            &self,
+            workspace_id: Uuid,
+        ) -> Result<WorkspaceBuildRecord, BuilderError> {
+            if let Ok(mut guard) = self.deletes.lock() {
+                guard.push(workspace_id);
+            }
+            Ok(WorkspaceBuildRecord {
+                id: Uuid::new_v4(),
+                created_at: OffsetDateTime::now_utc(),
+                updated_at: OffsetDateTime::now_utc(),
+                workspace_id,
+                build_number: 2,
+                transition: "delete".to_owned(),
+                job_id: Uuid::new_v4(),
+                template_version_id: Uuid::nil(),
+                initiator_id: PREBUILDS_SYSTEM_USER_ID,
+                provisioner_state: None,
+                deadline: None,
+                max_deadline: None,
+                reason: BUILD_REASON_PREBUILD.to_owned(),
+                daily_cost: 0,
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn prebuild_reconciler_tick_creates_workspaces_via_builder() {
+        // Seed a preset with desired=2 and no existing prebuilds.
+        let p = preset("warm", 2, true);
+        let store = FakePrebuildStore::new(vec![p.clone()], vec![]);
+        let actions = Arc::new(RecordingActions::default());
+        let reconciler = PrebuildReconciler::with_actions(
+            store,
+            PrebuildReconcilerOptions::default(),
+            CancellationToken::new(),
+            actions.clone() as Arc<dyn PrebuildActions>,
+        );
+
+        let stats = reconciler.tick().await.unwrap_or_default();
+        assert_eq!(stats.creates_requested, 2, "two creates requested");
+        assert_eq!(stats.creates_executed, 2, "two creates executed");
+
+        let creates = actions
+            .creates
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        assert_eq!(creates.len(), 2, "two workspace rows landed via builder");
+        for ci in &creates {
+            assert_eq!(ci.preset_id, p.preset_id);
+            assert_eq!(ci.template_id, p.template_id);
+            assert_eq!(ci.template_version_id, p.template_version_id);
+            assert_eq!(ci.organization_id, p.organization_id);
+        }
+    }
+
+    #[tokio::test]
+    async fn prebuild_reconciler_tick_deletes_oldest_prebuild_via_builder() {
+        // desired=0 but 2 existing prebuilds → both should be deleted
+        // oldest-first.
+        let p = preset("warm", 0, true);
+        let existing = vec![ws(p.preset_id, 10), ws(p.preset_id, 1)];
+        let oldest_id = existing[1].id;
+        let newer_id = existing[0].id;
+        let store = FakePrebuildStore::new(vec![p.clone()], existing);
+        let actions = Arc::new(RecordingActions::default());
+        let reconciler = PrebuildReconciler::with_actions(
+            store,
+            PrebuildReconcilerOptions::default(),
+            CancellationToken::new(),
+            actions.clone() as Arc<dyn PrebuildActions>,
+        );
+
+        let stats = reconciler.tick().await.unwrap_or_default();
+        assert_eq!(stats.deletes_requested, 2);
+        assert_eq!(stats.deletes_executed, 2);
+
+        let deletes = actions
+            .deletes
+            .lock()
+            .map(|g| g.clone())
+            .unwrap_or_default();
+        assert_eq!(deletes.len(), 2);
+        assert_eq!(deletes[0], oldest_id, "oldest prebuild is deleted first");
+        assert_eq!(
+            deletes[1], newer_id,
+            "next-oldest prebuild is deleted after"
+        );
     }
 }

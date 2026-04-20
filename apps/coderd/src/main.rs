@@ -1175,6 +1175,39 @@ async fn run() -> Result<(), MainError> {
         ))
         .spawn();
 
+    // Start the enterprise prebuild reconciler, gated on the
+    // `WorkspacePrebuilds` entitlement. The reconciler is a no-op on
+    // unlicensed deployments (entitlement disabled ⇒ nothing spawned),
+    // but we only burn a tokio task when the feature is actually
+    // licensed. Mirrors Go's gating in `enterprise/coderd/coderd.go`
+    // where the prebuild reconciler is only registered when the
+    // `WorkspacePrebuilds` feature is enabled.
+    let prebuilds_entitled = state
+        .entitlements
+        .enabled(coder_license::FeatureName::WorkspacePrebuilds);
+    let prebuilds_handle = if prebuilds_entitled {
+        let prebuilds_cancel = CancellationToken::new();
+        let actions = coder_workspaces::builder::AppStorePrebuildActions::new(
+            state.store.clone() as Arc<dyn AppStore>
+        );
+        let reconciler_store = coder_workspaces::builder::AppStoreReconcilerAdapter::new(
+            state.store.clone() as Arc<dyn AppStore>,
+        );
+        let reconciler = Arc::new(
+            coder_workspaces::prebuilds_reconciler::PrebuildReconciler::with_actions(
+                reconciler_store,
+                coder_workspaces::prebuilds_reconciler::PrebuildReconcilerOptions::default(),
+                prebuilds_cancel.clone(),
+                actions as Arc<dyn coder_workspaces::builder::PrebuildActions>,
+            ),
+        );
+        let handle = reconciler.spawn();
+        Some((prebuilds_cancel, handle))
+    } else {
+        info!("prebuilds entitlement disabled; skipping prebuild reconciler");
+        None
+    };
+
     let (state, update_check_handle) = if config.update_check {
         let update_check_cancel = CancellationToken::new();
         let handle = Arc::new(coder_server::UpdateChecker::with_cancel(
@@ -1350,6 +1383,17 @@ async fn run() -> Result<(), MainError> {
     if let Some(update_check_handle) = update_check_handle {
         coordinator.register("update_check", async move {
             update_check_handle.shutdown().await;
+        });
+    }
+
+    // 5e. Cancel the prebuild reconciler (enterprise-only, spawned
+    //     above when the `WorkspacePrebuilds` entitlement is enabled)
+    //     so its in-flight tick can finish writing to the DB before
+    //     the pool is closed.
+    if let Some((prebuilds_cancel, prebuilds_handle)) = prebuilds_handle {
+        coordinator.register("prebuild_reconciler", async move {
+            prebuilds_cancel.cancel();
+            prebuilds_handle.join().await;
         });
     }
 
