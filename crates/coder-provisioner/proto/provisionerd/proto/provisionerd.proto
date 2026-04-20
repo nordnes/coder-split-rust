@@ -2,8 +2,8 @@ syntax = "proto3";
 
 // Stripped vendoring of the upstream `provisionerd/proto/provisionerd.proto`.
 // Only the messages and RPCs required by the currently-ported RPCs
-// (CommitQuota, AcquireJob, UpdateJob) are retained; the rest (FailJob,
-// CompleteJob, UploadFile, DownloadFile, AcquireJobWithCancel) will be
+// (CommitQuota, AcquireJob, UpdateJob, FailJob) are retained; the rest
+// (CompleteJob, UploadFile, DownloadFile, AcquireJobWithCancel) will be
 // added in follow-up batches along with the corresponding
 // `provisionersdk/proto` imports they require.
 //
@@ -125,4 +125,39 @@ message UpdateJobResponse {
 
   bool canceled = 1;
   repeated VariableValue variable_values = 3;
+}
+
+// ── FailJob ───────────────────────────────────────────────────
+//
+// FailedJob is sent when a provisioner daemon reports a job failure.
+// The message retains upstream field numbers and the full top-level
+// oneof envelope so Go daemons stay wire-compatible. The nested
+// `WorkspaceBuild.timings` field (upstream field 2, typed
+// `repeated provisioner.Timing`) is not yet vendored — `reserved 2`
+// preserves the slot for when the provisionersdk types land in a
+// follow-up batch. Server-side handling of `state` and per-type
+// cleanup (workspace-build deadline reset, end-of-logs pubsub) is
+// also a follow-up; this first slice only persists the top-level
+// `error` / `error_code` and marks the job completed via the
+// existing `update_provisioner_job_with_complete_by_id` store hook.
+
+message FailedJob {
+  message WorkspaceBuild {
+    // Reserved for `repeated provisioner.Timing timings = 2;` which
+    // requires the provisionersdk types to be vendored.
+    reserved 2;
+
+    bytes state = 1;
+  }
+  message TemplateImport {}
+  message TemplateDryRun {}
+
+  string job_id = 1;
+  string error = 2;
+  oneof type {
+    WorkspaceBuild workspace_build = 3;
+    TemplateImport template_import = 4;
+    TemplateDryRun template_dry_run = 5;
+  }
+  string error_code = 6;
 }
