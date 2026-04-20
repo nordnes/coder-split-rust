@@ -2,6 +2,7 @@
 //! `WorkspaceProxy`).
 
 use super::*;
+use coder_connectivity::tailnet::NodeInfo;
 use coder_core::api::{
     CreateWorkspaceProxyRequest, CryptoKeyResponse, CryptoKeysResponse,
     DeregisterWorkspaceProxyRequest, IssueSignedAppTokenRequest, IssueSignedAppTokenResponse,
@@ -723,41 +724,32 @@ pub(crate) async fn workspace_proxy_deregister(
 /// proxy-to-coderd coordination (tailnet multi-agent).
 ///
 /// Go reference: `coder/enterprise/coderd/workspaceproxycoordinate.go` →
-/// `workspaceProxyCoordinate()`.
+/// `workspaceProxyCoordinate()` which ultimately calls
+/// `tailnetService.ServeMultiAgentClient` in
+/// `coder/enterprise/tailnet/workspaceproxy.go`.
 ///
-/// Registers the proxy as a `Client`-kind peer in the in-memory
+/// Registers the proxy as a multi-agent client in the in-memory
 /// [`TailnetCoordinator`](coder_connectivity::tailnet::TailnetCoordinator)
-/// and multiplexes the JSON coordinate protocol over the WebSocket:
+/// via
+/// [`serve_multi_agent_client_dyn`](coder_connectivity::tailnet::TailnetCoordinator::serve_multi_agent_client_dyn).
+/// The handle returned (`MultiAgentConn`) plugs the proxy in as a single
+/// logical peer that can subscribe to many agents on behalf of its end-user
+/// clients, mirroring Go's `MultiAgentConn` abstraction.
 ///
-/// - The initial frame is a `{ "derp_map": ... }` envelope so the proxy has
-///   relay information immediately (mirrors the agent coordinate handler and
-///   what the Go `tailnetService` does on attach).
-/// - Inbound JSON frames are parsed as
-///   [`CoordinateRequest`](coder_connectivity::tailnet::CoordinateRequest)
-///   and fed to the coordinator, which fans out peer updates to tunnel
-///   targets.
-/// - Outbound coordinator responses are serialised as JSON and written back
-///   to the socket.
-/// - DERP map changes (published via the coordinator's `watch::Receiver`)
-///   are forwarded as `{ "derp_map": ... }` envelopes so the proxy stays in
-///   sync when relay topology changes.
+/// Wire protocol: each inbound WebSocket binary frame carries a single
+/// prost-encoded `coder.tailnet.v2.CoordinateRequest`. Three request kinds
+/// are translated to `MultiAgentConn` calls:
 ///
-/// The handler honours the `?version=` query parameter used by the Go
-/// reference to distinguish the JSON-over-WebSocket protocol (`1.x`) from
-/// the binary dRPC protocol (`2.x+`). Because the Rust tailnet coordinator
-/// does not yet speak dRPC/protobuf, any major version ≥ 2 is rejected with
-/// 400 before the upgrade. Missing/empty defaults to `1.0`.
+/// - `update_self{node}` → [`MultiAgentConn::update_self`]
+/// - `add_tunnel{id}` → [`MultiAgentConn::subscribe`]
+/// - `remove_tunnel{id}` → [`MultiAgentConn::unsubscribe`]
 ///
-/// # Remaining gaps vs. Go
+/// Each outbound coordinator response is prost-encoded as a
+/// `coder.tailnet.v2.CoordinateResponse` and written as a binary frame.
 ///
-/// * **Multi-agent fan-out.** In Go, `ServeMultiAgentClient` gives the proxy
-///   a single RPC channel that multiplexes many end-user client sessions.
-///   Each `CoordinateRequest` carries a per-client peer ID. The Rust JSON
-///   protocol treats the proxy as a single peer; per-client multiplexing
-///   will come in with the DRPC port (gap §6).
-/// * **DRPC / protobuf wire compatibility.** Real Go proxies will dial
-///   `?version=2.x` and speak binary DRPC; this handler rejects those
-///   connections until the connectivity crate grows DRPC support.
+/// The `?version=` query parameter is honoured per Go: only major version 2
+/// (binary DRPC wire) is accepted. Missing/empty defaults to `2.0`; any
+/// major version < 2 or > 2 is rejected with HTTP 400.
 pub(crate) async fn workspace_proxy_coordinate(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -776,16 +768,15 @@ pub(crate) async fn workspace_proxy_coordinate(
         Err(resp) => return Ok(resp),
     };
 
-    // Validate the requested API version. The Go reference parses
-    // `?version=` (default "1.0") against `proto.CurrentVersion` and upgrades
-    // to binary dRPC framing for major >= 2. We only speak JSON (v1.x); any
-    // other major is rejected before the upgrade so the proxy fails fast and
-    // can fall back to v1 negotiation.
+    // Validate the requested API version. Go's workspaceProxyCoordinate only
+    // supports the v2 binary DRPC wire; v1 (JSON) is not accepted on this
+    // route. Default to "2.0" when unspecified to match Go's treatment of a
+    // missing query param in `ServeMultiAgentClient`.
     let version = params
         .get("version")
         .map(String::as_str)
         .filter(|v| !v.is_empty())
-        .unwrap_or("1.0");
+        .unwrap_or("2.0");
     let (major, minor) = match parse_api_version(version) {
         Ok(v) => v,
         Err(detail) => {
@@ -803,7 +794,7 @@ pub(crate) async fn workspace_proxy_coordinate(
                 .into_response());
         }
     };
-    if major != 1 {
+    if major != 2 {
         return Ok((
             StatusCode::BAD_REQUEST,
             Json(ApiResponse {
@@ -813,8 +804,8 @@ pub(crate) async fn workspace_proxy_coordinate(
                     field: "version".to_string(),
                     detail: format!(
                         "version {major}.{minor} is not supported by this \
-                         coderd build; only major version 1 (JSON over \
-                         WebSocket) is implemented"
+                         coderd build; only major version 2 (binary DRPC \
+                         over WebSocket) is implemented"
                     ),
                 }],
             }),
@@ -824,10 +815,12 @@ pub(crate) async fn workspace_proxy_coordinate(
 
     let coordinator = state.coordinator.clone();
     let proxy_name = proxy.name.clone();
-    let session_id = Uuid::new_v4();
+    // Each connection gets a fresh client peer id; mirrors Go's
+    // `uuid.New()` inside `workspaceProxyCoordinate()`.
+    let client_id = Uuid::new_v4();
 
     Ok(ws.on_upgrade(move |socket| async move {
-        run_workspace_proxy_coordinate(socket, coordinator, session_id, proxy_name).await;
+        run_workspace_proxy_coordinate(socket, coordinator, client_id, proxy_name).await;
     }))
 }
 
@@ -847,109 +840,68 @@ fn parse_api_version(version: &str) -> Result<(u32, u32), String> {
     Ok((major, minor))
 }
 
-/// Drives a single proxy coordinate WebSocket session.
+/// Drives a single proxy coordinate WebSocket session using the multi-agent
+/// coordinator path.
 ///
 /// Factored out of [`workspace_proxy_coordinate`] so it can be unit-tested
-/// directly without spinning up an HTTP server.
+/// directly without spinning up an HTTP server. The `coordinator` argument
+/// must support the multi-agent path (see
+/// [`TailnetCoordinator::serve_multi_agent_client_dyn`](
+/// coder_connectivity::tailnet::TailnetCoordinator::serve_multi_agent_client_dyn));
+/// if it does not, the handler closes the socket cleanly.
 async fn run_workspace_proxy_coordinate(
     mut socket: WebSocket,
     coordinator: Arc<dyn coder_connectivity::tailnet::TailnetCoordinator>,
-    session_id: Uuid,
+    client_id: Uuid,
     proxy_name: String,
 ) {
-    use coder_connectivity::tailnet::{CoordinateRequest, CoordinateResponse, PeerKind};
+    use coder_agent_rpc::proto::tailnet_v2 as pb;
+    use prost::Message as _;
 
-    // Watch DERP map updates so changes propagate to the proxy without it
-    // having to poll `/derp-map`.
-    let mut derp_rx = coordinator.subscribe_derp_map();
-    let initial_derp = derp_rx.borrow_and_update().clone();
-    let derp_envelope = serde_json::json!({ "derp_map": initial_derp });
-    if let Ok(payload) = serde_json::to_string(&derp_envelope) {
-        if socket.send(Message::Text(payload.into())).await.is_err() {
-            return;
-        }
-    }
-
-    // Register the proxy as a Client peer. The Go multi-agent model would
-    // assign each end-user client its own peer ID, but the Rust JSON path
-    // treats the proxy as a single peer until DRPC lands.
-    let mut handle = coordinator.coordinate(session_id, proxy_name.clone(), PeerKind::Client);
+    // Register the proxy as a multi-agent client. Mirrors Go's
+    // `tailnetService.ServeMultiAgentClient` entry point.
+    let Some(mut conn) = coordinator.serve_multi_agent_client_dyn(client_id) else {
+        tracing::warn!(
+            %client_id,
+            proxy = %proxy_name,
+            "coordinator does not support multi-agent clients",
+        );
+        let close = CloseFrame {
+            code: axum::extract::ws::close_code::ERROR,
+            reason: "multi-agent coordinator unavailable".into(),
+        };
+        let _ = socket.send(Message::Close(Some(close))).await;
+        return;
+    };
 
     loop {
         tokio::select! {
             // --- Inbound WebSocket frame ---
             ws_msg = socket.recv() => {
                 match ws_msg {
-                    Some(Ok(Message::Text(text))) => {
-                        match serde_json::from_str::<CoordinateRequest>(&text) {
-                            Ok(request) => {
-                                if let Err(error) =
-                                    coordinator.process_request(session_id, request)
-                                {
-                                    tracing::warn!(
-                                        %error,
-                                        session_id = %session_id,
-                                        proxy = %proxy_name,
-                                        "workspace proxy coordinate request error",
-                                    );
-                                }
-                            }
-                            Err(error) => {
-                                tracing::debug!(
-                                    %error,
-                                    session_id = %session_id,
-                                    proxy = %proxy_name,
-                                    "invalid workspace proxy coordinate JSON",
-                                );
-                                let err_resp = CoordinateResponse {
-                                    peer_updates: Vec::new(),
-                                    error: Some(format!("invalid request: {error}")),
-                                };
-                                if let Ok(payload) = serde_json::to_string(&err_resp) {
-                                    if socket
-                                        .send(Message::Text(payload.into()))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
-                                }
-                            }
-                        }
-                    }
                     Some(Ok(Message::Binary(bin))) => {
-                        match serde_json::from_slice::<CoordinateRequest>(&bin) {
-                            Ok(request) => {
-                                if let Err(error) =
-                                    coordinator.process_request(session_id, request)
-                                {
-                                    tracing::warn!(
-                                        %error,
-                                        session_id = %session_id,
-                                        proxy = %proxy_name,
-                                        "workspace proxy coordinate request error (binary)",
-                                    );
-                                }
+                        match pb::CoordinateRequest::decode(bin.as_ref()) {
+                            Ok(req) => {
+                                apply_proxy_coordinate_request(&mut conn, req);
                             }
                             Err(error) => {
                                 tracing::debug!(
                                     %error,
-                                    session_id = %session_id,
+                                    %client_id,
                                     proxy = %proxy_name,
-                                    "invalid workspace proxy coordinate binary JSON",
+                                    "invalid workspace proxy coordinate frame",
                                 );
-                                let err_resp = CoordinateResponse {
+                                let err_resp = pb::CoordinateResponse {
                                     peer_updates: Vec::new(),
-                                    error: Some(format!("invalid request: {error}")),
+                                    error: format!("invalid request: {error}"),
                                 };
-                                if let Ok(payload) = serde_json::to_string(&err_resp) {
-                                    if socket
-                                        .send(Message::Text(payload.into()))
-                                        .await
-                                        .is_err()
-                                    {
-                                        break;
-                                    }
+                                let payload = err_resp.encode_to_vec();
+                                if socket
+                                    .send(Message::Binary(payload.into()))
+                                    .await
+                                    .is_err()
+                                {
+                                    break;
                                 }
                             }
                         }
@@ -960,47 +912,156 @@ async fn run_workspace_proxy_coordinate(
                         }
                     }
                     Some(Ok(Message::Pong(_))) => {}
+                    // Text frames are not part of the v2 DRPC wire; ignore
+                    // them rather than tearing the connection down so that
+                    // stray control text (e.g. from test harnesses) does
+                    // not cause a disconnect.
+                    Some(Ok(Message::Text(_))) => {}
                     Some(Ok(Message::Close(_))) | None => break,
                     Some(Err(_)) => break,
                 }
             }
-            // --- Outbound coordination response ---
-            resp = handle.response_rx.recv() => {
+            // --- Outbound coordination response from the multi-agent conn ---
+            resp = conn.next_update() => {
                 match resp {
                     Some(coord_response) => {
-                        if let Ok(payload) = serde_json::to_string(&coord_response) {
-                            if socket.send(Message::Text(payload.into())).await.is_err() {
-                                break;
-                            }
+                        let pb_resp = encode_coordinate_response(&coord_response);
+                        let payload = pb_resp.encode_to_vec();
+                        if socket
+                            .send(Message::Binary(payload.into()))
+                            .await
+                            .is_err()
+                        {
+                            break;
                         }
                     }
                     None => break,
                 }
             }
-            // --- DERP map change ---
-            derp_changed = derp_rx.changed() => {
-                if derp_changed.is_err() {
-                    // Coordinator shut down — close the session.
-                    break;
-                }
-                let updated = derp_rx.borrow_and_update().clone();
-                let envelope = serde_json::json!({ "derp_map": updated });
-                if let Ok(payload) = serde_json::to_string(&envelope) {
-                    if socket.send(Message::Text(payload.into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
         }
     }
 
-    coordinator.close_coordination(session_id, handle.session_id);
+    // Deregister the client from the coordinator, clearing subscriptions and
+    // notifying any tunnel peers. Mirrors the `defer s.RemovePeer(...)` path
+    // on the Go side.
+    conn.close();
 
     let close = CloseFrame {
         code: axum::extract::ws::close_code::NORMAL,
         reason: "coordinate session ended".into(),
     };
     let _ = socket.send(Message::Close(Some(close))).await;
+}
+
+/// Decodes a prost [`pb::Node`](coder_agent_rpc::proto::tailnet_v2::Node) into
+/// the coordinator's in-memory [`NodeInfo`] shape.
+fn node_from_proto(pb_node: &coder_agent_rpc::proto::tailnet_v2::Node) -> NodeInfo {
+    NodeInfo {
+        id: pb_node.id,
+        key: if pb_node.key.is_empty() {
+            None
+        } else {
+            Some(pb_node.key.clone())
+        },
+        disco: if pb_node.disco.is_empty() {
+            None
+        } else {
+            Some(pb_node.disco.clone())
+        },
+        preferred_derp: i64::from(pb_node.preferred_derp),
+        derp_latency: pb_node.derp_latency.clone(),
+        addresses: pb_node.addresses.clone(),
+        allowed_ips: pb_node.allowed_ips.clone(),
+        endpoints: pb_node.endpoints.clone(),
+    }
+}
+
+/// Encodes the coordinator's in-memory [`NodeInfo`] as a prost
+/// [`pb::Node`](coder_agent_rpc::proto::tailnet_v2::Node).
+fn node_to_proto(node: &NodeInfo) -> coder_agent_rpc::proto::tailnet_v2::Node {
+    coder_agent_rpc::proto::tailnet_v2::Node {
+        id: node.id,
+        as_of: None,
+        key: node.key.clone().unwrap_or_default(),
+        disco: node.disco.clone().unwrap_or_default(),
+        #[allow(clippy::cast_possible_truncation)]
+        preferred_derp: node.preferred_derp as i32,
+        derp_latency: node.derp_latency.clone(),
+        derp_forced_websocket: HashMap::new(),
+        addresses: node.addresses.clone(),
+        allowed_ips: node.allowed_ips.clone(),
+        endpoints: node.endpoints.clone(),
+    }
+}
+
+/// Parses a 16-byte protobuf UUID field; returns `None` if the byte slice is
+/// not exactly 16 bytes.
+fn uuid_from_proto_bytes(bytes: &[u8]) -> Option<Uuid> {
+    let arr: [u8; 16] = bytes.try_into().ok()?;
+    Some(Uuid::from_bytes(arr))
+}
+
+/// Translates a prost `CoordinateRequest` into the matching
+/// [`MultiAgentConn`] action(s). Unknown/unsupported action kinds are ignored.
+fn apply_proxy_coordinate_request(
+    conn: &mut coder_connectivity::tailnet::MultiAgentConn,
+    req: coder_agent_rpc::proto::tailnet_v2::CoordinateRequest,
+) {
+    if let Some(update) = req.update_self {
+        if let Some(node) = update.node {
+            conn.update_self(node_from_proto(&node));
+        }
+    }
+    if let Some(tunnel) = req.add_tunnel {
+        if let Some(agent_id) = uuid_from_proto_bytes(&tunnel.id) {
+            conn.subscribe(agent_id);
+        }
+    }
+    if let Some(tunnel) = req.remove_tunnel {
+        if let Some(agent_id) = uuid_from_proto_bytes(&tunnel.id) {
+            conn.unsubscribe(agent_id);
+        }
+    }
+    // `disconnect` and `ready_for_handshake` are accepted but have no direct
+    // multi-agent equivalent — the client-level disconnect path is handled by
+    // socket closure, and ready-for-handshake fan-out is not yet modelled in
+    // the multi-agent subscription set.
+}
+
+/// Encodes the coordinator's in-memory response into a prost
+/// `CoordinateResponse` suitable for framing on the binary WebSocket wire.
+fn encode_coordinate_response(
+    resp: &coder_connectivity::tailnet::CoordinateResponse,
+) -> coder_agent_rpc::proto::tailnet_v2::CoordinateResponse {
+    use coder_agent_rpc::proto::tailnet_v2 as pb;
+    use coder_connectivity::tailnet::PeerUpdateKind;
+
+    let peer_updates: Vec<pb::coordinate_response::PeerUpdate> = resp
+        .peer_updates
+        .iter()
+        .map(|u| {
+            let kind = match u.kind {
+                PeerUpdateKind::Node => pb::coordinate_response::peer_update::Kind::Node,
+                PeerUpdateKind::Disconnected => {
+                    pb::coordinate_response::peer_update::Kind::Disconnected
+                }
+                PeerUpdateKind::Lost => pb::coordinate_response::peer_update::Kind::Lost,
+                PeerUpdateKind::ReadyForHandshake => {
+                    pb::coordinate_response::peer_update::Kind::ReadyForHandshake
+                }
+            };
+            pb::coordinate_response::PeerUpdate {
+                id: u.id.as_bytes().to_vec(),
+                node: u.node.as_ref().map(node_to_proto),
+                kind: i32::from(kind),
+                reason: String::new(),
+            }
+        })
+        .collect();
+    pb::CoordinateResponse {
+        peer_updates,
+        error: resp.error.clone().unwrap_or_default(),
+    }
 }
 
 /// `GET /api/v2/workspaceproxies/me/crypto-keys` — fetch signing keys.
@@ -1235,10 +1296,10 @@ pub(crate) async fn workspace_proxy_report_app_stats(
 mod coordinate_tests {
     //! Tests for [`workspace_proxy_coordinate`].
     //!
-    //! These exercise the bridge between the proxy WebSocket and the
-    //! [`coder_connectivity::tailnet::TailnetCoordinator`]: version
-    //! negotiation, initial DERP map delivery, peer-update forwarding, and
-    //! disconnect cleanup.
+    //! Exercises the v2 binary DRPC bridge between the proxy WebSocket and
+    //! the [`coder_connectivity::tailnet::TailnetCoordinator`] multi-agent
+    //! path: version negotiation, update-self registration, subscribe
+    //! fan-out, and disconnect deregistration.
 
     use super::*;
     use crate::app::build_router;
@@ -1248,9 +1309,11 @@ mod coordinate_tests {
     };
     use axum::Router;
     use axum::http::Method;
-    use coder_connectivity::tailnet::{CoordinateRequest, NodeInfo, PeerKind};
+    use coder_agent_rpc::proto::tailnet_v2 as pb;
+    use coder_connectivity::tailnet::{CoordinateRequest as CoordReq, NodeInfo, PeerKind};
     use coder_license::FeatureName;
     use futures_util::{SinkExt, StreamExt};
+    use prost::Message as _;
     use serde_json::Value;
     use std::error::Error;
     use std::sync::Arc;
@@ -1344,6 +1407,32 @@ mod coordinate_tests {
         Ok(proxy_token)
     }
 
+    /// Polls the coordinator's debug JSON until a predicate on `total_peers`
+    /// holds or the loop budget runs out. Returns the last observed value.
+    async fn wait_for_peer_count(
+        coordinator: &Arc<dyn coder_connectivity::tailnet::TailnetCoordinator>,
+        predicate: impl Fn(u64) -> bool,
+    ) -> u64 {
+        let mut last = 0u64;
+        for _ in 0..40 {
+            last = coordinator
+                .debug_json()
+                .get("total_peers")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            if predicate(last) {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        last
+    }
+
+    /// Default URL for the v2 coordinate endpoint used by the new tests.
+    fn coord_v2_url(base: &url::Url) -> String {
+        ws_url(base, "api/v2/workspaceproxies/me/coordinate?version=2.0")
+    }
+
     /// Unauthenticated clients cannot upgrade to the coordinate WebSocket.
     #[tokio::test]
     async fn coordinate_rejects_missing_proxy_token() -> TestResult {
@@ -1353,7 +1442,7 @@ mod coordinate_tests {
 
         // No Coder-Session-Token header: the server should reject the
         // upgrade with a 4xx before any WebSocket frames are exchanged.
-        let url = ws_url(&base_url, "api/v2/workspaceproxies/me/coordinate");
+        let url = coord_v2_url(&base_url);
         let request = http::Request::builder()
             .uri(&url)
             .header("Host", base_url.host_str().unwrap_or("127.0.0.1"))
@@ -1367,33 +1456,6 @@ mod coordinate_tests {
             .body(())?;
         let result = tokio_tungstenite::connect_async(request).await;
         assert!(result.is_err(), "should reject unauthenticated coordinate");
-        Ok(())
-    }
-
-    /// An authenticated proxy receives the initial DERP-map envelope on
-    /// connect, before any other frames.
-    #[tokio::test]
-    async fn coordinate_sends_initial_derp_map() -> TestResult {
-        let (state, _store) = entitled_state()?;
-        let app = build_router(state, None);
-        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
-
-        let proxy_token = create_proxy(&app, "proxy-derp").await?;
-        let url = ws_url(&base_url, "api/v2/workspaceproxies/me/coordinate");
-        let request = ws_request(&url, &proxy_token)?;
-        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
-
-        let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
-        let Some(Ok(tungstenite::Message::Text(text))) = msg else {
-            return Err(format!("expected text DERP map frame, got: {msg:?}").into());
-        };
-        let parsed: Value = serde_json::from_str(&text)?;
-        assert!(
-            parsed.get("derp_map").is_some(),
-            "initial frame must carry derp_map, got: {parsed}"
-        );
-
-        ws.close(None).await?;
         Ok(())
     }
 
@@ -1421,19 +1483,19 @@ mod coordinate_tests {
         }
     }
 
-    /// Version 2+ is the binary dRPC protocol which Rust does not yet speak;
-    /// the server must reject it with HTTP 400 and a `version` validation
-    /// error before the WebSocket upgrade.
+    /// The Rust port speaks the v2 binary DRPC wire; v1 (JSON) is rejected
+    /// with HTTP 400 and a `version` validation error before the WebSocket
+    /// upgrade, mirroring the Go entry point.
     #[tokio::test]
     async fn coordinate_rejects_unsupported_api_version() -> TestResult {
         let (state, _store) = entitled_state()?;
         let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
-        let proxy_token = create_proxy(&app, "proxy-v2").await?;
+        let proxy_token = create_proxy(&app, "proxy-v1").await?;
         let url = ws_url(
             &base_url,
-            "api/v2/workspaceproxies/me/coordinate?version=2.0",
+            "api/v2/workspaceproxies/me/coordinate?version=1.0",
         );
         let (status, body) = ws_connect_expecting_failure(&url, &proxy_token).await?;
         assert_eq!(status, StatusCode::BAD_REQUEST);
@@ -1468,145 +1530,191 @@ mod coordinate_tests {
         Ok(())
     }
 
-    /// Peer node updates pushed by a second peer (e.g. an agent) connected
-    /// to the same coordinator must be forwarded down the proxy WebSocket.
+    /// Sending a prost `UpdateSelf` frame over the WebSocket must register
+    /// the proxy as a multi-agent client peer in the coordinator.
     #[tokio::test]
-    async fn coordinate_forwards_peer_updates() -> TestResult {
+    async fn proxy_coordinate_handshake_registers_multi_agent_client() -> TestResult {
         let (state, _store) = entitled_state()?;
         let coordinator = state.coordinator.clone();
         let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
-        let proxy_token = create_proxy(&app, "proxy-peers").await?;
-        let url = ws_url(&base_url, "api/v2/workspaceproxies/me/coordinate");
+        let baseline = wait_for_peer_count(&coordinator, |_| true).await;
+
+        let proxy_token = create_proxy(&app, "proxy-handshake").await?;
+        let url = coord_v2_url(&base_url);
         let request = ws_request(&url, &proxy_token)?;
         let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
 
-        // Skip the initial DERP-map envelope.
-        let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
-
-        // The proxy opens a tunnel to a remote agent, then the agent
-        // publishes a node update; the coordinator should push a
-        // peer_updates response down the proxy socket.
-        let agent_id = Uuid::new_v4();
-        let agent_handle =
-            coordinator.coordinate(agent_id, "target-agent".to_owned(), PeerKind::Agent);
-
-        // Find the proxy's session_id by asking the first peer update;
-        // first we need the proxy to subscribe via `add_tunnel` → this
-        // requires knowing the session_id assigned to the proxy. The
-        // handler generates it internally, so instead we drive this from
-        // the agent side: the agent opens a tunnel to the proxy session.
-        // But again, the proxy session id isn't exposed.
-        //
-        // Approach: update node on the agent and have the proxy add a
-        // tunnel to the agent; the coordinator will then notify the proxy
-        // of the agent's node info.
-        let add_tunnel = CoordinateRequest {
-            add_tunnel: Some(agent_id),
-            ..Default::default()
-        };
-        let text = serde_json::to_string(&add_tunnel)?;
-        ws.send(tungstenite::Message::Text(text.into())).await?;
-
-        // Now publish an agent node update.
-        let node_update = CoordinateRequest {
-            update_self: Some(NodeInfo {
-                id: 42,
-                preferred_derp: 1,
-                ..Default::default()
+        // Send a single prost-encoded UpdateSelf frame.
+        let req = pb::CoordinateRequest {
+            update_self: Some(pb::coordinate_request::UpdateSelf {
+                node: Some(pb::Node {
+                    id: 1,
+                    key: b"proxy-node-key-handshake-01234567".to_vec(),
+                    preferred_derp: 1,
+                    ..Default::default()
+                }),
             }),
             ..Default::default()
         };
-        coordinator.process_request(agent_id, node_update)?;
+        let payload = req.encode_to_vec();
+        ws.send(tungstenite::Message::Binary(payload.into()))
+            .await?;
 
-        // Expect a coordinate response with non-empty peer_updates within
-        // a short timeout.
-        let mut saw_node = false;
-        for _ in 0..5 {
-            let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
-            let Some(Ok(tungstenite::Message::Text(text))) = msg else {
-                continue;
-            };
-            let parsed: Value = serde_json::from_str(&text)?;
-            if let Some(updates) = parsed.get("peer_updates").and_then(Value::as_array) {
-                if updates
-                    .iter()
-                    .any(|u| u.get("kind").and_then(Value::as_str) == Some("node"))
-                {
-                    saw_node = true;
-                    break;
-                }
-            }
-        }
+        // The coordinator should register the proxy as a client peer
+        // (coordinate() is called by serve_multi_agent_client → 1 peer).
+        let observed = wait_for_peer_count(&coordinator, |n| n > baseline).await;
         assert!(
-            saw_node,
-            "expected a Node peer update to be forwarded to the proxy"
+            observed > baseline,
+            "coordinator must register the multi-agent client \
+             (baseline={baseline}, observed={observed})",
         );
 
-        drop(agent_handle);
         ws.close(None).await?;
         Ok(())
     }
 
-    /// Closing the WebSocket must release the coordinator session so the
-    /// mesh doesn't leak state.
+    /// Subscribing to an agent via `add_tunnel` and then publishing an
+    /// agent node update must fan the update out to the proxy's outbound
+    /// WebSocket as a prost `CoordinateResponse`.
     #[tokio::test]
-    async fn coordinate_cleans_up_on_disconnect() -> TestResult {
+    async fn proxy_coordinate_subscribe_fans_out_agent_update() -> TestResult {
         let (state, _store) = entitled_state()?;
         let coordinator = state.coordinator.clone();
         let app = build_router(state, None);
         let (base_url, _handle) = spawn_test_server(app.clone()).await?;
 
-        let before = coordinator
-            .debug_json()
-            .get("total_peers")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-
-        let proxy_token = create_proxy(&app, "proxy-cleanup").await?;
-        let url = ws_url(&base_url, "api/v2/workspaceproxies/me/coordinate");
+        let proxy_token = create_proxy(&app, "proxy-fanout").await?;
+        let url = coord_v2_url(&base_url);
         let request = ws_request(&url, &proxy_token)?;
         let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
 
-        // Consume the DERP-map envelope so we know the session is live.
-        let _ = tokio::time::timeout(Duration::from_secs(2), ws.next()).await;
+        // Register an agent peer directly on the coordinator so the proxy
+        // can subscribe to it.
+        let agent_id = Uuid::new_v4();
+        let _agent_handle =
+            coordinator.coordinate(agent_id, "target-agent".to_owned(), PeerKind::Agent);
 
-        let during = coordinator
-            .debug_json()
-            .get("total_peers")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
+        // Handshake: proxy registers itself via update_self so the
+        // coordinator assigns a peer record.
+        let handshake = pb::CoordinateRequest {
+            update_self: Some(pb::coordinate_request::UpdateSelf {
+                node: Some(pb::Node {
+                    id: 100,
+                    key: b"proxy-node-key-fanout-0123456789".to_vec(),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        ws.send(tungstenite::Message::Binary(
+            handshake.encode_to_vec().into(),
+        ))
+        .await?;
+
+        // Proxy subscribes to the agent via add_tunnel.
+        let subscribe = pb::CoordinateRequest {
+            add_tunnel: Some(pb::coordinate_request::Tunnel {
+                id: agent_id.as_bytes().to_vec(),
+            }),
+            ..Default::default()
+        };
+        ws.send(tungstenite::Message::Binary(
+            subscribe.encode_to_vec().into(),
+        ))
+        .await?;
+
+        // Give the subscribe a beat to land on the coordinator.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        // Agent publishes a node update. This should fan out to the proxy.
+        coordinator.process_request(
+            agent_id,
+            CoordReq {
+                update_self: Some(NodeInfo {
+                    id: 42,
+                    preferred_derp: 1,
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )?;
+
+        // Read frames from the proxy socket until we see a Node peer update
+        // for the agent.
+        let mut saw_node = false;
+        for _ in 0..10 {
+            let msg = tokio::time::timeout(Duration::from_secs(2), ws.next()).await?;
+            let Some(Ok(tungstenite::Message::Binary(bin))) = msg else {
+                continue;
+            };
+            let resp = pb::CoordinateResponse::decode(bin.as_ref())?;
+            if resp.peer_updates.iter().any(|u| {
+                u.kind == i32::from(pb::coordinate_response::peer_update::Kind::Node)
+                    && u.id == agent_id.as_bytes().to_vec()
+            }) {
+                saw_node = true;
+                break;
+            }
+        }
+        assert!(
+            saw_node,
+            "expected a Node peer update for the agent to be fanned out to the proxy",
+        );
+
+        ws.close(None).await?;
+        Ok(())
+    }
+
+    /// Closing the WebSocket must deregister the proxy from the coordinator
+    /// so the multi-agent mesh doesn't leak state.
+    #[tokio::test]
+    async fn proxy_coordinate_close_deregisters_client() -> TestResult {
+        let (state, _store) = entitled_state()?;
+        let coordinator = state.coordinator.clone();
+        let app = build_router(state, None);
+        let (base_url, _handle) = spawn_test_server(app.clone()).await?;
+
+        let before = wait_for_peer_count(&coordinator, |_| true).await;
+
+        let proxy_token = create_proxy(&app, "proxy-close").await?;
+        let url = coord_v2_url(&base_url);
+        let request = ws_request(&url, &proxy_token)?;
+        let (mut ws, _resp) = tokio_tungstenite::connect_async(request).await?;
+
+        // Handshake so the peer is registered with the coordinator.
+        let handshake = pb::CoordinateRequest {
+            update_self: Some(pb::coordinate_request::UpdateSelf {
+                node: Some(pb::Node {
+                    id: 1,
+                    key: b"proxy-node-key-close-01234567890".to_vec(),
+                    ..Default::default()
+                }),
+            }),
+            ..Default::default()
+        };
+        ws.send(tungstenite::Message::Binary(
+            handshake.encode_to_vec().into(),
+        ))
+        .await?;
+
+        let during = wait_for_peer_count(&coordinator, |n| n > before).await;
         assert!(
             during > before,
             "coordinator must register the proxy while connected \
-             (before={before}, during={during})"
+             (before={before}, during={during})",
         );
 
         ws.close(None).await?;
 
-        // Give the server a beat to run the cleanup branch.
-        for _ in 0..20 {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-            let now = coordinator
-                .debug_json()
-                .get("total_peers")
-                .and_then(Value::as_u64)
-                .unwrap_or(0);
-            if now <= before {
-                return Ok(());
-            }
-        }
-        let final_count = coordinator
-            .debug_json()
-            .get("total_peers")
-            .and_then(Value::as_u64)
-            .unwrap_or(0);
-        Err(format!(
+        let after = wait_for_peer_count(&coordinator, |n| n <= before).await;
+        assert!(
+            after <= before,
             "coordinator did not release the proxy session on disconnect \
-             (before={before}, final={final_count})"
-        )
-        .into())
+             (before={before}, after={after})",
+        );
+        Ok(())
     }
 
     /// `parse_api_version` mirrors Go's `apiversion.Parse`.
