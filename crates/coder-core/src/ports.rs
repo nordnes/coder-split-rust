@@ -4143,6 +4143,23 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
         Ok(())
     }
 
+    // ── workspace_agent insert (sub-agents) ──
+    /// Inserts a workspace agent. Mirrors `InsertWorkspaceAgent` in
+    /// `coder/coderd/database/queries/workspaceagents.sql` and is the
+    /// store-level primitive behind `CreateSubAgent`.
+    ///
+    /// Default implementation returns `Unavailable` so stores that have
+    /// not opted-in yet surface a clear error rather than silently
+    /// succeeding.
+    async fn insert_workspace_agent(
+        &self,
+        _input: InsertWorkspaceAgentInput,
+    ) -> Result<WorkspaceAgentRow, StorageError> {
+        Err(StorageError::unavailable(
+            "insert_workspace_agent not implemented",
+        ))
+    }
+
     /// Lists workspace agents whose `parent_id` equals the supplied id.
     /// Mirrors `GetWorkspaceAgentsByParentID` in
     /// `coder/coderd/database/queries/workspaceagents.sql`.
@@ -5667,6 +5684,51 @@ pub struct InsertWorkspaceAppStatusInput {
     pub message: String,
     /// URI.
     pub uri: Option<String>,
+}
+
+// ── workspace_agent insert (sub-agents) ──
+/// Input for inserting a workspace agent (ports Go's
+/// `InsertWorkspaceAgentParams` in
+/// `coder/coderd/database/queries/workspaceagents.sql`).
+///
+/// Sub-agents differ from top-level agents only by having a non-null
+/// `parent_id`; both share the same backing `workspace_agents` table.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InsertWorkspaceAgentInput {
+    /// Stable identifier for the new agent.
+    pub id: Uuid,
+    /// Parent agent identifier (set for sub-agents, `None` for top-level).
+    pub parent_id: Option<Uuid>,
+    /// Creation timestamp.
+    pub created_at: OffsetDateTime,
+    /// Update timestamp.
+    pub updated_at: OffsetDateTime,
+    /// Agent name.
+    pub name: String,
+    /// Owning workspace resource identifier.
+    pub resource_id: Uuid,
+    /// Auth token used by the agent to authenticate back to coderd.
+    pub auth_token: Uuid,
+    /// Instance identity string for cloud-provider attested auth.
+    pub auth_instance_id: Option<String>,
+    /// CPU architecture, e.g. `amd64`.
+    pub architecture: String,
+    /// Operating system, e.g. `linux`.
+    pub operating_system: String,
+    /// Working directory.
+    pub directory: String,
+    /// Connection timeout in seconds.
+    pub connection_timeout_seconds: i32,
+    /// Troubleshooting URL.
+    pub troubleshooting_url: String,
+    /// MOTD file path.
+    pub motd_file: String,
+    /// Display apps (e.g. `vscode`, `web_terminal`).
+    pub display_apps: Vec<String>,
+    /// Display order.
+    pub display_order: i32,
+    /// API key scope (`all`, `no_user_data`).
+    pub api_key_scope: String,
 }
 
 /// Workspace-domain storage contract.

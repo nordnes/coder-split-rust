@@ -1819,12 +1819,12 @@ pub(crate) mod tests {
         InsertChatFileInput, InsertChatInput, InsertChatMessageInput, InsertFileInput,
         InsertFileResult, InsertOrganizationMemberError, InsertProvisionerJobInput,
         InsertProvisionerJobLogsInput, InsertProvisionerJobTimingsInput, InsertProvisionerKeyInput,
-        InsertTaskInput, InsertWorkspaceAppStatusInput, LicenseRecord, LogFormat, LoginType,
-        LoginWithPasswordRequest, NotificationMessageRecord, NotificationMessageStatus,
-        OrgResourceCounts, OrganizationMemberListFilter, OrganizationMemberRecord,
-        OrganizationRecord, PasswordUserRecord, PersistAuditLogInput, ProvisionerDaemonHealthInput,
-        ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord, ProvisionerJobRecord,
-        ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
+        InsertTaskInput, InsertWorkspaceAgentInput, InsertWorkspaceAppStatusInput, LicenseRecord,
+        LogFormat, LoginType, LoginWithPasswordRequest, NotificationMessageRecord,
+        NotificationMessageStatus, OrgResourceCounts, OrganizationMemberListFilter,
+        OrganizationMemberRecord, OrganizationRecord, PasswordUserRecord, PersistAuditLogInput,
+        ProvisionerDaemonHealthInput, ProvisionerDaemonHealthRecord, ProvisionerDaemonRecord,
+        ProvisionerJobRecord, ProvisionerJobStatsInput, ProvisionerKeyRecord, ProvisionerStore,
         RequestOneTimePasscodeRequest, ServerConfig, SessionCountDeploymentStatsResponse,
         SlimRoleRecord, SshConfig, StorageError, TaskListFilter, TaskRecord, TaskSendRequest,
         TaskSnapshotRecord, TaskStatus, TemplateDAURow, TemplateListFilter, TemplateRecord,
@@ -7211,6 +7211,65 @@ pub(crate) mod tests {
                 .lock()
                 .map_err(|e| StorageError::unavailable(e.to_string()))?
                 .push(row.clone());
+            Ok(row)
+        }
+
+        // ── workspace_agent insert (sub-agents) ──
+        async fn list_workspace_agents_by_parent_id(
+            &self,
+            parent_agent_id: Uuid,
+        ) -> Result<Vec<WorkspaceAgentRow>, StorageError> {
+            let agents = self
+                .workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?;
+            Ok(agents
+                .values()
+                .filter(|a| a.parent_id == Some(parent_agent_id))
+                .cloned()
+                .collect())
+        }
+
+        async fn insert_workspace_agent(
+            &self,
+            input: InsertWorkspaceAgentInput,
+        ) -> Result<WorkspaceAgentRow, StorageError> {
+            let row = WorkspaceAgentRow {
+                id: input.id,
+                parent_id: input.parent_id,
+                created_at: input.created_at,
+                updated_at: input.updated_at,
+                name: input.name,
+                first_connected_at: None,
+                last_connected_at: None,
+                disconnected_at: None,
+                resource_id: input.resource_id,
+                auth_token: input.auth_token,
+                auth_instance_id: input.auth_instance_id,
+                architecture: input.architecture,
+                environment_variables: None,
+                operating_system: input.operating_system,
+                directory: input.directory,
+                expanded_directory: String::new(),
+                version: String::new(),
+                api_version: String::new(),
+                connection_timeout_seconds: input.connection_timeout_seconds,
+                troubleshooting_url: input.troubleshooting_url,
+                motd_file: input.motd_file,
+                lifecycle_state: "created".to_owned(),
+                logs_length: 0,
+                logs_overflowed: false,
+                started_at: None,
+                ready_at: None,
+                subsystems: Vec::new(),
+                display_apps: input.display_apps,
+                display_order: input.display_order,
+                api_key_scope: input.api_key_scope,
+            };
+            self.workspace_agents
+                .lock()
+                .map_err(|e| StorageError::unavailable(e.to_string()))?
+                .insert(row.id, row.clone());
             Ok(row)
         }
 
@@ -19490,8 +19549,108 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    // ── workspace_agent insert (sub-agents) ──
     #[tokio::test]
-    async fn agent_rpc_live_create_sub_agent_returns_unimplemented() -> Result<(), Box<dyn Error>> {
+    async fn insert_workspace_agent_persists_in_fake_store() -> Result<(), Box<dyn Error>> {
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let now = OffsetDateTime::now_utc();
+        let parent_id = Uuid::new_v4();
+        let new_id = Uuid::new_v4();
+        let resource_id = Uuid::new_v4();
+        let auth_token = Uuid::new_v4();
+        let row = store
+            .insert_workspace_agent(InsertWorkspaceAgentInput {
+                id: new_id,
+                parent_id: Some(parent_id),
+                created_at: now,
+                updated_at: now,
+                name: "sub".to_owned(),
+                resource_id,
+                auth_token,
+                auth_instance_id: None,
+                architecture: "amd64".to_owned(),
+                operating_system: "linux".to_owned(),
+                directory: "/home/coder".to_owned(),
+                connection_timeout_seconds: 120,
+                troubleshooting_url: String::new(),
+                motd_file: String::new(),
+                display_apps: vec!["vscode".to_owned()],
+                display_order: 0,
+                api_key_scope: "all".to_owned(),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        assert_eq!(row.id, new_id);
+        assert_eq!(row.parent_id, Some(parent_id));
+        assert_eq!(row.auth_token, auth_token);
+        assert_eq!(row.name, "sub");
+
+        let looked_up = store
+            .find_workspace_agent_by_id(new_id)
+            .await
+            .map_err(|e| format!("{e:?}"))?
+            .ok_or("row should have been persisted")?;
+        assert_eq!(looked_up.id, new_id);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_sub_agent_handler_inserts_with_parent_id() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let parent_agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store.clone(), parent_agent_id);
+
+        let resp = handler
+            .create_sub_agent(agent::CreateSubAgentRequest {
+                name: "my-sub".to_owned(),
+                directory: "/home/coder".to_owned(),
+                architecture: "amd64".to_owned(),
+                operating_system: "linux".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        let sub = resp.agent.ok_or("expected agent in response")?;
+        let sub_id = Uuid::from_slice(&sub.id).map_err(|e| format!("{e:?}"))?;
+        let persisted = store
+            .find_workspace_agent_by_id(sub_id)
+            .await
+            .map_err(|e| format!("{e:?}"))?
+            .ok_or("sub agent must be persisted")?;
+        assert_eq!(persisted.parent_id, Some(parent_agent_id));
+        assert_eq!(persisted.name, "my-sub");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_sub_agent_handler_returns_auth_token() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let parent_agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, parent_agent_id);
+
+        let resp = handler
+            .create_sub_agent(agent::CreateSubAgentRequest {
+                name: "s".to_owned(),
+                architecture: "amd64".to_owned(),
+                operating_system: "linux".to_owned(),
+                ..Default::default()
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        let sub = resp.agent.ok_or("expected agent in response")?;
+        assert_eq!(sub.auth_token.len(), 16, "auth_token should be 16 bytes");
+        assert_ne!(sub.auth_token, vec![0u8; 16], "auth_token must be random");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn create_sub_agent_handler_rejects_empty_name() -> Result<(), Box<dyn Error>> {
         use coder_agent_rpc::AgentRpcHandler;
         use coder_agent_rpc::handlers::RpcError;
         use coder_agent_rpc::proto::agent_v2 as agent;
@@ -19504,8 +19663,8 @@ pub(crate) mod tests {
             .create_sub_agent(agent::CreateSubAgentRequest::default())
             .await
             .err()
-            .ok_or("expected Unimplemented")?;
-        assert!(matches!(err, RpcError::Unimplemented(_)), "got {err:?}");
+            .ok_or("expected empty-name rejection")?;
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
         Ok(())
     }
 
