@@ -652,7 +652,8 @@ impl AppStore for PostgresStore {
                 u.avatar_url,
                 u.name,
                 u.email,
-                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles
+                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles,
+                om.is_idp_controlled
              FROM organization_members om
              INNER JOIN users u ON u.id = om.user_id
              WHERE om.user_id = $1
@@ -1467,7 +1468,8 @@ impl AppStore for PostgresStore {
                 u.avatar_url,
                 u.name,
                 u.email,
-                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles
+                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles,
+                om.is_idp_controlled
              FROM organization_members om
              INNER JOIN users u ON u.id = om.user_id
              WHERE om.organization_id = $1
@@ -1546,7 +1548,8 @@ impl AppStore for PostgresStore {
                 u.avatar_url,
                 u.name,
                 u.email,
-                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles
+                COALESCE(u.rbac_roles, ARRAY[]::text[]) AS global_roles,
+                om.is_idp_controlled
              FROM organization_members om
              INNER JOIN users u ON u.id = om.user_id
              WHERE om.organization_id = $1
@@ -1567,6 +1570,7 @@ impl AppStore for PostgresStore {
         &self,
         organization_id: Uuid,
         user_id: Uuid,
+        is_idp_controlled: bool,
     ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError> {
         let result = sqlx::query(
             "INSERT INTO organization_members (
@@ -1574,11 +1578,13 @@ impl AppStore for PostgresStore {
                 user_id,
                 created_at,
                 updated_at,
-                roles
-             ) VALUES ($1, $2, NOW(), NOW(), ARRAY[]::text[])",
+                roles,
+                is_idp_controlled
+             ) VALUES ($1, $2, NOW(), NOW(), ARRAY[]::text[], $3)",
         )
         .bind(organization_id)
         .bind(user_id)
+        .bind(is_idp_controlled)
         .execute(&self.pool)
         .await;
 

@@ -508,7 +508,7 @@ where
             .ok_or_else(|| IdentityServiceError::not_found("User not found."))?;
 
         self.store
-            .insert_organization_member(target_organization.id, target_user.id)
+            .insert_organization_member(target_organization.id, target_user.id, false)
             .await
             .map_err(|error| match error {
                 InsertOrganizationMemberError::AlreadyExists => {
@@ -1249,7 +1249,7 @@ where
 
         // Add the creator as an organization member.
         self.store
-            .insert_organization_member(org.id, input.actor_user_id)
+            .insert_organization_member(org.id, input.actor_user_id, false)
             .await
             .map_err(|e| match e {
                 InsertOrganizationMemberError::AlreadyExists => IdentityServiceError::bad_request(

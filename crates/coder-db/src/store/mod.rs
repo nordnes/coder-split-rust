@@ -242,6 +242,7 @@ struct StoredOrganizationMemberRow {
     name: String,
     email: String,
     global_roles: Vec<String>,
+    is_idp_controlled: bool,
 }
 
 #[derive(Debug, FromRow)]
@@ -1416,6 +1417,7 @@ fn organization_member_record_from_row(
         avatar_url: row.avatar_url,
         email: row.email,
         global_roles: slim_roles_from_names(&row.global_roles, None),
+        is_idp_controlled: row.is_idp_controlled,
     })
 }
 

@@ -1973,10 +1973,17 @@ pub trait IdentityStore: Send + Sync {
     ) -> Result<Option<OrganizationMemberRecord>, StorageError>;
 
     /// Inserts a new organization membership.
+    ///
+    /// `is_idp_controlled` marks whether the membership was created by an
+    /// IDP sync pass (`true`) or a manual admin action (`false`). The
+    /// `sync_organizations` reconciler reads this flag to avoid removing
+    /// manually-assigned memberships when they are not asserted by the
+    /// current claim set.
     async fn insert_organization_member(
         &self,
         organization_id: Uuid,
         user_id: Uuid,
+        is_idp_controlled: bool,
     ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError>;
 
     /// Deletes an organization membership.
@@ -3349,10 +3356,17 @@ pub trait AppStore: DeploymentStore + ProvisionerStore + Send + Sync {
     ) -> Result<Option<OrganizationMemberRecord>, StorageError>;
 
     /// Inserts a new organization membership.
+    ///
+    /// `is_idp_controlled` marks whether the membership was created by an
+    /// IDP sync pass (`true`) or a manual admin action (`false`). The
+    /// `sync_organizations` reconciler reads this flag to avoid removing
+    /// manually-assigned memberships when they are not asserted by the
+    /// current claim set.
     async fn insert_organization_member(
         &self,
         organization_id: Uuid,
         user_id: Uuid,
+        is_idp_controlled: bool,
     ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError>;
 
     /// Deletes an organization membership.
@@ -6404,8 +6418,10 @@ where
         &self,
         organization_id: Uuid,
         user_id: Uuid,
+        is_idp_controlled: bool,
     ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError> {
-        AppStore::insert_organization_member(self, organization_id, user_id).await
+        AppStore::insert_organization_member(self, organization_id, user_id, is_idp_controlled)
+            .await
     }
 
     async fn delete_organization_member(
@@ -7089,9 +7105,10 @@ where
         &self,
         organization_id: Uuid,
         user_id: Uuid,
+        is_idp_controlled: bool,
     ) -> Result<OrganizationMemberRecord, InsertOrganizationMemberError> {
         (**self)
-            .insert_organization_member(organization_id, user_id)
+            .insert_organization_member(organization_id, user_id, is_idp_controlled)
             .await
     }
 
