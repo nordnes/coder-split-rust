@@ -1,23 +1,26 @@
 //! Provisionerd DRPC service — infrastructure slice.
 //!
 //! Ports the minimal machinery needed to dispatch provisionerd DRPC RPCs
-//! (currently `CommitQuota` and `AcquireJob`) over the wire framing
-//! already implemented in [`coder_agent_rpc`]. Follow-up batches will
-//! extend [`ProvisionerdDrpcService`] with the remaining RPCs declared
-//! in `provisionerd/proto/provisionerd.proto`:
+//! (currently `CommitQuota`, `AcquireJob`, and `UpdateJob`) over the
+//! wire framing already implemented in [`coder_agent_rpc`]. Follow-up
+//! batches will extend [`ProvisionerdDrpcService`] with the remaining
+//! RPCs declared in `provisionerd/proto/provisionerd.proto`:
 //!
 //! * `AcquireJobWithCancel` (bidi-streaming cousin of `AcquireJob`)
-//! * `UpdateJob`, `FailJob`, `CompleteJob`
+//! * `FailJob`, `CompleteJob`
 //! * `UploadFile`, `DownloadFile`
 //!
 //! Until those land, [`ProvisionerdDrpcService::dispatch`] returns
-//! [`RpcError::Unimplemented`] for any method path other than the two
+//! [`RpcError::Unimplemented`] for any method path other than the ones
 //! ported here, matching the DRPC `Unimplemented` sentinel (code 12).
 
 use std::sync::Arc;
 
 use coder_agent_rpc::RpcError;
-use coder_core::{AcquireProvisionerJobInput, ProvisionerStore, ProvisionerType};
+use coder_core::provisioner::{LogLevel, LogSource};
+use coder_core::{
+    AcquireProvisionerJobInput, InsertProvisionerJobLogsInput, ProvisionerStore, ProvisionerType,
+};
 use prost::Message as _;
 use time::OffsetDateTime;
 use tracing::instrument;
@@ -39,6 +42,9 @@ pub const COMMIT_QUOTA_METHOD: &str = "/provisionerd.ProvisionerDaemon/CommitQuo
 /// streaming `AcquireJobWithCancel` flavour will arrive in a separate
 /// batch once the DRPC stream plumbing is in place.
 pub const ACQUIRE_JOB_METHOD: &str = "/provisionerd.ProvisionerDaemon/AcquireJob";
+
+/// DRPC method path for the `UpdateJob` RPC.
+pub const UPDATE_JOB_METHOD: &str = "/provisionerd.ProvisionerDaemon/UpdateJob";
 
 /// DRPC service wrapping a [`ProvisionerStore`] to serve provisionerd RPCs.
 ///
@@ -168,6 +174,87 @@ impl ProvisionerdDrpcService {
         })
     }
 
+    /// Serves the `UpdateJob` RPC.
+    ///
+    /// Mirrors the Go OSS behaviour in
+    /// `coderd/provisionerdserver/provisionerdserver.go::UpdateJob`,
+    /// reduced to the store methods already exposed by
+    /// [`ProvisionerStore`]:
+    ///
+    /// 1. Parse the job id and look up the job.
+    /// 2. Reject if the job has not been acquired (`worker_id` unset).
+    ///    Full worker-ownership authentication (matching `WorkerID ==
+    ///    s.ID` in Go) will arrive with the acquire flow that plumbs
+    ///    the daemon identity into the service.
+    /// 3. Bump `updated_at` so the stale-job reaper treats this job as
+    ///    live.
+    /// 4. If the request carries logs, batch-insert them via
+    ///    `insert_provisioner_job_logs`. The upstream 1 MB size cap and
+    ///    `logs_overflowed` flag are not enforced yet — this port only
+    ///    persists what the daemon sends.
+    /// 5. Return the job's cancellation state. Template variables,
+    ///    workspace tags, and README persistence require additional
+    ///    `ProvisionerStore` methods (`GetTemplateVersionByJobID`,
+    ///    `InsertTemplateVersionVariable`, etc.) not yet ported; they
+    ///    are tracked as §B.6 follow-ups.
+    #[instrument(skip(self, req), err)]
+    pub async fn update_job(
+        &self,
+        req: pd::UpdateJobRequest,
+    ) -> Result<pd::UpdateJobResponse, RpcError> {
+        let job_id = Uuid::parse_str(&req.job_id)
+            .map_err(|e| RpcError::InvalidArgument(format!("parse job id: {e}")))?;
+
+        let job = self
+            .store
+            .get_provisioner_job_by_id(job_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("get job: {e}")))?
+            .ok_or_else(|| RpcError::InvalidArgument(format!("job {job_id} not found")))?;
+
+        if job.worker_id.is_none() {
+            return Err(RpcError::InvalidArgument(
+                "job isn't running yet".to_owned(),
+            ));
+        }
+
+        // Heartbeat: bump updated_at so the reaper considers the job live.
+        let now = OffsetDateTime::now_utc();
+        self.store
+            .update_provisioner_job_by_id(job_id, now)
+            .await
+            .map_err(|e| RpcError::Internal(format!("update job: {e}")))?;
+
+        // Batch-insert logs, if any. Upstream's 1 MB overflow guard is a
+        // follow-up; this port just persists the wire-received batch.
+        if !req.logs.is_empty() {
+            let mut input = InsertProvisionerJobLogsInput {
+                job_id,
+                created_at: Vec::with_capacity(req.logs.len()),
+                source: Vec::with_capacity(req.logs.len()),
+                level: Vec::with_capacity(req.logs.len()),
+                stage: Vec::with_capacity(req.logs.len()),
+                output: Vec::with_capacity(req.logs.len()),
+            };
+            for log in req.logs {
+                input.created_at.push(log_created_at(log.created_at)?);
+                input.source.push(convert_log_source(log.source));
+                input.level.push(convert_log_level(log.level));
+                input.stage.push(log.stage);
+                input.output.push(log.output);
+            }
+            self.store
+                .insert_provisioner_job_logs(input)
+                .await
+                .map_err(|e| RpcError::Internal(format!("insert logs: {e}")))?;
+        }
+
+        Ok(pd::UpdateJobResponse {
+            canceled: job.canceled_at.is_some(),
+            variable_values: Vec::new(),
+        })
+    }
+
     /// Routes an incoming DRPC method + encoded request body to the
     /// appropriate handler, returning the encoded response.
     ///
@@ -194,8 +281,56 @@ impl ProvisionerdDrpcService {
                     .map_err(|e| RpcError::Internal(format!("encode: {e}")))?;
                 Ok(buf)
             }
+            UPDATE_JOB_METHOD => {
+                let req = pd::UpdateJobRequest::decode(body)
+                    .map_err(|e| RpcError::InvalidArgument(format!("decode: {e}")))?;
+                let resp = self.update_job(req).await?;
+                let mut buf = Vec::with_capacity(resp.encoded_len());
+                resp.encode(&mut buf)
+                    .map_err(|e| RpcError::Internal(format!("encode: {e}")))?;
+                Ok(buf)
+            }
             other => Err(RpcError::Unimplemented(other.to_owned())),
         }
+    }
+}
+
+/// Converts the wire-level millisecond timestamp into an
+/// [`OffsetDateTime`], rejecting values that do not fit in the
+/// supported range.
+fn log_created_at(millis: i64) -> Result<OffsetDateTime, RpcError> {
+    // The Go proto uses `int64` millis-since-epoch. `time::OffsetDateTime`
+    // supports the full nanosecond range, so converting from millis is
+    // safe as long as the multiplication does not overflow.
+    let nanos = i128::from(millis).saturating_mul(1_000_000);
+    OffsetDateTime::from_unix_timestamp_nanos(nanos)
+        .map_err(|e| RpcError::InvalidArgument(format!("log created_at: {e}")))
+}
+
+/// Maps the protobuf `LogSource` enum onto the domain enum.
+///
+/// Unknown values fall back to `ProvisionerDaemon` to match the Go
+/// server's default when the wire value is 0 (the proto3 default).
+fn convert_log_source(source: i32) -> LogSource {
+    match pd::LogSource::try_from(source) {
+        Ok(pd::LogSource::Provisioner) => LogSource::Provisioner,
+        _ => LogSource::ProvisionerDaemon,
+    }
+}
+
+/// Maps the protobuf `LogLevel` enum onto the domain enum.
+///
+/// Unknown values fall back to `Info` to match Go's `convertLogLevel`
+/// behaviour when the daemon sends a value the server doesn't
+/// recognise.
+fn convert_log_level(level: i32) -> LogLevel {
+    match pd::LogLevel::try_from(level) {
+        Ok(pd::LogLevel::Trace) => LogLevel::Trace,
+        Ok(pd::LogLevel::Debug) => LogLevel::Debug,
+        Ok(pd::LogLevel::Info) => LogLevel::Info,
+        Ok(pd::LogLevel::Warn) => LogLevel::Warn,
+        Ok(pd::LogLevel::Error) => LogLevel::Error,
+        Err(_) => LogLevel::Info,
     }
 }
 
@@ -218,10 +353,14 @@ mod tests {
     use time::OffsetDateTime;
 
     /// Minimal `ProvisionerStore` that returns a single preconfigured job
-    /// and counts how many times `get_provisioner_job_by_id` was called.
+    /// and counts how many times `get_provisioner_job_by_id`,
+    /// `update_provisioner_job_by_id`, and `insert_provisioner_job_logs`
+    /// were called — the three store hooks touched by `UpdateJob`.
     struct CountingStore {
         job: Option<ProvisionerJobRecord>,
         calls: AtomicUsize,
+        log_inserts: AtomicUsize,
+        heartbeats: AtomicUsize,
     }
 
     impl CountingStore {
@@ -229,11 +368,21 @@ mod tests {
             Self {
                 job,
                 calls: AtomicUsize::new(0),
+                log_inserts: AtomicUsize::new(0),
+                heartbeats: AtomicUsize::new(0),
             }
         }
 
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn log_insert_count(&self) -> usize {
+            self.log_inserts.load(Ordering::SeqCst)
+        }
+
+        fn heartbeat_count(&self) -> usize {
+            self.heartbeats.load(Ordering::SeqCst)
         }
     }
 
@@ -300,6 +449,7 @@ mod tests {
             _id: Uuid,
             _updated_at: OffsetDateTime,
         ) -> Result<(), StorageError> {
+            self.heartbeats.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -328,6 +478,7 @@ mod tests {
             &self,
             _input: InsertProvisionerJobLogsInput,
         ) -> Result<Vec<ProvisionerJobLogRecord>, StorageError> {
+            self.log_inserts.fetch_add(1, Ordering::SeqCst);
             Ok(Vec::new())
         }
 
@@ -483,12 +634,12 @@ mod tests {
         let store: Arc<dyn ProvisionerStore> = counting;
         let service = ProvisionerdDrpcService::new(store);
 
-        // `UpdateJob` is intentionally a not-yet-ported method path; it
+        // `FailJob` is intentionally a not-yet-ported method path; it
         // stands in for any unrecognised DRPC method and must bubble up
         // as `Unimplemented` (code 12) so Go clients can `drpcerr.Is`
         // the sentinel and back off.
         let err = match service
-            .dispatch("/provisionerd.ProvisionerDaemon/UpdateJob", &[])
+            .dispatch("/provisionerd.ProvisionerDaemon/FailJob", &[])
             .await
         {
             Err(err) => err,
@@ -496,10 +647,50 @@ mod tests {
         };
         match err {
             RpcError::Unimplemented(m) => {
-                assert!(m.contains("UpdateJob"));
+                assert!(m.contains("FailJob"));
             }
             other => unreachable!("expected Unimplemented, got {other:?}"),
         }
+    }
+
+    /// Unary round-trip test for `UpdateJob`: encode the request, dispatch
+    /// through the method-router, decode the response, and assert the
+    /// heartbeat + logs store paths were invoked exactly once.
+    #[tokio::test]
+    async fn drpc_service_update_job_round_trip() {
+        let job = running_job();
+        let job_id = job.id;
+        let counting = Arc::new(CountingStore::new(Some(job)));
+        let store: Arc<dyn ProvisionerStore> = counting.clone();
+        let service = ProvisionerdDrpcService::new(store);
+
+        let req = pd::UpdateJobRequest {
+            job_id: job_id.to_string(),
+            logs: vec![pd::Log {
+                source: pd::LogSource::Provisioner as i32,
+                level: pd::LogLevel::Info as i32,
+                created_at: 1_700_000_000_000,
+                stage: "apply".to_owned(),
+                output: "hello".to_owned(),
+            }],
+            ..Default::default()
+        };
+        let bytes = match service
+            .dispatch(UPDATE_JOB_METHOD, &req.encode_to_vec())
+            .await
+        {
+            Ok(b) => b,
+            Err(err) => unreachable!("dispatch failed: {err}"),
+        };
+        let resp = match pd::UpdateJobResponse::decode(&bytes[..]) {
+            Ok(r) => r,
+            Err(err) => unreachable!("response decode failed: {err}"),
+        };
+
+        assert!(!resp.canceled, "running job is not canceled");
+        assert!(resp.variable_values.is_empty());
+        assert_eq!(counting.heartbeat_count(), 1, "updated_at heartbeat bumped");
+        assert_eq!(counting.log_insert_count(), 1, "log batch inserted once");
     }
 
     /// AcquireJob counting store: records how many times
