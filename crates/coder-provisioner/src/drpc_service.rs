@@ -1,13 +1,13 @@
 //! Provisionerd DRPC service — infrastructure slice.
 //!
 //! Ports the minimal machinery needed to dispatch provisionerd DRPC RPCs
-//! (currently `CommitQuota`, `AcquireJob`, and `UpdateJob`) over the
-//! wire framing already implemented in [`coder_agent_rpc`]. Follow-up
-//! batches will extend [`ProvisionerdDrpcService`] with the remaining
-//! RPCs declared in `provisionerd/proto/provisionerd.proto`:
+//! (currently `CommitQuota`, `AcquireJob`, `UpdateJob`, and `FailJob`)
+//! over the wire framing already implemented in [`coder_agent_rpc`].
+//! Follow-up batches will extend [`ProvisionerdDrpcService`] with the
+//! remaining RPCs declared in `provisionerd/proto/provisionerd.proto`:
 //!
 //! * `AcquireJobWithCancel` (bidi-streaming cousin of `AcquireJob`)
-//! * `FailJob`, `CompleteJob`
+//! * `CompleteJob`
 //! * `UploadFile`, `DownloadFile`
 //!
 //! Until those land, [`ProvisionerdDrpcService::dispatch`] returns
@@ -19,7 +19,8 @@ use std::sync::Arc;
 use coder_agent_rpc::RpcError;
 use coder_core::provisioner::{LogLevel, LogSource};
 use coder_core::{
-    AcquireProvisionerJobInput, InsertProvisionerJobLogsInput, ProvisionerStore, ProvisionerType,
+    AcquireProvisionerJobInput, CompleteProvisionerJobInput, InsertProvisionerJobLogsInput,
+    ProvisionerStore, ProvisionerType,
 };
 use prost::Message as _;
 use time::OffsetDateTime;
@@ -45,6 +46,9 @@ pub const ACQUIRE_JOB_METHOD: &str = "/provisionerd.ProvisionerDaemon/AcquireJob
 
 /// DRPC method path for the `UpdateJob` RPC.
 pub const UPDATE_JOB_METHOD: &str = "/provisionerd.ProvisionerDaemon/UpdateJob";
+
+/// DRPC method path for the `FailJob` RPC.
+pub const FAIL_JOB_METHOD: &str = "/provisionerd.ProvisionerDaemon/FailJob";
 
 /// DRPC service wrapping a [`ProvisionerStore`] to serve provisionerd RPCs.
 ///
@@ -255,6 +259,71 @@ impl ProvisionerdDrpcService {
         })
     }
 
+    /// Serves the `FailJob` RPC.
+    ///
+    /// Mirrors the Go OSS behaviour in
+    /// `coderd/provisionerdserver/provisionerdserver.go::FailJob`,
+    /// reduced to the store methods already exposed by
+    /// [`ProvisionerStore`]:
+    ///
+    /// 1. Parse the job id and look up the job.
+    /// 2. Reject if the job has not been acquired (`worker_id` unset).
+    ///    Full worker-ownership authentication (matching `WorkerID ==
+    ///    s.ID` in Go) will arrive with the acquire flow that plumbs
+    ///    the daemon identity into the service.
+    /// 3. Reject if the job is already completed — the daemon must not
+    ///    fail a job that has already been marked `CompletedAt`.
+    /// 4. Mark the job completed with the supplied `error` /
+    ///    `error_code` via `update_provisioner_job_with_complete_by_id`,
+    ///    the same store hook Go uses for both `FailJob` and
+    ///    `CompleteJob`.
+    /// 5. Return an empty [`pd::Empty`] — the upstream RPC signature
+    ///    is `FailJob(FailedJob) returns (Empty)`.
+    ///
+    /// Per-type follow-ups (WorkspaceBuild state / deadline reset,
+    /// telemetry report, audit log, workspace-event pubsub, end-of-logs
+    /// pubsub, notification enqueue) require additional store/pubsub
+    /// surfaces that are tracked as §B.6 follow-ups and land with the
+    /// remaining DRPC RPCs (`CompleteJob`, `UploadFile`, `DownloadFile`,
+    /// `AcquireJobWithCancel`).
+    #[instrument(skip(self, req), err)]
+    pub async fn fail_job(&self, req: pd::FailedJob) -> Result<pd::Empty, RpcError> {
+        let job_id = Uuid::parse_str(&req.job_id)
+            .map_err(|e| RpcError::InvalidArgument(format!("parse job id: {e}")))?;
+
+        let job = self
+            .store
+            .get_provisioner_job_by_id(job_id)
+            .await
+            .map_err(|e| RpcError::Internal(format!("get job: {e}")))?
+            .ok_or_else(|| RpcError::InvalidArgument(format!("job {job_id} not found")))?;
+
+        if job.worker_id.is_none() {
+            return Err(RpcError::InvalidArgument(
+                "job isn't running yet".to_owned(),
+            ));
+        }
+        if job.completed_at.is_some() {
+            return Err(RpcError::InvalidArgument(
+                "job already completed".to_owned(),
+            ));
+        }
+
+        let now = OffsetDateTime::now_utc();
+        self.store
+            .update_provisioner_job_with_complete_by_id(CompleteProvisionerJobInput {
+                id: job_id,
+                updated_at: now,
+                completed_at: now,
+                error: req.error,
+                error_code: req.error_code,
+            })
+            .await
+            .map_err(|e| RpcError::Internal(format!("complete job: {e}")))?;
+
+        Ok(pd::Empty::default())
+    }
+
     /// Routes an incoming DRPC method + encoded request body to the
     /// appropriate handler, returning the encoded response.
     ///
@@ -285,6 +354,15 @@ impl ProvisionerdDrpcService {
                 let req = pd::UpdateJobRequest::decode(body)
                     .map_err(|e| RpcError::InvalidArgument(format!("decode: {e}")))?;
                 let resp = self.update_job(req).await?;
+                let mut buf = Vec::with_capacity(resp.encoded_len());
+                resp.encode(&mut buf)
+                    .map_err(|e| RpcError::Internal(format!("encode: {e}")))?;
+                Ok(buf)
+            }
+            FAIL_JOB_METHOD => {
+                let req = pd::FailedJob::decode(body)
+                    .map_err(|e| RpcError::InvalidArgument(format!("decode: {e}")))?;
+                let resp = self.fail_job(req).await?;
                 let mut buf = Vec::with_capacity(resp.encoded_len());
                 resp.encode(&mut buf)
                     .map_err(|e| RpcError::Internal(format!("encode: {e}")))?;
@@ -354,13 +432,16 @@ mod tests {
 
     /// Minimal `ProvisionerStore` that returns a single preconfigured job
     /// and counts how many times `get_provisioner_job_by_id`,
-    /// `update_provisioner_job_by_id`, and `insert_provisioner_job_logs`
-    /// were called — the three store hooks touched by `UpdateJob`.
+    /// `update_provisioner_job_by_id`, `insert_provisioner_job_logs`,
+    /// and `update_provisioner_job_with_complete_by_id` were called —
+    /// the store hooks touched by `CommitQuota`, `UpdateJob`, and
+    /// `FailJob`.
     struct CountingStore {
         job: Option<ProvisionerJobRecord>,
         calls: AtomicUsize,
         log_inserts: AtomicUsize,
         heartbeats: AtomicUsize,
+        completions: AtomicUsize,
     }
 
     impl CountingStore {
@@ -370,6 +451,7 @@ mod tests {
                 calls: AtomicUsize::new(0),
                 log_inserts: AtomicUsize::new(0),
                 heartbeats: AtomicUsize::new(0),
+                completions: AtomicUsize::new(0),
             }
         }
 
@@ -383,6 +465,10 @@ mod tests {
 
         fn heartbeat_count(&self) -> usize {
             self.heartbeats.load(Ordering::SeqCst)
+        }
+
+        fn completion_count(&self) -> usize {
+            self.completions.load(Ordering::SeqCst)
         }
     }
 
@@ -457,6 +543,7 @@ mod tests {
             &self,
             _input: CompleteProvisionerJobInput,
         ) -> Result<(), StorageError> {
+            self.completions.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
 
@@ -634,12 +721,12 @@ mod tests {
         let store: Arc<dyn ProvisionerStore> = counting;
         let service = ProvisionerdDrpcService::new(store);
 
-        // `FailJob` is intentionally a not-yet-ported method path; it
-        // stands in for any unrecognised DRPC method and must bubble up
-        // as `Unimplemented` (code 12) so Go clients can `drpcerr.Is`
+        // `CompleteJob` is intentionally a not-yet-ported method path;
+        // it stands in for any unrecognised DRPC method and must bubble
+        // up as `Unimplemented` (code 12) so Go clients can `drpcerr.Is`
         // the sentinel and back off.
         let err = match service
-            .dispatch("/provisionerd.ProvisionerDaemon/FailJob", &[])
+            .dispatch("/provisionerd.ProvisionerDaemon/CompleteJob", &[])
             .await
         {
             Err(err) => err,
@@ -647,7 +734,7 @@ mod tests {
         };
         match err {
             RpcError::Unimplemented(m) => {
-                assert!(m.contains("FailJob"));
+                assert!(m.contains("CompleteJob"));
             }
             other => unreachable!("expected Unimplemented, got {other:?}"),
         }
@@ -691,6 +778,57 @@ mod tests {
         assert!(resp.variable_values.is_empty());
         assert_eq!(counting.heartbeat_count(), 1, "updated_at heartbeat bumped");
         assert_eq!(counting.log_insert_count(), 1, "log batch inserted once");
+    }
+
+    /// Unary round-trip test for `FailJob`: encode a `FailedJob` with
+    /// error + error_code, dispatch through the method-router, decode
+    /// the `Empty` response, and assert the completion store hook was
+    /// invoked exactly once — matching Go's
+    /// `update_provisioner_job_with_complete_by_id` call in
+    /// `provisionerdserver.go::FailJob`.
+    #[tokio::test]
+    async fn drpc_service_fail_job_round_trip() {
+        let job = running_job();
+        let job_id = job.id;
+        let counting = Arc::new(CountingStore::new(Some(job)));
+        let store: Arc<dyn ProvisionerStore> = counting.clone();
+        let service = ProvisionerdDrpcService::new(store);
+
+        let req = pd::FailedJob {
+            job_id: job_id.to_string(),
+            error: "terraform apply failed".to_owned(),
+            error_code: "APPLY_ERROR".to_owned(),
+            r#type: None,
+        };
+        let bytes = match service
+            .dispatch(FAIL_JOB_METHOD, &req.encode_to_vec())
+            .await
+        {
+            Ok(b) => b,
+            Err(err) => unreachable!("dispatch failed: {err}"),
+        };
+        // FailJob returns Empty; decoding must succeed on an empty body.
+        match pd::Empty::decode(&bytes[..]) {
+            Ok(_) => {}
+            Err(err) => unreachable!("response decode failed: {err}"),
+        }
+
+        // The completion store hook must fire exactly once — the core
+        // behaviour asserted by this test.
+        assert_eq!(
+            counting.completion_count(),
+            1,
+            "fail_job must call update_provisioner_job_with_complete_by_id exactly once"
+        );
+        // And the job-lookup path was consulted exactly once; the
+        // heartbeat / logs paths that UpdateJob touches must NOT fire.
+        assert_eq!(counting.call_count(), 1, "job lookup hit exactly once");
+        assert_eq!(counting.heartbeat_count(), 0, "FailJob does not heartbeat");
+        assert_eq!(
+            counting.log_insert_count(),
+            0,
+            "FailJob does not insert logs"
+        );
     }
 
     /// AcquireJob counting store: records how many times
