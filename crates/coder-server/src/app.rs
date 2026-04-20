@@ -19323,6 +19323,328 @@ pub(crate) mod tests {
     }
 
     // -----------------------------------------------------------------------
+    // agent_rpc_live — tail 8 RPCs (ReportConnection, resources monitoring ×2,
+    // sub-agents ×3, ReportBoundaryLogs, UpdateAppStatus).
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn agent_rpc_live_get_resources_monitoring_configuration_defaults()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let resp = handler
+            .get_resources_monitoring_configuration(
+                agent::GetResourcesMonitoringConfigurationRequest {},
+            )
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        // Mirrors Go's static defaults: 20 samples × 10s — the ported
+        // tables are not yet persisted.
+        let cfg = resp.config.ok_or("missing config")?;
+        assert_eq!(cfg.num_datapoints, 20);
+        assert_eq!(cfg.collection_interval_seconds, 10);
+        assert!(resp.memory.is_none());
+        assert!(resp.volumes.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_push_resources_monitoring_usage_is_ok() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let _ = handler
+            .push_resources_monitoring_usage(agent::PushResourcesMonitoringUsageRequest {
+                datapoints: vec![],
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_connection_rejects_nil_uuid() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let err = handler
+            .report_connection(agent::ReportConnectionRequest {
+                connection: Some(agent::Connection {
+                    id: Uuid::nil().as_bytes().to_vec(),
+                    action: agent::connection::Action::Connect as i32,
+                    r#type: agent::connection::Type::Ssh as i32,
+                    timestamp: None,
+                    ip: "127.0.0.1".to_owned(),
+                    status_code: 0,
+                    reason: None,
+                }),
+            })
+            .await
+            .err()
+            .ok_or("expected error for nil UUID")?;
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_connection_logs_valid_event() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let _ = handler
+            .report_connection(agent::ReportConnectionRequest {
+                connection: Some(agent::Connection {
+                    id: Uuid::new_v4().as_bytes().to_vec(),
+                    action: agent::connection::Action::Connect as i32,
+                    r#type: agent::connection::Type::Vscode as i32,
+                    timestamp: None,
+                    ip: "10.0.0.1".to_owned(),
+                    status_code: 0,
+                    reason: None,
+                }),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_report_boundary_logs_is_ok() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let _ = handler
+            .report_boundary_logs(agent::ReportBoundaryLogsRequest { logs: vec![] })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_list_sub_agents_is_empty_by_default() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let resp = handler
+            .list_sub_agents(agent::ListSubAgentsRequest {})
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+        assert!(resp.agents.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_create_sub_agent_returns_unimplemented() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let err = handler
+            .create_sub_agent(agent::CreateSubAgentRequest::default())
+            .await
+            .err()
+            .ok_or("expected Unimplemented")?;
+        assert!(matches!(err, RpcError::Unimplemented(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_delete_sub_agent_rejects_nil_uuid() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+        let handler = live_handler_for_store(store, agent_id);
+
+        let err = handler
+            .delete_sub_agent(agent::DeleteSubAgentRequest {
+                id: Uuid::nil().as_bytes().to_vec(),
+            })
+            .await
+            .err()
+            .ok_or("expected error for nil UUID")?;
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_delete_sub_agent_rejects_wrong_parent() -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let parent_agent_id = agent_id_from_store(&store)?;
+
+        // Seed a sub-agent whose parent_id points at a *different* parent to
+        // exercise the ownership guard from the Devin AI review of PR #251.
+        let foreign_parent = Uuid::new_v4();
+        let sub_agent_id = Uuid::new_v4();
+        let now = OffsetDateTime::now_utc();
+        let sub_row = WorkspaceAgentRow {
+            id: sub_agent_id,
+            parent_id: Some(foreign_parent),
+            created_at: now,
+            updated_at: now,
+            name: "sub".to_owned(),
+            first_connected_at: None,
+            last_connected_at: None,
+            disconnected_at: None,
+            resource_id: Uuid::new_v4(),
+            auth_token: Uuid::new_v4(),
+            auth_instance_id: None,
+            architecture: "amd64".to_owned(),
+            environment_variables: None,
+            operating_system: "linux".to_owned(),
+            directory: String::new(),
+            expanded_directory: String::new(),
+            version: String::new(),
+            api_version: String::new(),
+            connection_timeout_seconds: 120,
+            troubleshooting_url: String::new(),
+            motd_file: String::new(),
+            lifecycle_state: "created".to_owned(),
+            logs_length: 0,
+            logs_overflowed: false,
+            started_at: None,
+            ready_at: None,
+            subsystems: Vec::new(),
+            display_apps: Vec::new(),
+            display_order: 0,
+            api_key_scope: "all".to_owned(),
+        };
+        store.insert_agent(sub_row)?;
+
+        let handler = live_handler_for_store(store, parent_agent_id);
+        let err = handler
+            .delete_sub_agent(agent::DeleteSubAgentRequest {
+                id: sub_agent_id.as_bytes().to_vec(),
+            })
+            .await
+            .err()
+            .ok_or("expected parent-mismatch error")?;
+        assert!(matches!(err, RpcError::InvalidArgument(_)), "got {err:?}");
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn agent_rpc_live_update_app_status_persists_and_enforces_160_limit()
+    -> Result<(), Box<dyn Error>> {
+        use coder_agent_rpc::AgentRpcHandler;
+        use coder_agent_rpc::handlers::RpcError;
+        use coder_agent_rpc::proto::agent_v2 as agent;
+
+        let (_state, store, _token) = setup_agent_test_state()?;
+        let agent_id = agent_id_from_store(&store)?;
+
+        // Seed an app tied to the existing agent so the handler can resolve
+        // it by slug.
+        let now = OffsetDateTime::now_utc();
+        let app_row = WorkspaceAppRow {
+            id: Uuid::new_v4(),
+            created_at: now,
+            agent_id,
+            display_name: "My App".to_owned(),
+            icon: String::new(),
+            command: None,
+            url: None,
+            healthcheck_url: String::new(),
+            healthcheck_interval: 0,
+            healthcheck_threshold: 0,
+            health: "healthy".to_owned(),
+            subdomain: false,
+            sharing_level: "owner".to_owned(),
+            slug: "my-app".to_owned(),
+            external: false,
+            display_order: 0,
+            hidden: false,
+            open_in: "slim-window".to_owned(),
+            display_group: None,
+        };
+        store.insert_app(app_row)?;
+
+        let handler = live_handler_for_store(store.clone(), agent_id);
+
+        // Exactly 160 chars must be accepted — Devin AI review on PR #251
+        // flagged the boundary; the handler rejects only when count > 160.
+        let msg_160 = "a".repeat(160);
+        handler
+            .update_app_status(agent::UpdateAppStatusRequest {
+                slug: "my-app".to_owned(),
+                state: agent::update_app_status_request::AppStatusState::Working as i32,
+                message: msg_160.clone(),
+                uri: String::new(),
+            })
+            .await
+            .map_err(|e| format!("{e:?}"))?;
+
+        let statuses = store
+            .workspace_app_statuses
+            .lock()
+            .map_err(|e| StorageError::unavailable(e.to_string()))?;
+        assert_eq!(statuses.len(), 1);
+        assert_eq!(statuses[0].state, "working");
+        assert_eq!(statuses[0].message, msg_160);
+        drop(statuses);
+
+        // 161 chars must be rejected with the exact wording required by
+        // PR #251 review feedback.
+        let msg_161 = "a".repeat(161);
+        let err = handler
+            .update_app_status(agent::UpdateAppStatusRequest {
+                slug: "my-app".to_owned(),
+                state: agent::update_app_status_request::AppStatusState::Working as i32,
+                message: msg_161,
+                uri: String::new(),
+            })
+            .await
+            .err()
+            .ok_or("expected 161-char rejection")?;
+        match err {
+            RpcError::InvalidArgument(msg) => {
+                assert!(
+                    msg.contains("must be at most 160 characters"),
+                    "wrong wording: {msg}"
+                );
+            }
+            other => return Err(format!("unexpected error: {other:?}").into()),
+        }
+        Ok(())
+    }
+
+    // -----------------------------------------------------------------------
     // Instance identity & connection endpoint tests
     // -----------------------------------------------------------------------
 
