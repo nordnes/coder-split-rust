@@ -34,6 +34,10 @@
 //! * `replace_user_password` — via [`UserPasswordMutator`] (lives on
 //!   [`AuthStore`] in `coder-core`, not [`IdentityStore`])
 //!
+//! API key mutations (Wave 0 S3 tail):
+//! * `create_api_key`, `update_api_key_last_used`, `delete_api_key`
+//!   — via [`ApiKeyMutator`] (lives on [`AuthStore`] in `coder-core`)
+//!
 //! Each lister trait is a narrow subset of the corresponding `coder-core`
 //! super-trait, so real stores (e.g. `PostgresStore`) satisfy them via
 //! the blanket `impl<T: WorkspaceStore + ?Sized> WorkspaceLister for T`
@@ -63,7 +67,8 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use coder_core::{
-    AuditLogListFilter, AuditLogResponse, AuthStore, CreateTemplateInput, CreateTemplateStoreError,
+    ApiKeyRecord, AuditLogListFilter, AuditLogResponse, AuthStore, CreateApiKeyInput,
+    CreateApiKeyStoreError, CreateTemplateInput, CreateTemplateStoreError,
     CreateTemplateVersionInput, CreateUserInput, CreateUserStoreError, CreateWorkspaceBuildInput,
     CreateWorkspaceInput, IdentityStore, OperationalStore, StorageError, TemplateListFilter,
     TemplateRecord, TemplateStore, TemplateVersionRecord, UpdateTemplateACLInput,
@@ -94,6 +99,11 @@ pub enum DbAuthzError {
     /// variants; the `Storage` variant flattens into [`Self::Storage`].
     #[error(transparent)]
     UserCreate(CreateUserStoreError),
+    /// API key creation failed for a non-storage reason. Maps from
+    /// `CreateApiKeyStoreError`'s domain-specific variants; the
+    /// `Storage` variant flattens into [`Self::Storage`].
+    #[error(transparent)]
+    ApiKeyCreate(CreateApiKeyStoreError),
 }
 
 impl From<CreateTemplateStoreError> for DbAuthzError {
@@ -110,6 +120,15 @@ impl From<CreateUserStoreError> for DbAuthzError {
         match err {
             CreateUserStoreError::Storage(e) => Self::Storage(e),
             other => Self::UserCreate(other),
+        }
+    }
+}
+
+impl From<CreateApiKeyStoreError> for DbAuthzError {
+    fn from(err: CreateApiKeyStoreError) -> Self {
+        match err {
+            CreateApiKeyStoreError::Storage(e) => Self::Storage(e),
+            other => Self::ApiKeyCreate(other),
         }
     }
 }
@@ -508,6 +527,57 @@ where
     ) -> Result<bool, StorageError> {
         AuthStore::replace_user_password(self, user_id, password_hash, clear_one_time_passcode)
             .await
+    }
+}
+
+/// Narrow subset of [`AuthStore`] exposing the write-side API key
+/// methods the W0.S3 tail slice wraps. Keeping this trait small lets
+/// test fakes implement just the mutators they need, without a full
+/// [`AuthStore`] impl.
+#[async_trait]
+pub trait ApiKeyMutator: Send + Sync {
+    /// Inserts a new API key row.
+    async fn create_api_key(
+        &self,
+        input: CreateApiKeyInput,
+    ) -> Result<ApiKeyRecord, CreateApiKeyStoreError>;
+
+    /// Updates an API key's `last_used` and `expires_at` timestamps.
+    /// Mirrors Go's `UpdateAPIKeyByID` in `dbauthz.go`.
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError>;
+
+    /// Deletes an API key by stable identifier.
+    async fn delete_api_key(&self, id: &str) -> Result<bool, StorageError>;
+}
+
+#[async_trait]
+impl<T> ApiKeyMutator for T
+where
+    T: AuthStore + ?Sized,
+{
+    async fn create_api_key(
+        &self,
+        input: CreateApiKeyInput,
+    ) -> Result<ApiKeyRecord, CreateApiKeyStoreError> {
+        AuthStore::create_api_key(self, input).await
+    }
+
+    async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), StorageError> {
+        AuthStore::update_api_key_last_used(self, id, last_used, expires_at).await
+    }
+
+    async fn delete_api_key(&self, id: &str) -> Result<bool, StorageError> {
+        AuthStore::delete_api_key(self, id).await
     }
 }
 
@@ -1017,6 +1087,76 @@ where
             .inner
             .replace_user_password(user_id, password_hash, clear_one_time_passcode)
             .await?)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// API key mutator wraps (W0.S3 tail). Each authorizes the matching CRUD
+// action against `ResourceType::ApiKey` before delegating.
+//
+// `create_api_key` pins `.with_owner(input.user_id)` to match Go's
+// `dbauthz.InsertAPIKey` precheck (`rbac.ResourceApiKey.WithOwner(arg.UserID)`).
+//
+// The id-only methods (`update_api_key_last_used`, `delete_api_key`)
+// authorize against the bare `ResourceType::ApiKey` resource because
+// our `Object.id` field is `Option<Uuid>` and API key IDs are opaque
+// strings — we cannot express `.with_id(id_str)` here. Go's dbauthz
+// fetches the row and authorizes against its owner; we defer that
+// owner-scoped tightening to a follow-up (tracked in TODO-dbauthz).
+// ---------------------------------------------------------------------------
+
+impl<S> Authorized<S>
+where
+    S: ApiKeyMutator + ?Sized,
+{
+    /// Authorized version of `AuthStore::create_api_key`. Mirrors Go's
+    /// `InsertAPIKey` in `dbauthz.go`
+    /// (`ActionCreate` on `ResourceApiKey.WithOwner(arg.UserID)`).
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not create
+    /// an API key for this owner, [`DbAuthzError::ApiKeyCreate`] for
+    /// domain-specific create failures (e.g. duplicate token name), or
+    /// [`DbAuthzError::Storage`] for storage failures.
+    pub async fn create_api_key(
+        &self,
+        input: CreateApiKeyInput,
+    ) -> Result<ApiKeyRecord, DbAuthzError> {
+        let object = Object::new(ResourceType::ApiKey).with_owner(input.user_id);
+        self.authorize_action(Action::Create, &object)?;
+        Ok(self.inner.create_api_key(input).await?)
+    }
+
+    /// Authorized version of `AuthStore::update_api_key_last_used`.
+    /// Mirrors Go's `UpdateAPIKeyByID` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not update
+    /// API keys, or propagates storage errors from the inner store.
+    pub async fn update_api_key_last_used(
+        &self,
+        id: &str,
+        last_used: OffsetDateTime,
+        expires_at: OffsetDateTime,
+    ) -> Result<(), DbAuthzError> {
+        let object = Object::new(ResourceType::ApiKey);
+        self.authorize_action(Action::Update, &object)?;
+        Ok(self
+            .inner
+            .update_api_key_last_used(id, last_used, expires_at)
+            .await?)
+    }
+
+    /// Authorized version of `AuthStore::delete_api_key`. Mirrors Go's
+    /// `DeleteAPIKeyByID` in `dbauthz.go`.
+    ///
+    /// # Errors
+    /// Returns [`DbAuthzError::Forbidden`] if the actor may not delete
+    /// API keys, or propagates storage errors from the inner store.
+    pub async fn delete_api_key(&self, id: &str) -> Result<bool, DbAuthzError> {
+        let object = Object::new(ResourceType::ApiKey);
+        self.authorize_action(Action::Delete, &object)?;
+        Ok(self.inner.delete_api_key(id).await?)
     }
 }
 
@@ -1801,6 +1941,130 @@ mod tests {
 
         let allowed = Authorized::new(store, owner_actor())
             .replace_user_password(Uuid::nil(), "hash", false)
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    // -----------------------------------------------------------------------
+    // ApiKeyMutator wrap tests (Wave 0 S3 tail). One test per wrapped method,
+    // each asserting restricted_actor -> Forbidden and owner_actor -> Ok.
+    // -----------------------------------------------------------------------
+
+    fn sample_api_key_record() -> ApiKeyRecord {
+        ApiKeyRecord {
+            id: "key-id".to_owned(),
+            hashed_secret: Vec::new(),
+            user_id: Uuid::nil(),
+            last_used: OffsetDateTime::UNIX_EPOCH,
+            expires_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            login_type: LoginType::Password,
+            scopes: Vec::new(),
+            token_name: String::new(),
+            lifetime_seconds: 0,
+            allow_list: Vec::new(),
+        }
+    }
+
+    fn sample_create_api_key_input() -> CreateApiKeyInput {
+        CreateApiKeyInput {
+            id: "key-id".to_owned(),
+            hashed_secret: Vec::new(),
+            user_id: Uuid::nil(),
+            last_used: OffsetDateTime::UNIX_EPOCH,
+            expires_at: OffsetDateTime::UNIX_EPOCH,
+            created_at: OffsetDateTime::UNIX_EPOCH,
+            updated_at: OffsetDateTime::UNIX_EPOCH,
+            login_type: LoginType::Password,
+            scopes: Vec::new(),
+            token_name: String::new(),
+            lifetime_seconds: 0,
+            allow_list: Vec::new(),
+        }
+    }
+
+    #[derive(Default)]
+    struct FakeApiKeyMutator;
+
+    #[async_trait]
+    impl ApiKeyMutator for FakeApiKeyMutator {
+        async fn create_api_key(
+            &self,
+            _input: CreateApiKeyInput,
+        ) -> Result<ApiKeyRecord, CreateApiKeyStoreError> {
+            Ok(sample_api_key_record())
+        }
+
+        async fn update_api_key_last_used(
+            &self,
+            _id: &str,
+            _last_used: OffsetDateTime,
+            _expires_at: OffsetDateTime,
+        ) -> Result<(), StorageError> {
+            Ok(())
+        }
+
+        async fn delete_api_key(&self, _id: &str) -> Result<bool, StorageError> {
+            Ok(true)
+        }
+    }
+
+    #[tokio::test]
+    async fn create_api_key_authorizes_then_delegates() {
+        let store = Arc::new(FakeApiKeyMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .create_api_key(sample_create_api_key_input())
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .create_api_key(sample_create_api_key_input())
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn update_api_key_last_used_authorizes_then_delegates() {
+        let store = Arc::new(FakeApiKeyMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .update_api_key_last_used(
+                "key-id",
+                OffsetDateTime::UNIX_EPOCH,
+                OffsetDateTime::UNIX_EPOCH,
+            )
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .update_api_key_last_used(
+                "key-id",
+                OffsetDateTime::UNIX_EPOCH,
+                OffsetDateTime::UNIX_EPOCH,
+            )
+            .await;
+        assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
+    }
+
+    #[tokio::test]
+    async fn delete_api_key_authorizes_then_delegates() {
+        let store = Arc::new(FakeApiKeyMutator);
+        let denied = Authorized::new(Arc::clone(&store), restricted_actor())
+            .delete_api_key("key-id")
+            .await;
+        assert!(
+            matches!(denied, Err(DbAuthzError::Forbidden(_))),
+            "expected Forbidden, got: {denied:?}",
+        );
+
+        let allowed = Authorized::new(store, owner_actor())
+            .delete_api_key("key-id")
             .await;
         assert!(allowed.is_ok(), "expected Ok, got: {allowed:?}");
     }
