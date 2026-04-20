@@ -336,6 +336,7 @@ pub(crate) async fn post_refresh_entitlements(
 }
 
 #[cfg(test)]
+#[allow(clippy::expect_used, clippy::unwrap_used)]
 mod tests {
     use super::*;
 
