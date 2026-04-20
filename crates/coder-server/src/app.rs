@@ -29883,6 +29883,239 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// `delete_workspace_acl` emits a Delete audit event for the workspace
+    /// ACL row reset. Site `delete_workspace_acl` from gap-doc §B.10.2 /
+    /// Wave 0 S7 (TODO-audit-diff-schema-expand — ACL rows live outside
+    /// `AuditWorkspaceView`, so diff is None).
+    #[tokio::test]
+    async fn workspace_acl_delete_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{}/acl", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Delete, &ws.id.to_string())
+            .ok_or("expected a Delete audit event for ACL delete")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("ACL"));
+        Ok(())
+    }
+
+    /// `put_workspace_extend` emits a Write audit event when the build
+    /// deadline is extended. Site `put_workspace_extend` from gap-doc
+    /// §B.10.2 / Wave 0 S7 (TODO-audit-diff-schema-expand — deadline lives
+    /// on the build row, not `AuditWorkspaceView`, so diff is None).
+    #[tokio::test]
+    async fn workspace_extend_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        // `put_workspace_extend` requires a build to target.
+        let _build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let deadline = (OffsetDateTime::now_utc() + time::Duration::hours(4))
+            .format(&time::format_description::well_known::Rfc3339)
+            .map_err(|e| -> Box<dyn Error> { e.to_string().into() })?;
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/extend", ws.id),
+                &session_token,
+                &json!({ "deadline": deadline }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for workspace extend")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("extended"));
+        Ok(())
+    }
+
+    /// `post_workspace_port_share` emits a Write audit event when an agent
+    /// port is shared. Site `post_workspace_port_share` from gap-doc
+    /// §B.10.2 / Wave 0 S7 (TODO-audit-diff-schema-expand — port-share rows
+    /// are stored in `workspace_agent_port_shares`, not on
+    /// `AuditWorkspaceView`, so diff is None).
+    #[tokio::test]
+    async fn workspace_port_share_create_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/port-share", ws.id),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                    "share_level": "authenticated",
+                    "protocol": "http",
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for port share create")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("port share"));
+        Ok(())
+    }
+
+    /// `delete_workspace_port_share` emits a Write audit event when a
+    /// shared agent port is revoked. Site `delete_workspace_port_share`
+    /// from gap-doc §B.10.2 / Wave 0 S7 (TODO-audit-diff-schema-expand —
+    /// see sibling note on `post_workspace_port_share`).
+    #[tokio::test]
+    async fn workspace_port_share_delete_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{}/port-share", ws.id),
+                &session_token,
+                &json!({
+                    "agent_name": "main",
+                    "port": 8080,
+                }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for port share delete")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("port share"));
+        Ok(())
+    }
+
+    /// `patch_cancel_workspace_build` emits a Write audit event after the
+    /// provisioner job is cancelled. Site `patch_cancel_workspace_build`
+    /// from gap-doc §B.10.2 / Wave 0 S7 (TODO-audit-diff-schema-expand —
+    /// cancel mutates job state on the build row, not `AuditWorkspaceView`,
+    /// so diff is None).
+    #[tokio::test]
+    async fn workspace_build_cancel_emits_audit_event() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        let build = seed_workspace_build_for(&store, ws.id, org_id, uid);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PATCH,
+                &format!("/api/v2/workspacebuilds/{}/cancel", build.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for build cancel")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(event.summary.contains("canceled"));
+        Ok(())
+    }
+
+    /// `post_workspace_build` with `transition="stop"` emits a Stop audit
+    /// event. Companion to the existing start / delete transition tests
+    /// (`workspace_build_audits_start_transition`,
+    /// `workspace_build_audits_delete_transition`) — closes the last of
+    /// the three build transitions called out in gap-doc §B.10.2 / Wave 0
+    /// S7 (TODO-audit-diff-schema-expand — build transitions are async so
+    /// a `WorkspaceRecord`-level before/after diff is empty).
+    #[tokio::test]
+    async fn workspace_build_audits_stop_transition() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let tv = seed_template_version(&store, Some(tmpl.id), org_id, uid);
+        if let Ok(mut templates) = store.templates.lock() {
+            if let Some(t) = templates.get_mut(&tmpl.id) {
+                t.active_version_id = tv.id;
+            }
+        }
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::POST,
+                &format!("/api/v2/workspaces/{}/builds", ws.id),
+                &session_token,
+                &json!({ "transition": "stop" }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::CREATED);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Stop, &ws.id.to_string())
+            .ok_or("expected a Stop audit event for workspace build")?;
+        assert_eq!(event.resource, ResourceKind::Workspace);
+        assert!(
+            event.summary.contains("stopped"),
+            "summary should reference the stop transition, got: {}",
+            event.summary
+        );
+        assert!(event.summary.contains(&ws.name));
+        Ok(())
+    }
+
     // =======================================================================
     // Audit-sweep follow-up: template-version, template-ACL, and notification
     // preference mutations (gap-doc §B.10.2 / Wave 0 S7).
