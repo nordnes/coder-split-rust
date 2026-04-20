@@ -29445,6 +29445,133 @@ pub(crate) mod tests {
         Ok(())
     }
 
+    /// `put_workspace_favorite` should emit a structured diff flipping
+    /// `favorite: false -> true`. Part of the Wave 2 workspace audit-diff
+    /// rollout (gap-doc §B.10.1).
+    #[tokio::test]
+    async fn workspace_favorite_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/favorite", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for favorite")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("favorite audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("favorite")
+            .ok_or("diff should contain a `favorite` change entry")?;
+        assert_eq!(change.old, serde_json::json!(false));
+        assert_eq!(change.new, serde_json::json!(true));
+        assert!(!change.secret);
+        Ok(())
+    }
+
+    /// `delete_workspace_favorite` should emit a structured diff flipping
+    /// `favorite: true -> false`.
+    #[tokio::test]
+    async fn workspace_unfavorite_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let mut ws = seed_workspace(&store, uid, org_id, tmpl.id);
+        // Pre-favorite the workspace so the DELETE mutation produces a
+        // true -> false diff.
+        ws.favorite = true;
+        if let Ok(mut wss) = store.workspaces.lock() {
+            wss.insert(ws.id, ws.clone());
+        }
+
+        let response = call(
+            app,
+            authenticated_request(
+                Method::DELETE,
+                &format!("/api/v2/workspaces/{}/favorite", ws.id),
+                &session_token,
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for unfavorite")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("unfavorite audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("favorite")
+            .ok_or("diff should contain a `favorite` change entry")?;
+        assert_eq!(change.old, serde_json::json!(true));
+        assert_eq!(change.new, serde_json::json!(false));
+        Ok(())
+    }
+
+    /// `put_workspace_dormant` should emit a structured diff capturing the
+    /// change to `dormant_at` (None -> Some timestamp).
+    #[tokio::test]
+    async fn workspace_dormant_audit_carries_diff() -> Result<(), Box<dyn Error>> {
+        let (state, store, audit) = test_state_with_memory_audit()?;
+        let app = build_router(state, None);
+        let session_token = create_and_login(&app).await?;
+        let org_id = first_organization_id(&app, &session_token).await?;
+        let uid = owner_user_id(&store);
+        let tmpl = seed_template(&store, org_id, uid);
+        let ws = seed_workspace(&store, uid, org_id, tmpl.id);
+
+        let response = call(
+            app,
+            authenticated_json_request(
+                Method::PUT,
+                &format!("/api/v2/workspaces/{}/dormant", ws.id),
+                &session_token,
+                &json!({ "dormant": true }),
+            )?,
+        )
+        .await?;
+        assert_eq!(response.status(), StatusCode::OK);
+
+        let events = await_audit_events(&audit, 1, std::time::Duration::from_secs(5)).await;
+        let event = audit_event_for(&events, AuditAction::Write, &ws.id.to_string())
+            .ok_or("expected a Write audit event for dormant toggle")?;
+        let diff = event
+            .diff
+            .as_ref()
+            .ok_or("dormant audit event should carry a structured diff")?;
+        let change = diff
+            .changes
+            .get("dormant_at")
+            .ok_or("diff should contain a `dormant_at` change entry")?;
+        assert_eq!(change.old, serde_json::Value::Null);
+        assert!(!change.new.is_null(), "new dormant_at should be populated");
+        assert!(!change.secret);
+        Ok(())
+    }
+
     #[tokio::test]
     async fn workspace_acl_patch_emits_audit_event() -> Result<(), Box<dyn Error>> {
         let (state, store, audit) = test_state_with_memory_audit()?;
